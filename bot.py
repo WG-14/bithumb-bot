@@ -53,8 +53,8 @@ def main():
 
     sys.argv = _strip_legacy_flags(argv)
 
-    import main as _main
-    _main.main()
+    from bithumb_bot.cli import main as _main
+    _main()
 
 if __name__ == "__main__":
     main()
