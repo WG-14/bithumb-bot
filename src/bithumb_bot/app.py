@@ -1,3 +1,4 @@
+from .config import settings
 import os
 import time
 import argparse
@@ -19,11 +20,26 @@ DB_PATH = os.getenv("DB_PATH", "data/bithumb.sqlite")
 SMA_SHORT = int(os.getenv("SMA_SHORT", "7"))
 SMA_LONG = int(os.getenv("SMA_LONG", "30"))
 
-MODE = os.getenv("MODE", "paper").lower()
-START_CASH_KRW = float(os.getenv("START_CASH_KRW", "1000000"))
-FEE_RATE = float(os.getenv("FEE_RATE", "0.0004"))
-BUY_FRACTION = float(os.getenv("BUY_FRACTION", "0.99"))
+MODE = settings.MODE
+PAIR = settings.PAIR
+INTERVAL = settings.INTERVAL
+EVERY = settings.EVERY
 
+SMA_SHORT = settings.SMA_SHORT
+SMA_LONG = settings.SMA_LONG
+COOLDOWN_MIN = settings.COOLDOWN_MIN
+MIN_GAP = settings.MIN_GAP
+
+DB_PATH = settings.DB_PATH
+START_CASH_KRW = settings.START_CASH_KRW
+BUY_FRACTION = settings.BUY_FRACTION
+FEE_RATE = settings.FEE_RATE
+
+MAX_ORDER_KRW = settings.MAX_ORDER_KRW
+MAX_DAILY_LOSS_KRW = settings.MAX_DAILY_LOSS_KRW
+MAX_OPEN_POSITIONS = settings.MAX_OPEN_POSITIONS
+KILL_SWITCH = settings.KILL_SWITCH
+KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
 
 def fetch_json(path: str):
     url = f"{BASE_URL}{path}"
@@ -382,27 +398,30 @@ def cmd_run(short_n: int, long_n: int):
     print(f"[RUN] MODE={MODE} PAIR={PAIR} INTERVAL={INTERVAL} (every {sec}s) short={short_n} long={long_n}")
     print("중지: Ctrl+C")
 
-    while True:
-        # 캔들 마감 직후를 노리고 약간 늦게 실행(2초)
-        now = time.time()
-        sleep_s = sec - (now % sec) + 2
-        time.sleep(sleep_s)
+    try:
+        while True:
+            # 캔들 마감 직후를 노리고 약간 늦게 실행(2초)
+            now = time.time()
+            sleep_s = sec - (now % sec) + 2
+            time.sleep(sleep_s)
 
-        cmd_sync(quiet=True)
-        r = compute_signal(short_n, long_n)
-        if r is None:
-            print("[RUN] 데이터 부족. sync가 쌓이면 다시 계산됨.")
-            continue
+            cmd_sync(quiet=True)
+            r = compute_signal(short_n, long_n)
+            if r is None:
+                print("[RUN] 데이터 부족. sync가 쌓이면 다시 계산됨.")
+                continue
 
-        print(f"[RUN] {kst_str(r['ts'])} close={r['last_close']:,.0f}  "
-              f"SMA{short_n}={r['curr_s']:.2f}  SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}")
+            print(f"[RUN] {kst_str(r['ts'])} close={r['last_close']:,.0f}  "
+                f"SMA{short_n}={r['curr_s']:.2f}  SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}")
 
-        if MODE == "paper" and r["signal"] in ("BUY", "SELL"):
-            trade = paper_execute(r["signal"], r["ts"], r["last_close"])
-            if trade:
-                print(f"  [PAPER] {trade['side']} qty={trade['qty']:.8f} price={trade['price']:,.0f} "
-                      f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} asset={trade['asset']:.8f}")
-
+            if MODE == "paper" and r["signal"] in ("BUY", "SELL"):
+                trade = paper_execute(r["signal"], r["ts"], r["last_close"])
+                if trade:
+                    print(f"  [PAPER] {trade['side']} qty={trade['qty']:.8f} price={trade['price']:,.0f} "
+                        f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} asset={trade['asset']:.8f}")
+    except KeyboardInterrupt:
+        print("\n[RUN] stopped by user (Ctrl+C)")
+        return
 
 def main():
     p = argparse.ArgumentParser()
