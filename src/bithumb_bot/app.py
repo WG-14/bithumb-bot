@@ -131,7 +131,7 @@ def cmd_trades(limit: int):
     conn = ensure_db(DB_PATH)
     rows = conn.execute(
         """
-        SELECT ts, side, price, qty, fee, cash_after, asset_after
+        SELECT ts, side, price, qty, fee, cash_after, asset_after, note
         FROM trades
         ORDER BY id DESC
         LIMIT ?
@@ -141,11 +141,48 @@ def cmd_trades(limit: int):
     conn.close()
 
     print(f"[TRADES] last {limit}")
-    for ts, side, price, qty, fee, cash_a, asset_a in reversed(rows):
+    for ts, side, price, qty, fee, cash_a, asset_a, note in reversed(rows):
+        note_s = (note or "")
         print(
             f"  {kst_str(int(ts))} {side:4s} price={float(price):,.0f} qty={float(qty):.8f} "
-            f"fee={float(fee):,.0f} cash={float(cash_a):,.0f} asset={float(asset_a):.8f}"
+            f"fee={float(fee):,.0f} cash={float(cash_a):,.0f} asset={float(asset_a):.8f} "
+            f"note={note_s}"
         )
+
+def cmd_orders(limit: int = 50):
+    conn = ensure_db()
+    rows = conn.execute(
+        """
+        SELECT client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts
+        FROM orders
+        ORDER BY created_ts DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+
+    print(f"[ORDERS] last {limit}")
+    for r in reversed(rows):
+        print(dict(r))
+
+
+def cmd_fills(limit: int = 50):
+    conn = ensure_db()
+    rows = conn.execute(
+        """
+        SELECT client_order_id, fill_ts, price, qty, fee
+        FROM fills
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+
+    print(f"[FILLS] last {limit}")
+    for r in reversed(rows):
+        print(dict(r))
 
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
@@ -156,6 +193,12 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=False)
 
     sub.add_parser("ticker")
+
+    o = sub.add_parser("orders")
+    o.add_argument("--limit", type=int, default=50)
+
+    f = sub.add_parser("fills")
+    f.add_argument("--limit", type=int, default=50)
 
     c = sub.add_parser("candles")
     c.add_argument("--limit", type=int, default=5)
@@ -195,6 +238,10 @@ def main():
         cmd_status()
     elif args.cmd == "trades":
         cmd_trades(args.limit)
+    elif args.cmd == "orders":
+        cmd_orders(args.limit)
+    elif args.cmd == "fills":
+        cmd_fills(args.limit)
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
 
