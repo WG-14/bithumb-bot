@@ -60,7 +60,9 @@ def sma(values, n: int):
 
 
 def cmd_signal(short_n: int, long_n: int):
-    r = compute_signal(short_n, long_n)
+    conn = ensure_db(DB_PATH)
+    r = compute_signal(conn, short_n, long_n)
+    conn.close()
     if r is None:
         print(f"[SIGNAL] 데이터가 부족해. 먼저 sync를 실행해줘.")
         return
@@ -88,7 +90,9 @@ def cmd_explain(short_n: int, long_n: int):
     for (ts, close) in rows:
         print(f"  {kst_str(int(ts))}  close={float(close):.2f}")
 
-    r = compute_signal(short_n, long_n)
+    conn = ensure_db(DB_PATH)
+    r = compute_signal(conn, short_n, long_n)
+    conn.close()
     print("")
     print("계산 요약:")
     print(f"  prev short SMA = 평균(직전 {short_n}개 close)")
@@ -244,4 +248,3 @@ def main():
         cmd_fills(args.limit)
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
-

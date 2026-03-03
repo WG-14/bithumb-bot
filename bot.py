@@ -1,5 +1,11 @@
-﻿import os
+import os
 import sys
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency for local convenience
+    load_dotenv = None
 
 # legacy flags that may appear in old commands
 FLAGS_WITH_VALUE = {
@@ -32,6 +38,11 @@ def _strip_legacy_flags(argv: list[str]):
     return out
 
 def main():
+    # Local convenience: load .env automatically when present.
+    # In server/production, prefer injecting environment variables externally.
+    if load_dotenv and Path(".env").exists():
+        load_dotenv()
+
     argv = sys.argv[:]
 
     # map a few legacy flags to env so main.py can read them if needed
