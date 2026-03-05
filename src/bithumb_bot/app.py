@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio, set_portfolio
 from .utils_time import kst_str, parse_interval_sec
+from .engine import get_health_status
 
 import httpx
 
@@ -290,6 +291,15 @@ def cmd_audit():
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
     run_loop(short_n, long_n)
+
+
+def cmd_health() -> None:
+    health = get_health_status()
+    print("[HEALTH]")
+    print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
+    print(f"  error_count={health['error_count']}")
+    print(f"  trading_enabled={health['trading_enabled']}")
+    print(f"  retry_at_epoch_sec={health['retry_at_epoch_sec']}")
     
 def main():
     p = argparse.ArgumentParser()
@@ -369,6 +379,8 @@ def build_parser() -> argparse.ArgumentParser:
     fills = sub.add_parser("fills", help="Print recent fills")
     fills.add_argument("--limit", type=int, default=50)
 
+    sub.add_parser("health", help="Print runtime health status")
+
     # (옵션) 너 app.py에 있는 다른 cmd_*들도 같은 방식으로 추가하면 됨.
     # 예시:
     # orders = sub.add_parser("orders", help="Print recent orders")
@@ -388,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "fills":
         cmd_fills(limit=args.limit)
+        return 0
+
+    if args.cmd == "health":
+        cmd_health()
         return 0
 
     # 이론상 여기 올 일 없음(required=True라서)
