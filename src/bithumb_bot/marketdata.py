@@ -19,6 +19,36 @@ def fetch_json(path: str) -> dict[str, Any]:
         return r.json()
 
 
+def to_v1_market(pair: str) -> str:
+    """
+    BTC_KRW -> KRW-BTC
+    """
+    if "_" not in pair:
+        return pair
+    base, quote = pair.split("_", 1)
+    return f"{quote}-{base}"
+
+
+def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:
+    market = to_v1_market(pair or settings.PAIR)
+    with httpx.Client(base_url=BASE_URL, timeout=10.0) as c:
+        r = c.get("/v1/orderbook", params={"markets": market})
+        r.raise_for_status()
+        payload = r.json()
+
+    if not isinstance(payload, list) or not payload:
+        raise RuntimeError(f"empty orderbook payload: {payload}")
+
+    units = payload[0].get("orderbook_units")
+    if not isinstance(units, list) or not units:
+        raise RuntimeError(f"orderbook_units missing: {payload[0]}")
+
+    best = units[0]
+    bid = float(best.get("bid_price", 0.0))
+    ask = float(best.get("ask_price", 0.0))
+    return bid, ask
+
+
 def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
     """
     Public candlestick -> DB(candles)
