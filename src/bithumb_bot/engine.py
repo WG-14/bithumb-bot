@@ -9,11 +9,25 @@ from .broker.paper import paper_execute
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import notify
+from . import runtime_state
+
+
+FAILSAFE_RETRY_DELAY_SEC = 180
+
+
+def get_health_status() -> dict[str, float | int | bool | None]:
+    state = runtime_state.snapshot()
+    return {
+        "last_candle_age_sec": state.last_candle_age_sec,
+        "error_count": state.error_count,
+        "trading_enabled": state.trading_enabled,
+        "retry_at_epoch_sec": state.retry_at_epoch_sec,
+    }
 
 def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import assert_no_open_orders
     assert_no_open_orders()
-    
+
     sec = parse_interval_sec(settings.INTERVAL)
     print(f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}")
     print("중지: Ctrl+C")
@@ -22,9 +36,19 @@ def run_loop(short_n: int, long_n: int) -> None:
 
     try:
         while True:
-            now = time.time()
-            sleep_s = sec - (now % sec) + 2
+            tick_now = time.time()
+            sleep_s = sec - (tick_now % sec) + 2
             time.sleep(sleep_s)
+            now = time.time()
+
+            state = runtime_state.snapshot()
+            if (not state.trading_enabled) and state.retry_at_epoch_sec and now < state.retry_at_epoch_sec:
+                wait_sec = int(state.retry_at_epoch_sec - now)
+                print(f"[RUN] failsafe active. trading paused for {wait_sec}s")
+                continue
+            if (not state.trading_enabled) and state.retry_at_epoch_sec and now >= state.retry_at_epoch_sec:
+                runtime_state.enable_trading()
+                notify("failsafe retry window reached, attempting auto-resume")
 
             try:
                 cmd_sync(quiet=True)
@@ -41,14 +65,30 @@ def run_loop(short_n: int, long_n: int) -> None:
                     continue
 
                 last_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
+                candle_age_sec = max(0.0, (time.time() * 1000 - last_ts) / 1000)
+                runtime_state.set_last_candle_age_sec(candle_age_sec)
 
                 fail_count = 0
+                runtime_state.set_error_count(fail_count)
             except Exception as e:
                 fail_count += 1
+                runtime_state.set_error_count(fail_count)
                 notify(f"sync failed ({fail_count}/{MAX_FAILS}): {e}")
                 if fail_count >= MAX_FAILS:
-                    raise RuntimeError("sync failed too many times") from e
+                    retry_at = time.time() + FAILSAFE_RETRY_DELAY_SEC
+                    runtime_state.disable_trading_until(retry_at)
+                    notify(
+                        f"failsafe enabled after consecutive sync failures. "
+                        f"trading paused until epoch={int(retry_at)}"
+                    )
                 # 다음 루프로 넘어가서 다시 시도
+                continue
+
+            stale_cutoff_sec = sec * 2
+            if candle_age_sec > stale_cutoff_sec:
+                notify(
+                    f"stale candle detected: age={candle_age_sec:.1f}s > {stale_cutoff_sec}s; order blocked"
+                )
                 continue
 
             conn = ensure_db()
