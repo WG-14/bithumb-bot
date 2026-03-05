@@ -188,6 +188,105 @@ def cmd_fills(limit: int = 50):
     for r in reversed(rows):
         print(dict(r))
 
+
+def cmd_audit():
+    conn = ensure_db(DB_PATH)
+    init_portfolio(conn)
+
+    errors: list[str] = []
+
+    portfolio = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+    if portfolio is None:
+        errors.append("portfolio row(id=1) missing")
+    else:
+        cash_krw = float(portfolio["cash_krw"])
+        asset_qty = float(portfolio["asset_qty"])
+        if cash_krw < 0:
+            errors.append(f"portfolio.cash_krw is negative: {cash_krw}")
+        if asset_qty < 0:
+            errors.append(f"portfolio.asset_qty is negative: {asset_qty}")
+
+    filled_without_qty = conn.execute(
+        """
+        SELECT client_order_id, qty_filled
+        FROM orders
+        WHERE status='FILLED' AND qty_filled <= 0
+        """
+    ).fetchall()
+    for row in filled_without_qty:
+        errors.append(
+            f"order {row['client_order_id']} has FILLED status but qty_filled={float(row['qty_filled'])}"
+        )
+
+    orphan_fills = conn.execute(
+        """
+        SELECT f.id, f.client_order_id
+        FROM fills f
+        LEFT JOIN orders o ON o.client_order_id = f.client_order_id
+        WHERE o.client_order_id IS NULL
+        """
+    ).fetchall()
+    for row in orphan_fills:
+        errors.append(f"fill id={row['id']} references missing order {row['client_order_id']}")
+
+    bad_buy_snapshots = conn.execute(
+        """
+        SELECT id, side, qty, fee, cash_after, asset_after
+        FROM trades
+        WHERE side='BUY' AND (cash_after + fee < 0 OR asset_after < qty)
+        """
+    ).fetchall()
+    for row in bad_buy_snapshots:
+        errors.append(
+            "trade id={id} BUY snapshot impossible: cash_after={cash_after}, fee={fee}, asset_after={asset_after}, qty={qty}".format(
+                id=row['id'],
+                cash_after=float(row['cash_after']),
+                fee=float(row['fee']),
+                asset_after=float(row['asset_after']),
+                qty=float(row['qty']),
+            )
+        )
+
+    bad_sell_snapshots = conn.execute(
+        """
+        SELECT id, side, qty, cash_after, asset_after
+        FROM trades
+        WHERE side='SELL' AND (cash_after < 0 OR asset_after > qty)
+        """
+    ).fetchall()
+    for row in bad_sell_snapshots:
+        errors.append(
+            "trade id={id} SELL snapshot impossible: cash_after={cash_after}, asset_after={asset_after}, qty={qty}".format(
+                id=row['id'],
+                cash_after=float(row['cash_after']),
+                asset_after=float(row['asset_after']),
+                qty=float(row['qty']),
+            )
+        )
+
+    last_trade = conn.execute(
+        "SELECT cash_after, asset_after FROM trades ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    if last_trade is not None and portfolio is not None:
+        if abs(float(last_trade["cash_after"]) - float(portfolio["cash_krw"])) > 1e-8:
+            errors.append(
+                f"latest trade cash_after={float(last_trade['cash_after'])} != portfolio.cash_krw={float(portfolio['cash_krw'])}"
+            )
+        if abs(float(last_trade["asset_after"]) - float(portfolio["asset_qty"])) > 1e-12:
+            errors.append(
+                f"latest trade asset_after={float(last_trade['asset_after'])} != portfolio.asset_qty={float(portfolio['asset_qty'])}"
+            )
+
+    conn.close()
+
+    if errors:
+        print("[AUDIT] FAILED")
+        for err in errors:
+            print(f"  - {err}")
+        raise SystemExit(1)
+
+    print("[AUDIT] OK")
+
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
     run_loop(short_n, long_n)
@@ -219,6 +318,9 @@ def main():
 
     st = sub.add_parser("status")
 
+    sub.add_parser("audit")
+    sub.add_parser("check")
+
     t = sub.add_parser("trades")
     t.add_argument("--limit", type=int, default=20)
 
@@ -240,6 +342,8 @@ def main():
         cmd_explain(args.short, args.long)
     elif args.cmd == "status":
         cmd_status()
+    elif args.cmd in ("audit", "check"):
+        cmd_audit()
     elif args.cmd == "trades":
         cmd_trades(args.limit)
     elif args.cmd == "orders":

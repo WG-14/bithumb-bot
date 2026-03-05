@@ -4,7 +4,7 @@ from typing import Any
 
 from ..config import settings
 from ..risk import evaluate_buy_guardrails
-from ..db_core import ensure_db, init_portfolio, get_portfolio, set_portfolio
+from ..db_core import ensure_db, init_portfolio, get_portfolio
 from ..oms import new_client_order_id, create_order, add_fill, set_status
 
 POSITION_EPSILON = 1e-12
@@ -57,6 +57,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
                 price=float(price),
                 status="NEW",
                 ts_ms=int(ts),
+                conn=conn,
             )
             add_fill(
                 client_order_id=client_order_id,
@@ -64,8 +65,9 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
                 price=float(price),
                 qty=float(trade_qty),
                 fee=float(fee),
+                conn=conn,
             )
-            set_status(client_order_id, "FILLED")
+            set_status(client_order_id, "FILLED", conn=conn)
 
         elif signal == "SELL" and qty > POSITION_EPSILON:
             proceeds = qty * float(price)
@@ -85,6 +87,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
                 price=float(price),
                 status="NEW",
                 ts_ms=int(ts),
+                conn=conn,
             )
             add_fill(
                 client_order_id=client_order_id,
@@ -92,14 +95,18 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
                 price=float(price),
                 qty=float(trade_qty),
                 fee=float(fee),
+                conn=conn,
             )
-            set_status(client_order_id, "FILLED")
+            set_status(client_order_id, "FILLED", conn=conn)
 
         else:
             return None
 
         # portfolio update
-        set_portfolio(conn, cash_after, qty_after)
+        conn.execute(
+            "UPDATE portfolio SET cash_krw=?, asset_qty=? WHERE id=1",
+            (float(cash_after), float(qty_after)),
+        )
 
         # trades record (db_core schema)
         conn.execute(

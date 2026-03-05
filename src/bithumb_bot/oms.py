@@ -20,9 +20,11 @@ def create_order(
     price: float | None,
     status: str = "NEW",
     ts_ms: int | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     ts = int(ts_ms if ts_ms is not None else time.time() * 1000)
-    conn = ensure_db()
+    own_conn = conn is None
+    conn = conn or ensure_db()
     try:
         conn.execute(
             """
@@ -33,9 +35,11 @@ def create_order(
             """,
             (client_order_id, status, side, price, float(qty_req), ts, ts),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def set_exchange_order_id(client_order_id: str, exchange_order_id: str) -> None:
@@ -51,17 +55,25 @@ def set_exchange_order_id(client_order_id: str, exchange_order_id: str) -> None:
         conn.close()
 
 
-def set_status(client_order_id: str, status: str, last_error: str | None = None) -> None:
+def set_status(
+    client_order_id: str,
+    status: str,
+    last_error: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
     ts = int(time.time() * 1000)
-    conn = ensure_db()
+    own_conn = conn is None
+    conn = conn or ensure_db()
     try:
         conn.execute(
             "UPDATE orders SET status=?, updated_ts=?, last_error=? WHERE client_order_id=?",
             (status, ts, (last_error[:500] if last_error else None), client_order_id),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def add_fill(
@@ -71,8 +83,10 @@ def add_fill(
     price: float,
     qty: float,
     fee: float = 0.0,
+    conn: sqlite3.Connection | None = None,
 ) -> None:
-    conn = ensure_db()
+    own_conn = conn is None
+    conn = conn or ensure_db()
     try:
         conn.execute(
             "INSERT INTO fills(client_order_id, fill_ts, price, qty, fee) VALUES (?, ?, ?, ?, ?)",
@@ -82,9 +96,11 @@ def add_fill(
             "UPDATE orders SET qty_filled = qty_filled + ?, updated_ts=? WHERE client_order_id=?",
             (float(qty), int(time.time() * 1000), client_order_id),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def get_open_orders() -> list[dict[str, Any]]:
