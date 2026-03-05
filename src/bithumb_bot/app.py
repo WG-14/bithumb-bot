@@ -352,3 +352,48 @@ def main():
         cmd_fills(args.limit)
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
+
+# === CLI entrypoint & routing (add at bottom of file) ===
+import sys
+import argparse
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="bithumb-bot")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # audit
+    sub.add_parser("audit", help="Check DB invariants / ledger consistency")
+
+    # fills (너 파일에 cmd_fills(limit=50) 가 있으니 연결)
+    fills = sub.add_parser("fills", help="Print recent fills")
+    fills.add_argument("--limit", type=int, default=50)
+
+    # (옵션) 너 app.py에 있는 다른 cmd_*들도 같은 방식으로 추가하면 됨.
+    # 예시:
+    # orders = sub.add_parser("orders", help="Print recent orders")
+    # orders.add_argument("--limit", type=int, default=50)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.cmd == "audit":
+        cmd_audit()
+        return 0
+
+    if args.cmd == "fills":
+        cmd_fills(limit=args.limit)
+        return 0
+
+    # 이론상 여기 올 일 없음(required=True라서)
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
