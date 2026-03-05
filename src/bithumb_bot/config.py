@@ -31,6 +31,8 @@ class Settings:
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))  # 기본값은 너 코드와 다를 수 있음
+    SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
+    MAX_ORDERBOOK_SPREAD_BPS: float = float(os.getenv("MAX_ORDERBOOK_SPREAD_BPS", "100"))
 
     # risk
     MAX_ORDER_KRW: float = float(os.getenv("MAX_ORDER_KRW", "0"))
