@@ -6,6 +6,7 @@ import os
 import time
 import argparse
 import sqlite3
+import math
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
@@ -300,6 +301,217 @@ def cmd_health() -> None:
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")
     print(f"  retry_at_epoch_sec={health['retry_at_epoch_sec']}")
+
+
+def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
+    row = conn.execute(
+        """
+        SELECT close
+        FROM candles
+        WHERE pair=? AND interval=? AND strftime('%Y-%m-%d', ts/1000, 'unixepoch', '+9 hours')=?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (PAIR, INTERVAL, day),
+    ).fetchone()
+    if row is None:
+        return None
+    return float(row["close"])
+
+
+def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
+    init_portfolio(conn)
+    cash = float(settings.START_CASH_KRW)
+    qty = 0.0
+    total_fee = 0.0
+    dup_fill_count = 0
+
+    seen_fill_keys: set[tuple[str, int, float, float]] = set()
+    fills = conn.execute(
+        """
+        SELECT f.client_order_id, f.fill_ts, f.price, f.qty, f.fee, o.side
+        FROM fills f
+        JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.fill_ts ASC, f.id ASC
+        """
+    ).fetchall()
+
+    for row in fills:
+        key = (
+            str(row["client_order_id"]),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(row["qty"]),
+        )
+        if key in seen_fill_keys:
+            dup_fill_count += 1
+        seen_fill_keys.add(key)
+
+        fill_price = float(row["price"])
+        fill_qty = float(row["qty"])
+        fee = float(row["fee"])
+        side = str(row["side"])
+        total_fee += fee
+
+        if side == "BUY":
+            cash -= (fill_price * fill_qty) + fee
+            qty += fill_qty
+        elif side == "SELL":
+            cash += (fill_price * fill_qty) - fee
+            qty -= fill_qty
+
+    p = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+    portfolio_cash = float(p["cash_krw"]) if p else 0.0
+    portfolio_qty = float(p["asset_qty"]) if p else 0.0
+    consistent = math.isclose(cash, portfolio_cash, abs_tol=1e-6) and math.isclose(qty, portfolio_qty, abs_tol=1e-10)
+
+    return {
+        "replay_cash": cash,
+        "replay_qty": qty,
+        "portfolio_cash": portfolio_cash,
+        "portfolio_qty": portfolio_qty,
+        "fee_total": total_fee,
+        "dup_fill_count": dup_fill_count,
+        "consistent": consistent,
+    }
+
+
+def cmd_audit_ledger() -> None:
+    conn = ensure_db(DB_PATH)
+    try:
+        replay = _ledger_replay(conn)
+    finally:
+        conn.close()
+
+    print("[AUDIT-LEDGER]")
+    print(f"  replay_cash={float(replay['replay_cash']):,.3f}")
+    print(f"  replay_qty={float(replay['replay_qty']):.10f}")
+    print(f"  portfolio_cash={float(replay['portfolio_cash']):,.3f}")
+    print(f"  portfolio_qty={float(replay['portfolio_qty']):.10f}")
+    print(f"  fee_total={float(replay['fee_total']):,.3f}")
+    print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
+
+    if not bool(replay["consistent"]):
+        print("[AUDIT-LEDGER] FAILED: replay result mismatches portfolio")
+        raise SystemExit(1)
+
+    print("[AUDIT-LEDGER] OK")
+
+
+def cmd_report(days: int) -> None:
+    conn = ensure_db(DB_PATH)
+    try:
+        now_kst = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).date()
+        start_day = now_kst - timedelta(days=days - 1)
+        rows: list[tuple[str, float, float, float, float, float, float]] = []
+
+        prev_end = float(settings.START_CASH_KRW)
+        peak = prev_end
+        mdd = 0.0
+        slippage_bps = float(settings.SLIPPAGE_BPS)
+
+        for i in range(days):
+            day = (start_day + timedelta(days=i)).isoformat()
+            agg = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN side='SELL' THEN (price * qty) ELSE 0 END), 0) AS sell_notional,
+                    COALESCE(SUM(CASE WHEN side='BUY' THEN (price * qty) ELSE 0 END), 0) AS buy_notional,
+                    COALESCE(SUM(fee), 0) AS fee_total
+                FROM trades
+                WHERE strftime('%Y-%m-%d', ts/1000, 'unixepoch', '+9 hours')=?
+                """,
+                (day,),
+            ).fetchone()
+
+            day_fee = float(agg["fee_total"])
+            realized = float(agg["sell_notional"]) - float(agg["buy_notional"]) - day_fee
+            slippage_cost = (float(agg["sell_notional"]) + float(agg["buy_notional"])) * (slippage_bps / 10000.0)
+
+            eod = conn.execute(
+                """
+                SELECT cash_after, asset_after
+                FROM trades
+                WHERE strftime('%Y-%m-%d', ts/1000, 'unixepoch', '+9 hours')=?
+                ORDER BY ts DESC, id DESC
+                LIMIT 1
+                """,
+                (day,),
+            ).fetchone()
+
+            if eod is None:
+                end_equity = prev_end
+                unrealized = 0.0
+            else:
+                eod_price = _eod_price_for_day(conn, day)
+                if eod_price is None:
+                    eod_price = float(eod["cash_after"]) if float(eod["asset_after"]) == 0 else 0.0
+                end_equity = float(eod["cash_after"]) + (float(eod["asset_after"]) * float(eod_price))
+                unrealized = end_equity - prev_end - realized
+
+            drawdown = 0.0
+            if peak > 0:
+                drawdown = (peak - end_equity) / peak
+            peak = max(peak, end_equity)
+            mdd = max(mdd, drawdown)
+
+            rows.append((day, prev_end, end_equity, realized, unrealized, day_fee, slippage_cost))
+            prev_end = end_equity
+
+        expected_bars = int((24 * 60 * 60 / parse_interval_sec(INTERVAL)) * days)
+        candle_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM candles
+                WHERE pair=? AND interval=? AND ts >= ?
+                """,
+                (
+                    PAIR,
+                    INTERVAL,
+                    int(datetime.combine(start_day, datetime.min.time(), tzinfo=timezone(timedelta(hours=9))).timestamp() * 1000),
+                ),
+            ).fetchone()["c"]
+        )
+        missing_rate = 1.0 - (candle_count / expected_bars) if expected_bars > 0 else 0.0
+
+        replay = _ledger_replay(conn)
+        dup_orders = int(
+            conn.execute(
+                "SELECT COALESCE(SUM(cnt-1),0) FROM (SELECT client_order_id, COUNT(*) cnt FROM orders GROUP BY client_order_id HAVING COUNT(*)>1)"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+    print(f"[REPORT] days={days} pair={PAIR} interval={INTERVAL}")
+    print("day,start_equity,end_equity,realized,unrealized,fee,slippage_est")
+    for day, start_eq, end_eq, realized, unrealized, fee_total, slip in rows:
+        print(f"{day},{start_eq:.2f},{end_eq:.2f},{realized:.2f},{unrealized:.2f},{fee_total:.2f},{slip:.2f}")
+
+    target_daily = 0.001
+    avg_daily = ((rows[-1][2] / rows[0][1]) ** (1 / len(rows)) - 1) if rows and rows[0][1] > 0 else 0.0
+    gate_missing = missing_rate <= 0.05
+    gate_dup = dup_orders == 0 and int(replay["dup_fill_count"]) == 0
+    gate_consistency = bool(replay["consistent"])
+    gate_mdd = mdd <= 0.20
+    gate_pnl = avg_daily >= target_daily
+    gate_pass = gate_missing and gate_dup and gate_consistency and gate_mdd and gate_pnl
+
+    print("[SUMMARY]")
+    print(f"  avg_daily_return={avg_daily * 100:.4f}%")
+    print(f"  mdd={mdd * 100:.2f}%")
+    print(f"  missing_candle_rate={missing_rate * 100:.2f}%")
+    print(f"  fee_total={float(replay['fee_total']):,.2f}")
+    print(f"  ledger_consistent={replay['consistent']}")
+    print(f"  duplicate_orders={dup_orders}, duplicate_fills={int(replay['dup_fill_count'])}")
+    print("[GATE]")
+    print(f"  data_missing_rate<=5%: {'PASS' if gate_missing else 'FAIL'}")
+    print(f"  duplicate_orders/fills==0: {'PASS' if gate_dup else 'FAIL'}")
+    print(f"  ledger_consistency: {'PASS' if gate_consistency else 'FAIL'}")
+    print(f"  drawdown<=20%: {'PASS' if gate_mdd else 'FAIL'}")
+    print(f"  avg_daily_return>=0.10%: {'PASS' if gate_pnl else 'FAIL'}")
+    print(f"  => {'PASS' if gate_pass else 'FAIL'}")
     
 def main():
     p = argparse.ArgumentParser()
@@ -381,6 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("health", help="Print runtime health status")
 
+    report = sub.add_parser("report", help="PnL/equity report with gate checks")
+    report.add_argument("--days", type=int, default=30)
+
+    sub.add_parser("audit-ledger", help="Replay fills/orders and verify portfolio consistency")
+
     # (옵션) 너 app.py에 있는 다른 cmd_*들도 같은 방식으로 추가하면 됨.
     # 예시:
     # orders = sub.add_parser("orders", help="Print recent orders")
@@ -404,6 +621,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "health":
         cmd_health()
+        return 0
+
+    if args.cmd == "report":
+        cmd_report(days=max(1, int(args.days)))
+        return 0
+
+    if args.cmd == "audit-ledger":
+        cmd_audit_ledger()
         return 0
 
     # 이론상 여기 올 일 없음(required=True라서)
