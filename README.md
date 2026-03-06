@@ -47,3 +47,21 @@ uv run python bot.py run --short 7 --long 30
 - `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.
+
+
+## 24/7 운영(systemd + healthcheck + backup)
+
+- systemd 유닛: `deploy/systemd/`
+  - `bithumb-bot.service` (`Restart=always`)
+  - `bithumb-bot-healthcheck.timer` (1분 주기)
+  - `bithumb-bot-backup.timer` (6시간 주기)
+- 운영 절차 문서: `docs/RUNBOOK.md`
+- 백업 스크립트: `scripts/backup_sqlite.sh`
+
+빠른 확인:
+
+```bash
+sudo systemctl restart bithumb-bot.service
+uv run python bot.py health
+./scripts/backup_sqlite.sh
+```
