@@ -6,6 +6,8 @@ from .config import settings
 from .marketdata import cmd_sync
 from .strategy.sma import compute_signal
 from .broker.paper import paper_execute
+from .broker.live import live_execute_signal
+from .broker.bithumb import BithumbBroker
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import notify
@@ -24,9 +26,14 @@ def get_health_status() -> dict[str, float | int | bool | None]:
         "retry_at_epoch_sec": state.retry_at_epoch_sec,
     }
 
+
 def run_loop(short_n: int, long_n: int) -> None:
-    from .recovery import assert_no_open_orders
-    assert_no_open_orders()
+    from .recovery import reconcile_with_broker
+
+    broker = None
+    if settings.MODE == "live":
+        broker = BithumbBroker()
+        reconcile_with_broker(broker)
 
     sec = parse_interval_sec(settings.INTERVAL)
     print(f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}")
@@ -52,7 +59,6 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             try:
                 cmd_sync(quiet=True)
-                # --- candle stall check ---
                 conn = ensure_db()
                 row = conn.execute(
                     "SELECT ts FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
@@ -81,7 +87,6 @@ def run_loop(short_n: int, long_n: int) -> None:
                         f"failsafe enabled after consecutive sync failures. "
                         f"trading paused until epoch={int(retry_at)}"
                     )
-                # 다음 루프로 넘어가서 다시 시도
                 continue
 
             stale_cutoff_sec = sec * 2
@@ -104,13 +109,20 @@ def run_loop(short_n: int, long_n: int) -> None:
                 f"SMA{short_n}={r['curr_s']:.2f}  SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}"
             )
 
-            if settings.MODE == "paper" and r["signal"] in ("BUY", "SELL"):
+            if r["signal"] not in ("BUY", "SELL"):
+                continue
+
+            trade = None
+            if settings.MODE == "paper":
                 trade = paper_execute(r["signal"], r["ts"], r["last_close"])
-                if trade:
-                    print(
-                        f"  [PAPER] {trade['side']} qty={trade['qty']:.8f} price={trade['price']:,.0f} "
-                        f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} asset={trade['asset']:.8f}"
-                    )
+            elif settings.MODE == "live" and broker is not None:
+                trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
+
+            if trade:
+                print(
+                    f"  [{settings.MODE.upper()}] {trade['side']} qty={trade['qty']:.8f} price={trade['price']:,.0f} "
+                    f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} asset={trade['asset']:.8f}"
+                )
 
     except KeyboardInterrupt:
         print("\n[RUN] stopped by user (Ctrl+C)")

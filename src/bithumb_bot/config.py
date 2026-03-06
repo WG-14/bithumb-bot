@@ -1,4 +1,3 @@
-# src/bithumb_bot/config.py
 from __future__ import annotations
 
 import os
@@ -40,6 +39,13 @@ class Settings:
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "1"))
     KILL_SWITCH: bool = parse_bool_env("KILL_SWITCH", "false")
     KILL_SWITCH_LIQUIDATE: bool = parse_bool_env("KILL_SWITCH_LIQUIDATE", "false")
+    MAX_DAILY_ORDER_COUNT: int = int(os.getenv("MAX_DAILY_ORDER_COUNT", "0"))
+
+    # bithumb private api / live
+    BITHUMB_API_BASE: str = os.getenv("BITHUMB_API_BASE", "https://api.bithumb.com")
+    BITHUMB_API_KEY: str = os.getenv("BITHUMB_API_KEY", "")
+    BITHUMB_API_SECRET: str = os.getenv("BITHUMB_API_SECRET", "")
+    LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
 
 
 settings = Settings()

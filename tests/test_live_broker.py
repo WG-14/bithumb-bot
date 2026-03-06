@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from bithumb_bot.broker.bithumb import BithumbBroker
+from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker.live import live_execute_signal
+from bithumb_bot.db_core import ensure_db
+from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot.config import settings
+
+
+class _FakeBroker:
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, "ex1", side, "NEW", price, qty, 0.0, 1, 1)
+
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        raise NotImplementedError
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex1", "BUY", "FILLED", None, 0.01, 0.01, 1, 1)
+
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return []
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        if client_order_id:
+            return [BrokerFill(client_order_id=client_order_id, fill_id="f1", fill_ts=1000, price=100000000.0, qty=0.01, fee=10.0)]
+        return []
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(cash_krw=500000.0, asset_qty=0.01)
+
+
+def test_bithumb_broker_dry_run(monkeypatch):
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "k")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "s")
+
+    broker = BithumbBroker()
+    order = broker.place_order(client_order_id="a", side="BUY", qty=0.1, price=None)
+
+    assert order.exchange_order_id.startswith("dry_")
+
+
+def test_live_execute_idempotent(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "idempotent.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    broker = _FakeBroker()
+    t1 = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+    t2 = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert t1 is not None
+    assert t2 is None
+
+
+def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "reconcile.sqlite"))
+    conn = ensure_db(str(tmp_path / "reconcile.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_FakeBroker())
+
+    conn = ensure_db(str(tmp_path / "reconcile.sqlite"))
+    row = conn.execute("SELECT status FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    p = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+    conn.close()
+
+    assert row["status"] == "FILLED"
+    assert float(p["asset_qty"]) == 0.01

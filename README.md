@@ -39,3 +39,11 @@ uv run python bot.py run --short 7 --long 30
 - `DB_PATH` (기본: `data/bithumb_1m.sqlite`)
 
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
+
+
+## Live 모드(실거래)
+
+- `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
+- `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.
+- 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
+- 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.

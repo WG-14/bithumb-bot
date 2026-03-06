@@ -37,22 +37,37 @@ def create_order(
         )
         if own_conn:
             conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
     finally:
         if own_conn:
             conn.close()
 
 
-def set_exchange_order_id(client_order_id: str, exchange_order_id: str) -> None:
+def set_exchange_order_id(
+    client_order_id: str,
+    exchange_order_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
     ts = int(time.time() * 1000)
-    conn = ensure_db()
+    own_conn = conn is None
+    conn = conn or ensure_db()
     try:
         conn.execute(
             "UPDATE orders SET exchange_order_id=?, updated_ts=? WHERE client_order_id=?",
             (exchange_order_id, ts, client_order_id),
         )
-        conn.commit()
+        if own_conn:
+            conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def set_status(
@@ -71,6 +86,10 @@ def set_status(
         )
         if own_conn:
             conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
     finally:
         if own_conn:
             conn.close()
@@ -98,6 +117,10 @@ def add_fill(
         )
         if own_conn:
             conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
     finally:
         if own_conn:
             conn.close()

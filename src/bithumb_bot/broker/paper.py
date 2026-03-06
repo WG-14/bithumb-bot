@@ -4,10 +4,11 @@ from typing import Any
 
 from ..config import settings
 from ..risk import evaluate_buy_guardrails
-from ..db_core import ensure_db, init_portfolio, get_portfolio
+from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..marketdata import fetch_orderbook_top
 from ..notifier import notify
-from ..oms import new_client_order_id, create_order, add_fill, set_status
+from ..oms import new_client_order_id, set_status
+from ..execution import apply_fill_and_trade, record_order_if_missing
 
 POSITION_EPSILON = 1e-12
 
@@ -41,9 +42,6 @@ def _get_fill_price(signal: str) -> float | None:
 
 
 def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
-    """
-    paper trade -> portfolio/trades + orders/fills(OMS) 기록
-    """
     fill_price = _get_fill_price(signal)
     if fill_price is None:
         return None
@@ -55,15 +53,14 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
 
         fee = 0.0
         trade_qty = 0.0
-        side: str | None = None
-        cash_after = cash
-        qty_after = qty
-        note = None
-        client_order_id: str | None = None
 
         if signal == "BUY" and qty <= POSITION_EPSILON:
-            blocked, reason = evaluate_buy_guardrails(
-                conn=conn, ts_ms=int(ts), cash=cash, qty=qty, price=float(fill_price)
+            blocked, _ = evaluate_buy_guardrails(
+                conn=conn,
+                ts_ms=int(ts),
+                cash=cash,
+                qty=qty,
+                price=float(fill_price),
             )
             if blocked:
                 return None
@@ -77,100 +74,46 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             fee = spend * float(settings.FEE_RATE)
             spend_net = max(0.0, spend - fee)
             trade_qty = spend_net / float(fill_price)
-
-            cash_after = cash - spend
-            qty_after = qty + trade_qty
             side = "BUY"
 
-            client_order_id = new_client_order_id("paper")
-            note = f"client_order_id={client_order_id}; signal_price={price}"
-            create_order(
-                client_order_id=client_order_id,
-                side="BUY",
-                qty_req=float(trade_qty),
-                price=float(fill_price),
-                status="NEW",
-                ts_ms=int(ts),
-                conn=conn,
-            )
-            add_fill(
-                client_order_id=client_order_id,
-                fill_ts=int(ts),
-                price=float(fill_price),
-                qty=float(trade_qty),
-                fee=float(fee),
-                conn=conn,
-            )
-            set_status(client_order_id, "FILLED", conn=conn)
-
         elif signal == "SELL" and qty > POSITION_EPSILON:
-            proceeds = qty * float(fill_price)
-            fee = proceeds * float(settings.FEE_RATE)
-
-            cash_after = cash + (proceeds - fee)
-            qty_after = 0.0
             trade_qty = qty
+            fee = (qty * float(fill_price)) * float(settings.FEE_RATE)
             side = "SELL"
-
-            client_order_id = new_client_order_id("paper")
-            note = f"client_order_id={client_order_id}; signal_price={price}"
-            create_order(
-                client_order_id=client_order_id,
-                side="SELL",
-                qty_req=float(trade_qty),
-                price=float(fill_price),
-                status="NEW",
-                ts_ms=int(ts),
-                conn=conn,
-            )
-            add_fill(
-                client_order_id=client_order_id,
-                fill_ts=int(ts),
-                price=float(fill_price),
-                qty=float(trade_qty),
-                fee=float(fee),
-                conn=conn,
-            )
-            set_status(client_order_id, "FILLED", conn=conn)
 
         else:
             return None
 
-        conn.execute(
-            "UPDATE portfolio SET cash_krw=?, asset_qty=? WHERE id=1",
-            (float(cash_after), float(qty_after)),
+        client_order_id = new_client_order_id("paper")
+        note = f"client_order_id={client_order_id}; signal_price={price}"
+
+        record_order_if_missing(
+            conn,
+            client_order_id=client_order_id,
+            side=side,
+            qty_req=float(trade_qty),
+            price=float(fill_price),
+            ts_ms=int(ts),
         )
 
-        conn.execute(
-            """
-            INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(ts),
-                settings.PAIR,
-                settings.INTERVAL,
-                side,
-                float(fill_price),
-                float(trade_qty),
-                float(fee),
-                float(cash_after),
-                float(qty_after),
-                note,
-            ),
+        trade = apply_fill_and_trade(
+            conn,
+            client_order_id=client_order_id,
+            side=side,
+            fill_ts=int(ts),
+            price=float(fill_price),
+            qty=float(trade_qty),
+            fee=float(fee),
+            note=note,
         )
+
+        set_status(client_order_id, "FILLED", conn=conn)
         conn.commit()
+        return trade
 
-        return {
-            "ts": int(ts),
-            "side": side,
-            "price": float(fill_price),
-            "qty": float(trade_qty),
-            "fee": float(fee),
-            "cash": float(cash_after),
-            "asset": float(qty_after),
-            "client_order_id": client_order_id,
-        }
+    except Exception:
+        conn.rollback()
+        raise
 
     finally:
         conn.close()

@@ -36,6 +36,19 @@ def _get_or_set_start_equity(conn: sqlite3.Connection, day_kst: str, equity: flo
     return float(equity)
 
 
+def _count_orders_today(conn: sqlite3.Connection, ts_ms: int) -> int:
+    day = _day_kst(ts_ms)
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM orders
+        WHERE strftime('%Y-%m-%d', created_ts/1000, 'unixepoch', '+9 hours')=?
+        """,
+        (day,),
+    ).fetchone()
+    return int(row["cnt"] if hasattr(row, "keys") else row[0])
+
+
 def evaluate_buy_guardrails(
     conn: sqlite3.Connection,
     ts_ms: int,
@@ -48,13 +61,18 @@ def evaluate_buy_guardrails(
     - Kill switch
     - Max open position (single-position model)
     - Daily loss limit (optional)
+    - Daily order count limit (optional)
     """
     if settings.KILL_SWITCH:
         return True, "KILL_SWITCH=ON"
 
-    # single-position model
     if settings.MAX_OPEN_POSITIONS <= 1 and qty > POSITION_EPSILON:
         return True, "duplicate entry blocked"
+
+    if settings.MAX_DAILY_ORDER_COUNT > 0:
+        today_orders = _count_orders_today(conn, ts_ms)
+        if today_orders >= settings.MAX_DAILY_ORDER_COUNT:
+            return True, f"daily order count limit exceeded ({today_orders}/{settings.MAX_DAILY_ORDER_COUNT})"
 
     if settings.MAX_DAILY_LOSS_KRW > 0:
         _ensure_daily_risk_table(conn)

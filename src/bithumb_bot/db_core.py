@@ -1,4 +1,3 @@
-# src/bithumb_bot/db_core.py
 from __future__ import annotations
 
 import sqlite3
@@ -10,7 +9,6 @@ from .config import settings
 def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or settings.DB_PATH
 
-    # create parent dir for file DB (ignore for ":memory:")
     try:
         p = Path(path)
         if str(p) != ":memory:":
@@ -21,7 +19,6 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
 
-    # sane defaults
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
@@ -34,7 +31,6 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    # candles
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candles (
@@ -51,7 +47,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # portfolio: keep your column names
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS portfolio (
@@ -62,7 +57,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # trades: keep your query columns
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS trades (
@@ -70,7 +64,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             ts INTEGER NOT NULL,
             pair TEXT NOT NULL,
             interval TEXT NOT NULL,
-            side TEXT NOT NULL,    -- BUY / SELL
+            side TEXT NOT NULL,
             price REAL NOT NULL,
             qty REAL NOT NULL,
             fee REAL NOT NULL,
@@ -81,7 +75,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # risk daily start equity
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS daily_risk (
@@ -91,16 +84,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # orders (OMS)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_order_id TEXT NOT NULL UNIQUE,
             exchange_order_id TEXT,
-            status TEXT NOT NULL,           -- NEW / PARTIAL / FILLED / CANCELED / REJECTED / ERROR
-            side TEXT NOT NULL,             -- BUY / SELL
-            price REAL,                     -- market order면 NULL 가능
+            status TEXT NOT NULL,
+            side TEXT NOT NULL,
+            price REAL,
             qty_req REAL NOT NULL,
             qty_filled REAL NOT NULL DEFAULT 0,
             created_ts INTEGER NOT NULL,
@@ -110,7 +102,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # fills (executions)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fills (
@@ -131,11 +122,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 def init_portfolio(conn: sqlite3.Connection) -> None:
     row = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
     if row is None:
+        had_tx = conn.in_transaction
         conn.execute(
             "INSERT INTO portfolio(id, cash_krw, asset_qty) VALUES (1, ?, 0.0)",
             (float(settings.START_CASH_KRW),),
         )
-        conn.commit()
+        if not had_tx:
+            conn.commit()
 
 
 def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
@@ -145,5 +138,10 @@ def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
 
 
 def set_portfolio(conn: sqlite3.Connection, cash_krw: float, asset_qty: float) -> None:
-    conn.execute("UPDATE portfolio SET cash_krw=?, asset_qty=? WHERE id=1", (float(cash_krw), float(asset_qty)))
-    conn.commit()
+    had_tx = conn.in_transaction
+    conn.execute(
+        "UPDATE portfolio SET cash_krw=?, asset_qty=? WHERE id=1",
+        (float(cash_krw), float(asset_qty)),
+    )
+    if not had_tx:
+        conn.commit()
