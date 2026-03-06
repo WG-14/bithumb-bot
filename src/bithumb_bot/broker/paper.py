@@ -100,6 +100,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             conn,
             client_order_id=client_order_id,
             side=side,
+            fill_id=None,
             fill_ts=int(ts),
             price=float(fill_price),
             qty=float(trade_qty),

@@ -16,6 +16,7 @@ def record_order_if_missing(
     qty_req: float,
     price: float | None,
     ts_ms: int,
+    status: str = "NEW",
 ) -> None:
     exists = conn.execute(
         "SELECT 1 FROM orders WHERE client_order_id=?",
@@ -28,13 +29,33 @@ def record_order_if_missing(
         side=side,
         qty_req=qty_req,
         price=price,
-        status="NEW",
+        status=status,
         ts_ms=ts_ms,
         conn=conn,
     )
 
 
-def _fill_exists(conn: sqlite3.Connection, *, client_order_id: str, fill_ts: int, price: float, qty: float) -> bool:
+def _fill_exists(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+) -> bool:
+    if fill_id:
+        row = conn.execute(
+            """
+            SELECT 1 FROM fills
+            WHERE client_order_id=? AND fill_id=?
+            LIMIT 1
+            """,
+            (client_order_id, fill_id),
+        ).fetchone()
+        if row is not None:
+            return True
+
     row = conn.execute(
         """
         SELECT 1 FROM fills
@@ -51,6 +72,7 @@ def apply_fill_and_trade(
     *,
     client_order_id: str,
     side: str,
+    fill_id: str | None,
     fill_ts: int,
     price: float,
     qty: float,
@@ -58,7 +80,7 @@ def apply_fill_and_trade(
     note: str | None = None,
 ) -> dict[str, Any] | None:
     init_portfolio(conn)
-    if _fill_exists(conn, client_order_id=client_order_id, fill_ts=fill_ts, price=price, qty=qty):
+    if _fill_exists(conn, client_order_id=client_order_id, fill_id=fill_id, fill_ts=fill_ts, price=price, qty=qty):
         return None
 
     cash, asset = get_portfolio(conn)
@@ -71,6 +93,7 @@ def apply_fill_and_trade(
 
     add_fill(
         client_order_id=client_order_id,
+        fill_id=fill_id,
         fill_ts=fill_ts,
         price=price,
         qty=qty,
