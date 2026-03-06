@@ -37,6 +37,7 @@ MAX_OPEN_POSITIONS = settings.MAX_OPEN_POSITIONS
 KILL_SWITCH = settings.KILL_SWITCH
 KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
 
+
 def load_recent(conn: sqlite3.Connection, need: int):
     rows = conn.execute(
         """
@@ -155,8 +156,9 @@ def cmd_trades(limit: int):
             f"note={note_s}"
         )
 
+
 def cmd_orders(limit: int = 50):
-    conn = ensure_db()
+    conn = ensure_db(DB_PATH)
     rows = conn.execute(
         """
         SELECT client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts
@@ -174,7 +176,7 @@ def cmd_orders(limit: int = 50):
 
 
 def cmd_fills(limit: int = 50):
-    conn = ensure_db()
+    conn = ensure_db(DB_PATH)
     rows = conn.execute(
         """
         SELECT client_order_id, fill_ts, price, qty, fee
@@ -241,11 +243,11 @@ def cmd_audit():
     for row in bad_buy_snapshots:
         errors.append(
             "trade id={id} BUY snapshot impossible: cash_after={cash_after}, fee={fee}, asset_after={asset_after}, qty={qty}".format(
-                id=row['id'],
-                cash_after=float(row['cash_after']),
-                fee=float(row['fee']),
-                asset_after=float(row['asset_after']),
-                qty=float(row['qty']),
+                id=row["id"],
+                cash_after=float(row["cash_after"]),
+                fee=float(row["fee"]),
+                asset_after=float(row["asset_after"]),
+                qty=float(row["qty"]),
             )
         )
 
@@ -259,10 +261,10 @@ def cmd_audit():
     for row in bad_sell_snapshots:
         errors.append(
             "trade id={id} SELL snapshot impossible: cash_after={cash_after}, asset_after={asset_after}, qty={qty}".format(
-                id=row['id'],
-                cash_after=float(row['cash_after']),
-                asset_after=float(row['asset_after']),
-                qty=float(row['qty']),
+                id=row["id"],
+                cash_after=float(row["cash_after"]),
+                asset_after=float(row["asset_after"]),
+                qty=float(row["qty"]),
             )
         )
 
@@ -288,6 +290,7 @@ def cmd_audit():
         raise SystemExit(1)
 
     print("[AUDIT] OK")
+
 
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
@@ -512,9 +515,10 @@ def cmd_report(days: int) -> None:
     print(f"  drawdown<=20%: {'PASS' if gate_mdd else 'FAIL'}")
     print(f"  avg_daily_return>=0.10%: {'PASS' if gate_pnl else 'FAIL'}")
     print(f"  => {'PASS' if gate_pass else 'FAIL'}")
-    
-def main():
-    p = argparse.ArgumentParser()
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
 
     sub.add_parser("ticker")
@@ -538,10 +542,14 @@ def main():
     e.add_argument("--short", type=int, default=SMA_SHORT)
     e.add_argument("--long", type=int, default=SMA_LONG)
 
-    st = sub.add_parser("status")
-
+    sub.add_parser("status")
     sub.add_parser("audit")
     sub.add_parser("check")
+    sub.add_parser("health")
+    sub.add_parser("audit-ledger")
+
+    report = sub.add_parser("report")
+    report.add_argument("--days", type=int, default=30)
 
     t = sub.add_parser("trades")
     t.add_argument("--limit", type=int, default=20)
@@ -550,7 +558,7 @@ def main():
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     if args.cmd in (None, "ticker"):
         cmd_ticker()
@@ -566,74 +574,25 @@ def main():
         cmd_status()
     elif args.cmd in ("audit", "check"):
         cmd_audit()
+    elif args.cmd == "health":
+        cmd_health()
     elif args.cmd == "trades":
         cmd_trades(args.limit)
     elif args.cmd == "orders":
         cmd_orders(args.limit)
     elif args.cmd == "fills":
         cmd_fills(args.limit)
+    elif args.cmd == "report":
+        cmd_report(max(1, int(args.days)))
+    elif args.cmd == "audit-ledger":
+        cmd_audit_ledger()
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
+    else:
+        p.print_help()
+        return 2
 
-# === CLI entrypoint & routing (add at bottom of file) ===
-import sys
-import argparse
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="bithumb-bot")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    # audit
-    sub.add_parser("audit", help="Check DB invariants / ledger consistency")
-
-    # fills (너 파일에 cmd_fills(limit=50) 가 있으니 연결)
-    fills = sub.add_parser("fills", help="Print recent fills")
-    fills.add_argument("--limit", type=int, default=50)
-
-    sub.add_parser("health", help="Print runtime health status")
-
-    report = sub.add_parser("report", help="PnL/equity report with gate checks")
-    report.add_argument("--days", type=int, default=30)
-
-    sub.add_parser("audit-ledger", help="Replay fills/orders and verify portfolio consistency")
-
-    # (옵션) 너 app.py에 있는 다른 cmd_*들도 같은 방식으로 추가하면 됨.
-    # 예시:
-    # orders = sub.add_parser("orders", help="Print recent orders")
-    # orders.add_argument("--limit", type=int, default=50)
-
-    return p
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.cmd == "audit":
-        cmd_audit()
-        return 0
-
-    if args.cmd == "fills":
-        cmd_fills(limit=args.limit)
-        return 0
-
-    if args.cmd == "health":
-        cmd_health()
-        return 0
-
-    if args.cmd == "report":
-        cmd_report(days=max(1, int(args.days)))
-        return 0
-
-    if args.cmd == "audit-ledger":
-        cmd_audit_ledger()
-        return 0
-
-    # 이론상 여기 올 일 없음(required=True라서)
-    parser.print_help()
-    return 2
+    return 0
 
 
 if __name__ == "__main__":
