@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import httpx
+
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
-from bithumb_bot.broker.live import live_execute_signal
+from bithumb_bot.broker.live import live_execute_signal, validate_order
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot.config import settings
@@ -30,6 +32,16 @@ class _FakeBroker:
         return BrokerBalance(cash_krw=500000.0, asset_qty=0.01)
 
 
+class _TimeoutBroker(_FakeBroker):
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        raise httpx.ReadTimeout("timeout")
+
+
+class _StrayBroker(_FakeBroker):
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return [BrokerOrder("", "stray1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
+
+
 def test_bithumb_broker_dry_run(monkeypatch):
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "k")
@@ -53,6 +65,40 @@ def test_live_execute_idempotent(monkeypatch, tmp_path):
     assert t2 is None
 
 
+def test_live_open_order_guard_blocks_new_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "open_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    conn = ensure_db(str(tmp_path / "open_guard.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('existing_open','ex_open','NEW','BUY',NULL,0.01,0,999,999,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
+    assert trade is None
+
+
+def test_live_timeout_marks_submit_unknown(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    trade = live_execute_signal(_TimeoutBroker(), "BUY", 1000, 100000000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "submit_unknown.sqlite"))
+    row = conn.execute("SELECT status, last_error FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "SUBMIT_UNKNOWN"
+    assert "submit unknown" in str(row["last_error"])
+
+
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "reconcile.sqlite"))
     conn = ensure_db(str(tmp_path / "reconcile.sqlite"))
@@ -74,3 +120,26 @@ def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
 
     assert row["status"] == "FILLED"
     assert float(p["asset_qty"]) == 0.01
+
+
+def test_reconcile_records_stray_remote_open_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "stray.sqlite"))
+    reconcile_with_broker(_StrayBroker())
+
+    conn = ensure_db(str(tmp_path / "stray.sqlite"))
+    row = conn.execute("SELECT status, exchange_order_id, side FROM orders WHERE client_order_id='remote_stray1'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["exchange_order_id"] == "stray1"
+    assert row["status"] == "NEW"
+    assert row["side"] == "BUY"
+
+
+def test_validate_order_rejects_invalid_qty():
+    try:
+        validate_order(signal="BUY", side="BUY", qty=0.0, market_price=100.0)
+    except ValueError as e:
+        assert "invalid order qty" in str(e)
+    else:
+        raise AssertionError("expected ValueError")

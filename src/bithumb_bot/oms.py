@@ -8,6 +8,9 @@ import sqlite3
 from .db_core import ensure_db
 
 
+OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
+
+
 def new_client_order_id(prefix: str = "cli") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
@@ -98,6 +101,7 @@ def set_status(
 def add_fill(
     *,
     client_order_id: str,
+    fill_id: str | None,
     fill_ts: int,
     price: float,
     qty: float,
@@ -108,8 +112,8 @@ def add_fill(
     conn = conn or ensure_db()
     try:
         conn.execute(
-            "INSERT INTO fills(client_order_id, fill_ts, price, qty, fee) VALUES (?, ?, ?, ?, ?)",
-            (client_order_id, int(fill_ts), float(price), float(qty), float(fee)),
+            "INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee) VALUES (?, ?, ?, ?, ?, ?)",
+            (client_order_id, fill_id, int(fill_ts), float(price), float(qty), float(fee)),
         )
         conn.execute(
             "UPDATE orders SET qty_filled = qty_filled + ?, updated_ts=? WHERE client_order_id=?",
@@ -129,13 +133,15 @@ def add_fill(
 def get_open_orders() -> list[dict[str, Any]]:
     conn = ensure_db()
     try:
+        placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
         rows = conn.execute(
-            """
+            f"""
             SELECT client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts
             FROM orders
-            WHERE status IN ('NEW', 'PARTIAL')
+            WHERE status IN ({placeholders})
             ORDER BY created_ts ASC
-            """
+            """,
+            OPEN_ORDER_STATUSES,
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

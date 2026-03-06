@@ -30,6 +30,13 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    names = {str(row[1]) for row in cols}
+    if column not in names:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -107,12 +114,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS fills (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_order_id TEXT NOT NULL,
+            fill_id TEXT,
             fill_ts INTEGER NOT NULL,
             price REAL NOT NULL,
             qty REAL NOT NULL,
             fee REAL NOT NULL DEFAULT 0,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
+        """
+    )
+
+    _ensure_column(conn, "fills", "fill_id", "fill_id TEXT")
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_client_fill_id
+        ON fills(client_order_id, fill_id)
+        WHERE fill_id IS NOT NULL
         """
     )
 
