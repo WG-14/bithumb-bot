@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import math
 
-import httpx
-
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..risk import evaluate_buy_guardrails
 from ..oms import set_exchange_order_id, set_status
-from .base import Broker
+from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
 
@@ -91,8 +89,9 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         try:
             order = broker.place_order(client_order_id=client_order_id, side=side, qty=order_qty, price=None)
-        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPError) as e:
-            set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=f"submit unknown: {type(e).__name__}: {e}", conn=conn)
+        except BrokerTemporaryError as e:
+            err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
+            set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=str(err), conn=conn)
             conn.commit()
             return None
 

@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ..config import settings
-from .base import BrokerBalance, BrokerFill, BrokerOrder
+from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 
 
 class BithumbBroker:
@@ -37,17 +37,45 @@ class BithumbBroker:
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-    def _post_private(self, endpoint: str, payload: dict[str, str]) -> dict:
+    def _post_private(self, endpoint: str, payload: dict[str, str], *, retry_safe: bool = False) -> dict:
         if self.dry_run:
             return {"status": "0000", "data": {"order_id": f"dry_{payload.get('order_id', payload.get('order_currency', 'order'))}"}}
-        headers = self._headers(endpoint, payload)
-        with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
-            res = client.post(endpoint, data=payload, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-        if str(data.get("status")) != "0000":
-            raise RuntimeError(f"bithumb private call failed: {data}")
-        return data
+
+        attempts = 3 if retry_safe else 1
+        backoffs = (0.2, 0.5)
+
+        for attempt in range(attempts):
+            headers = self._headers(endpoint, payload)
+            try:
+                with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                    res = client.post(endpoint, data=payload, headers=headers)
+
+                if 500 <= res.status_code <= 599:
+                    raise BrokerTemporaryError(f"bithumb private {endpoint} server error status={res.status_code}")
+                res.raise_for_status()
+                data = res.json()
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt < attempts - 1:
+                    time.sleep(backoffs[attempt])
+                    continue
+                raise BrokerTemporaryError(f"bithumb private {endpoint} transport error: {type(exc).__name__}: {exc}") from exc
+            except httpx.HTTPStatusError as exc:
+                if 500 <= exc.response.status_code <= 599:
+                    if attempt < attempts - 1:
+                        time.sleep(backoffs[attempt])
+                        continue
+                    raise BrokerTemporaryError(
+                        f"bithumb private {endpoint} server error status={exc.response.status_code}"
+                    ) from exc
+                raise BrokerRejectError(
+                    f"bithumb private {endpoint} rejected with http status={exc.response.status_code}"
+                ) from exc
+
+            if str(data.get("status")) != "0000":
+                raise BrokerRejectError(f"bithumb private call rejected: {data}")
+            return data
+
+        raise BrokerTemporaryError(f"bithumb private {endpoint} failed after retries")
 
     def _pair(self) -> tuple[str, str]:
         order_currency, payment_currency = settings.PAIR.split("_")
@@ -68,7 +96,7 @@ class BithumbBroker:
         if price is not None:
             payload["price"] = str(price)
 
-        data = self._post_private("/trade/place", payload)
+        data = self._post_private("/trade/place", payload, retry_safe=False)
         exchange_order_id = str(data["data"]["order_id"])
         return BrokerOrder(client_order_id, exchange_order_id, side, "NEW", price, qty, 0.0, now, now)
 
@@ -87,6 +115,7 @@ class BithumbBroker:
                 "order_currency": order_currency,
                 "payment_currency": payment_currency,
             },
+            retry_safe=False,
         )
         now = int(time.time() * 1000)
         return BrokerOrder(order.client_order_id, order.exchange_order_id, order.side, "CANCELED", order.price, order.qty_req, order.qty_filled, order.created_ts, now)
@@ -105,13 +134,14 @@ class BithumbBroker:
                 "order_currency": order_currency,
                 "payment_currency": payment_currency,
             },
+            retry_safe=True,
         )
         rows = data.get("data") or []
         if not rows:
-            raise RuntimeError(f"order not found for exchange_order_id={exid}")
+            raise BrokerRejectError(f"order not found for exchange_order_id={exid}")
         row = rows[0]
         qty_req = float(row.get("units") or 0.0)
-        qty_remain = float(row.get("units_remaining") or row.get("units_remaining", 0.0))
+        qty_remain = float(row.get("units_remaining") or 0.0)
         qty_filled = max(0.0, qty_req - qty_remain)
         status = "FILLED" if qty_filled >= qty_req and qty_req > 0 else ("PARTIAL" if qty_filled > 0 else "NEW")
         return BrokerOrder(client_order_id, str(exid), str(row.get("type", "BUY")).upper(), status, float(row.get("price")) if row.get("price") else None, qty_req, qty_filled, now, now)
@@ -127,6 +157,7 @@ class BithumbBroker:
                 "order_currency": order_currency,
                 "payment_currency": payment_currency,
             },
+            retry_safe=True,
         )
         out: list[BrokerOrder] = []
         now = int(time.time() * 1000)
@@ -160,7 +191,7 @@ class BithumbBroker:
         }
         if exchange_order_id:
             payload["order_id"] = exchange_order_id
-        data = self._post_private("/info/user_transactions", payload)
+        data = self._post_private("/info/user_transactions", payload, retry_safe=True)
         fills: list[BrokerFill] = []
         for row in data.get("data") or []:
             tms = int(float(row.get("transfer_date", 0)))
@@ -178,15 +209,24 @@ class BithumbBroker:
 
     def get_balance(self) -> BrokerBalance:
         if self.dry_run:
-            return BrokerBalance(cash_krw=settings.START_CASH_KRW, asset_qty=0.0)
+            return BrokerBalance(cash_available=settings.START_CASH_KRW, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
         order_currency, payment_currency = self._pair()
         data = self._post_private(
             "/info/balance",
             {
                 "currency": order_currency,
             },
+            retry_safe=True,
         )
         d = data.get("data") or {}
-        cash = float(d.get(f"available_{payment_currency.lower()}") or 0.0)
-        qty = float(d.get(f"available_{order_currency.lower()}") or 0.0)
-        return BrokerBalance(cash_krw=cash, asset_qty=qty)
+        cash_available = float(d.get(f"available_{payment_currency.lower()}") or 0.0)
+        asset_available = float(d.get(f"available_{order_currency.lower()}") or 0.0)
+        # Bithumb balance payload may omit in-use values for some accounts.
+        cash_locked = float(d.get(f"in_use_{payment_currency.lower()}") or 0.0)
+        asset_locked = float(d.get(f"in_use_{order_currency.lower()}") or 0.0)
+        return BrokerBalance(
+            cash_available=cash_available,
+            cash_locked=cash_locked,
+            asset_available=asset_available,
+            asset_locked=asset_locked,
+        )

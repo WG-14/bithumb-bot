@@ -4,6 +4,22 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+class BrokerError(Exception):
+    """Base broker exception."""
+
+
+class BrokerTemporaryError(BrokerError):
+    """Temporary/transient broker error (timeout, transport, 5xx)."""
+
+
+class BrokerRejectError(BrokerError):
+    """Exchange business reject (request was received but rejected)."""
+
+
+class BrokerSubmissionUnknownError(BrokerError):
+    """Order submission state is unknown and requires reconciliation."""
+
+
 @dataclass(frozen=True)
 class BrokerOrder:
     client_order_id: str
@@ -29,8 +45,20 @@ class BrokerFill:
 
 @dataclass(frozen=True)
 class BrokerBalance:
-    cash_krw: float
-    asset_qty: float
+    cash_available: float
+    cash_locked: float
+    asset_available: float
+    asset_locked: float
+
+    @property
+    def cash_krw(self) -> float:
+        # Backward compatibility: historical callers used available cash only.
+        return self.cash_available
+
+    @property
+    def asset_qty(self) -> float:
+        # Backward compatibility: historical callers used available asset only.
+        return self.asset_available
 
 
 class Broker(Protocol):

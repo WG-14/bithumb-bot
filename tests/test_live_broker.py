@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import httpx
-
 from bithumb_bot.broker.bithumb import BithumbBroker
-from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, validate_order
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.recovery import reconcile_with_broker
@@ -29,12 +27,12 @@ class _FakeBroker:
         return []
 
     def get_balance(self) -> BrokerBalance:
-        return BrokerBalance(cash_krw=500000.0, asset_qty=0.01)
+        return BrokerBalance(cash_available=500000.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
 
 
 class _TimeoutBroker(_FakeBroker):
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
-        raise httpx.ReadTimeout("timeout")
+        raise BrokerTemporaryError("timeout")
 
 
 class _StrayBroker(_FakeBroker):
