@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, validate_order
@@ -9,25 +11,61 @@ from bithumb_bot.config import settings
 
 
 class _FakeBroker:
+    def __init__(self) -> None:
+        self.place_order_calls = 0
+        self._last_qty = 0.01
+        self._last_side = "BUY"
+        self._last_price = None
+        self._last_client_order_id = "live_1000_buy"
+
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        self.place_order_calls += 1
+        self._last_client_order_id = client_order_id
+        self._last_side = side
+        self._last_qty = qty
+        self._last_price = price
         return BrokerOrder(client_order_id, "ex1", side, "NEW", price, qty, 0.0, 1, 1)
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         raise NotImplementedError
 
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
-        return BrokerOrder(client_order_id, exchange_order_id or "ex1", "BUY", "FILLED", None, 0.01, 0.01, 1, 1)
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "ex1",
+            self._last_side,
+            "FILLED",
+            self._last_price,
+            self._last_qty,
+            self._last_qty,
+            1,
+            1,
+        )
 
     def get_open_orders(self) -> list[BrokerOrder]:
         return []
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         if client_order_id:
-            return [BrokerFill(client_order_id=client_order_id, fill_id="f1", fill_ts=1000, price=100000000.0, qty=0.01, fee=10.0)]
+            return [
+                BrokerFill(
+                    client_order_id=client_order_id,
+                    fill_id="f1",
+                    fill_ts=1000,
+                    price=100000000.0,
+                    qty=self._last_qty,
+                    fee=10.0,
+                )
+            ]
         return []
 
     def get_balance(self) -> BrokerBalance:
-        return BrokerBalance(cash_available=500000.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
+        return BrokerBalance(
+            cash_available=float(settings.START_CASH_KRW),
+            cash_locked=0.0,
+            asset_available=0.01,
+            asset_locked=0.0,
+        )
 
 
 class _TimeoutBroker(_FakeBroker):
@@ -42,6 +80,11 @@ class _StrayBroker(_FakeBroker):
 
 class _NoExchangeIdBroker(_FakeBroker):
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        self.place_order_calls += 1
+        self._last_client_order_id = client_order_id
+        self._last_side = side
+        self._last_qty = qty
+        self._last_price = price
         return BrokerOrder(client_order_id, None, side, "NEW", price, qty, 0.0, 1, 1)
 
 
@@ -50,6 +93,34 @@ class _StrictRecoveryBroker(_FakeBroker):
         if exchange_order_id is None:
             raise AssertionError("unsafe get_order called without exchange_order_id")
         return super().get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+
+
+@pytest.fixture(autouse=True)
+def _reset_pretrade_guards():
+    old_values = {
+        "DB_PATH": settings.DB_PATH,
+        "START_CASH_KRW": settings.START_CASH_KRW,
+        "BUY_FRACTION": settings.BUY_FRACTION,
+        "FEE_RATE": settings.FEE_RATE,
+        "MAX_ORDERBOOK_SPREAD_BPS": settings.MAX_ORDERBOOK_SPREAD_BPS,
+        "MAX_MARKET_SLIPPAGE_BPS": settings.MAX_MARKET_SLIPPAGE_BPS,
+        "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
+        "PRETRADE_BALANCE_BUFFER_BPS": settings.PRETRADE_BALANCE_BUFFER_BPS,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
+        "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+    }
+
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 0.0)
+    object.__setattr__(settings, "FEE_RATE", 0.0004)
+
+    yield
+
+    for key, value in old_values.items():
+        object.__setattr__(settings, key, value)
 
 
 def test_bithumb_broker_dry_run(monkeypatch):
@@ -130,6 +201,7 @@ def test_live_submit_without_exchange_id_marks_recovery_required(tmp_path):
 
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "reconcile.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
     conn = ensure_db(str(tmp_path / "reconcile.sqlite"))
     conn.execute(
         """
@@ -167,6 +239,7 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
 
 def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "recovery_required.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
     conn = ensure_db(str(tmp_path / "recovery_required.sqlite"))
     conn.execute(
         """
@@ -207,3 +280,50 @@ def test_validate_order_rejects_invalid_qty():
         assert "invalid order qty" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_live_invalid_market_price_rejected_before_submit(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "invalid_market.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    broker = _FakeBroker()
+
+    trade = live_execute_signal(broker, "BUY", 1000, 0.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+def test_live_insufficient_available_balance_rejected(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "insufficient_balance.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 0.99)
+    object.__setattr__(settings, "FEE_RATE", 0.001)
+    object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 10.0)
+
+    broker = _FakeBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_balance",
+        lambda: BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
+    )
+
+    trade = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "spread_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 5.0)
+
+    from bithumb_bot.broker import live as live_module
+
+    monkeypatch.setattr(live_module, "fetch_orderbook_top", lambda _pair: (100.0, 101.0))
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100.5)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
