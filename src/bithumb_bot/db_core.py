@@ -120,6 +120,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS bot_health (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            trading_enabled INTEGER NOT NULL DEFAULT 1,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_candle_age_sec REAL,
+            retry_at_epoch_sec REAL,
+            last_disable_reason TEXT,
+            updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        INSERT INTO bot_health (
+            id,
+            trading_enabled,
+            error_count,
+            last_candle_age_sec,
+            retry_at_epoch_sec,
+            last_disable_reason
+        )
+        VALUES (1, 1, 0, NULL, NULL, NULL)
+        ON CONFLICT(id) DO NOTHING
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_order_id TEXT NOT NULL UNIQUE,

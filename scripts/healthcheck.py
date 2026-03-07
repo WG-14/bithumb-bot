@@ -2,17 +2,23 @@
 from __future__ import annotations
 
 import os
-import sys
 
-from bithumb_bot.engine import get_health_status
 from bithumb_bot.notifier import notify
+from bithumb_bot.runtime_state import snapshot
 
 
 def main() -> int:
     stale_threshold_sec = float(os.getenv("HEALTH_MAX_CANDLE_AGE_SEC", "180"))
     error_threshold = int(os.getenv("HEALTH_MAX_ERROR_COUNT", "3"))
 
-    health = get_health_status()
+    state = snapshot()
+    health = {
+        "last_candle_age_sec": state.last_candle_age_sec,
+        "error_count": state.error_count,
+        "trading_enabled": state.trading_enabled,
+        "retry_at_epoch_sec": state.retry_at_epoch_sec,
+    }
+
     problems: list[str] = []
 
     age = health.get("last_candle_age_sec")
