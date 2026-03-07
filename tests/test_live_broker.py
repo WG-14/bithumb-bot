@@ -109,6 +109,9 @@ def _reset_pretrade_guards():
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+        "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
+        "KILL_SWITCH": settings.KILL_SWITCH,
+        "MAX_OPEN_ORDER_AGE_SEC": settings.MAX_OPEN_ORDER_AGE_SEC,
     }
 
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
@@ -116,6 +119,8 @@ def _reset_pretrade_guards():
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
     object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 0.0)
     object.__setattr__(settings, "FEE_RATE", 0.0004)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
+    object.__setattr__(settings, "KILL_SWITCH", False)
 
     yield
 
@@ -162,6 +167,77 @@ def test_live_open_order_guard_blocks_new_order(tmp_path):
     broker = _FakeBroker()
     trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
     assert trade is None
+
+
+def test_live_kill_switch_blocks_new_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "kill_switch.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "KILL_SWITCH", True)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+def test_live_daily_loss_limit_blocks_new_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "daily_loss.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 1000.0)
+
+    conn = ensure_db(str(tmp_path / "daily_loss.sqlite"))
+    conn.execute("INSERT INTO daily_risk(day_kst, start_equity) VALUES ('1970-01-01', 1010000.0)")
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+def test_live_recovery_required_order_blocks_new_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "recovery_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    conn = ensure_db(str(tmp_path / "recovery_guard.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('needs_recovery',NULL,'RECOVERY_REQUIRED','BUY',NULL,0.01,0,999,999,'manual recovery required')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+def test_live_stale_unresolved_open_order_blocks_new_order(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "stale_open_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 5)
+
+    conn = ensure_db(str(tmp_path / "stale_open_guard.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('stale_open','ex_open','NEW','BUY',NULL,0.01,0,1,1,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 10_000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
 
 
 def test_live_timeout_marks_submit_unknown(tmp_path):

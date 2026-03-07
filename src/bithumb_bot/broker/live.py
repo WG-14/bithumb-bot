@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+import time
 
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import notify
-from ..risk import evaluate_buy_guardrails
+from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from ..oms import record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
@@ -15,7 +16,6 @@ POSITION_EPSILON = 1e-12
 
 
 VALID_ORDER_SIDES = {"BUY", "SELL"}
-OPEN_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
 
 
 def _client_order_id(ts: int, side: str) -> str:
@@ -95,15 +95,6 @@ def validate_pretrade(
         raise ValueError(f"slippage guard blocked: bps={slippage_bps:.2f} > limit={slip_limit_bps:.2f}")
 
 
-def _has_open_orders(conn) -> bool:
-    placeholders = ",".join("?" for _ in OPEN_STATUSES)
-    row = conn.execute(
-        f"SELECT 1 FROM orders WHERE status IN ({placeholders}) LIMIT 1",
-        OPEN_STATUSES,
-    ).fetchone()
-    return row is not None
-
-
 def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: float) -> dict | None:
     conn = ensure_db()
     try:
@@ -138,7 +129,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             notify(f"live pretrade validation blocked ({side}): {e}")
             return None
 
-        if _has_open_orders(conn):
+        blocked, reason = evaluate_order_submission_halt(
+            conn,
+            ts_ms=int(ts),
+            now_ms=int(time.time() * 1000),
+            cash=float(cash),
+            qty=float(qty),
+            price=float(market_price),
+        )
+        if blocked:
+            notify(f"live order placement blocked ({side}): {reason}")
             return None
 
         client_order_id = _client_order_id(ts, side)

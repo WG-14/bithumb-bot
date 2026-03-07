@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from .config import settings
+from .oms import OPEN_ORDER_STATUSES
 
 KST = timezone(timedelta(hours=9))
 POSITION_EPSILON = 1e-12
@@ -74,13 +75,69 @@ def evaluate_buy_guardrails(
         if today_orders >= settings.MAX_DAILY_ORDER_COUNT:
             return True, f"daily order count limit exceeded ({today_orders}/{settings.MAX_DAILY_ORDER_COUNT})"
 
-    if settings.MAX_DAILY_LOSS_KRW > 0:
-        _ensure_daily_risk_table(conn)
-        day = _day_kst(ts_ms)
-        equity = float(cash) + float(qty) * float(price)
-        start_equity = _get_or_set_start_equity(conn, day, equity)
-        loss_today = max(0.0, start_equity - equity)
-        if loss_today >= settings.MAX_DAILY_LOSS_KRW:
-            return True, f"daily loss limit exceeded ({loss_today:,.0f}/{settings.MAX_DAILY_LOSS_KRW:,.0f} KRW)"
+    blocked, reason = _daily_loss_exceeded(conn, ts_ms, cash, qty, price)
+    if blocked:
+        return True, reason
 
     return False, "ok"
+
+
+def _daily_loss_exceeded(conn: sqlite3.Connection, ts_ms: int, cash: float, qty: float, price: float) -> tuple[bool, str]:
+    if settings.MAX_DAILY_LOSS_KRW <= 0:
+        return False, "ok"
+
+    _ensure_daily_risk_table(conn)
+    day = _day_kst(ts_ms)
+    equity = float(cash) + float(qty) * float(price)
+    start_equity = _get_or_set_start_equity(conn, day, equity)
+    loss_today = max(0.0, start_equity - equity)
+    if loss_today >= settings.MAX_DAILY_LOSS_KRW:
+        return True, f"daily loss limit exceeded ({loss_today:,.0f}/{settings.MAX_DAILY_LOSS_KRW:,.0f} KRW)"
+
+    return False, "ok"
+
+
+def evaluate_order_submission_halt(
+    conn: sqlite3.Connection,
+    *,
+    ts_ms: int,
+    now_ms: int,
+    cash: float,
+    qty: float,
+    price: float,
+) -> tuple[bool, str]:
+    """Shared hard-stop checks before placing any new order."""
+    if settings.KILL_SWITCH:
+        return True, "KILL_SWITCH=ON"
+
+    blocked, reason = _daily_loss_exceeded(conn, ts_ms, cash, qty, price)
+    if blocked:
+        return True, reason
+
+    recovery_required = conn.execute(
+        "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
+    ).fetchone()
+    if recovery_required is not None:
+        return True, "recovery-required order exists"
+
+    placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
+    open_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS open_count, MIN(created_ts) AS oldest_created_ts
+        FROM orders
+        WHERE status IN ({placeholders})
+        """,
+        OPEN_ORDER_STATUSES,
+    ).fetchone()
+    open_count = int(open_row["open_count"] if hasattr(open_row, "keys") else open_row[0])
+    oldest_created_ts = open_row["oldest_created_ts"] if hasattr(open_row, "keys") else open_row[1]
+    if open_count <= 0:
+        return False, "ok"
+
+    if oldest_created_ts is not None:
+        age_sec = max(0.0, (int(now_ms) - int(oldest_created_ts)) / 1000)
+        max_age_sec = max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC))
+        if age_sec > max_age_sec:
+            return True, f"stale unresolved open order exists: age={age_sec:.1f}s > {max_age_sec}s"
+
+    return True, "unresolved open order exists"
