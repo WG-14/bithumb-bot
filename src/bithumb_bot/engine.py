@@ -8,6 +8,7 @@ from .strategy.sma import compute_signal
 from .broker.paper import paper_execute
 from .broker.live import live_execute_signal
 from .broker.bithumb import BithumbBroker
+from .broker.base import BrokerError
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import notify
@@ -17,14 +18,20 @@ from . import runtime_state
 FAILSAFE_RETRY_DELAY_SEC = 180
 
 
-def get_health_status() -> dict[str, float | int | bool | None]:
+def get_health_status() -> dict[str, float | int | bool | str | None]:
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
         "error_count": state.error_count,
         "trading_enabled": state.trading_enabled,
         "retry_at_epoch_sec": state.retry_at_epoch_sec,
+        "last_disable_reason": state.last_disable_reason,
     }
+
+
+def _halt_trading(reason: str) -> None:
+    runtime_state.disable_trading_until(float("inf"), reason=reason)
+    notify(f"trading halted: {reason}")
 
 
 def run_loop(short_n: int, long_n: int) -> None:
@@ -33,7 +40,10 @@ def run_loop(short_n: int, long_n: int) -> None:
     broker = None
     if settings.MODE == "live":
         broker = BithumbBroker()
-        reconcile_with_broker(broker)
+        try:
+            reconcile_with_broker(broker)
+        except Exception as e:
+            _halt_trading(f"initial reconcile failed ({type(e).__name__}): {e}")
 
     sec = parse_interval_sec(settings.INTERVAL)
     print(f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}")
@@ -112,11 +122,33 @@ def run_loop(short_n: int, long_n: int) -> None:
             if r["signal"] not in ("BUY", "SELL"):
                 continue
 
+            if settings.MODE == "live":
+                conn = ensure_db()
+                has_recovery_required = conn.execute(
+                    "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
+                ).fetchone() is not None
+                conn.close()
+                if has_recovery_required:
+                    notify("recovery required order exists; skip new order placement")
+                    continue
+
             trade = None
             if settings.MODE == "paper":
                 trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
-                trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
+                try:
+                    trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
+                except BrokerError as e:
+                    _halt_trading(f"live execution broker error ({type(e).__name__}): {e}")
+                    continue
+                except Exception as e:
+                    _halt_trading(f"live execution failed ({type(e).__name__}): {e}")
+                    continue
+                try:
+                    reconcile_with_broker(broker)
+                except Exception as e:
+                    _halt_trading(f"reconcile failed ({type(e).__name__}): {e}")
+                    continue
 
             if trade:
                 print(
