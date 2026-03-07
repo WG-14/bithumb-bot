@@ -13,7 +13,7 @@ POSITION_EPSILON = 1e-12
 
 
 VALID_ORDER_SIDES = {"BUY", "SELL"}
-OPEN_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
+OPEN_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
 
 
 def _client_order_id(ts: int, side: str) -> str:
@@ -98,6 +98,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         if order.exchange_order_id:
             set_exchange_order_id(client_order_id, order.exchange_order_id, conn=conn)
         set_status(client_order_id, order.status, conn=conn)
+
+        if not order.exchange_order_id:
+            set_status(
+                client_order_id,
+                "RECOVERY_REQUIRED",
+                last_error="submit acknowledged without exchange_order_id; manual recovery required",
+                conn=conn,
+            )
+            conn.commit()
+            return None
 
         fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
         trade = None

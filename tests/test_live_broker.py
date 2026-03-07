@@ -40,6 +40,18 @@ class _StrayBroker(_FakeBroker):
         return [BrokerOrder("", "stray1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
 
 
+class _NoExchangeIdBroker(_FakeBroker):
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, None, side, "NEW", price, qty, 0.0, 1, 1)
+
+
+class _StrictRecoveryBroker(_FakeBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        if exchange_order_id is None:
+            raise AssertionError("unsafe get_order called without exchange_order_id")
+        return super().get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+
+
 def test_bithumb_broker_dry_run(monkeypatch):
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "k")
@@ -97,6 +109,25 @@ def test_live_timeout_marks_submit_unknown(tmp_path):
     assert "submit unknown" in str(row["last_error"])
 
 
+def test_live_submit_without_exchange_id_marks_recovery_required(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "missing_exchange_id.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    trade = live_execute_signal(_NoExchangeIdBroker(), "BUY", 1000, 100000000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "missing_exchange_id.sqlite"))
+    row = conn.execute(
+        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='live_1000_buy'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+
+
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "reconcile.sqlite"))
     conn = ensure_db(str(tmp_path / "reconcile.sqlite"))
@@ -132,6 +163,41 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
     assert row["exchange_order_id"] == "stray1"
     assert row["status"] == "NEW"
     assert row["side"] == "BUY"
+
+
+def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "recovery_required.sqlite"))
+    conn = ensure_db(str(tmp_path / "recovery_required.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('ambiguous_missing_exid',NULL,'SUBMIT_UNKNOWN','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_2000_buy','ex2','NEW','BUY',NULL,0.01,0,2000,2000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_StrictRecoveryBroker())
+
+    conn = ensure_db(str(tmp_path / "recovery_required.sqlite"))
+    ambiguous = conn.execute(
+        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='ambiguous_missing_exid'"
+    ).fetchone()
+    reconciled = conn.execute("SELECT status FROM orders WHERE client_order_id='live_2000_buy'").fetchone()
+    conn.close()
+
+    assert ambiguous is not None
+    assert ambiguous["status"] == "RECOVERY_REQUIRED"
+    assert ambiguous["exchange_order_id"] is None
+    assert "manual recovery required" in str(ambiguous["last_error"])
+    assert reconciled is not None
+    assert reconciled["status"] == "FILLED"
 
 
 def test_validate_order_rejects_invalid_qty():

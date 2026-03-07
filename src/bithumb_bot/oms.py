@@ -8,7 +8,7 @@ import sqlite3
 from .db_core import ensure_db
 
 
-OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
+OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
 
 
 def new_client_order_id(prefix: str = "cli") -> str:

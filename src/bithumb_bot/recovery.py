@@ -27,6 +27,15 @@ def reconcile_with_broker(broker: Broker) -> None:
         ).fetchall()
         for row in local_open:
             oid = row["client_order_id"]
+            if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
+                set_status(
+                    oid,
+                    "RECOVERY_REQUIRED",
+                    last_error="submit_unknown without exchange_order_id; manual recovery required",
+                    conn=conn,
+                )
+                continue
+
             remote = broker.get_order(client_order_id=oid, exchange_order_id=row["exchange_order_id"])
             if remote.exchange_order_id:
                 set_exchange_order_id(oid, remote.exchange_order_id, conn=conn)
