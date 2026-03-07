@@ -4,7 +4,7 @@ import sqlite3
 from typing import Any
 
 from .config import settings
-from .db_core import ensure_db, get_portfolio, init_portfolio, set_portfolio
+from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .oms import add_fill, create_order, set_exchange_order_id, set_status
 
 
@@ -79,17 +79,80 @@ def apply_fill_and_trade(
     fee: float,
     note: str | None = None,
 ) -> dict[str, Any] | None:
+    eps = 1e-12
+
+    if qty <= 0:
+        raise RuntimeError(f"invalid fill qty for {client_order_id}: {qty}")
+    if price < 0:
+        raise RuntimeError(f"invalid fill price for {client_order_id}: {price}")
+    if fee < 0:
+        raise RuntimeError(f"invalid fill fee for {client_order_id}: {fee}")
+    if side not in ("BUY", "SELL"):
+        raise RuntimeError(f"invalid fill side for {client_order_id}: {side}")
+
     init_portfolio(conn)
     if _fill_exists(conn, client_order_id=client_order_id, fill_id=fill_id, fill_ts=fill_ts, price=price, qty=qty):
         return None
 
-    cash, asset = get_portfolio(conn)
+    order = conn.execute(
+        "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+        (client_order_id,),
+    ).fetchone()
+    if order is not None:
+        qty_req = float(order["qty_req"])
+        qty_filled = float(order["qty_filled"])
+        if qty_filled + qty > qty_req + eps:
+            raise RuntimeError(
+                f"overfill detected for {client_order_id}: existing={qty_filled}, fill={qty}, requested={qty_req}"
+            )
+
+    cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+
+    def _consume_locked_then_available(locked: float, available: float, amount: float, *, field: str) -> tuple[float, float]:
+        remaining = float(amount)
+        locked_after = float(locked)
+        available_after = float(available)
+
+        from_locked = min(locked_after, remaining)
+        locked_after -= from_locked
+        remaining -= from_locked
+
+        if remaining > eps:
+            available_after -= remaining
+
+        if locked_after < -eps or available_after < -eps:
+            raise RuntimeError(
+                f"negative {field} after fill for {client_order_id}: available={available_after}, locked={locked_after}, needed={amount}"
+            )
+        return max(locked_after, 0.0), max(available_after, 0.0)
+
     if side == "BUY":
-        cash_after = cash - (price * qty) - fee
-        asset_after = asset + qty
+        spend = (price * qty) + fee
+        cash_locked_after, cash_available_after = _consume_locked_then_available(
+            cash_locked,
+            cash_available,
+            spend,
+            field="cash",
+        )
+        asset_available_after = asset_available + qty
+        asset_locked_after = asset_locked
     else:
-        cash_after = cash + (price * qty) - fee
-        asset_after = asset - qty
+        cash_available_after = cash_available + (price * qty) - fee
+        cash_locked_after = cash_locked
+        asset_locked_after, asset_available_after = _consume_locked_then_available(
+            asset_locked,
+            asset_available,
+            qty,
+            field="asset",
+        )
+
+    cash_after = cash_available_after + cash_locked_after
+    asset_after = asset_available_after + asset_locked_after
+
+    if cash_after < -eps:
+        raise RuntimeError(f"negative cash after fill for {client_order_id}: {cash_after}")
+    if asset_after < -eps:
+        raise RuntimeError(f"negative asset after fill for {client_order_id}: {asset_after}")
 
     add_fill(
         client_order_id=client_order_id,
@@ -101,7 +164,13 @@ def apply_fill_and_trade(
         conn=conn,
     )
 
-    set_portfolio(conn, cash_after, asset_after)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=max(cash_available_after, 0.0),
+        cash_locked=max(cash_locked_after, 0.0),
+        asset_available=max(asset_available_after, 0.0),
+        asset_locked=max(asset_locked_after, 0.0),
+    )
     conn.execute(
         """
         INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, note)

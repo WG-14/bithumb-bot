@@ -8,7 +8,7 @@ from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 def test_apply_fill_dedupes_by_fill_id(tmp_path):
     db_path = tmp_path / "fill_dedupe.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
-    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
 
     conn = ensure_db(str(db_path))
     try:

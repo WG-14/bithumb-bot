@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .broker.base import Broker
-from .db_core import ensure_db, init_portfolio, set_portfolio_breakdown
+from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, record_order_if_missing
 from .oms import get_open_orders, set_exchange_order_id, set_status
 
@@ -79,12 +79,22 @@ def reconcile_with_broker(broker: Broker) -> None:
             set_status(oid, remote.status, last_error="stray remote open order detected", conn=conn)
 
         bal = broker.get_balance()
+        _, local_cash_locked, _, local_asset_locked = get_portfolio_breakdown(conn)
+        has_open_orders = bool(local_open) or bool(remote_open)
+
+        cash_locked = float(bal.cash_locked)
+        asset_locked = float(bal.asset_locked)
+        if has_open_orders and cash_locked <= 1e-12 and local_cash_locked > 1e-12:
+            cash_locked = local_cash_locked
+        if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
+            asset_locked = local_asset_locked
+
         set_portfolio_breakdown(
             conn,
             cash_available=bal.cash_available,
-            cash_locked=bal.cash_locked,
+            cash_locked=cash_locked,
             asset_available=bal.asset_available,
-            asset_locked=bal.asset_locked,
+            asset_locked=asset_locked,
         )
         conn.commit()
     finally:
