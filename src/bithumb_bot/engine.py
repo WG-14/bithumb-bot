@@ -16,6 +16,47 @@ from . import runtime_state
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
+LIVE_UNRESOLVED_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
+
+
+def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
+    conn = ensure_db()
+    try:
+        placeholders = ",".join("?" for _ in LIVE_UNRESOLVED_ORDER_STATUSES)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS open_count, MIN(created_ts) AS oldest_created_ts
+            FROM orders
+            WHERE status IN ({placeholders})
+            """,
+            LIVE_UNRESOLVED_ORDER_STATUSES,
+        ).fetchone()
+        open_count = int(row["open_count"])
+        oldest_created_ts = int(row["oldest_created_ts"]) if row["oldest_created_ts"] is not None else None
+        if open_count <= 0 or oldest_created_ts is None:
+            return 0, None
+        age_sec = max(0.0, (now_ms - oldest_created_ts) / 1000)
+        return open_count, age_sec
+    finally:
+        conn.close()
+
+
+def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
+    conn = ensure_db()
+    try:
+        placeholders = ",".join("?" for _ in LIVE_UNRESOLVED_ORDER_STATUSES)
+        res = conn.execute(
+            f"""
+            UPDATE orders
+            SET status='RECOVERY_REQUIRED', updated_ts=?, last_error=?
+            WHERE status IN ({placeholders})
+            """,
+            (now_ms, reason, *LIVE_UNRESOLVED_ORDER_STATUSES),
+        )
+        conn.commit()
+        return int(res.rowcount or 0)
+    finally:
+        conn.close()
 
 
 def get_health_status() -> dict[str, float | int | bool | str | None]:
@@ -50,6 +91,7 @@ def run_loop(short_n: int, long_n: int) -> None:
     print("중지: Ctrl+C")
     fail_count = 0
     MAX_FAILS = 5
+    last_open_order_reconcile_at: float | None = None
 
     try:
         while True:
@@ -106,6 +148,37 @@ def run_loop(short_n: int, long_n: int) -> None:
                 )
                 continue
 
+            if settings.MODE == "live" and broker is not None:
+                open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
+                if open_count > 0:
+                    min_reconcile_sec = max(1, int(settings.OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC))
+                    if (
+                        last_open_order_reconcile_at is None
+                        or (now - last_open_order_reconcile_at) >= min_reconcile_sec
+                    ):
+                        try:
+                            reconcile_with_broker(broker)
+                            last_open_order_reconcile_at = now
+                        except Exception as e:
+                            _halt_trading(f"periodic reconcile failed ({type(e).__name__}): {e}")
+                            continue
+
+                    open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
+                    if open_count > 0 and oldest_open_age_sec is not None:
+                        max_age_sec = max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC))
+                        if oldest_open_age_sec > max_age_sec:
+                            reason = (
+                                f"stale unresolved open order detected: "
+                                f"age={oldest_open_age_sec:.1f}s > {max_age_sec}s"
+                            )
+                            marked = _mark_open_orders_recovery_required(reason, int(now * 1000))
+                            _halt_trading(f"{reason}; marked={marked} recovery_required")
+                            continue
+
+                    if open_count > 0:
+                        notify("unresolved open order exists; skip new order placement")
+                        continue
+
             conn = ensure_db()
             r = compute_signal(conn, short_n, long_n)
             conn.close()
@@ -121,16 +194,6 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             if r["signal"] not in ("BUY", "SELL"):
                 continue
-
-            if settings.MODE == "live":
-                conn = ensure_db()
-                has_recovery_required = conn.execute(
-                    "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
-                ).fetchone() is not None
-                conn.close()
-                if has_recovery_required:
-                    notify("recovery required order exists; skip new order placement")
-                    continue
 
             trade = None
             if settings.MODE == "paper":

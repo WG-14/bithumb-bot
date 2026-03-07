@@ -8,37 +8,52 @@ from bithumb_bot.marketdata import _get_with_retry
 
 
 from bithumb_bot.config import settings
-from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
+from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.engine import run_loop
 
 
 class _LoopConn:
-    def __init__(self, *, has_recovery_required: bool = False):
-        self._has_recovery_required = has_recovery_required
+    def __init__(self, *, open_order_created_ts: int | None = None):
+        self.open_order_created_ts = open_order_created_ts
+        self.marked_recovery_required = 0
 
     def execute(self, query, params=None):
         q = " ".join(str(query).split())
         if "FROM candles" in q:
             return _Rows({"ts": int(10_000_000_000_000)})
-        if "status='RECOVERY_REQUIRED'" in q:
-            return _Rows((1,) if self._has_recovery_required else None)
+        if "COUNT(*) AS open_count" in q:
+            if self.open_order_created_ts is None:
+                return _Rows({"open_count": 0, "oldest_created_ts": None})
+            return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
+        if "SET status='RECOVERY_REQUIRED'" in q:
+            if self.open_order_created_ts is None:
+                self.marked_recovery_required = 0
+                return _Rows(None, rowcount=0)
+            self.marked_recovery_required = 1
+            return _Rows(None, rowcount=1)
         raise AssertionError(f"unexpected query: {query}")
+
+    def commit(self):
+        return None
 
     def close(self):
         return None
 
 
 class _Rows:
-    def __init__(self, row):
+    def __init__(self, row, rowcount: int = 0):
         self._row = row
+        self.rowcount = rowcount
 
     def fetchone(self):
         return self._row
 
 
-def _prepare_run_loop(monkeypatch, *, has_recovery_required: bool = False):
+def _prepare_run_loop(monkeypatch, *, open_order_created_ts: int | None = None) -> _LoopConn:
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "INTERVAL", "1m")
+    object.__setattr__(settings, "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", 30)
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 900)
 
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
@@ -53,7 +68,8 @@ def _prepare_run_loop(monkeypatch, *, has_recovery_required: bool = False):
         "curr_l": 0.5,
         "signal": "BUY",
     })
-    monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: _LoopConn(has_recovery_required=has_recovery_required))
+    loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts)
+    monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: loop_conn)
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: object())
 
     ticks = iter([10.0, 11.0])
@@ -67,6 +83,7 @@ def _prepare_run_loop(monkeypatch, *, has_recovery_required: bool = False):
             raise KeyboardInterrupt
 
     monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
+    return loop_conn
 
 
 def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
@@ -113,8 +130,41 @@ def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     assert "reconcile failed" in state.last_disable_reason
 
 
-def test_run_loop_skips_new_order_when_recovery_required_exists(monkeypatch):
-    _prepare_run_loop(monkeypatch, has_recovery_required=True)
+def test_run_loop_periodically_reconciles_when_open_order_exists(monkeypatch):
+    _prepare_run_loop(monkeypatch, open_order_created_ts=10_500)
+
+    calls = {"n": 0}
+
+    def _reconcile(_broker):
+        calls["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", _reconcile, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    assert calls["n"] == 2
+
+
+def test_run_loop_stale_open_order_halts_and_marks_recovery_required(monkeypatch):
+    loop_conn = _prepare_run_loop(monkeypatch, open_order_created_ts=0)
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 5)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
+    assert state.last_disable_reason is not None
+    assert "stale unresolved open order" in state.last_disable_reason
+    assert loop_conn.marked_recovery_required == 1
+
+
+def test_run_loop_unresolved_open_order_blocks_new_trading(monkeypatch):
+    _prepare_run_loop(monkeypatch, open_order_created_ts=10_500)
 
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
 
@@ -122,7 +172,6 @@ def test_run_loop_skips_new_order_when_recovery_required_exists(monkeypatch):
 
     def _live_execute(*_args, **_kwargs):
         called["n"] += 1
-        raise BrokerTemporaryError("should not be called")
 
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _live_execute)
 

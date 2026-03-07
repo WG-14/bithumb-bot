@@ -46,6 +46,9 @@ class Settings:
     BITHUMB_API_KEY: str = os.getenv("BITHUMB_API_KEY", "")
     BITHUMB_API_SECRET: str = os.getenv("BITHUMB_API_SECRET", "")
     LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
-
+    OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC: int = int(
+        os.getenv("OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", "30")
+)
+    MAX_OPEN_ORDER_AGE_SEC: int = int(os.getenv("MAX_OPEN_ORDER_AGE_SEC", "900"))
 
 settings = Settings()
