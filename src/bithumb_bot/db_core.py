@@ -59,8 +59,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             cash_krw REAL NOT NULL,
-            asset_qty REAL NOT NULL
+            asset_qty REAL NOT NULL,
+            cash_available REAL NOT NULL DEFAULT 0,
+            cash_locked REAL NOT NULL DEFAULT 0,
+            asset_available REAL NOT NULL DEFAULT 0,
+            asset_locked REAL NOT NULL DEFAULT 0
         )
+        """
+    )
+
+    _ensure_column(conn, "portfolio", "cash_available", "cash_available REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "portfolio", "cash_locked", "cash_locked REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "portfolio", "asset_available", "asset_available REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "portfolio", "asset_locked", "asset_locked REAL NOT NULL DEFAULT 0")
+
+    # One-time backfill for pre-existing DBs that had only aggregate columns.
+    conn.execute(
+        """
+        UPDATE portfolio
+        SET
+            cash_available = cash_krw,
+            cash_locked = 0,
+            asset_available = asset_qty,
+            asset_locked = 0
+        WHERE
+            ABS(cash_available) < 1e-12
+            AND ABS(cash_locked) < 1e-12
+            AND ABS(asset_available) < 1e-12
+            AND ABS(asset_locked) < 1e-12
+            AND (ABS(cash_krw) >= 1e-12 OR ABS(asset_qty) >= 1e-12)
         """
     )
 
@@ -138,28 +165,88 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def init_portfolio(conn: sqlite3.Connection) -> None:
-    row = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+    row = conn.execute("SELECT id FROM portfolio WHERE id=1").fetchone()
     if row is None:
         had_tx = conn.in_transaction
         conn.execute(
-            "INSERT INTO portfolio(id, cash_krw, asset_qty) VALUES (1, ?, 0.0)",
-            (float(settings.START_CASH_KRW),),
+            """
+            INSERT INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, ?, 0.0, ?, 0.0, 0.0, 0.0)
+            """,
+            (float(settings.START_CASH_KRW), float(settings.START_CASH_KRW)),
         )
         if not had_tx:
             conn.commit()
 
 
-def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
+def get_portfolio_breakdown(conn: sqlite3.Connection) -> tuple[float, float, float, float]:
     init_portfolio(conn)
-    row = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
-    return float(row["cash_krw"]), float(row["asset_qty"])
+    row = conn.execute(
+        "SELECT cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
+    ).fetchone()
+    return (
+        float(row["cash_available"]),
+        float(row["cash_locked"]),
+        float(row["asset_available"]),
+        float(row["asset_locked"]),
+    )
 
 
-def set_portfolio(conn: sqlite3.Connection, cash_krw: float, asset_qty: float) -> None:
+def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
+    cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+    return cash_available + cash_locked, asset_available + asset_locked
+
+
+def set_portfolio(
+    conn: sqlite3.Connection,
+    cash_krw: float,
+    asset_qty: float,
+    *,
+    cash_locked: float = 0.0,
+    asset_locked: float = 0.0,
+) -> None:
+    set_portfolio_breakdown(
+        conn,
+        cash_available=float(cash_krw),
+        cash_locked=float(cash_locked),
+        asset_available=float(asset_qty),
+        asset_locked=float(asset_locked),
+    )
+
+
+def set_portfolio_breakdown(
+    conn: sqlite3.Connection,
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+) -> None:
+    init_portfolio(conn)
+    cash_total = float(cash_available) + float(cash_locked)
+    asset_total = float(asset_available) + float(asset_locked)
     had_tx = conn.in_transaction
     conn.execute(
-        "UPDATE portfolio SET cash_krw=?, asset_qty=? WHERE id=1",
-        (float(cash_krw), float(asset_qty)),
+        """
+        UPDATE portfolio
+        SET
+            cash_krw=?,
+            asset_qty=?,
+            cash_available=?,
+            cash_locked=?,
+            asset_available=?,
+            asset_locked=?
+        WHERE id=1
+        """,
+        (
+            cash_total,
+            asset_total,
+            float(cash_available),
+            float(cash_locked),
+            float(asset_available),
+            float(asset_locked),
+        ),
     )
     if not had_tx:
         conn.commit()

@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
-from .db_core import ensure_db, init_portfolio, get_portfolio, set_portfolio
+from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import get_health_status
 
@@ -111,7 +111,9 @@ def cmd_explain(short_n: int, long_n: int):
 def cmd_status():
     conn = ensure_db(DB_PATH)
     init_portfolio(conn)
-    cash, qty = get_portfolio(conn)
+    cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+    cash = cash_available + cash_locked
+    qty = asset_available + asset_locked
 
     row = conn.execute(
         "SELECT close, ts FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
@@ -128,8 +130,8 @@ def cmd_status():
 
     equity = cash + qty * last_close
     print(f"[STATUS {PAIR} {INTERVAL}] at {kst_str(ts)}")
-    print(f"  cash_krw={cash:,.0f}")
-    print(f"  asset_qty={qty:.8f}")
+    print(f"  cash_krw={cash:,.0f} (available={cash_available:,.0f}, locked={cash_locked:,.0f})")
+    print(f"  asset_qty={qty:.8f} (available={asset_available:.8f}, locked={asset_locked:.8f})")
     print(f"  last_close={last_close:,.0f}")
     print(f"  equity={equity:,.0f} KRW")
 
@@ -199,16 +201,36 @@ def cmd_audit():
 
     errors: list[str] = []
 
-    portfolio = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
+    portfolio = conn.execute("SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1").fetchone()
     if portfolio is None:
         errors.append("portfolio row(id=1) missing")
     else:
         cash_krw = float(portfolio["cash_krw"])
         asset_qty = float(portfolio["asset_qty"])
+        cash_available = float(portfolio["cash_available"])
+        cash_locked = float(portfolio["cash_locked"])
+        asset_available = float(portfolio["asset_available"])
+        asset_locked = float(portfolio["asset_locked"])
         if cash_krw < 0:
             errors.append(f"portfolio.cash_krw is negative: {cash_krw}")
         if asset_qty < 0:
             errors.append(f"portfolio.asset_qty is negative: {asset_qty}")
+        if cash_available < 0:
+            errors.append(f"portfolio.cash_available is negative: {cash_available}")
+        if cash_locked < 0:
+            errors.append(f"portfolio.cash_locked is negative: {cash_locked}")
+        if asset_available < 0:
+            errors.append(f"portfolio.asset_available is negative: {asset_available}")
+        if asset_locked < 0:
+            errors.append(f"portfolio.asset_locked is negative: {asset_locked}")
+        if abs((cash_available + cash_locked) - cash_krw) > 1e-8:
+            errors.append(
+                f"portfolio cash split mismatch: available+locked={cash_available + cash_locked} != cash_krw={cash_krw}"
+            )
+        if abs((asset_available + asset_locked) - asset_qty) > 1e-12:
+            errors.append(
+                f"portfolio asset split mismatch: available+locked={asset_available + asset_locked} != asset_qty={asset_qty}"
+            )
 
     filled_without_qty = conn.execute(
         """
@@ -363,9 +385,11 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
             cash += (fill_price * fill_qty) - fee
             qty -= fill_qty
 
-    p = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
-    portfolio_cash = float(p["cash_krw"]) if p else 0.0
-    portfolio_qty = float(p["asset_qty"]) if p else 0.0
+    p = conn.execute(
+        "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
+    ).fetchone()
+    portfolio_cash = float(p["cash_available"]) + float(p["cash_locked"]) if p else 0.0
+    portfolio_qty = float(p["asset_available"]) + float(p["asset_locked"]) if p else 0.0
     consistent = math.isclose(cash, portfolio_cash, abs_tol=1e-6) and math.isclose(qty, portfolio_qty, abs_tol=1e-10)
 
     return {
