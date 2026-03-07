@@ -11,6 +11,39 @@ from .db_core import ensure_db
 OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
 
 
+def _record_order_event(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    event_type: str,
+    event_ts: int | None = None,
+    order_status: str | None = None,
+    exchange_order_id: str | None = None,
+    fill_id: str | None = None,
+    qty: float | None = None,
+    price: float | None = None,
+    message: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, exchange_order_id, fill_id, qty, price, message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            client_order_id,
+            event_type,
+            int(event_ts if event_ts is not None else time.time() * 1000),
+            order_status,
+            exchange_order_id,
+            fill_id,
+            (float(qty) if qty is not None else None),
+            (float(price) if price is not None else None),
+            (message[:500] if message else None),
+        ),
+    )
+
+
 def new_client_order_id(prefix: str = "cli") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
@@ -38,6 +71,40 @@ def create_order(
             """,
             (client_order_id, status, side, price, float(qty_req), ts, ts),
         )
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="intent_created",
+            event_ts=ts,
+            order_status=status,
+            qty=qty_req,
+            price=price,
+        )
+        if own_conn:
+            conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def record_submit_started(
+    client_order_id: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    ts = int(time.time() * 1000)
+    own_conn = conn is None
+    conn = conn or ensure_db()
+    try:
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="submit_started",
+            event_ts=ts,
+        )
         if own_conn:
             conn.commit()
     except Exception:
@@ -61,6 +128,13 @@ def set_exchange_order_id(
         conn.execute(
             "UPDATE orders SET exchange_order_id=?, updated_ts=? WHERE client_order_id=?",
             (exchange_order_id, ts, client_order_id),
+        )
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="exchange_order_id_attached",
+            event_ts=ts,
+            exchange_order_id=exchange_order_id,
         )
         if own_conn:
             conn.commit()
@@ -86,6 +160,17 @@ def set_status(
         conn.execute(
             "UPDATE orders SET status=?, updated_ts=?, last_error=? WHERE client_order_id=?",
             (status, ts, (last_error[:500] if last_error else None), client_order_id),
+        )
+        event_type = "status_changed"
+        if status == "SUBMIT_UNKNOWN":
+            event_type = "submit_timeout"
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type=event_type,
+            event_ts=ts,
+            order_status=status,
+            message=last_error,
         )
         if own_conn:
             conn.commit()
@@ -115,9 +200,20 @@ def add_fill(
             "INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee) VALUES (?, ?, ?, ?, ?, ?)",
             (client_order_id, fill_id, int(fill_ts), float(price), float(qty), float(fee)),
         )
+        updated_ts = int(time.time() * 1000)
         conn.execute(
             "UPDATE orders SET qty_filled = qty_filled + ?, updated_ts=? WHERE client_order_id=?",
-            (float(qty), int(time.time() * 1000), client_order_id),
+            (float(qty), updated_ts, client_order_id),
+        )
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="fill_applied",
+            event_ts=updated_ts,
+            fill_id=fill_id,
+            qty=qty,
+            price=price,
+            message=(f"fee={float(fee)}" if fee else None),
         )
         if own_conn:
             conn.commit()

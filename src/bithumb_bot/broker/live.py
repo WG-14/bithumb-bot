@@ -8,7 +8,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import notify
 from ..risk import evaluate_buy_guardrails
-from ..oms import set_exchange_order_id, set_status
+from ..oms import record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -159,6 +159,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             ts_ms=ts,
             status="PENDING_SUBMIT",
         )
+        record_submit_started(client_order_id, conn=conn)
 
         try:
             order = broker.place_order(client_order_id=client_order_id, side=side, qty=order_qty, price=None)
