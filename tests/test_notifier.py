@@ -57,3 +57,20 @@ def test_notify_falls_back_to_stdout(capsys: pytest.CaptureFixture[str]):
     notifier.notify("fallback")
     out = capsys.readouterr().out
     assert "[NOTIFY] fallback" in out
+
+
+def test_format_event_skips_empty_fields():
+    message = notifier.format_event(
+        "reconcile_status_change",
+        client_order_id="live_1000_buy",
+        exchange_order_id="ex1",
+        side="BUY",
+        status="FILLED",
+        reason="",
+        ignored=None,
+    )
+
+    assert message == (
+        "event=reconcile_status_change client_order_id=live_1000_buy "
+        "exchange_order_id=ex1 side=BUY status=FILLED"
+    )

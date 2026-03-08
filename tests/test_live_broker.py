@@ -358,9 +358,12 @@ def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
 
     assert trade is not None
 
-def test_live_timeout_marks_submit_unknown(tmp_path):
+def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
 
     trade = live_execute_signal(_TimeoutBroker(), "BUY", 1000, 100000000.0)
     assert trade is None
@@ -372,11 +375,16 @@ def test_live_timeout_marks_submit_unknown(tmp_path):
     assert row is not None
     assert row["status"] == "SUBMIT_UNKNOWN"
     assert "submit unknown" in str(row["last_error"])
+    assert any("event=order_submit_started" in msg for msg in notifications)
+    assert any("event=order_submit_unknown" in msg for msg in notifications)
 
 
-def test_live_submit_without_exchange_id_marks_recovery_required(tmp_path):
+def test_live_submit_without_exchange_id_marks_recovery_required(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "missing_exchange_id.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
 
     trade = live_execute_signal(_NoExchangeIdBroker(), "BUY", 1000, 100000000.0)
     assert trade is None
@@ -391,6 +399,7 @@ def test_live_submit_without_exchange_id_marks_recovery_required(tmp_path):
     assert row["status"] == "RECOVERY_REQUIRED"
     assert row["exchange_order_id"] is None
     assert "manual recovery required" in str(row["last_error"])
+    assert any("event=recovery_required_transition" in msg for msg in notifications)
 
 
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
@@ -473,7 +482,7 @@ def test_cancel_open_orders_reports_cancel_failures(tmp_path):
     assert len(summary["error_messages"]) == 1
 
 
-def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(tmp_path):
+def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "recovery_required.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
     conn = ensure_db(str(tmp_path / "recovery_required.sqlite"))
@@ -492,6 +501,9 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     conn.commit()
     conn.close()
 
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.recovery.notify", lambda msg: notifications.append(msg))
+
     reconcile_with_broker(_StrictRecoveryBroker())
 
     conn = ensure_db(str(tmp_path / "recovery_required.sqlite"))
@@ -507,6 +519,11 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert "manual recovery required" in str(ambiguous["last_error"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
+    assert any("event=recovery_required_transition" in msg for msg in notifications)
+    assert any(
+        "event=reconcile_status_change" in msg and "client_order_id=live_2000_buy" in msg
+        for msg in notifications
+    )
 
 
 def test_reconcile_recovers_known_local_order_from_recent_activity(tmp_path):

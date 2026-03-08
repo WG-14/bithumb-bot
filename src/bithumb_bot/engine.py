@@ -11,7 +11,7 @@ from .broker.bithumb import BithumbBroker
 from .broker.base import BrokerError
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
-from .notifier import notify
+from .notifier import format_event, notify
 from . import runtime_state
 
 
@@ -88,7 +88,7 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
 
 def _halt_trading(reason: str) -> None:
     runtime_state.disable_trading_until(float("inf"), reason=reason)
-    notify(f"trading halted: {reason}")
+    notify(format_event("trading_halted", status="HALTED", reason=reason))
 
 
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
