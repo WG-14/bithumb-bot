@@ -13,6 +13,7 @@ from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import get_health_status
+from .recovery import cancel_open_orders_with_broker
 
 import httpx
 
@@ -548,6 +549,28 @@ def cmd_report(days: int) -> None:
     print(f"  => {'PASS' if gate_pass else 'FAIL'}")
 
 
+def cmd_cancel_open_orders() -> None:
+    if settings.MODE != "live":
+        print(f"[CANCEL-OPEN-ORDERS] skipped: MODE={settings.MODE} (live only)")
+        return
+
+    from .broker.bithumb import BithumbBroker
+
+    broker = BithumbBroker()
+    summary = cancel_open_orders_with_broker(broker)
+
+    print("[CANCEL-OPEN-ORDERS]")
+    print(f"  remote_open_count={summary['remote_open_count']}")
+    print(f"  canceled_count={summary['canceled_count']}")
+    print(f"  matched_local_count={summary['matched_local_count']}")
+    print(f"  stray_canceled_count={summary['stray_canceled_count']}")
+    print(f"  failed_count={summary['failed_count']}")
+    for msg in summary["stray_messages"]:
+        print(f"  - {msg}")
+    for msg in summary["error_messages"]:
+        print(f"  - {msg}")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -578,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check")
     sub.add_parser("health")
     sub.add_parser("audit-ledger")
+    sub.add_parser("cancel-open-orders")
 
     report = sub.add_parser("report")
     report.add_argument("--days", type=int, default=30)
@@ -617,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_report(max(1, int(args.days)))
     elif args.cmd == "audit-ledger":
         cmd_audit_ledger()
+    elif args.cmd == "cancel-open-orders":
+        cmd_cancel_open_orders()
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
     else:

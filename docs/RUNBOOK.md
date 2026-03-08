@@ -59,6 +59,20 @@ uv run python bot.py health
 4. 필요시 봇 일시 중지: `sudo systemctl stop bithumb-bot.service`.
 5. 수동 정리 후 재기동: `sudo systemctl start bithumb-bot.service`.
 
+### B-1. Live 오픈 주문 강제 취소 (운영자 명령)
+
+live 모드에서 원격 미체결 주문을 일괄 취소하고, 매칭되는 로컬 주문 상태를 `CANCELED`로 반영해야 할 때 사용.
+
+```bash
+uv run python bot.py cancel-open-orders
+```
+
+- `MODE=live`에서만 동작한다. (`paper` 모드에서는 skip 출력)
+- 브로커 `get_open_orders`로 원격 오픈 주문 조회 후 `cancel_order`를 순차 호출한다.
+- 원격 주문이 로컬 주문(`exchange_order_id` 또는 `client_order_id`)과 매칭되면 로컬 `orders.status=CANCELED`로 업데이트한다.
+- 로컬 매칭이 없는 원격 주문은 보수적으로 취소하되, `stray remote order canceled ...` 메시지로 별도 출력한다.
+- 취소 실패 건은 `failed_count` 및 에러 메시지로 출력되므로, 실패가 있으면 재실행 또는 수동 확인이 필요하다.
+
 ### C. 잔고 불일치
 
 1. `uv run python bot.py audit` 실행.
@@ -125,4 +139,3 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_LOSS_KRW=50000`
 - `MAX_DAILY_ORDER_COUNT=20`
 - 초기 점검 단계에서는 `LIVE_DRY_RUN=true`로 검증 후 실거래 전환
-

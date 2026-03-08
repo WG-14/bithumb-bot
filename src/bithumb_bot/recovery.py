@@ -99,3 +99,82 @@ def reconcile_with_broker(broker: Broker) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]:
+    conn = ensure_db()
+    try:
+        remote_open = broker.get_open_orders()
+        if not remote_open:
+            return {
+                "remote_open_count": 0,
+                "canceled_count": 0,
+                "matched_local_count": 0,
+                "stray_canceled_count": 0,
+                "failed_count": 0,
+                "stray_messages": [],
+                "error_messages": [],
+            }
+
+        local_by_exchange_id: dict[str, str] = {}
+        local_by_client_order_id: dict[str, str] = {}
+        rows = conn.execute(
+            "SELECT client_order_id, exchange_order_id FROM orders"
+        ).fetchall()
+        for row in rows:
+            local_id = str(row["client_order_id"])
+            local_by_client_order_id[local_id] = local_id
+            if row["exchange_order_id"]:
+                local_by_exchange_id[str(row["exchange_order_id"])] = local_id
+
+        canceled_count = 0
+        matched_local_count = 0
+        stray_canceled_count = 0
+        failed_count = 0
+        stray_messages: list[str] = []
+        error_messages: list[str] = []
+
+        for remote in remote_open:
+            remote_exchange_id = str(remote.exchange_order_id or "")
+            remote_client_order_id = str(remote.client_order_id or "")
+            local_id = local_by_exchange_id.get(remote_exchange_id)
+            if local_id is None and remote_client_order_id:
+                local_id = local_by_client_order_id.get(remote_client_order_id)
+
+            cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
+
+            try:
+                broker.cancel_order(
+                    client_order_id=cancel_client_order_id,
+                    exchange_order_id=remote.exchange_order_id,
+                )
+                canceled_count += 1
+            except Exception as e:
+                failed_count += 1
+                target = remote_exchange_id or cancel_client_order_id
+                error_messages.append(f"failed to cancel {target}: {type(e).__name__}: {e}")
+                continue
+
+            if local_id:
+                if remote_exchange_id:
+                    set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
+                set_status(local_id, "CANCELED", conn=conn)
+                matched_local_count += 1
+            else:
+                stray_canceled_count += 1
+                stray_messages.append(
+                    f"stray remote order canceled exchange_order_id={remote_exchange_id or '<none>'} side={remote.side} qty={remote.qty_req}"
+                )
+
+        conn.commit()
+        return {
+            "remote_open_count": len(remote_open),
+            "canceled_count": canceled_count,
+            "matched_local_count": matched_local_count,
+            "stray_canceled_count": stray_canceled_count,
+            "failed_count": failed_count,
+            "stray_messages": stray_messages,
+            "error_messages": error_messages,
+        }
+    finally:
+        conn.close()

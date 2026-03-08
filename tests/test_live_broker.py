@@ -6,7 +6,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, validate_order
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker
 from bithumb_bot.config import settings
 
 
@@ -113,6 +113,31 @@ class _NoExchangeIdBroker(_FakeBroker):
         self._last_qty = qty
         self._last_price = price
         return BrokerOrder(client_order_id, None, side, "NEW", price, qty, 0.0, 1, 1)
+
+
+
+
+class _CancelOpenOrdersBroker(_FakeBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.canceled: list[tuple[str, str | None]] = []
+
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return [
+            BrokerOrder("", "ex1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1),
+            BrokerOrder("", "stray1", "SELL", "PARTIAL", 110.0, 0.2, 0.05, 1, 1),
+        ]
+
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        self.canceled.append((client_order_id, exchange_order_id))
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "CANCELED", None, 0.0, 0.0, 1, 1)
+
+
+class _CancelFailureBroker(_CancelOpenOrdersBroker):
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        if exchange_order_id == "stray1":
+            raise RuntimeError("cancel failed")
+        return super().cancel_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
 
 
 class _StrictRecoveryBroker(_FakeBroker):
@@ -349,6 +374,48 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
     assert row["exchange_order_id"] == "stray1"
     assert row["status"] == "NEW"
     assert row["side"] == "BUY"
+
+
+
+
+def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_open_orders.sqlite"))
+    conn = ensure_db(str(tmp_path / "cancel_open_orders.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _CancelOpenOrdersBroker()
+    summary = cancel_open_orders_with_broker(broker)
+
+    conn = ensure_db(str(tmp_path / "cancel_open_orders.sqlite"))
+    row = conn.execute("SELECT status FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert summary["remote_open_count"] == 2
+    assert summary["canceled_count"] == 2
+    assert summary["matched_local_count"] == 1
+    assert summary["stray_canceled_count"] == 1
+    assert summary["failed_count"] == 0
+    assert len(summary["stray_messages"]) == 1
+
+
+def test_cancel_open_orders_reports_cancel_failures(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_failure.sqlite"))
+
+    summary = cancel_open_orders_with_broker(_CancelFailureBroker())
+
+    assert summary["remote_open_count"] == 2
+    assert summary["canceled_count"] == 1
+    assert summary["failed_count"] == 1
+    assert len(summary["error_messages"]) == 1
 
 
 def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(tmp_path):
