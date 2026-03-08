@@ -4,7 +4,7 @@ import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
-from bithumb_bot.broker.live import live_execute_signal, validate_order
+from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker
 from bithumb_bot.config import settings
@@ -99,6 +99,7 @@ class _CommitCheckingBroker(_FakeBroker):
 
         return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
 
+
 class _TimeoutBroker(_FakeBroker):
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
         raise BrokerTemporaryError("timeout")
@@ -117,8 +118,6 @@ class _NoExchangeIdBroker(_FakeBroker):
         self._last_qty = qty
         self._last_price = price
         return BrokerOrder(client_order_id, None, side, "NEW", price, qty, 0.0, 1, 1)
-
-
 
 
 class _CancelOpenOrdersBroker(_FakeBroker):
@@ -219,6 +218,9 @@ def _reset_pretrade_guards():
         "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
         "KILL_SWITCH": settings.KILL_SWITCH,
         "MAX_OPEN_ORDER_AGE_SEC": settings.MAX_OPEN_ORDER_AGE_SEC,
+        "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
+        "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
+        "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
     }
 
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
@@ -228,6 +230,9 @@ def _reset_pretrade_guards():
     object.__setattr__(settings, "FEE_RATE", 0.0004)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
     object.__setattr__(settings, "KILL_SWITCH", False)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
 
     yield
 
@@ -347,8 +352,6 @@ def test_live_stale_unresolved_open_order_blocks_new_order(tmp_path):
     assert broker.place_order_calls == 0
 
 
-
-
 def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
     db_path = str(tmp_path / "pre_submit_commit.sqlite")
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -357,6 +360,7 @@ def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
     trade = live_execute_signal(_CommitCheckingBroker(db_path=db_path), "BUY", 1000, 100000000.0)
 
     assert trade is not None
+
 
 def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))
@@ -438,8 +442,6 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
     assert row["exchange_order_id"] == "stray1"
     assert row["status"] == "NEW"
     assert row["side"] == "BUY"
-
-
 
 
 def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
@@ -631,3 +633,27 @@ def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):
 
     assert trade is None
     assert broker.place_order_calls == 0
+
+
+def test_normalize_order_qty_floors_to_step_and_decimals():
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.01)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 3)
+
+    normalized = normalize_order_qty(qty=1.2399, market_price=100.0)
+
+    assert normalized == pytest.approx(1.23)
+
+
+def test_normalize_order_qty_rejects_when_collapses_to_zero():
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.01)
+
+    with pytest.raises(ValueError, match="normalized order qty is non-positive"):
+        normalize_order_qty(qty=0.009, market_price=100.0)
+
+
+def test_normalize_order_qty_rejects_when_normalized_notional_below_minimum():
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.1)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 100.0)
+
+    with pytest.raises(ValueError, match="normalized order notional below minimum"):
+        normalize_order_qty(qty=1.09, market_price=99.0)

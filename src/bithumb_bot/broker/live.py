@@ -39,6 +39,38 @@ def validate_order(*, signal: str, side: str, qty: float, market_price: float) -
         raise ValueError(f"invalid order qty: {qty}")
 
 
+
+
+def normalize_order_qty(*, qty: float, market_price: float) -> float:
+    normalized = float(qty)
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError(f"invalid order qty: {qty}")
+
+    step = float(settings.LIVE_ORDER_QTY_STEP)
+    if math.isfinite(step) and step > 0:
+        normalized = math.floor((normalized / step) + POSITION_EPSILON) * step
+
+    max_decimals = int(settings.LIVE_ORDER_MAX_QTY_DECIMALS)
+    if max_decimals > 0:
+        scale = 10 ** max_decimals
+        normalized = math.floor((normalized * scale) + POSITION_EPSILON) / scale
+
+    if normalized <= 0:
+        raise ValueError(f"normalized order qty is non-positive: {normalized}")
+
+    min_qty = float(settings.LIVE_MIN_ORDER_QTY)
+    if min_qty > 0 and normalized < min_qty:
+        raise ValueError(f"order qty below minimum: {normalized:.12f} < {min_qty:.12f}")
+
+    min_notional = float(settings.MIN_ORDER_NOTIONAL_KRW)
+    if min_notional > 0 and normalized * float(market_price) < min_notional:
+        raise ValueError(
+            f"normalized order notional below minimum: {normalized * float(market_price):.2f} < {min_notional:.2f}"
+        )
+
+    return normalized
+
+
 def validate_pretrade(
     *,
     broker: Broker,
@@ -122,9 +154,10 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         else:
             return None
 
-        validate_order(signal=signal, side=side, qty=order_qty, market_price=market_price)
         try:
-            validate_pretrade(broker=broker, side=side, qty=order_qty, market_price=market_price)
+            normalized_qty = normalize_order_qty(qty=order_qty, market_price=market_price)
+            validate_order(signal=signal, side=side, qty=normalized_qty, market_price=market_price)
+            validate_pretrade(broker=broker, side=side, qty=normalized_qty, market_price=market_price)
         except ValueError as e:
             notify(f"live pretrade validation blocked ({side}): {e}")
             return None
@@ -154,7 +187,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             conn,
             client_order_id=client_order_id,
             side=side,
-            qty_req=order_qty,
+            qty_req=normalized_qty,
             price=None,
             ts_ms=ts,
             status="PENDING_SUBMIT",
@@ -164,7 +197,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         conn.commit()
 
         try:
-            order = broker.place_order(client_order_id=client_order_id, side=side, qty=order_qty, price=None)
+            order = broker.place_order(client_order_id=client_order_id, side=side, qty=normalized_qty, price=None)
         except BrokerTemporaryError as e:
             err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
             set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=str(err), conn=conn)

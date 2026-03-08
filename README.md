@@ -37,6 +37,9 @@ uv run python bot.py run --short 7 --long 30
 - `COOLDOWN_MIN` (기본: `1`)
 - `MIN_GAP` (기본: `0.0003`)
 - `DB_PATH` (기본: `data/bithumb_1m.sqlite`)
+- `LIVE_MIN_ORDER_QTY` (기본: `0`, 0이면 비활성)
+- `LIVE_ORDER_QTY_STEP` (기본: `0`, 0이면 비활성)
+- `LIVE_ORDER_MAX_QTY_DECIMALS` (기본: `0`, 0이면 비활성)
 
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
 
