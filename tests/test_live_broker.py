@@ -68,6 +68,33 @@ class _FakeBroker:
         )
 
 
+
+
+class _CommitCheckingBroker(_FakeBroker):
+    def __init__(self, *, db_path: str) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        conn = ensure_db(self._db_path)
+        try:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            assert row is not None
+            assert row["status"] == "PENDING_SUBMIT"
+
+            event = conn.execute(
+                "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
+                (client_order_id,),
+            ).fetchone()
+            assert event is not None
+        finally:
+            conn.close()
+
+        return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
+
 class _TimeoutBroker(_FakeBroker):
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
         raise BrokerTemporaryError("timeout")
@@ -239,6 +266,17 @@ def test_live_stale_unresolved_open_order_blocks_new_order(tmp_path):
     assert trade is None
     assert broker.place_order_calls == 0
 
+
+
+
+def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
+    db_path = str(tmp_path / "pre_submit_commit.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    trade = live_execute_signal(_CommitCheckingBroker(db_path=db_path), "BUY", 1000, 100000000.0)
+
+    assert trade is not None
 
 def test_live_timeout_marks_submit_unknown(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))

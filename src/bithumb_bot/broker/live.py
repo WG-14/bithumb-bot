@@ -160,6 +160,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             status="PENDING_SUBMIT",
         )
         record_submit_started(client_order_id, conn=conn)
+        conn.commit()
 
         try:
             order = broker.place_order(client_order_id=client_order_id, side=side, qty=order_qty, price=None)
