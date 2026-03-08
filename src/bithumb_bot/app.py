@@ -13,7 +13,7 @@ from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import get_health_status
-from .recovery import cancel_open_orders_with_broker, reconcile_with_broker
+from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .oms import OPEN_ORDER_STATUSES
 
@@ -657,6 +657,31 @@ def cmd_reconcile() -> None:
     print("[RECONCILE] completed one live reconciliation pass")
 
 
+def cmd_recover_order(*, client_order_id: str, exchange_order_id: str) -> None:
+    if settings.MODE != "live":
+        print(f"[RECOVER-ORDER] skipped: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    from .broker.bithumb import BithumbBroker
+
+    disable_trading_until(float("inf"), reason="manual recovery in progress")
+    try:
+        recover_order_with_exchange_id(
+            BithumbBroker(),
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+        )
+    except Exception as e:
+        disable_trading_until(float("inf"), reason="manual recovery failed; resume required")
+        print(f"[RECOVER-ORDER] failed: {type(e).__name__}: {e}")
+        print("  order remains RECOVERY_REQUIRED; inspect and retry")
+        raise SystemExit(1)
+
+    disable_trading_until(float("inf"), reason="manual recovery completed; explicit resume required")
+    print("[RECOVER-ORDER] completed")
+    print("  trading remains disabled; run `uv run python bot.py resume` when ready")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -695,6 +720,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("reconcile")
     sub.add_parser("recovery-report")
+    recover_order = sub.add_parser("recover-order")
+    recover_order.add_argument("--client-order-id", required=True)
+    recover_order.add_argument("--exchange-order-id", required=True)
 
     report = sub.add_parser("report")
     report.add_argument("--days", type=int, default=30)
@@ -744,6 +772,11 @@ def main(argv: list[str] | None = None) -> int:
         cmd_reconcile()
     elif args.cmd == "recovery-report":
         cmd_recovery_report()
+    elif args.cmd == "recover-order":
+        cmd_recover_order(
+            client_order_id=str(args.client_order_id),
+            exchange_order_id=str(args.exchange_order_id),
+        )
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
     else:

@@ -6,7 +6,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker
+from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot.config import settings
 
 
@@ -577,6 +577,35 @@ def test_reconcile_unmatched_recent_activity_creates_recovery_required_record(tm
     assert str(row["client_order_id"]).startswith("recovery_")
     assert row["status"] == "RECOVERY_REQUIRED"
     assert "manual recovery required" in str(row["last_error"])
+
+
+def test_manual_recover_order_attaches_exchange_order_id_and_applies_fills(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "manual_recover.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db(str(tmp_path / "manual_recover.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('manual_1',NULL,'RECOVERY_REQUIRED','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    recover_order_with_exchange_id(_FakeBroker(), client_order_id="manual_1", exchange_order_id="ex_manual_fill")
+
+    conn = ensure_db(str(tmp_path / "manual_recover.sqlite"))
+    row = conn.execute(
+        "SELECT status, exchange_order_id, qty_filled FROM orders WHERE client_order_id='manual_1'"
+    ).fetchone()
+    fill = conn.execute("SELECT fill_id FROM fills WHERE client_order_id='manual_1'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex_manual_fill"
+    assert float(row["qty_filled"]) == 0.01
+    assert fill is not None
 
 
 def test_validate_order_rejects_invalid_qty():
