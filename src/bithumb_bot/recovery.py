@@ -281,6 +281,71 @@ def reconcile_with_broker(broker: Broker) -> None:
         conn.close()
 
 
+def recover_order_with_exchange_id(
+    broker: Broker,
+    *,
+    client_order_id: str,
+    exchange_order_id: str,
+) -> None:
+    conn = ensure_db()
+    order_found = False
+    try:
+        order = conn.execute(
+            "SELECT client_order_id, side FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        if order is None:
+            raise RuntimeError(f"unknown client_order_id: {client_order_id}")
+
+        order_found = True
+        side = str(order["side"])
+        set_exchange_order_id(client_order_id, exchange_order_id, conn=conn)
+
+        remote = broker.get_order(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+        )
+        resolved_exchange_order_id = str(remote.exchange_order_id or exchange_order_id)
+        if resolved_exchange_order_id:
+            set_exchange_order_id(client_order_id, resolved_exchange_order_id, conn=conn)
+
+        fills = broker.get_fills(
+            client_order_id=client_order_id,
+            exchange_order_id=resolved_exchange_order_id,
+        )
+        for fill in fills:
+            apply_fill_and_trade(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=fill.fee,
+                note=f"manual recovery exchange_order_id={resolved_exchange_order_id}",
+            )
+
+        if remote.status in LOCAL_RECONCILE_STATUSES:
+            raise RuntimeError(f"order still unresolved after recovery: status={remote.status}")
+
+        set_status(client_order_id, remote.status, conn=conn)
+        conn.commit()
+    except Exception as e:
+        if order_found:
+            set_status(
+                client_order_id,
+                "RECOVERY_REQUIRED",
+                last_error=f"manual recovery failed: {type(e).__name__}: {e}",
+                conn=conn,
+            )
+            conn.commit()
+        raise
+    finally:
+        conn.close()
+        runtime_state.refresh_open_order_health()
+
+
 def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]:
     conn = ensure_db()
     try:

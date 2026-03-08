@@ -5,7 +5,8 @@ import time
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.app import _load_recovery_report, cmd_pause, cmd_reconcile, cmd_resume
+from bithumb_bot.app import _load_recovery_report, cmd_pause, cmd_reconcile, cmd_recover_order, cmd_resume
+from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 
@@ -32,6 +33,32 @@ def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None
         conn.commit()
     finally:
         conn.close()
+
+
+class _RecoverSuccessBroker:
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "FILLED", None, 0.01, 0.01, 1, 1)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id=str(client_order_id or ""),
+                fill_id="recover_fill_1",
+                fill_ts=1000,
+                price=100000000.0,
+                qty=0.01,
+                fee=10.0,
+                exchange_order_id=exchange_order_id,
+            )
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+
+class _RecoverAmbiguousBroker(_RecoverSuccessBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "NEW", None, 0.01, 0.0, 1, 1)
 
 
 def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
@@ -98,3 +125,87 @@ def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "[RECONCILE] skipped" in out
+
+
+def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+
+    try:
+        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_1")
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id FROM orders WHERE client_order_id='needs_recovery'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex_manual_1"
+
+
+def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverAmbiguousBroker())
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_2")
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    assert exc.value.code == 1
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='needs_recovery'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] == "ex_manual_2"
+    assert "manual recovery failed" in str(row["last_error"])
+
+
+def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+
+    runtime_state.enable_trading()
+    try:
+        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_3")
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
