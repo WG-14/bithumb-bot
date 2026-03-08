@@ -20,6 +20,7 @@ class RuntimeState:
     last_reconcile_epoch_sec: float | None = None
     last_reconcile_status: str | None = None
     last_reconcile_error: str | None = None
+    startup_gate_reason: str | None = None
 
 
 _STATE = RuntimeState()
@@ -41,6 +42,7 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_reconcile_epoch_sec = persisted.last_reconcile_epoch_sec
     _STATE.last_reconcile_status = persisted.last_reconcile_status
     _STATE.last_reconcile_error = persisted.last_reconcile_error
+    _STATE.startup_gate_reason = persisted.startup_gate_reason
 
 
 def _persist_state(state: RuntimeState) -> None:
@@ -61,9 +63,10 @@ def _persist_state(state: RuntimeState) -> None:
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
                 last_reconcile_error,
+                startup_gate_reason,
                 updated_ts
             )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
             ON CONFLICT(id) DO UPDATE SET
                 trading_enabled=excluded.trading_enabled,
                 error_count=excluded.error_count,
@@ -76,6 +79,7 @@ def _persist_state(state: RuntimeState) -> None:
                 last_reconcile_epoch_sec=excluded.last_reconcile_epoch_sec,
                 last_reconcile_status=excluded.last_reconcile_status,
                 last_reconcile_error=excluded.last_reconcile_error,
+                startup_gate_reason=excluded.startup_gate_reason,
                 updated_ts=excluded.updated_ts
             """,
             (
@@ -90,6 +94,7 @@ def _persist_state(state: RuntimeState) -> None:
                 state.last_reconcile_epoch_sec,
                 state.last_reconcile_status,
                 state.last_reconcile_error,
+                state.startup_gate_reason,
             ),
         )
         conn.commit()
@@ -113,7 +118,8 @@ def _read_persisted_state() -> RuntimeState | None:
                 recovery_required_count,
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
-                last_reconcile_error
+                last_reconcile_error,
+                startup_gate_reason
             FROM bot_health
             WHERE id = 1
             """
@@ -156,6 +162,9 @@ def _read_persisted_state() -> RuntimeState | None:
             if row["last_reconcile_error"] is not None
             else None
         ),
+        startup_gate_reason=(
+            str(row["startup_gate_reason"]) if row["startup_gate_reason"] is not None else None
+        ),
     )
 
 
@@ -174,6 +183,7 @@ def snapshot() -> RuntimeState:
             last_reconcile_epoch_sec=_STATE.last_reconcile_epoch_sec,
             last_reconcile_status=_STATE.last_reconcile_status,
             last_reconcile_error=_STATE.last_reconcile_error,
+            startup_gate_reason=_STATE.startup_gate_reason,
         )
 
 
@@ -228,6 +238,13 @@ def record_reconcile_result(*, success: bool, error: str | None = None, now_epoc
         _STATE.last_reconcile_epoch_sec = float(ts)
         _STATE.last_reconcile_status = "ok" if success else "error"
         _STATE.last_reconcile_error = None if success else (error[:500] if error else "unknown")
+        _persist_state(_STATE)
+
+
+def set_startup_gate_reason(reason: str | None) -> None:
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        _STATE.startup_gate_reason = (reason[:500] if reason else None)
         _persist_state(_STATE)
 
 

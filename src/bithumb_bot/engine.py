@@ -18,9 +18,7 @@ from .risk import evaluate_daily_loss_breach
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
-STARTUP_RECOVERY_GATE_REASON = (
-    "startup recovery gate: unresolved/recovery-required state exists"
-)
+STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
     "NEW",
@@ -88,8 +86,63 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "last_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
         "last_reconcile_status": state.last_reconcile_status,
         "last_reconcile_error": state.last_reconcile_error,
+        "startup_gate_reason": state.startup_gate_reason,
     }
 
+
+
+
+def evaluate_startup_safety_gate() -> str | None:
+    runtime_state.refresh_open_order_health()
+    state = runtime_state.snapshot()
+
+    conn = ensure_db()
+    try:
+        submit_unknown_without_exchange_row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE status='SUBMIT_UNKNOWN'
+              AND (exchange_order_id IS NULL OR TRIM(exchange_order_id)='')
+            """
+        ).fetchone()
+        stray_remote_open_row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE client_order_id LIKE 'remote_%'
+              AND status IN ('PENDING_SUBMIT','NEW','PARTIAL','SUBMIT_UNKNOWN','RECOVERY_REQUIRED')
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    reasons: list[str] = []
+    if state.unresolved_open_order_count > 0:
+        reasons.append(f"unresolved_open_orders={state.unresolved_open_order_count}")
+    if state.recovery_required_count > 0:
+        reasons.append(f"recovery_required_orders={state.recovery_required_count}")
+
+    submit_unknown_without_exchange_count = int(
+        submit_unknown_without_exchange_row["cnt"] if submit_unknown_without_exchange_row else 0
+    )
+    if submit_unknown_without_exchange_count > 0:
+        reasons.append(
+            "submit_unknown_without_exchange_id="
+            f"{submit_unknown_without_exchange_count}"
+        )
+
+    stray_remote_open_count = int(stray_remote_open_row["cnt"] if stray_remote_open_row else 0)
+    if stray_remote_open_count > 0:
+        reasons.append(f"stray_remote_open_orders={stray_remote_open_count}")
+
+    if not reasons:
+        runtime_state.set_startup_gate_reason(None)
+        return None
+
+    reason = f"{STARTUP_RECOVERY_GATE_PREFIX}: " + ", ".join(reasons)
+    runtime_state.set_startup_gate_reason(reason)
+    return reason
 
 def _halt_trading(reason: str) -> None:
     runtime_state.disable_trading_until(float("inf"), reason=reason)
@@ -142,10 +195,9 @@ def run_loop(short_n: int, long_n: int) -> None:
             _halt_trading(f"initial reconcile failed ({type(e).__name__}): {e}")
             return
 
-        runtime_state.refresh_open_order_health()
-        startup_state = runtime_state.snapshot()
-        if startup_state.recovery_required_count > 0:
-            _halt_trading(STARTUP_RECOVERY_GATE_REASON)
+        startup_gate_reason = evaluate_startup_safety_gate()
+        if startup_gate_reason is not None:
+            _halt_trading(startup_gate_reason)
             return
 
     sec = parse_interval_sec(settings.INTERVAL)

@@ -52,6 +52,10 @@ class _LoopConn:
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
         if "FROM portfolio" in q:
             return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
+        if "status='SUBMIT_UNKNOWN'" in q and "exchange_order_id" in q:
+            return _Rows({"cnt": 0})
+        if "client_order_id LIKE 'remote_%'" in q:
+            return _Rows({"cnt": 0})
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0
@@ -241,10 +245,29 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.retry_at_epoch_sec == float("inf")
-    assert state.last_disable_reason == "startup recovery gate: unresolved/recovery-required state exists"
+    assert state.last_disable_reason is not None
+    assert state.last_disable_reason.startswith("startup safety gate:")
     assert called["n"] == 0
     assert sum("event=trading_halted" in n for n in notifications) == 1
 
+
+
+
+def test_run_loop_startup_safety_gate_halts_when_unresolved_open_order_exists(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    _insert_order(status="NEW", client_order_id="startup_unresolved", created_ts=1)
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    health = get_health_status()
+    assert state.trading_enabled is False
+    assert health["startup_gate_reason"] is not None
+    assert "unresolved_open_orders=1" in str(health["startup_gate_reason"])
 
 def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)

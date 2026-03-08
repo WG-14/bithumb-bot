@@ -9,6 +9,7 @@ from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.recovery import reconcile_with_broker
 
 
@@ -41,7 +42,8 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 recovery_required_count,
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
-                last_reconcile_error
+                last_reconcile_error,
+                startup_gate_reason
             FROM bot_health
             WHERE id = 1
             """
@@ -61,7 +63,43 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert row["last_reconcile_epoch_sec"] is None
     assert row["last_reconcile_status"] is None
     assert row["last_reconcile_error"] is None
+    assert row["startup_gate_reason"] is None
 
+
+
+
+def test_startup_gate_reason_is_persisted_to_health_state(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = 1_730_000_000_000
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, NULL, 'NEW', 'BUY', NULL, 0.01, 0.0, ?, ?, NULL)
+            """,
+            ("startup_unresolved", now_ms - 30_000, now_ms - 30_000),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reason = evaluate_startup_safety_gate()
+    assert reason is not None
+
+    state = runtime_state.snapshot()
+    assert state.startup_gate_reason == reason
+
+    conn = ensure_db()
+    try:
+        row = conn.execute("SELECT startup_gate_reason FROM bot_health WHERE id=1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["startup_gate_reason"] == reason
 
 def test_open_order_health_fields_are_persisted(tmp_path):
     _set_tmp_db(tmp_path)

@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
-from .engine import get_health_status
+from .engine import evaluate_startup_safety_gate, get_health_status
 from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .oms import OPEN_ORDER_STATUSES
@@ -344,6 +344,7 @@ def cmd_health() -> None:
     print(f"  last_reconcile_status={health['last_reconcile_status']}")
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
+    print(f"  startup_gate_reason={health['startup_gate_reason']}")
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
@@ -670,18 +671,21 @@ def cmd_pause() -> None:
 
 
 def cmd_resume(force: bool = False) -> None:
-    report = _load_recovery_report()
-    unresolved_count = int(report["unresolved_count"])
-    recovery_required_count = int(report["recovery_required_count"])
-    if (unresolved_count > 0 or recovery_required_count > 0) and not force:
-        print("[RESUME] refused: unresolved orders/recovery-required state still exists")
+    if settings.MODE == "live":
+        from .broker.bithumb import BithumbBroker
+
+        reconcile_with_broker(BithumbBroker())
+
+    startup_gate_reason = evaluate_startup_safety_gate()
+    if startup_gate_reason and not force:
+        print(f"[RESUME] refused: {startup_gate_reason}")
         print("  run `uv run python bot.py recovery-report` for details")
         print("  or resume explicitly with `uv run python bot.py resume --force`")
         raise SystemExit(1)
 
     enable_trading()
-    if force and (unresolved_count > 0 or recovery_required_count > 0):
-        print("[RESUME] forced: trading enabled despite unresolved/recovery-required state")
+    if force and startup_gate_reason:
+        print(f"[RESUME] forced: trading enabled despite gate={startup_gate_reason}")
     else:
         print("[RESUME] trading enabled")
 

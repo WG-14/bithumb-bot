@@ -64,6 +64,15 @@ class _RecoverSuccessBroker:
             )
         ]
 
+    def get_open_orders(self):
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100):
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100):
+        return []
+
     def get_balance(self) -> BrokerBalance:
         return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
 
@@ -98,6 +107,35 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path):
     assert exc.value.code == 1
     assert runtime_state.snapshot().trading_enabled is False
 
+
+
+
+def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    calls = {"n": 0}
+
+    def _reconcile(_broker):
+        calls["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", _reconcile)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
+
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_resume(force=False)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert exc.value.code == 1
+    assert calls["n"] == 1
+    assert runtime_state.snapshot().trading_enabled is False
 
 def test_resume_force_enables_even_when_unresolved_state_exists(tmp_path):
     _set_tmp_db(tmp_path)

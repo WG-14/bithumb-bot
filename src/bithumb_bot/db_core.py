@@ -133,6 +133,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_reconcile_epoch_sec REAL,
             last_reconcile_status TEXT,
             last_reconcile_error TEXT,
+            startup_gate_reason TEXT,
             updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
@@ -174,6 +175,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "last_reconcile_error",
         "last_reconcile_error TEXT",
     )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "startup_gate_reason",
+        "startup_gate_reason TEXT",
+    )
 
     conn.execute(
         """
@@ -189,9 +196,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             recovery_required_count,
             last_reconcile_epoch_sec,
             last_reconcile_status,
-            last_reconcile_error
+            last_reconcile_error,
+            startup_gate_reason
         )
-        VALUES (1, 1, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL)
+        VALUES (1, 1, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL)
         ON CONFLICT(id) DO NOTHING
         """
     )
