@@ -146,14 +146,26 @@ def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path
     conn = ensure_db()
     try:
         row = conn.execute(
-            "SELECT status, exchange_order_id FROM orders WHERE client_order_id='needs_recovery'"
+            "SELECT status, exchange_order_id, qty_filled FROM orders WHERE client_order_id='needs_recovery'"
         ).fetchone()
+        fills = conn.execute(
+            "SELECT fill_id, qty, fee FROM fills WHERE client_order_id='needs_recovery'"
+        ).fetchall()
+        trades = conn.execute(
+            "SELECT side, qty, fee FROM trades WHERE note LIKE 'manual recovery%'"
+        ).fetchall()
     finally:
         conn.close()
 
     assert row is not None
     assert row["status"] == "FILLED"
     assert row["exchange_order_id"] == "ex_manual_1"
+    assert row["qty_filled"] == pytest.approx(0.01)
+    assert len(fills) == 1
+    assert fills[0]["fill_id"] == "recover_fill_1"
+    assert fills[0]["qty"] == pytest.approx(0.01)
+    assert len(trades) == 1
+    assert trades[0]["side"] == "BUY"
 
 
 def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(monkeypatch, tmp_path):
@@ -209,3 +221,28 @@ def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.retry_at_epoch_sec == float("inf")
+
+
+def test_resume_succeeds_after_manual_recovery_clears_recovery_required(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+
+    try:
+        runtime_state.disable_trading_until(float("inf"), reason="startup recovery gate")
+        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_4")
+        cmd_resume(force=False)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    report = _load_recovery_report()
+    state = runtime_state.snapshot()
+    assert int(report["recovery_required_count"]) == 0
+    assert int(report["unresolved_count"]) == 0
+    assert state.trading_enabled is True
