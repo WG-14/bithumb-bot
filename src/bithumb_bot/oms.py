@@ -183,6 +183,38 @@ def set_status(
             conn.close()
 
 
+def record_status_transition(
+    client_order_id: str,
+    *,
+    from_status: str,
+    to_status: str,
+    reason: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    """Record a detailed status transition event for high-risk paths."""
+    ts = int(time.time() * 1000)
+    own_conn = conn is None
+    conn = conn or ensure_db()
+    try:
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="status_transition",
+            event_ts=ts,
+            order_status=to_status,
+            message=f"from={from_status};to={to_status};reason={reason}",
+        )
+        if own_conn:
+            conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def add_fill(
     *,
     client_order_id: str,

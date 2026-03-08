@@ -5,7 +5,7 @@ import re
 from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, record_order_if_missing
-from .oms import get_open_orders, set_exchange_order_id, set_status
+from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status
 from . import runtime_state
 from .notifier import format_event, notify
 
@@ -47,6 +47,13 @@ def _record_unmatched_recent_activity(
     )
     if exchange_order_id:
         set_exchange_order_id(oid, str(exchange_order_id), conn=conn)
+    record_status_transition(
+        oid,
+        from_status="SUBMIT_UNKNOWN",
+        to_status=status,
+        reason=message,
+        conn=conn,
+    )
     set_status(oid, status, last_error=message, conn=conn)
 
 
@@ -154,6 +161,13 @@ def reconcile_with_broker(broker: Broker) -> None:
             oid = row["client_order_id"]
             if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
                 reason = "submit_unknown without exchange_order_id; manual recovery required"
+                record_status_transition(
+                    oid,
+                    from_status="SUBMIT_UNKNOWN",
+                    to_status="RECOVERY_REQUIRED",
+                    reason=reason,
+                    conn=conn,
+                )
                 set_status(
                     oid,
                     "RECOVERY_REQUIRED",
@@ -333,10 +347,22 @@ def recover_order_with_exchange_id(
         conn.commit()
     except Exception as e:
         if order_found:
+            reason = f"manual recovery failed: {type(e).__name__}: {e}"
+            current = conn.execute(
+                "SELECT status FROM orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            record_status_transition(
+                client_order_id,
+                from_status=(str(current["status"]) if current and current["status"] else "UNKNOWN"),
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
             set_status(
                 client_order_id,
                 "RECOVERY_REQUIRED",
-                last_error=f"manual recovery failed: {type(e).__name__}: {e}",
+                last_error=reason,
                 conn=conn,
             )
             conn.commit()

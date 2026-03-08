@@ -374,11 +374,24 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
 
     conn = ensure_db(str(tmp_path / "submit_unknown.sqlite"))
     row = conn.execute("SELECT status, last_error FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    transition = conn.execute(
+        """
+        SELECT message, order_status
+        FROM order_events
+        WHERE client_order_id='live_1000_buy' AND event_type='status_transition'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     conn.close()
 
     assert row is not None
     assert row["status"] == "SUBMIT_UNKNOWN"
     assert "submit unknown" in str(row["last_error"])
+    assert transition is not None
+    assert transition["order_status"] == "SUBMIT_UNKNOWN"
+    assert "from=PENDING_SUBMIT" in str(transition["message"])
+    assert "to=SUBMIT_UNKNOWN" in str(transition["message"])
     assert any("event=order_submit_started" in msg for msg in notifications)
     assert any("event=order_submit_unknown" in msg for msg in notifications)
 
@@ -512,6 +525,15 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     ambiguous = conn.execute(
         "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='ambiguous_missing_exid'"
     ).fetchone()
+    transition = conn.execute(
+        """
+        SELECT message, order_status
+        FROM order_events
+        WHERE client_order_id='ambiguous_missing_exid' AND event_type='status_transition'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     reconciled = conn.execute("SELECT status FROM orders WHERE client_order_id='live_2000_buy'").fetchone()
     conn.close()
 
@@ -519,6 +541,10 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert ambiguous["status"] == "RECOVERY_REQUIRED"
     assert ambiguous["exchange_order_id"] is None
     assert "manual recovery required" in str(ambiguous["last_error"])
+    assert transition is not None
+    assert transition["order_status"] == "RECOVERY_REQUIRED"
+    assert "from=SUBMIT_UNKNOWN" in str(transition["message"])
+    assert "to=RECOVERY_REQUIRED" in str(transition["message"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
     assert any("event=recovery_required_transition" in msg for msg in notifications)

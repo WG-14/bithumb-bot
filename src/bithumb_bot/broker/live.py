@@ -9,7 +9,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
-from ..oms import record_submit_started, set_exchange_order_id, set_status
+from ..oms import record_status_transition, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -200,6 +200,13 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             order = broker.place_order(client_order_id=client_order_id, side=side, qty=normalized_qty, price=None)
         except BrokerTemporaryError as e:
             err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
+            record_status_transition(
+                client_order_id,
+                from_status="PENDING_SUBMIT",
+                to_status="SUBMIT_UNKNOWN",
+                reason=str(err),
+                conn=conn,
+            )
             set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=str(err), conn=conn)
             notify(
                 format_event(
@@ -228,6 +235,13 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         if not order.exchange_order_id:
             reason = "submit acknowledged without exchange_order_id; manual recovery required"
+            record_status_transition(
+                client_order_id,
+                from_status=order.status,
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
             set_status(
                 client_order_id,
                 "RECOVERY_REQUIRED",
