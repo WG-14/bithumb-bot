@@ -52,10 +52,11 @@ uv run python bot.py run --short 7 --long 30
 초기 실거래는 아래처럼 **작게 시작**하는 것을 권장합니다.
 
 - `MAX_ORDER_KRW=30000` (주문 1회당 약 3%)
-- `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 중단)
+- `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 즉시 HALT(무기한 중지, 자동 재개 없음))
 - `MAX_DAILY_ORDER_COUNT=6` (과매매 방지)
 - `KILL_SWITCH=false` (비상시에만 true)
 - `KILL_SWITCH_LIQUIDATE=false` (**청산 모드 미구현**. 반드시 false 유지; true면 live preflight 실패)
+- 일 손실 한도 초과 시 엔진은 신규 주문 전에 거래를 **영구 HALT**하고 오픈주문 취소만 1회 시도합니다(자동 재개/강제 청산 없음).
 - `LIVE_DRY_RUN=true`로 최소 반나절 이상 검증 후 `false` 전환
 
 ## 라이브 시작 전 체크리스트 (Startup)
