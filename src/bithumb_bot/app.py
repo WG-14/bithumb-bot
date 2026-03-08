@@ -14,7 +14,7 @@ from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import get_health_status
 from .recovery import cancel_open_orders_with_broker, reconcile_with_broker
-from .runtime_state import disable_trading_until, enable_trading
+from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .oms import OPEN_ORDER_STATUSES
 
 import httpx
@@ -330,12 +330,20 @@ def cmd_run(short_n: int, long_n: int):
 
 
 def cmd_health() -> None:
+    refresh_open_order_health()
     health = get_health_status()
     print("[HEALTH]")
     print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")
     print(f"  retry_at_epoch_sec={health['retry_at_epoch_sec']}")
+    print(f"  unresolved_open_order_count={health['unresolved_open_order_count']}")
+    print(f"  oldest_unresolved_order_age_sec={health['oldest_unresolved_order_age_sec']}")
+    print(f"  recovery_required_count={health['recovery_required_count']}")
+    print(f"  last_reconcile_epoch_sec={health['last_reconcile_epoch_sec']}")
+    print(f"  last_reconcile_status={health['last_reconcile_status']}")
+    print(f"  last_reconcile_error={health['last_reconcile_error']}")
+    print(f"  last_disable_reason={health['last_disable_reason']}")
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:

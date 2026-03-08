@@ -77,6 +77,12 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "trading_enabled": state.trading_enabled,
         "retry_at_epoch_sec": state.retry_at_epoch_sec,
         "last_disable_reason": state.last_disable_reason,
+        "unresolved_open_order_count": state.unresolved_open_order_count,
+        "oldest_unresolved_order_age_sec": state.oldest_unresolved_order_age_sec,
+        "recovery_required_count": state.recovery_required_count,
+        "last_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
+        "last_reconcile_status": state.last_reconcile_status,
+        "last_reconcile_error": state.last_reconcile_error,
     }
 
 

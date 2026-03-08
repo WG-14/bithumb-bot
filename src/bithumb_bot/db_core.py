@@ -127,9 +127,52 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_candle_age_sec REAL,
             retry_at_epoch_sec REAL,
             last_disable_reason TEXT,
+            unresolved_open_order_count INTEGER NOT NULL DEFAULT 0,
+            oldest_unresolved_order_age_sec REAL,
+            recovery_required_count INTEGER NOT NULL DEFAULT 0,
+            last_reconcile_epoch_sec REAL,
+            last_reconcile_status TEXT,
+            last_reconcile_error TEXT,
             updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
+    )
+
+    _ensure_column(
+        conn,
+        "bot_health",
+        "unresolved_open_order_count",
+        "unresolved_open_order_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "oldest_unresolved_order_age_sec",
+        "oldest_unresolved_order_age_sec REAL",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "recovery_required_count",
+        "recovery_required_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_reconcile_epoch_sec",
+        "last_reconcile_epoch_sec REAL",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_reconcile_status",
+        "last_reconcile_status TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_reconcile_error",
+        "last_reconcile_error TEXT",
     )
 
     conn.execute(
@@ -140,9 +183,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             error_count,
             last_candle_age_sec,
             retry_at_epoch_sec,
-            last_disable_reason
+            last_disable_reason,
+            unresolved_open_order_count,
+            oldest_unresolved_order_age_sec,
+            recovery_required_count,
+            last_reconcile_epoch_sec,
+            last_reconcile_status,
+            last_reconcile_error
         )
-        VALUES (1, 1, 0, NULL, NULL, NULL)
+        VALUES (1, 1, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL)
         ON CONFLICT(id) DO NOTHING
         """
     )
