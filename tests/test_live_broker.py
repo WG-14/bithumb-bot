@@ -303,6 +303,45 @@ def test_live_retry_after_cancel_uses_new_attempt_row_and_client_order_id(monkey
     assert rows[0]["client_order_id"] != rows[1]["client_order_id"]
 
 
+def test_live_duplicate_attempt_with_terminal_status_blocks_resubmit(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "terminal_resubmit_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    from bithumb_bot.broker import live as live_module
+
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: "attempt_terminal")
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    broker = _CanceledBroker()
+    first = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+    second = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert first is None
+    assert second is None
+    assert broker.place_order_calls == 1
+
+    conn = ensure_db(str(tmp_path / "terminal_resubmit_guard.sqlite"))
+    try:
+        blocked = conn.execute(
+            """
+            SELECT event_type, order_status, message
+            FROM order_events
+            WHERE client_order_id LIKE 'live_1000_buy_%' AND event_type='submit_blocked'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert blocked is not None
+    assert blocked["event_type"] == "submit_blocked"
+    assert blocked["order_status"] == "CANCELED"
+    assert "terminal status CANCELED" in str(blocked["message"])
+    assert any("event=order_submit_blocked" in msg for msg in notifications)
+
+
 def test_live_open_order_guard_blocks_new_order(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "open_guard.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)

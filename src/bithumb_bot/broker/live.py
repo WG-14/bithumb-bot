@@ -9,7 +9,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
-from ..oms import new_client_order_id, record_status_transition, record_submit_started, set_exchange_order_id, set_status
+from ..oms import TERMINAL_ORDER_STATUSES, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -178,6 +178,27 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         submit_attempt_id = _submit_attempt_id()
         client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
+
+        existing = conn.execute(
+            "SELECT status FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        if existing is not None:
+            existing_status = str(existing["status"])
+            if existing_status in TERMINAL_ORDER_STATUSES:
+                reason = f"duplicate submit blocked: terminal status {existing_status}"
+                record_submit_blocked(client_order_id, status=existing_status, reason=reason, conn=conn)
+                notify(
+                    format_event(
+                        "order_submit_blocked",
+                        client_order_id=client_order_id,
+                        side=side,
+                        status=existing_status,
+                        reason=reason,
+                    )
+                )
+                conn.commit()
+                return None
 
         # Durable order intent before remote submit.
         record_order_if_missing(

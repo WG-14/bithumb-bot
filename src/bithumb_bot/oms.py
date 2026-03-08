@@ -9,6 +9,28 @@ from .db_core import ensure_db
 
 
 OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
+TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED", "RECOVERY_REQUIRED")
+
+
+ALLOWED_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "PENDING_SUBMIT": ("PENDING_SUBMIT", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"),
+    "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
+    "PARTIAL": ("PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
+    "SUBMIT_UNKNOWN": ("SUBMIT_UNKNOWN", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
+    "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED"),
+    "FILLED": ("FILLED",),
+    "CANCELED": ("CANCELED",),
+    "FAILED": ("FAILED",),
+}
+
+
+def validate_status_transition(*, from_status: str, to_status: str) -> tuple[bool, str | None]:
+    allowed = ALLOWED_STATUS_TRANSITIONS.get(from_status)
+    if allowed is None:
+        return False, f"unknown current status: {from_status}"
+    if to_status in allowed:
+        return True, None
+    return False, f"disallowed status transition: {from_status}->{to_status}"
 
 
 def _record_order_event(
@@ -117,6 +139,36 @@ def record_submit_started(
             conn.close()
 
 
+def record_submit_blocked(
+    client_order_id: str,
+    *,
+    status: str,
+    reason: str,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    ts = int(time.time() * 1000)
+    own_conn = conn is None
+    conn = conn or ensure_db()
+    try:
+        _record_order_event(
+            conn,
+            client_order_id=client_order_id,
+            event_type="submit_blocked",
+            event_ts=ts,
+            order_status=status,
+            message=reason,
+        )
+        if own_conn:
+            conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def set_exchange_order_id(
     client_order_id: str,
     exchange_order_id: str,
@@ -158,6 +210,28 @@ def set_status(
     own_conn = conn is None
     conn = conn or ensure_db()
     try:
+        current = conn.execute(
+            "SELECT status FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        if current is None:
+            raise ValueError(f"order not found: {client_order_id}")
+
+        from_status = str(current["status"])
+        allowed, reason = validate_status_transition(from_status=from_status, to_status=status)
+        if not allowed:
+            _record_order_event(
+                conn,
+                client_order_id=client_order_id,
+                event_type="status_transition_blocked",
+                event_ts=ts,
+                order_status=from_status,
+                message=reason,
+            )
+            if own_conn:
+                conn.commit()
+            raise ValueError(reason)
+
         conn.execute(
             "UPDATE orders SET status=?, updated_ts=?, last_error=? WHERE client_order_id=?",
             (status, ts, (last_error[:500] if last_error else None), client_order_id),

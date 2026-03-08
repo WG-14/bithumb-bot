@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_started, set_exchange_order_id, set_status
+from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
 
 
 def test_order_events_written_for_major_transitions(tmp_path):
@@ -147,3 +147,51 @@ def test_status_transition_event_records_common_fields(tmp_path):
     assert "from=PENDING_SUBMIT" in str(row["message"])
     assert "to=SUBMIT_UNKNOWN" in str(row["message"])
     assert "reason=submit unknown: timeout" in str(row["message"])
+
+
+def test_validate_status_transition_allows_only_whitelisted_paths():
+    allowed, reason = validate_status_transition(from_status="PENDING_SUBMIT", to_status="SUBMIT_UNKNOWN")
+    assert allowed is True
+    assert reason is None
+
+    allowed, reason = validate_status_transition(from_status="FILLED", to_status="NEW")
+    assert allowed is False
+    assert "disallowed status transition" in str(reason)
+
+
+def test_disallowed_status_transition_records_block_event(tmp_path):
+    db_path = tmp_path / "order_events_transition_blocked.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_blocked",
+            side="BUY",
+            qty_req=0.01,
+            price=None,
+            status="FILLED",
+            ts_ms=1000,
+            conn=conn,
+        )
+
+        try:
+            set_status("o_blocked", "NEW", conn=conn)
+            assert False, "expected ValueError"
+        except ValueError as exc:
+            assert "FILLED->NEW" in str(exc)
+
+        row = conn.execute(
+            """
+            SELECT event_type, order_status, message
+            FROM order_events
+            WHERE client_order_id='o_blocked' AND event_type='status_transition_blocked'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["event_type"] == "status_transition_blocked"
+    assert row["order_status"] == "FILLED"
+    assert "FILLED->NEW" in str(row["message"])
