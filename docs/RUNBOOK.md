@@ -1,5 +1,17 @@
 # RUNBOOK (24/7 운영 초안)
 
+## 0) 1,000,000 KRW 소액 계정 보수 프로필 (권장)
+
+실거래 초기값은 아래처럼 보수적으로 시작한다.
+
+- `MAX_ORDER_KRW=30000` (계정의 약 3%)
+- `MAX_DAILY_LOSS_KRW=20000` (계정의 약 2% 손실 시 당일 중단)
+- `MAX_DAILY_ORDER_COUNT=6` (과매매/오작동 노출 축소)
+- `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off)
+- `LIVE_DRY_RUN=true`로 먼저 운영 경로를 검증하고, 확인 후 `false` 전환
+
+> 핵심 원칙: **주문 크기보다 생존이 우선**. 초반 1~2주는 수익보다 안정성 검증에 집중.
+
 ## 1) 배포 구성
 
 - `deploy/systemd/bithumb-bot.service`: 메인 트레이딩 루프 (`Restart=always`).
@@ -26,29 +38,116 @@ sudo systemctl enable --now bithumb-bot-healthcheck.timer
 sudo systemctl enable --now bithumb-bot-backup.timer
 ```
 
-## 3) 기본 점검
+## 3) 라이브 시작 체크리스트 (Startup)
+
+### A. 환경/리스크 값 확인
+
+1. `MODE=live` 여부 확인 (paper/live 혼동 금지)
+2. 다음 값이 의도대로 설정되었는지 재확인
+   - `MAX_ORDER_KRW=30000`
+   - `MAX_DAILY_LOSS_KRW=20000`
+   - `MAX_DAILY_ORDER_COUNT=6`
+3. 실주문 전에는 `LIVE_DRY_RUN=true`
+4. `KILL_SWITCH=false` 확인 (비상 시에만 true)
+5. API 키는 `LIVE_DRY_RUN=false` 전환 직전에만 주입
+
+### B. 기동 전/직후 점검
 
 ```bash
 sudo systemctl restart bithumb-bot.service
 sudo systemctl status bithumb-bot.service
 sudo journalctl -u bithumb-bot.service -n 100 --no-pager
 
-sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
 uv run python bot.py health
+uv run python bot.py recovery-report
+```
+
+- 서비스가 `active (running)`인지 확인.
+- `health`에서 `last_candle_age_sec`, `error_count`, `trading_enabled` 확인.
+- `recovery-report`에서 unresolved/recovery-required 건수 확인.
+
+## 4) 기본 점검
+
+```bash
+sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
 ./scripts/backup_sqlite.sh
 ```
 
-- `systemctl restart` 이후 서비스가 자동 실행 상태(`active (running)`)인지 확인.
-- health 출력에서 `trading_enabled=True` 여부, `error_count` 및 `last_candle_age_sec` 확인.
-- `backups/`에 백업 파일 생성 여부 확인.
+- timer가 정상 등록/실행되는지 확인.
+- `backups/` 파일 생성 여부 확인.
 
-## 4) 장애 대응 절차
+## 5) 비상 정지 / 일시중지 / 복구 체크리스트
+
+### A. 즉시 리스크 차단 (Emergency stop)
+
+```bash
+# 1) 신규 거래 즉시 중지
+uv run python bot.py pause
+
+# 2) (선택) 환경에서 kill switch 활성화 후 서비스 재시작
+# KILL_SWITCH=true
+# sudo systemctl restart bithumb-bot.service
+```
+
+- 원인 확인 전에는 `resume --force`를 사용하지 않는다.
+- 운영자 승인 없이 실주문 재개 금지.
+
+### B. 상태 파악 (Pause 상태에서)
+
+```bash
+uv run python bot.py health
+uv run python bot.py recovery-report
+sudo journalctl -u bithumb-bot.service -n 200 --no-pager
+```
+
+확인 포인트:
+- 최근 오류가 API/네트워크/인증 중 무엇인지
+- 미해결 주문(`unresolved_orders`) 존재 여부
+- 복구 필요 주문(`recovery_required_orders`) 존재 여부
+
+### C. 복구 액션 (필요 시 순서대로)
+
+```bash
+# live 모드에서 원격 미체결 일괄 취소
+uv run python bot.py cancel-open-orders
+
+# 거래소/로컬 원장 정합성 점검
+uv run python bot.py reconcile
+
+# 복구 상태 재확인
+uv run python bot.py recovery-report
+```
+
+### D. 재개 (Recovery / Resume)
+
+```bash
+# 보수적 재개 (이상 상태가 있으면 자동 거부)
+uv run python bot.py resume
+
+# 마지막 수단: 운영자 책임 하 강제 재개
+uv run python bot.py resume --force
+```
+
+## 6) 크래시 후 재개 전 필수 확인
+
+크래시/강제 재시작 이후에는 아래를 모두 확인하기 전 재개하지 않는다.
+
+1. `journalctl`로 마지막 예외 원인이 해소되었는지 확인
+2. `uv run python bot.py recovery-report`에서 아래가 0인지 확인
+   - `unresolved_orders`
+   - `recovery_required_orders`
+3. `uv run python bot.py reconcile` 후 다시 `recovery-report` 실행
+4. live 모드면 거래소 오픈 주문/체결과 로컬 `orders/fills/trades` 샘플 대조
+5. `uv run python bot.py health`에서 stale/error 이상 없음 확인
+6. `uv run python bot.py resume`로 재개 후 30~60분 모니터링
+
+## 7) 장애 대응 절차 (유형별)
 
 ### A. 재시작/프로세스 크래시
 
 1. `sudo systemctl status bithumb-bot.service`로 재시작 루프 여부 확인.
 2. `sudo journalctl -u bithumb-bot.service -n 200 --no-pager`로 직전 예외 확인.
-3. 환경변수 변경 후 `sudo systemctl restart bithumb-bot.service`.
+3. 환경변수/설정 수정 후 `sudo systemctl restart bithumb-bot.service`.
 4. 3~5분 모니터링 후 healthcheck 알림 미발생 확인.
 
 ### B. 중복 주문 의심
@@ -56,55 +155,15 @@ uv run python bot.py health
 1. `uv run python bot.py orders --limit 100`로 최근 주문 상태 확인.
 2. 동일 시점/동일 방향의 order가 중복인지 확인.
 3. live 모드면 거래소 체결 내역과 `fills` 비교.
-4. 필요시 봇 일시 중지: `sudo systemctl stop bithumb-bot.service`.
-5. 수동 정리 후 재기동: `sudo systemctl start bithumb-bot.service`.
-
-### B-1. Live 오픈 주문 강제 취소 (운영자 명령)
-
-live 모드에서 원격 미체결 주문을 일괄 취소하고, 매칭되는 로컬 주문 상태를 `CANCELED`로 반영해야 할 때 사용.
-
-```bash
-uv run python bot.py cancel-open-orders
-```
-
-- `MODE=live`에서만 동작한다. (`paper` 모드에서는 skip 출력)
-- 브로커 `get_open_orders`로 원격 오픈 주문 조회 후 `cancel_order`를 순차 호출한다.
-- 원격 주문이 로컬 주문(`exchange_order_id` 또는 `client_order_id`)과 매칭되면 로컬 `orders.status=CANCELED`로 업데이트한다.
-- 로컬 매칭이 없는 원격 주문은 보수적으로 취소하되, `stray remote order canceled ...` 메시지로 별도 출력한다.
-- 취소 실패 건은 `failed_count` 및 에러 메시지로 출력되므로, 실패가 있으면 재실행 또는 수동 확인이 필요하다.
-
-
-### B-2. 수동 안전 제어 명령 (pause/resume/reconcile/recovery-report)
-
-```bash
-# 즉시 신규 거래 중지 (상태는 DB에 영속 저장)
-uv run python bot.py pause
-
-# 미해결 주문/복구 필요 상태 요약
-uv run python bot.py recovery-report
-
-# 보수적 재개: 미해결 상태가 있으면 거부
-uv run python bot.py resume
-
-# 운영자 책임 하 강제 재개
-uv run python bot.py resume --force
-
-# live 모드에서 복구/정합성 1회 패스 실행
-uv run python bot.py reconcile
-```
-
-- `pause`: `bot_health` 영속 상태로 거래를 비활성화한다.
-- `resume`: 기본값은 보수적으로 동작하며, `RECOVERY_REQUIRED` 또는 미해결 오픈 주문이 있으면 실패한다.
-- `resume --force`: 미해결 상태가 남아 있어도 운영자 확인 하에 강제로 거래를 활성화한다.
-- `reconcile`: `MODE=live`에서만 브로커 기반 정합성 점검을 1회 수행한다.
-- `recovery-report`: 미해결 주문 수, `RECOVERY_REQUIRED` 수, 가장 오래된 미해결 주문 age를 간단히 출력한다.
+4. 필요시 봇 일시 중지: `uv run python bot.py pause`.
+5. 수동 정리 후 재기동/재개.
 
 ### C. 잔고 불일치
 
 1. `uv run python bot.py audit` 실행.
 2. 불일치 시 `uv run python bot.py pnl --days 1` 및 `trades`/`fills` 대조.
 3. live 모드면 브로커 잔고 API 기준으로 reconcile 수행.
-4. 원인(수수료/슬리피지/부분체결 반영 누락) 확인 전 신규 주문 중단.
+4. 원인 확인 전 신규 주문 중단.
 
 ### D. 데이터 누락 (캔들 stale / sync 실패)
 
@@ -120,7 +179,7 @@ uv run python bot.py reconcile
 3. healthcheck 알림 빈도가 높으면 임계치(`HEALTH_MAX_ERROR_COUNT`) 조정.
 4. 복구 후 10~15분간 주문/체결/캔들 흐름 점검.
 
-## 5) 알림 설정
+## 8) 알림 설정
 
 하나 이상 설정하면 webhook 알림 사용, 미설정 시 콘솔 출력만 수행.
 
@@ -134,7 +193,7 @@ uv run python bot.py reconcile
 - `NOTIFIER_TIMEOUT_SEC=5`
 - 비밀키/URL은 `/etc/bithumb-bot/bithumb-bot.env`에만 저장하고 로그에 출력 금지.
 
-## 6) 백업 정책
+## 9) 백업 정책
 
 - 기본 경로: `backups/`
 - 기본 보관: 7일, 최대 30개
@@ -149,8 +208,7 @@ uv run python bot.py reconcile
 sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_120000.sqlite"
 ```
 
-
-## 7) Live 모드 사전 점검 (fail-fast)
+## 10) Live 모드 사전 점검 (fail-fast)
 
 `MODE=live`로 시작하면 런타임 시작 전에 아래 항목을 강제 검증한다. 하나라도 누락되면 즉시 종료된다.
 
@@ -158,10 +216,3 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
-
-운영 권장값 예시(보수적):
-
-- `MAX_ORDER_KRW=100000`
-- `MAX_DAILY_LOSS_KRW=50000`
-- `MAX_DAILY_ORDER_COUNT=20`
-- 초기 점검 단계에서는 `LIVE_DRY_RUN=true`로 검증 후 실거래 전환

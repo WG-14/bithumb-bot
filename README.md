@@ -1,6 +1,6 @@
 # bithumb-bot
 
-간단한 SMA 기반 빗썸 페이퍼 트레이딩 봇입니다.
+간단한 SMA 기반 빗썸 페이퍼/실거래 봇입니다.
 
 ## 빠른 시작
 
@@ -40,7 +40,6 @@ uv run python bot.py run --short 7 --long 30
 
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
 
-
 ## Live 모드(실거래)
 
 - `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
@@ -48,6 +47,56 @@ uv run python bot.py run --short 7 --long 30
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.
 
+### 보수적 라이브 프로필 (권장: 1,000,000 KRW 계정)
+
+초기 실거래는 아래처럼 **작게 시작**하는 것을 권장합니다.
+
+- `MAX_ORDER_KRW=30000` (주문 1회당 약 3%)
+- `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 중단)
+- `MAX_DAILY_ORDER_COUNT=6` (과매매 방지)
+- `KILL_SWITCH=false` (비상시에만 true)
+- `KILL_SWITCH_LIQUIDATE=false` (운영자 수동 판단 권장)
+- `LIVE_DRY_RUN=true`로 최소 반나절 이상 검증 후 `false` 전환
+
+## 라이브 시작 전 체크리스트 (Startup)
+
+1. `.env` 또는 `/etc/bithumb-bot/bithumb-bot.env`에 라이브 안전값이 반영되었는지 확인
+2. `uv run python bot.py health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
+3. `uv run python bot.py recovery-report`에서 미해결 주문/복구 필요 건수 확인
+4. 처음 라이브 전환 시 `MODE=live`, `LIVE_DRY_RUN=true`로 기동 후 로그/알림 확인
+5. API 키를 활성화하기 전 `pause/resume/reconcile` 명령이 정상 동작하는지 점검
+6. 실주문 전환(`LIVE_DRY_RUN=false`) 직후 30~60분 수동 모니터링
+
+## 비상 정지 / 일시중지 / 복구
+
+```bash
+# 즉시 신규 거래 중지
+uv run python bot.py pause
+
+# 상태 점검
+uv run python bot.py recovery-report
+uv run python bot.py health
+
+# (live) 원격 오픈 주문 일괄 취소
+uv run python bot.py cancel-open-orders
+
+# 정합성 점검
+uv run python bot.py reconcile
+
+# 보수적 재개(문제 있으면 자동 거부)
+uv run python bot.py resume
+```
+
+- 긴급 시에는 `pause`를 먼저 실행하고, 원인 파악 전 `resume --force`는 피하세요.
+- `KILL_SWITCH=true`는 마지막 안전장치로 사용하고, 해제 전 반드시 주문/체결 정합성을 다시 확인하세요.
+
+## 크래시 후 재개 전 필수 확인
+
+1. `journalctl -u bithumb-bot.service -n 200 --no-pager`로 마지막 예외/네트워크 오류 원인 확인
+2. `uv run python bot.py recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인
+3. `uv run python bot.py reconcile` 실행 후 다시 `recovery-report` 확인
+4. live 모드면 거래소 오픈 주문/체결 내역과 로컬 `orders/fills`가 일치하는지 샘플 대조
+5. `uv run python bot.py health` 정상 확인 후 `uv run python bot.py resume`
 
 ## 24/7 운영(systemd + healthcheck + backup)
 
