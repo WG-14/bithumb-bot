@@ -67,7 +67,11 @@ class _FakeBroker:
             asset_locked=0.0,
         )
 
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return []
 
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return []
 
 
 class _CommitCheckingBroker(_FakeBroker):
@@ -145,6 +149,57 @@ class _StrictRecoveryBroker(_FakeBroker):
         if exchange_order_id is None:
             raise AssertionError("unsafe get_order called without exchange_order_id")
         return super().get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+
+
+class _RecentActivityBroker(_FakeBroker):
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="",
+                exchange_order_id="ex_recent_known",
+                side="BUY",
+                status="FILLED",
+                price=100.0,
+                qty_req=0.01,
+                qty_filled=0.01,
+                created_ts=1001,
+                updated_ts=1002,
+            )
+        ]
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="recent_fill_1",
+                fill_ts=1002,
+                price=100000000.0,
+                qty=0.01,
+                fee=10.0,
+                exchange_order_id="ex_recent_known",
+            )
+        ]
+
+
+class _UnmatchedRecentFillBroker(_FakeBroker):
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="recent_fill_unmatched",
+                fill_ts=7777,
+                price=100000000.0,
+                qty=0.02,
+                fee=20.0,
+                exchange_order_id="stray_recent_ex",
+            )
+        ]
 
 
 @pytest.fixture(autouse=True)
@@ -452,6 +507,57 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert "manual recovery required" in str(ambiguous["last_error"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
+
+
+def test_reconcile_recovers_known_local_order_from_recent_activity(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "recent_known.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db(str(tmp_path / "recent_known.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_3000_buy','ex_recent_known','NEW','BUY',NULL,0.01,0,3000,3000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_RecentActivityBroker())
+
+    conn = ensure_db(str(tmp_path / "recent_known.sqlite"))
+    row = conn.execute(
+        "SELECT status, qty_filled FROM orders WHERE client_order_id='live_3000_buy'"
+    ).fetchone()
+    fill = conn.execute(
+        "SELECT fill_id FROM fills WHERE client_order_id='live_3000_buy'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == 0.01
+    assert fill is not None
+
+
+def test_reconcile_unmatched_recent_activity_creates_recovery_required_record(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "recent_unmatched.sqlite"))
+
+    reconcile_with_broker(_UnmatchedRecentFillBroker())
+
+    conn = ensure_db(str(tmp_path / "recent_unmatched.sqlite"))
+    row = conn.execute(
+        """
+        SELECT client_order_id, status, exchange_order_id, last_error
+        FROM orders
+        WHERE exchange_order_id='stray_recent_ex'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert str(row["client_order_id"]).startswith("recovery_")
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "manual recovery required" in str(row["last_error"])
 
 
 def test_validate_order_rejects_invalid_qty():

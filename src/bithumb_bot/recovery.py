@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .broker.base import Broker
+import re
+
+from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, record_order_if_missing
 from .oms import get_open_orders, set_exchange_order_id, set_status
@@ -13,6 +15,127 @@ def assert_no_open_orders() -> None:
     open_orders = get_open_orders()
     if open_orders:
         raise RuntimeError(f"Open orders exist (resume required): {open_orders}")
+
+
+def _safe_recovery_client_order_id(*, tag: str, exchange_order_id: str | None, ts: int) -> str:
+    base = exchange_order_id or f"{tag}_{ts}"
+    clean = re.sub(r"[^a-zA-Z0-9_-]", "_", str(base))[:64]
+    return f"recovery_{clean}"
+
+
+def _record_unmatched_recent_activity(
+    conn,
+    *,
+    exchange_order_id: str | None,
+    side: str,
+    qty_req: float,
+    ts_ms: int,
+    status: str,
+    message: str,
+) -> None:
+    oid = _safe_recovery_client_order_id(tag="recent", exchange_order_id=exchange_order_id, ts=ts_ms)
+    record_order_if_missing(
+        conn,
+        client_order_id=oid,
+        side=(side if side in ("BUY", "SELL") else "BUY"),
+        qty_req=max(0.0, float(qty_req)),
+        price=None,
+        ts_ms=int(ts_ms),
+        status="SUBMIT_UNKNOWN",
+    )
+    if exchange_order_id:
+        set_exchange_order_id(oid, str(exchange_order_id), conn=conn)
+    set_status(oid, status, last_error=message, conn=conn)
+
+
+def _sync_recent_order_activity(conn, recent_orders: list[BrokerOrder]) -> None:
+    local_rows = conn.execute(
+        "SELECT client_order_id, exchange_order_id FROM orders"
+    ).fetchall()
+    by_exchange_id = {str(r["exchange_order_id"]): str(r["client_order_id"]) for r in local_rows if r["exchange_order_id"]}
+    by_client_order_id = {str(r["client_order_id"]): str(r["client_order_id"]) for r in local_rows}
+
+    for remote in recent_orders:
+        remote_exchange_id = str(remote.exchange_order_id or "")
+        remote_client_order_id = str(remote.client_order_id or "")
+
+        local_id = by_exchange_id.get(remote_exchange_id)
+        if local_id is None and remote_client_order_id:
+            local_id = by_client_order_id.get(remote_client_order_id)
+
+        if local_id:
+            if remote_exchange_id:
+                set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
+                by_exchange_id[remote_exchange_id] = local_id
+            set_status(local_id, remote.status, conn=conn)
+            continue
+
+        _record_unmatched_recent_activity(
+            conn,
+            exchange_order_id=(remote_exchange_id or None),
+            side=remote.side,
+            qty_req=remote.qty_req,
+            ts_ms=remote.updated_ts,
+            status="RECOVERY_REQUIRED",
+            message="unmatched recent remote order detected; manual recovery required",
+        )
+
+
+def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> None:
+    local_rows = conn.execute(
+        "SELECT client_order_id, exchange_order_id, side, qty_req, qty_filled FROM orders"
+    ).fetchall()
+    by_exchange_id = {str(r["exchange_order_id"]): r for r in local_rows if r["exchange_order_id"]}
+    by_client_order_id = {str(r["client_order_id"]): r for r in local_rows}
+
+    for fill in recent_fills:
+        remote_exchange_id = str(fill.exchange_order_id or "")
+        remote_client_order_id = str(fill.client_order_id or "")
+
+        local = by_exchange_id.get(remote_exchange_id)
+        if local is None and remote_client_order_id:
+            local = by_client_order_id.get(remote_client_order_id)
+
+        if local is None:
+            _record_unmatched_recent_activity(
+                conn,
+                exchange_order_id=(remote_exchange_id or None),
+                side="BUY",
+                qty_req=fill.qty,
+                ts_ms=fill.fill_ts,
+                status="RECOVERY_REQUIRED",
+                message="unmatched recent remote fill detected; manual recovery required",
+            )
+            continue
+
+        local_id = str(local["client_order_id"])
+        if remote_exchange_id:
+            set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
+
+        apply_fill_and_trade(
+            conn,
+            client_order_id=local_id,
+            side=str(local["side"]),
+            fill_id=fill.fill_id,
+            fill_ts=fill.fill_ts,
+            price=fill.price,
+            qty=fill.qty,
+            fee=fill.fee,
+            note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
+        )
+
+        order_row = conn.execute(
+            "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+            (local_id,),
+        ).fetchone()
+        if order_row is None:
+            continue
+        qty_req = float(order_row["qty_req"])
+        qty_filled = float(order_row["qty_filled"])
+        if qty_req > 0 and qty_filled >= qty_req - 1e-12:
+            set_status(local_id, "FILLED", conn=conn)
+        elif qty_filled > 1e-12:
+            set_status(local_id, "PARTIAL", conn=conn)
 
 
 def reconcile_with_broker(broker: Broker) -> None:
@@ -77,6 +200,9 @@ def reconcile_with_broker(broker: Broker) -> None:
             )
             set_exchange_order_id(oid, exid, conn=conn)
             set_status(oid, remote.status, last_error="stray remote open order detected", conn=conn)
+
+        _sync_recent_order_activity(conn, broker.get_recent_orders(limit=100))
+        _apply_recent_fills(conn, broker.get_recent_fills(limit=100))
 
         bal = broker.get_balance()
         _, local_cash_locked, _, local_asset_locked = get_portfolio_breakdown(conn)

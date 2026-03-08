@@ -41,6 +41,7 @@ class BrokerFill:
     price: float
     qty: float
     fee: float
+    exchange_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,12 @@ class Broker(Protocol):
         ...
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        ...
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        ...
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         ...
 
     def get_balance(self) -> BrokerBalance:

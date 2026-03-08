@@ -203,6 +203,7 @@ class BithumbBroker:
                     price=float(row.get("price") or 0.0),
                     qty=float(row.get("units_traded") or 0.0),
                     fee=float(row.get("fee") or 0.0),
+                    exchange_order_id=(str(row.get("order_id")) if row.get("order_id") else exchange_order_id),
                 )
             )
         return fills
@@ -230,3 +231,14 @@ class BithumbBroker:
             asset_available=asset_available,
             asset_locked=asset_locked,
         )
+
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        # Bithumb private API does not expose a separate closed-order history endpoint
+        # for this bot, so reuse open-order snapshots conservatively.
+        return self.get_open_orders()[: max(0, int(limit))]
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        fills = self.get_fills(client_order_id=None, exchange_order_id=None)
+        fills.sort(key=lambda f: int(f.fill_ts), reverse=True)
+        return fills[: max(0, int(limit))]

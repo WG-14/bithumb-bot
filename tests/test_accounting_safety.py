@@ -19,6 +19,12 @@ class _AvailableOnlyBalanceBroker:
     def get_open_orders(self) -> list[BrokerOrder]:
         return []
 
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return []
+
     def get_balance(self) -> BrokerBalance:
         # Simulates a response that only reflects available balances.
         return BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.5, asset_locked=0.0)
