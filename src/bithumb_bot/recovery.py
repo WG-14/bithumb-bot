@@ -6,6 +6,7 @@ from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, record_order_if_missing
 from .oms import get_open_orders, set_exchange_order_id, set_status
+from . import runtime_state
 
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
@@ -223,6 +224,16 @@ def reconcile_with_broker(broker: Broker) -> None:
             asset_locked=asset_locked,
         )
         conn.commit()
+    except Exception as e:
+        runtime_state.record_reconcile_result(
+            success=False,
+            error=f"{type(e).__name__}: {e}",
+        )
+        runtime_state.refresh_open_order_health()
+        raise
+    else:
+        runtime_state.record_reconcile_result(success=True)
+        runtime_state.refresh_open_order_health()
     finally:
         conn.close()
 

@@ -226,6 +226,13 @@ def test_health_status_contains_runtime_flags():
     assert health["trading_enabled"] is False
     assert health["retry_at_epoch_sec"] == 999.0
     assert health["last_disable_reason"] is None
+    assert int(health["unresolved_open_order_count"]) >= 0
+    assert int(health["recovery_required_count"]) >= 0
+    if int(health["unresolved_open_order_count"]) == 0:
+        assert health["oldest_unresolved_order_age_sec"] is None
+    assert health["last_reconcile_status"] in (None, "ok", "error")
+    if health["last_reconcile_status"] != "error":
+        assert health["last_reconcile_error"] is None
 
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
