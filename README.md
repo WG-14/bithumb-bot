@@ -55,7 +55,7 @@ uv run python bot.py run --short 7 --long 30
 - `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 중단)
 - `MAX_DAILY_ORDER_COUNT=6` (과매매 방지)
 - `KILL_SWITCH=false` (비상시에만 true)
-- `KILL_SWITCH_LIQUIDATE=false` (운영자 수동 판단 권장)
+- `KILL_SWITCH_LIQUIDATE=false` (**청산 모드 미구현**. 반드시 false 유지; true면 live preflight 실패)
 - `LIVE_DRY_RUN=true`로 최소 반나절 이상 검증 후 `false` 전환
 
 ## 라이브 시작 전 체크리스트 (Startup)

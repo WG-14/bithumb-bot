@@ -7,7 +7,7 @@
 - `MAX_ORDER_KRW=30000` (계정의 약 3%)
 - `MAX_DAILY_LOSS_KRW=20000` (계정의 약 2% 손실 시 당일 중단)
 - `MAX_DAILY_ORDER_COUNT=6` (과매매/오작동 노출 축소)
-- `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off)
+- `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off, **청산 모드 미구현으로 true 금지**)
 - `LIVE_DRY_RUN=true`로 먼저 운영 경로를 검증하고, 확인 후 `false` 전환
 
 > 핵심 원칙: **주문 크기보다 생존이 우선**. 초반 1~2주는 수익보다 안정성 검증에 집중.
@@ -49,7 +49,8 @@ sudo systemctl enable --now bithumb-bot-backup.timer
    - `MAX_DAILY_ORDER_COUNT=6`
 3. 실주문 전에는 `LIVE_DRY_RUN=true`
 4. `KILL_SWITCH=false` 확인 (비상 시에만 true)
-5. API 키는 `LIVE_DRY_RUN=false` 전환 직전에만 주입
+5. `KILL_SWITCH_LIQUIDATE=false` 확인 (청산 모드 미구현; true면 기동 실패)
+6. API 키는 `LIVE_DRY_RUN=false` 전환 직전에만 주입
 
 ### B. 기동 전/직후 점검
 
@@ -216,3 +217,4 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
+- `KILL_SWITCH_LIQUIDATE=true`는 현재 미지원(설정 시 기동 실패)

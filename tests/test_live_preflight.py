@@ -13,6 +13,7 @@ def _restore_settings():
         "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
         "MAX_DAILY_ORDER_COUNT": settings.MAX_DAILY_ORDER_COUNT,
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
     }
@@ -62,6 +63,24 @@ def test_live_preflight_requires_credentials_when_not_dry_run() -> None:
     assert "BITHUMB_API_KEY is required when LIVE_DRY_RUN=false" in msg
     assert "BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false" in msg
 
+
+
+
+def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert (
+        "KILL_SWITCH_LIQUIDATE=true is not supported yet; keep KILL_SWITCH_LIQUIDATE=false"
+        in str(exc.value)
+    )
 
 def test_live_preflight_allows_dry_run_without_credentials() -> None:
     object.__setattr__(settings, "MODE", "live")
