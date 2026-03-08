@@ -16,7 +16,13 @@ from . import runtime_state
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
-LIVE_UNRESOLVED_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
+LIVE_UNRESOLVED_ORDER_STATUSES = (
+    "PENDING_SUBMIT",
+    "NEW",
+    "PARTIAL",
+    "SUBMIT_UNKNOWN",
+    "RECOVERY_REQUIRED",
+)
 
 
 def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
@@ -32,7 +38,11 @@ def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
             LIVE_UNRESOLVED_ORDER_STATUSES,
         ).fetchone()
         open_count = int(row["open_count"])
-        oldest_created_ts = int(row["oldest_created_ts"]) if row["oldest_created_ts"] is not None else None
+        oldest_created_ts = (
+            int(row["oldest_created_ts"])
+            if row["oldest_created_ts"] is not None
+            else None
+        )
         if open_count <= 0 or oldest_created_ts is None:
             return 0, None
         age_sec = max(0.0, (now_ms - oldest_created_ts) / 1000)
@@ -75,6 +85,38 @@ def _halt_trading(reason: str) -> None:
     notify(f"trading halted: {reason}")
 
 
+def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
+    from .recovery import cancel_open_orders_with_broker
+
+    try:
+        summary = cancel_open_orders_with_broker(broker)
+    except Exception as e:
+        notify(
+            f"emergency open-order cancellation failed ({trigger}): "
+            f"{type(e).__name__}: {e}"
+        )
+        return False
+
+    remote_open_count = int(summary["remote_open_count"])
+    canceled_count = int(summary["canceled_count"])
+    failed_count = int(summary["failed_count"])
+    notify(
+        "emergency open-order cancellation pass "
+        f"({trigger}): remote_open={remote_open_count} "
+        f"canceled={canceled_count} failed={failed_count}"
+    )
+
+    for message in summary["stray_messages"]:
+        notify(message)
+    for message in summary["error_messages"]:
+        notify(message)
+
+    if failed_count > 0:
+        notify("emergency stop remains halted: open-order cancellation incomplete")
+        return False
+    return True
+
+
 def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import reconcile_with_broker
 
@@ -89,7 +131,10 @@ def run_loop(short_n: int, long_n: int) -> None:
             _halt_trading(f"initial reconcile failed ({type(e).__name__}): {e}")
 
     sec = parse_interval_sec(settings.INTERVAL)
-    print(f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}")
+    print(
+        f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} "
+        f"INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}"
+    )
     print("중지: Ctrl+C")
     fail_count = 0
     MAX_FAILS = 5
@@ -138,7 +183,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                     retry_at = time.time() + FAILSAFE_RETRY_DELAY_SEC
                     runtime_state.disable_trading_until(retry_at)
                     notify(
-                        f"failsafe enabled after consecutive sync failures. "
+                        "failsafe enabled after consecutive sync failures. "
                         f"trading paused until epoch={int(retry_at)}"
                     )
                 continue
@@ -146,14 +191,27 @@ def run_loop(short_n: int, long_n: int) -> None:
             stale_cutoff_sec = sec * 2
             if candle_age_sec > stale_cutoff_sec:
                 notify(
-                    f"stale candle detected: age={candle_age_sec:.1f}s > {stale_cutoff_sec}s; order blocked"
+                    f"stale candle detected: age={candle_age_sec:.1f}s > "
+                    f"{stale_cutoff_sec}s; order blocked"
                 )
                 continue
 
             if settings.MODE == "live" and broker is not None:
+                if settings.KILL_SWITCH:
+                    canceled_ok = _attempt_open_order_cancellation(
+                        broker, trigger="kill-switch"
+                    )
+                    if not canceled_ok:
+                        _halt_trading("KILL_SWITCH=ON; emergency cancellation failed")
+                    else:
+                        _halt_trading("KILL_SWITCH=ON; emergency cancellation attempted")
+                    continue
+
                 open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
                 if open_count > 0:
-                    min_reconcile_sec = max(1, int(settings.OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC))
+                    min_reconcile_sec = max(
+                        1, int(settings.OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC)
+                    )
                     if (
                         last_open_order_reconcile_at is None
                         or (now - last_open_order_reconcile_at) >= min_reconcile_sec
@@ -162,7 +220,9 @@ def run_loop(short_n: int, long_n: int) -> None:
                             reconcile_with_broker(broker)
                             last_open_order_reconcile_at = now
                         except Exception as e:
-                            _halt_trading(f"periodic reconcile failed ({type(e).__name__}): {e}")
+                            _halt_trading(
+                                f"periodic reconcile failed ({type(e).__name__}): {e}"
+                            )
                             continue
 
                     open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
@@ -170,11 +230,25 @@ def run_loop(short_n: int, long_n: int) -> None:
                         max_age_sec = max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC))
                         if oldest_open_age_sec > max_age_sec:
                             reason = (
-                                f"stale unresolved open order detected: "
+                                "stale unresolved open order detected: "
                                 f"age={oldest_open_age_sec:.1f}s > {max_age_sec}s"
                             )
-                            marked = _mark_open_orders_recovery_required(reason, int(now * 1000))
-                            _halt_trading(f"{reason}; marked={marked} recovery_required")
+                            marked = _mark_open_orders_recovery_required(
+                                reason, int(now * 1000)
+                            )
+                            canceled_ok = _attempt_open_order_cancellation(
+                                broker, trigger="stale-open-order-halt"
+                            )
+                            if not canceled_ok:
+                                _halt_trading(
+                                    f"{reason}; marked={marked} recovery_required; "
+                                    "emergency cancellation failed"
+                                )
+                            else:
+                                _halt_trading(
+                                    f"{reason}; marked={marked} recovery_required; "
+                                    "emergency cancellation attempted"
+                                )
                             continue
 
                     if open_count > 0:
@@ -191,7 +265,8 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             print(
                 f"[RUN] {kst_str(r['ts'])} close={r['last_close']:,.0f}  "
-                f"SMA{short_n}={r['curr_s']:.2f}  SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}"
+                f"SMA{short_n}={r['curr_s']:.2f}  "
+                f"SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}"
             )
 
             if r["signal"] not in ("BUY", "SELL"):
@@ -202,7 +277,9 @@ def run_loop(short_n: int, long_n: int) -> None:
                 trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
                 try:
-                    trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
+                    trade = live_execute_signal(
+                        broker, r["signal"], r["ts"], r["last_close"]
+                    )
                 except BrokerError as e:
                     _halt_trading(f"live execution broker error ({type(e).__name__}): {e}")
                     continue
@@ -217,8 +294,10 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             if trade:
                 print(
-                    f"  [{settings.MODE.upper()}] {trade['side']} qty={trade['qty']:.8f} price={trade['price']:,.0f} "
-                    f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} asset={trade['asset']:.8f}"
+                    f"  [{settings.MODE.upper()}] {trade['side']} "
+                    f"qty={trade['qty']:.8f} price={trade['price']:,.0f} "
+                    f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} "
+                    f"asset={trade['asset']:.8f}"
                 )
 
     except KeyboardInterrupt:
