@@ -5,10 +5,11 @@
 실거래 초기값은 아래처럼 보수적으로 시작한다.
 
 - `MAX_ORDER_KRW=30000` (계정의 약 3%)
-- `MAX_DAILY_LOSS_KRW=20000` (계정의 약 2% 손실 시 당일 중단)
+- `MAX_DAILY_LOSS_KRW=20000` (계정의 약 2% 손실 시 즉시 HALT(무기한 중지, 자동 재개 없음))
 - `MAX_DAILY_ORDER_COUNT=6` (과매매/오작동 노출 축소)
 - `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off, **청산 모드 미구현으로 true 금지**)
 - `LIVE_DRY_RUN=true`로 먼저 운영 경로를 검증하고, 확인 후 `false` 전환
+- 일 손실 한도 초과 시 엔진은 신규 주문 전 단계에서 거래를 **영구 HALT**하고 오픈주문 취소만 1회 시도한다(자동 재개/강제 청산 없음).
 
 > 핵심 원칙: **주문 크기보다 생존이 우선**. 초반 1~2주는 수익보다 안정성 검증에 집중.
 

@@ -45,11 +45,13 @@ class _LoopConn:
     def execute(self, query, params=None):
         q = " ".join(str(query).split())
         if "FROM candles" in q:
-            return _Rows({"ts": int(10_000_000_000_000)})
+            return _Rows({"ts": int(10_000_000_000_000), "close": 100.0})
         if "COUNT(*) AS open_count" in q:
             if self.open_order_created_ts is None:
                 return _Rows({"open_count": 0, "oldest_created_ts": None})
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
+        if "FROM portfolio" in q:
+            return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0
@@ -101,6 +103,10 @@ def _prepare_run_loop(monkeypatch, *, open_order_created_ts: int | None = None) 
     loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts)
     monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: loop_conn)
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: object())
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (False, "ok"),
+    )
 
     ticks = iter([10.0, 11.0])
     monkeypatch.setattr("bithumb_bot.engine.time.time", lambda: next(ticks, 11.0))
@@ -259,6 +265,77 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
     assert state.trading_enabled is True
     assert state.retry_at_epoch_sec is None
     assert called["n"] == 1
+
+
+
+def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (True, "daily loss limit exceeded (60,000/50,000 KRW)"),
+    )
+
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
+    assert state.last_disable_reason is not None
+    assert "daily loss limit exceeded" in state.last_disable_reason
+    assert called["n"] == 0
+
+
+def test_run_loop_daily_loss_breach_attempts_open_order_cancel(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (True, "daily loss limit exceeded (60,000/50,000 KRW)"),
+    )
+
+    cancel_calls = {"n": 0}
+
+    def _cancel(_broker, trigger: str):
+        cancel_calls["n"] += 1
+        assert trigger == "daily-loss-halt"
+        return True
+
+    monkeypatch.setattr("bithumb_bot.engine._attempt_open_order_cancellation", _cancel)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    assert cancel_calls["n"] == 1
+
+
+def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (True, "daily loss limit exceeded (60,000/50,000 KRW)"),
+    )
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
+    assert all("attempting auto-resume" not in n for n in notifications)
 
 class _DummyClient:
     def __init__(self, responses):

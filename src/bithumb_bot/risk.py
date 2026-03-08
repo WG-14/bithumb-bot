@@ -97,6 +97,18 @@ def _daily_loss_exceeded(conn: sqlite3.Connection, ts_ms: int, cash: float, qty:
     return False, "ok"
 
 
+def evaluate_daily_loss_breach(
+    conn: sqlite3.Connection,
+    *,
+    ts_ms: int,
+    cash: float,
+    qty: float,
+    price: float,
+) -> tuple[bool, str]:
+    """Returns whether current portfolio equity already breached the daily loss limit."""
+    return _daily_loss_exceeded(conn, ts_ms, cash, qty, price)
+
+
 def evaluate_order_submission_halt(
     conn: sqlite3.Connection,
     *,
@@ -110,7 +122,13 @@ def evaluate_order_submission_halt(
     if settings.KILL_SWITCH:
         return True, "KILL_SWITCH=ON"
 
-    blocked, reason = _daily_loss_exceeded(conn, ts_ms, cash, qty, price)
+    blocked, reason = evaluate_daily_loss_breach(
+        conn,
+        ts_ms=ts_ms,
+        cash=cash,
+        qty=qty,
+        price=price,
+    )
     if blocked:
         return True, reason
 

@@ -14,6 +14,7 @@ from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from . import runtime_state
+from .risk import evaluate_daily_loss_breach
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
@@ -179,17 +180,20 @@ def run_loop(short_n: int, long_n: int) -> None:
             try:
                 cmd_sync(quiet=True)
                 conn = ensure_db()
-                row = conn.execute(
-                    "SELECT ts FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
-                    (settings.PAIR, settings.INTERVAL),
-                ).fetchone()
-                conn.close()
+                try:
+                    row = conn.execute(
+                        "SELECT ts, close FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
+                        (settings.PAIR, settings.INTERVAL),
+                    ).fetchone()
+                finally:
+                    conn.close()
 
                 if row is None:
                     notify("no candles after sync")
                     continue
 
                 last_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
+                last_close = float(row["close"] if hasattr(row, "keys") else row[1])
                 candle_age_sec = max(0.0, (time.time() * 1000 - last_ts) / 1000)
                 runtime_state.set_last_candle_age_sec(candle_age_sec)
 
@@ -226,6 +230,34 @@ def run_loop(short_n: int, long_n: int) -> None:
                     else:
                         _halt_trading("KILL_SWITCH=ON; emergency cancellation attempted")
                     continue
+
+                conn = ensure_db()
+                try:
+                    portfolio = conn.execute(
+                        "SELECT cash_krw, asset_qty FROM portfolio WHERE id=1"
+                    ).fetchone()
+                    if portfolio is not None:
+                        # Use latest candle close as the mark price for daily-loss evaluation.
+                        blocked, reason = evaluate_daily_loss_breach(
+                            conn,
+                            ts_ms=int(now * 1000),
+                            cash=float(portfolio["cash_krw"]),
+                            qty=float(portfolio["asset_qty"]),
+                            price=float(last_close),
+                        )
+                        if blocked:
+                            canceled_ok = _attempt_open_order_cancellation(
+                                broker, trigger="daily-loss-halt"
+                            )
+                            suffix = (
+                                "emergency cancellation attempted"
+                                if canceled_ok
+                                else "emergency cancellation failed"
+                            )
+                            _halt_trading(f"{reason}; {suffix}")
+                            continue
+                finally:
+                    conn.close()
 
                 open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
                 if open_count > 0:
