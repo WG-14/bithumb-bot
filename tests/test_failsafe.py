@@ -5,12 +5,37 @@ import httpx
 from bithumb_bot import runtime_state
 from bithumb_bot.engine import get_health_status
 from bithumb_bot.marketdata import _get_with_retry
-
+from bithumb_bot.db_core import ensure_db
 
 from bithumb_bot.config import settings
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.engine import run_loop
 
+
+
+
+def _set_tmp_db(tmp_path):
+    db_path = tmp_path / "failsafe.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    return db_path
+
+
+def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            )
+            VALUES (?, NULL, ?, 'BUY', NULL, 0.01, 0.0, ?, ?, NULL)
+            """,
+            (client_order_id, status, created_ts, created_ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 class _LoopConn:
     def __init__(self, *, open_order_created_ts: int | None = None):
@@ -185,6 +210,55 @@ def test_run_loop_unresolved_open_order_blocks_new_trading(monkeypatch):
     assert called["n"] == 0
     assert runtime_state.snapshot().trading_enabled is True
 
+
+
+
+def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="startup_block", created_ts=1)
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    called = {"n": 0}
+
+    def _live_execute(*_args, **_kwargs):
+        called["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _live_execute)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
+    assert state.last_disable_reason == "startup recovery gate: unresolved/recovery-required state exists"
+    assert called["n"] == 0
+    assert sum("event=trading_halted" in n for n in notifications) == 1
+
+
+def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    called = {"n": 0}
+
+    def _live_execute(*_args, **_kwargs):
+        called["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", _live_execute)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.retry_at_epoch_sec is None
+    assert called["n"] == 1
 
 class _DummyClient:
     def __init__(self, responses):

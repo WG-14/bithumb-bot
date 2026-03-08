@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 
 from .config import settings, validate_live_mode_preflight
@@ -16,6 +17,9 @@ from . import runtime_state
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
+STARTUP_RECOVERY_GATE_REASON = (
+    "startup recovery gate: unresolved/recovery-required state exists"
+)
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
     "NEW",
@@ -135,6 +139,13 @@ def run_loop(short_n: int, long_n: int) -> None:
             reconcile_with_broker(broker)
         except Exception as e:
             _halt_trading(f"initial reconcile failed ({type(e).__name__}): {e}")
+            return
+
+        runtime_state.refresh_open_order_health()
+        startup_state = runtime_state.snapshot()
+        if startup_state.recovery_required_count > 0:
+            _halt_trading(STARTUP_RECOVERY_GATE_REASON)
+            return
 
     sec = parse_interval_sec(settings.INTERVAL)
     print(
@@ -154,11 +165,14 @@ def run_loop(short_n: int, long_n: int) -> None:
             now = time.time()
 
             state = runtime_state.snapshot()
-            if (not state.trading_enabled) and state.retry_at_epoch_sec and now < state.retry_at_epoch_sec:
-                wait_sec = int(state.retry_at_epoch_sec - now)
-                print(f"[RUN] failsafe active. trading paused for {wait_sec}s")
-                continue
-            if (not state.trading_enabled) and state.retry_at_epoch_sec and now >= state.retry_at_epoch_sec:
+            if (not state.trading_enabled) and state.retry_at_epoch_sec:
+                if math.isinf(state.retry_at_epoch_sec):
+                    print("[RUN] trading halted indefinitely. exiting run loop.")
+                    return
+                if now < state.retry_at_epoch_sec:
+                    wait_sec = max(0, int(state.retry_at_epoch_sec - now))
+                    print(f"[RUN] failsafe active. trading paused for {wait_sec}s")
+                    continue
                 runtime_state.enable_trading()
                 notify("failsafe retry window reached, attempting auto-resume")
 
@@ -231,7 +245,9 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             continue
 
-                    open_count, oldest_open_age_sec = _get_open_order_snapshot(int(now * 1000))
+                    open_count, oldest_open_age_sec = _get_open_order_snapshot(
+                        int(now * 1000)
+                    )
                     if open_count > 0 and oldest_open_age_sec is not None:
                         max_age_sec = max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC))
                         if oldest_open_age_sec > max_age_sec:
