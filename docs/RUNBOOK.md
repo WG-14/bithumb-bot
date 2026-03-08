@@ -108,3 +108,21 @@ uv run python bot.py health
 ```bash
 sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_120000.sqlite"
 ```
+
+
+## 7) Live 모드 사전 점검 (fail-fast)
+
+`MODE=live`로 시작하면 런타임 시작 전에 아래 항목을 강제 검증한다. 하나라도 누락되면 즉시 종료된다.
+
+- `MAX_ORDER_KRW > 0`
+- `MAX_DAILY_LOSS_KRW > 0`
+- `MAX_DAILY_ORDER_COUNT > 0`
+- `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
+
+운영 권장값 예시(보수적):
+
+- `MAX_ORDER_KRW=100000`
+- `MAX_DAILY_LOSS_KRW=50000`
+- `MAX_DAILY_ORDER_COUNT=20`
+- 초기 점검 단계에서는 `LIVE_DRY_RUN=true`로 검증 후 실거래 전환
+
