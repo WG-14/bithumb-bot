@@ -51,6 +51,7 @@ class _Rows:
 
 def _prepare_run_loop(monkeypatch, *, open_order_created_ts: int | None = None) -> _LoopConn:
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "KILL_SWITCH", False)
     object.__setattr__(settings, "INTERVAL", "1m")
     object.__setattr__(settings, "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", 30)
     object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 900)
