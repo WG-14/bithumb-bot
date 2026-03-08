@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from .config import settings
+from .config import settings, validate_live_mode_preflight
 from .marketdata import cmd_sync
 from .strategy.sma import compute_signal
 from .broker.paper import paper_execute
@@ -77,6 +77,8 @@ def _halt_trading(reason: str) -> None:
 
 def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import reconcile_with_broker
+
+    validate_live_mode_preflight(settings)
 
     broker = None
     if settings.MODE == "live":

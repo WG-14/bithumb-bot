@@ -51,7 +51,35 @@ class Settings:
     LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
     OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC: int = int(
         os.getenv("OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", "30")
-)
+    )
     MAX_OPEN_ORDER_AGE_SEC: int = int(os.getenv("MAX_OPEN_ORDER_AGE_SEC", "900"))
 
 settings = Settings()
+
+
+class LiveModeValidationError(ValueError):
+    pass
+
+
+def validate_live_mode_preflight(cfg: Settings) -> None:
+    if cfg.MODE != "live":
+        return
+
+    issues: list[str] = []
+    if cfg.MAX_ORDER_KRW <= 0:
+        issues.append("MAX_ORDER_KRW must be > 0")
+    if cfg.MAX_DAILY_LOSS_KRW <= 0:
+        issues.append("MAX_DAILY_LOSS_KRW must be > 0")
+    if cfg.MAX_DAILY_ORDER_COUNT <= 0:
+        issues.append("MAX_DAILY_ORDER_COUNT must be > 0")
+
+    if not cfg.LIVE_DRY_RUN:
+        if not cfg.BITHUMB_API_KEY.strip():
+            issues.append("BITHUMB_API_KEY is required when LIVE_DRY_RUN=false")
+        if not cfg.BITHUMB_API_SECRET.strip():
+            issues.append("BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false")
+
+    if issues:
+        raise LiveModeValidationError(
+            "live mode preflight validation failed: " + "; ".join(issues)
+        )
