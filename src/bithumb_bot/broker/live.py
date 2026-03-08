@@ -7,7 +7,7 @@ from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
-from ..notifier import notify
+from ..notifier import format_event, notify
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from ..oms import record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
@@ -160,6 +160,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             status="PENDING_SUBMIT",
         )
         record_submit_started(client_order_id, conn=conn)
+        notify(format_event("order_submit_started", client_order_id=client_order_id, side=side, status="PENDING_SUBMIT"))
         conn.commit()
 
         try:
@@ -167,19 +168,47 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         except BrokerTemporaryError as e:
             err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
             set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=str(err), conn=conn)
+            notify(
+                format_event(
+                    "order_submit_unknown",
+                    client_order_id=client_order_id,
+                    side=side,
+                    status="SUBMIT_UNKNOWN",
+                    reason=str(err),
+                )
+            )
             conn.commit()
             return None
 
         if order.exchange_order_id:
             set_exchange_order_id(client_order_id, order.exchange_order_id, conn=conn)
+            notify(
+                format_event(
+                    "exchange_order_id_attached",
+                    client_order_id=client_order_id,
+                    exchange_order_id=order.exchange_order_id,
+                    side=side,
+                    status=order.status,
+                )
+            )
         set_status(client_order_id, order.status, conn=conn)
 
         if not order.exchange_order_id:
+            reason = "submit acknowledged without exchange_order_id; manual recovery required"
             set_status(
                 client_order_id,
                 "RECOVERY_REQUIRED",
-                last_error="submit acknowledged without exchange_order_id; manual recovery required",
+                last_error=reason,
                 conn=conn,
+            )
+            notify(
+                format_event(
+                    "recovery_required_transition",
+                    client_order_id=client_order_id,
+                    side=side,
+                    status="RECOVERY_REQUIRED",
+                    reason=reason,
+                )
             )
             conn.commit()
             return None

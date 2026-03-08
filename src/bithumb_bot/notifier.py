@@ -23,6 +23,16 @@ def _post_json(url: str, payload: dict[str, Any]) -> None:
     timeout = _timeout_sec()
     httpx.post(url, json=payload, timeout=timeout)
 
+def format_event(event: str, **fields: Any) -> str:
+    parts = [f"event={event}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        parts.append(f"{key}={text}")
+    return " ".join(parts)
 
 def notify(msg: str) -> None:
     if not _is_enabled():

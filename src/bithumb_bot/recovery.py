@@ -7,6 +7,7 @@ from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_por
 from .execution import apply_fill_and_trade, record_order_if_missing
 from .oms import get_open_orders, set_exchange_order_id, set_status
 from . import runtime_state
+from .notifier import format_event, notify
 
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
@@ -152,18 +153,50 @@ def reconcile_with_broker(broker: Broker) -> None:
         for row in local_open:
             oid = row["client_order_id"]
             if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
+                reason = "submit_unknown without exchange_order_id; manual recovery required"
                 set_status(
                     oid,
                     "RECOVERY_REQUIRED",
-                    last_error="submit_unknown without exchange_order_id; manual recovery required",
+                    last_error=reason,
                     conn=conn,
+                )
+                notify(
+                    format_event(
+                        "recovery_required_transition",
+                        client_order_id=oid,
+                        side=row["side"],
+                        status="RECOVERY_REQUIRED",
+                        reason=reason,
+                    )
                 )
                 continue
 
             remote = broker.get_order(client_order_id=oid, exchange_order_id=row["exchange_order_id"])
             if remote.exchange_order_id:
                 set_exchange_order_id(oid, remote.exchange_order_id, conn=conn)
+                notify(
+                    format_event(
+                        "exchange_order_id_attached",
+                        client_order_id=oid,
+                        exchange_order_id=remote.exchange_order_id,
+                        side=row["side"],
+                        status=remote.status,
+                        reason="reconcile",
+                    )
+                )
+            prev_status = row["status"]
             set_status(oid, remote.status, conn=conn)
+            if prev_status != remote.status:
+                notify(
+                    format_event(
+                        "reconcile_status_change",
+                        client_order_id=oid,
+                        exchange_order_id=remote.exchange_order_id,
+                        side=row["side"],
+                        status=remote.status,
+                        reason=f"from={prev_status}",
+                    )
+                )
             fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
             for fill in fills:
                 apply_fill_and_trade(
@@ -201,6 +234,16 @@ def reconcile_with_broker(broker: Broker) -> None:
             )
             set_exchange_order_id(oid, exid, conn=conn)
             set_status(oid, remote.status, last_error="stray remote open order detected", conn=conn)
+            notify(
+                format_event(
+                    "reconcile_status_change",
+                    client_order_id=oid,
+                    exchange_order_id=exid,
+                    side=remote.side,
+                    status=remote.status,
+                    reason="stray remote open order detected",
+                )
+            )
 
         _sync_recent_order_activity(conn, broker.get_recent_orders(limit=100))
         _apply_recent_fills(conn, broker.get_recent_fills(limit=100))

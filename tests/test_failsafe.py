@@ -110,7 +110,7 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert "BrokerRejectError" in state.last_disable_reason
-    assert any("trading halted" in n for n in notifications)
+    assert any("event=trading_halted" in n for n in notifications)
 
 
 def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
