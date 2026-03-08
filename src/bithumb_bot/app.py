@@ -13,7 +13,9 @@ from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import get_health_status
-from .recovery import cancel_open_orders_with_broker
+from .recovery import cancel_open_orders_with_broker, reconcile_with_broker
+from .runtime_state import disable_trading_until, enable_trading
+from .oms import OPEN_ORDER_STATUSES
 
 import httpx
 
@@ -64,7 +66,7 @@ def sma(values, n: int):
 
 
 def cmd_signal(short_n: int, long_n: int):
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db(settings.DB_PATH)
     r = compute_signal(conn, short_n, long_n)
     conn.close()
     if r is None:
@@ -571,6 +573,82 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
 
 
+def _load_recovery_report() -> dict[str, int | float | None]:
+    conn = ensure_db(settings.DB_PATH)
+    try:
+        placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
+        unresolved_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS unresolved_count, MIN(created_ts) AS oldest_created_ts
+            FROM orders
+            WHERE status IN ({placeholders})
+            """,
+            OPEN_ORDER_STATUSES,
+        ).fetchone()
+        recovery_required_row = conn.execute(
+            "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    unresolved_count = int(unresolved_row["unresolved_count"] if unresolved_row else 0)
+    recovery_required_count = int(recovery_required_row["recovery_required_count"] if recovery_required_row else 0)
+    oldest_created_ts = unresolved_row["oldest_created_ts"] if unresolved_row else None
+    oldest_age_sec = None
+    if unresolved_count > 0 and oldest_created_ts is not None:
+        oldest_age_sec = max(0.0, (time.time() * 1000 - float(oldest_created_ts)) / 1000)
+
+    return {
+        "unresolved_count": unresolved_count,
+        "recovery_required_count": recovery_required_count,
+        "oldest_unresolved_age_sec": oldest_age_sec,
+    }
+
+
+def cmd_recovery_report() -> None:
+    report = _load_recovery_report()
+    print("[RECOVERY-REPORT]")
+    print(f"  unresolved_open_orders={report['unresolved_count']}")
+    print(f"  recovery_required_orders={report['recovery_required_count']}")
+    if report["oldest_unresolved_age_sec"] is None:
+        print("  oldest_unresolved_age_sec=none")
+    else:
+        print(f"  oldest_unresolved_age_sec={float(report['oldest_unresolved_age_sec']):.1f}")
+
+
+def cmd_pause() -> None:
+    disable_trading_until(float("inf"), reason="manual operator pause")
+    print("[PAUSE] trading disabled via persistent runtime state")
+
+
+def cmd_resume(force: bool = False) -> None:
+    report = _load_recovery_report()
+    unresolved_count = int(report["unresolved_count"])
+    recovery_required_count = int(report["recovery_required_count"])
+    if (unresolved_count > 0 or recovery_required_count > 0) and not force:
+        print("[RESUME] refused: unresolved orders/recovery-required state still exists")
+        print("  run `uv run python bot.py recovery-report` for details")
+        print("  or resume explicitly with `uv run python bot.py resume --force`")
+        raise SystemExit(1)
+
+    enable_trading()
+    if force and (unresolved_count > 0 or recovery_required_count > 0):
+        print("[RESUME] forced: trading enabled despite unresolved/recovery-required state")
+    else:
+        print("[RESUME] trading enabled")
+
+
+def cmd_reconcile() -> None:
+    if settings.MODE != "live":
+        print(f"[RECONCILE] skipped: MODE={settings.MODE} (live only)")
+        return
+
+    from .broker.bithumb import BithumbBroker
+
+    reconcile_with_broker(BithumbBroker())
+    print("[RECONCILE] completed one live reconciliation pass")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -602,6 +680,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health")
     sub.add_parser("audit-ledger")
     sub.add_parser("cancel-open-orders")
+    sub.add_parser("pause")
+
+    resume = sub.add_parser("resume")
+    resume.add_argument("--force", action="store_true")
+
+    sub.add_parser("reconcile")
+    sub.add_parser("recovery-report")
 
     report = sub.add_parser("report")
     report.add_argument("--days", type=int, default=30)
@@ -643,6 +728,14 @@ def main(argv: list[str] | None = None) -> int:
         cmd_audit_ledger()
     elif args.cmd == "cancel-open-orders":
         cmd_cancel_open_orders()
+    elif args.cmd == "pause":
+        cmd_pause()
+    elif args.cmd == "resume":
+        cmd_resume(force=bool(args.force))
+    elif args.cmd == "reconcile":
+        cmd_reconcile()
+    elif args.cmd == "recovery-report":
+        cmd_recovery_report()
     elif args.cmd == "run":
         cmd_run(args.short, args.long)
     else:

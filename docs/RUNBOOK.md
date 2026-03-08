@@ -73,6 +73,32 @@ uv run python bot.py cancel-open-orders
 - 로컬 매칭이 없는 원격 주문은 보수적으로 취소하되, `stray remote order canceled ...` 메시지로 별도 출력한다.
 - 취소 실패 건은 `failed_count` 및 에러 메시지로 출력되므로, 실패가 있으면 재실행 또는 수동 확인이 필요하다.
 
+
+### B-2. 수동 안전 제어 명령 (pause/resume/reconcile/recovery-report)
+
+```bash
+# 즉시 신규 거래 중지 (상태는 DB에 영속 저장)
+uv run python bot.py pause
+
+# 미해결 주문/복구 필요 상태 요약
+uv run python bot.py recovery-report
+
+# 보수적 재개: 미해결 상태가 있으면 거부
+uv run python bot.py resume
+
+# 운영자 책임 하 강제 재개
+uv run python bot.py resume --force
+
+# live 모드에서 복구/정합성 1회 패스 실행
+uv run python bot.py reconcile
+```
+
+- `pause`: `bot_health` 영속 상태로 거래를 비활성화한다.
+- `resume`: 기본값은 보수적으로 동작하며, `RECOVERY_REQUIRED` 또는 미해결 오픈 주문이 있으면 실패한다.
+- `resume --force`: 미해결 상태가 남아 있어도 운영자 확인 하에 강제로 거래를 활성화한다.
+- `reconcile`: `MODE=live`에서만 브로커 기반 정합성 점검을 1회 수행한다.
+- `recovery-report`: 미해결 주문 수, `RECOVERY_REQUIRED` 수, 가장 오래된 미해결 주문 age를 간단히 출력한다.
+
 ### C. 잔고 불일치
 
 1. `uv run python bot.py audit` 실행.
