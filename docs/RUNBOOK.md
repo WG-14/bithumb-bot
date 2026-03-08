@@ -66,7 +66,7 @@ uv run python bot.py recovery-report
 
 - 서비스가 `active (running)`인지 확인.
 - `health`에서 `last_candle_age_sec`, `error_count`, `trading_enabled` 확인.
-- `recovery-report`에서 unresolved/recovery-required 건수 확인.
+- `recovery-report`에서 unresolved/recovery-required 건수와 오래된 미해결 주문 요약(top 5) 확인.
 
 ## 4) 기본 점검
 
@@ -106,6 +106,7 @@ sudo journalctl -u bithumb-bot.service -n 200 --no-pager
 - 최근 오류가 API/네트워크/인증 중 무엇인지
 - 미해결 주문(`unresolved_orders`) 존재 여부
 - 복구 필요 주문(`recovery_required_orders`) 존재 여부
+- 오래된 주문 요약에서 `client_order_id`, `exchange_order_id`, `last_error`를 우선 확인해 복구 우선순위 결정
 
 ### C. 복구 액션 (필요 시 순서대로)
 

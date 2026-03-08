@@ -581,7 +581,10 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
 
 
-def _load_recovery_report() -> dict[str, int | float | None]:
+def _load_recovery_report(
+    *,
+    oldest_limit: int = 5,
+) -> dict[str, int | float | None | list[dict[str, str | float]]]:
     conn = ensure_db(settings.DB_PATH)
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
@@ -596,6 +599,16 @@ def _load_recovery_report() -> dict[str, int | float | None]:
         recovery_required_row = conn.execute(
             "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
         ).fetchone()
+        oldest_rows = conn.execute(
+            f"""
+            SELECT client_order_id, status, exchange_order_id, created_ts, last_error
+            FROM orders
+            WHERE status IN ({placeholders})
+            ORDER BY created_ts ASC
+            LIMIT ?
+            """,
+            (*OPEN_ORDER_STATUSES, oldest_limit),
+        ).fetchall()
     finally:
         conn.close()
 
@@ -606,10 +619,25 @@ def _load_recovery_report() -> dict[str, int | float | None]:
     if unresolved_count > 0 and oldest_created_ts is not None:
         oldest_age_sec = max(0.0, (time.time() * 1000 - float(oldest_created_ts)) / 1000)
 
+    now_ms = time.time() * 1000
+    oldest_orders: list[dict[str, str | float]] = []
+    for row in oldest_rows:
+        last_error = str(row["last_error"] or "").strip()
+        oldest_orders.append(
+            {
+                "client_order_id": str(row["client_order_id"]),
+                "status": str(row["status"]),
+                "exchange_order_id": str(row["exchange_order_id"] or "-"),
+                "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
+                "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+            }
+        )
+
     return {
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
         "oldest_unresolved_age_sec": oldest_age_sec,
+        "oldest_orders": oldest_orders,
     }
 
 
@@ -622,6 +650,18 @@ def cmd_recovery_report() -> None:
         print("  oldest_unresolved_age_sec=none")
     else:
         print(f"  oldest_unresolved_age_sec={float(report['oldest_unresolved_age_sec']):.1f}")
+    oldest_orders = report.get("oldest_orders") or []
+    if oldest_orders:
+        print(f"  oldest_unresolved_orders(top {len(oldest_orders)}):")
+        for item in oldest_orders:
+            print(
+                "    - "
+                f"client_order_id={item['client_order_id']} "
+                f"status={item['status']} "
+                f"exchange_order_id={item['exchange_order_id']} "
+                f"age_sec={float(item['age_sec']):.1f} "
+                f"last_error={item['last_error']}"
+            )
 
 
 def cmd_pause() -> None:

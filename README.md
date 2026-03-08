@@ -66,7 +66,7 @@ uv run python bot.py run --short 7 --long 30
 
 1. `.env` 또는 `/etc/bithumb-bot/bithumb-bot.env`에 라이브 안전값이 반영되었는지 확인
 2. `uv run python bot.py health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
-3. `uv run python bot.py recovery-report`에서 미해결 주문/복구 필요 건수 확인
+3. `uv run python bot.py recovery-report`에서 미해결 주문/복구 필요 건수와 오래된 미해결 주문 요약(top 5) 확인
 4. 처음 라이브 전환 시 `MODE=live`, `LIVE_DRY_RUN=true`로 기동 후 로그/알림 확인
 5. API 키를 활성화하기 전 `pause/resume/reconcile` 명령이 정상 동작하는지 점검
 6. 실주문 전환(`LIVE_DRY_RUN=false`) 직후 30~60분 수동 모니터링
@@ -97,7 +97,7 @@ uv run python bot.py resume
 ## 크래시 후 재개 전 필수 확인
 
 1. `journalctl -u bithumb-bot.service -n 200 --no-pager`로 마지막 예외/네트워크 오류 원인 확인
-2. `uv run python bot.py recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인
+2. `uv run python bot.py recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인 (0이 아니면 오래된 주문 요약 목록으로 우선 대응 대상 확인)
 3. `uv run python bot.py reconcile` 실행 후 다시 `recovery-report` 확인
 4. live 모드면 거래소 오픈 주문/체결 내역과 로컬 `orders/fills`가 일치하는지 샘플 대조
 5. `uv run python bot.py health` 정상 확인 후 `uv run python bot.py resume`

@@ -5,7 +5,7 @@ import time
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.app import _load_recovery_report, cmd_pause, cmd_reconcile, cmd_recover_order, cmd_resume
+from bithumb_bot.app import _load_recovery_report, cmd_pause, cmd_reconcile, cmd_recover_order, cmd_recovery_report, cmd_resume
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
@@ -29,6 +29,18 @@ def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None
             VALUES (?, NULL, ?, 'BUY', NULL, 0.01, 0.0, ?, ?, NULL)
             """,
             (client_order_id, status, created_ts, created_ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _set_last_error(*, client_order_id: str, last_error: str) -> None:
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "UPDATE orders SET last_error=? WHERE client_order_id=?",
+            (last_error, client_order_id),
         )
         conn.commit()
     finally:
@@ -112,6 +124,39 @@ def test_recovery_report_summarizes_unresolved_and_recovery_required(tmp_path):
     assert int(report["recovery_required_count"]) == 1
     assert report["oldest_unresolved_age_sec"] is not None
     assert float(report["oldest_unresolved_age_sec"]) >= 20.0
+    oldest_orders = report["oldest_orders"]
+    assert isinstance(oldest_orders, list)
+    assert len(oldest_orders) == 2
+    assert oldest_orders[0]["client_order_id"] == "open_1"
+    assert oldest_orders[0]["status"] == "NEW"
+    assert oldest_orders[1]["client_order_id"] == "open_2"
+
+
+def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    for i in range(6):
+        _insert_order(
+            status="RECOVERY_REQUIRED" if i % 2 == 0 else "NEW",
+            client_order_id=f"open_{i}",
+            created_ts=now_ms - (60_000 - i * 1_000),
+        )
+    _set_last_error(
+        client_order_id="open_0",
+        last_error="timeout while polling exchange status endpoint due to transient error and retry budget exceeded",
+    )
+
+    cmd_recovery_report()
+    out = capsys.readouterr().out
+
+    assert "[RECOVERY-REPORT]" in out
+    assert "unresolved_open_orders=6" in out
+    assert "recovery_required_orders=3" in out
+    assert "oldest_unresolved_orders(top 5):" in out
+    assert "client_order_id=open_0" in out
+    assert "client_order_id=open_4" in out
+    assert "client_order_id=open_5" not in out
+    assert "last_error=timeout while polling exchange status endpoint due to transi..." in out
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
