@@ -9,7 +9,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
-from ..oms import record_status_transition, record_submit_started, set_exchange_order_id, set_status
+from ..oms import new_client_order_id, record_status_transition, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -18,8 +18,12 @@ POSITION_EPSILON = 1e-12
 VALID_ORDER_SIDES = {"BUY", "SELL"}
 
 
-def _client_order_id(ts: int, side: str) -> str:
-    return f"live_{ts}_{side.lower()}"
+def _submit_attempt_id() -> str:
+    return new_client_order_id("attempt")
+
+
+def _client_order_id(*, ts: int, side: str, submit_attempt_id: str) -> str:
+    return f"live_{ts}_{side.lower()}_{submit_attempt_id}"
 
 
 def _as_bps(value: float, base: float) -> float:
@@ -37,8 +41,6 @@ def validate_order(*, signal: str, side: str, qty: float, market_price: float) -
         raise ValueError(f"invalid market_price: {market_price}")
     if not math.isfinite(float(qty)) or float(qty) <= 0:
         raise ValueError(f"invalid order qty: {qty}")
-
-
 
 
 def normalize_order_qty(*, qty: float, market_price: float) -> float:
@@ -174,18 +176,14 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             notify(f"live order placement blocked ({side}): {reason}")
             return None
 
-        client_order_id = _client_order_id(ts, side)
-        row = conn.execute(
-            "SELECT status FROM orders WHERE client_order_id=?",
-            (client_order_id,),
-        ).fetchone()
-        if row and row["status"] in ("NEW", "PARTIAL", "FILLED"):
-            return None
+        submit_attempt_id = _submit_attempt_id()
+        client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
 
         # Durable order intent before remote submit.
         record_order_if_missing(
             conn,
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
             side=side,
             qty_req=normalized_qty,
             price=None,

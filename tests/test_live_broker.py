@@ -105,6 +105,23 @@ class _TimeoutBroker(_FakeBroker):
         raise BrokerTemporaryError("timeout")
 
 
+class _CanceledBroker(_FakeBroker):
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "ex1",
+            self._last_side,
+            "CANCELED",
+            self._last_price,
+            self._last_qty,
+            0.0,
+            1,
+            1,
+        )
+
 class _StrayBroker(_FakeBroker):
     def get_open_orders(self) -> list[BrokerOrder]:
         return [BrokerOrder("", "stray1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
@@ -251,16 +268,39 @@ def test_bithumb_broker_dry_run(monkeypatch):
     assert order.exchange_order_id.startswith("dry_")
 
 
-def test_live_execute_idempotent(monkeypatch, tmp_path):
-    object.__setattr__(settings, "DB_PATH", str(tmp_path / "idempotent.sqlite"))
+def test_live_retry_after_cancel_uses_new_attempt_row_and_client_order_id(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "retry_after_cancel.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
 
-    broker = _FakeBroker()
-    t1 = live_execute_signal(broker, "BUY", 1000, 100000000.0)
-    t2 = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+    from bithumb_bot.broker import live as live_module
 
-    assert t1 is not None
-    assert t2 is None
+    attempt_ids = iter(["attempt_a", "attempt_b"])
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
+
+    broker = _CanceledBroker()
+    first = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+    second = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert first is None
+    assert second is None
+
+    conn = ensure_db(str(tmp_path / "retry_after_cancel.sqlite"))
+    rows = conn.execute(
+        """
+        SELECT client_order_id, submit_attempt_id, status
+        FROM orders
+        WHERE client_order_id LIKE 'live_1000_buy_%'
+        ORDER BY id
+        """
+    ).fetchall()
+    conn.close()
+
+    assert len(rows) == 2
+    assert rows[0]["status"] == "CANCELED"
+    assert rows[1]["status"] == "CANCELED"
+    assert rows[0]["submit_attempt_id"] == "attempt_a"
+    assert rows[1]["submit_attempt_id"] == "attempt_b"
+    assert rows[0]["client_order_id"] != rows[1]["client_order_id"]
 
 
 def test_live_open_order_guard_blocks_new_order(tmp_path):
@@ -373,15 +413,16 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert trade is None
 
     conn = ensure_db(str(tmp_path / "submit_unknown.sqlite"))
-    row = conn.execute("SELECT status, last_error FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    row = conn.execute("SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1").fetchone()
     transition = conn.execute(
         """
         SELECT message, order_status
         FROM order_events
-        WHERE client_order_id='live_1000_buy' AND event_type='status_transition'
+        WHERE client_order_id=? AND event_type='status_transition'
         ORDER BY id DESC
         LIMIT 1
-        """
+        """,
+        (row["client_order_id"],),
     ).fetchone()
     conn.close()
 
@@ -408,7 +449,7 @@ def test_live_submit_without_exchange_id_marks_recovery_required(monkeypatch, tm
 
     conn = ensure_db(str(tmp_path / "missing_exchange_id.sqlite"))
     row = conn.execute(
-        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='live_1000_buy'"
+        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
 

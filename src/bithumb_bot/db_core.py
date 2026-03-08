@@ -201,6 +201,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_order_id TEXT NOT NULL UNIQUE,
+            submit_attempt_id TEXT,
             exchange_order_id TEXT,
             status TEXT NOT NULL,
             side TEXT NOT NULL,
@@ -213,6 +214,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    _ensure_column(conn, "orders", "submit_attempt_id", "submit_attempt_id TEXT")
 
     conn.execute(
         """

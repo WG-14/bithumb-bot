@@ -51,6 +51,7 @@ def new_client_order_id(prefix: str = "cli") -> str:
 def create_order(
     *,
     client_order_id: str,
+    submit_attempt_id: str | None = None,
     side: str,
     qty_req: float,
     price: float | None,
@@ -65,11 +66,11 @@ def create_order(
         conn.execute(
             """
             INSERT INTO orders(
-                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+                client_order_id, submit_attempt_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
             )
-            VALUES (?, NULL, ?, ?, ?, ?, 0, ?, ?, NULL)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, NULL)
             """,
-            (client_order_id, status, side, price, float(qty_req), ts, ts),
+            (client_order_id, submit_attempt_id, status, side, price, float(qty_req), ts, ts),
         )
         _record_order_event(
             conn,
