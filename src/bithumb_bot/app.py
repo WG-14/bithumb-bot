@@ -316,7 +316,14 @@ def cmd_audit():
 
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
-    run_loop(short_n, long_n)
+    from .run_lock import RunLockError, acquire_run_lock
+
+    try:
+        with acquire_run_lock():
+            run_loop(short_n, long_n)
+    except RunLockError as e:
+        print(f"[RUN] {e}")
+        raise SystemExit(1) from e
 
 
 def cmd_health() -> None:
