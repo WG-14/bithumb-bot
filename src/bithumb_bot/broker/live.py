@@ -129,6 +129,128 @@ def validate_pretrade(
         raise ValueError(f"slippage guard blocked: bps={slippage_bps:.2f} > limit={slip_limit_bps:.2f}")
 
 
+def _mark_submit_unknown(*, conn, client_order_id: str, side: str, reason: str) -> None:
+    record_status_transition(
+        client_order_id,
+        from_status="PENDING_SUBMIT",
+        to_status="SUBMIT_UNKNOWN",
+        reason=reason,
+        conn=conn,
+    )
+    set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=reason, conn=conn)
+    notify(
+        format_event(
+            "order_submit_unknown",
+            client_order_id=client_order_id,
+            side=side,
+            status="SUBMIT_UNKNOWN",
+            reason=reason,
+        )
+    )
+
+
+def _mark_submit_failed(*, conn, client_order_id: str, side: str, reason: str) -> None:
+    record_status_transition(
+        client_order_id,
+        from_status="PENDING_SUBMIT",
+        to_status="FAILED",
+        reason=reason,
+        conn=conn,
+    )
+    set_status(client_order_id, "FAILED", last_error=reason, conn=conn)
+    notify(
+        format_event(
+            "order_submit_failed",
+            client_order_id=client_order_id,
+            side=side,
+            status="FAILED",
+            reason=reason,
+        )
+    )
+
+
+def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_status: str, reason: str) -> None:
+    record_status_transition(
+        client_order_id,
+        from_status=from_status,
+        to_status="RECOVERY_REQUIRED",
+        reason=reason,
+        conn=conn,
+    )
+    set_status(
+        client_order_id,
+        "RECOVERY_REQUIRED",
+        last_error=reason,
+        conn=conn,
+    )
+    notify(
+        format_event(
+            "recovery_required_transition",
+            client_order_id=client_order_id,
+            side=side,
+            status="RECOVERY_REQUIRED",
+            reason=reason,
+        )
+    )
+
+
+def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, submit_attempt_id: str, side: str, qty: float, ts: int):
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        side=side,
+        qty_req=qty,
+        price=None,
+        ts_ms=ts,
+        status="PENDING_SUBMIT",
+    )
+    record_submit_started(client_order_id, conn=conn)
+    notify(format_event("order_submit_started", client_order_id=client_order_id, side=side, status="PENDING_SUBMIT"))
+    conn.commit()
+
+    try:
+        order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
+    except BrokerTemporaryError as e:
+        err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
+        _mark_submit_unknown(conn=conn, client_order_id=client_order_id, side=side, reason=str(err))
+        conn.commit()
+        return None
+    except Exception as e:
+        reason = f"submit failed: {type(e).__name__}: {e}"
+        _mark_submit_failed(conn=conn, client_order_id=client_order_id, side=side, reason=reason)
+        conn.commit()
+        return None
+
+    if order.exchange_order_id:
+        set_exchange_order_id(client_order_id, order.exchange_order_id, conn=conn)
+        notify(
+            format_event(
+                "exchange_order_id_attached",
+                client_order_id=client_order_id,
+                exchange_order_id=order.exchange_order_id,
+                side=side,
+                status=order.status,
+            )
+        )
+    set_status(client_order_id, order.status, conn=conn)
+
+    if not order.exchange_order_id:
+        reason = "submit acknowledged without exchange_order_id; manual recovery required"
+        _mark_recovery_required(
+            conn=conn,
+            client_order_id=client_order_id,
+            side=side,
+            from_status=order.status,
+            reason=reason,
+        )
+        conn.commit()
+        return None
+
+    conn.commit()
+    return order
+
+
 def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: float) -> dict | None:
     conn = ensure_db()
     try:
@@ -200,83 +322,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 conn.commit()
                 return None
 
-        # Durable order intent before remote submit.
-        record_order_if_missing(
-            conn,
+        order = _submit_via_standard_path(
+            conn=conn,
+            broker=broker,
             client_order_id=client_order_id,
             submit_attempt_id=submit_attempt_id,
             side=side,
-            qty_req=normalized_qty,
-            price=None,
-            ts_ms=ts,
-            status="PENDING_SUBMIT",
+            qty=normalized_qty,
+            ts=ts,
         )
-        record_submit_started(client_order_id, conn=conn)
-        notify(format_event("order_submit_started", client_order_id=client_order_id, side=side, status="PENDING_SUBMIT"))
-        conn.commit()
-
-        try:
-            order = broker.place_order(client_order_id=client_order_id, side=side, qty=normalized_qty, price=None)
-        except BrokerTemporaryError as e:
-            err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
-            record_status_transition(
-                client_order_id,
-                from_status="PENDING_SUBMIT",
-                to_status="SUBMIT_UNKNOWN",
-                reason=str(err),
-                conn=conn,
-            )
-            set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=str(err), conn=conn)
-            notify(
-                format_event(
-                    "order_submit_unknown",
-                    client_order_id=client_order_id,
-                    side=side,
-                    status="SUBMIT_UNKNOWN",
-                    reason=str(err),
-                )
-            )
-            conn.commit()
-            return None
-
-        if order.exchange_order_id:
-            set_exchange_order_id(client_order_id, order.exchange_order_id, conn=conn)
-            notify(
-                format_event(
-                    "exchange_order_id_attached",
-                    client_order_id=client_order_id,
-                    exchange_order_id=order.exchange_order_id,
-                    side=side,
-                    status=order.status,
-                )
-            )
-        set_status(client_order_id, order.status, conn=conn)
-
-        if not order.exchange_order_id:
-            reason = "submit acknowledged without exchange_order_id; manual recovery required"
-            record_status_transition(
-                client_order_id,
-                from_status=order.status,
-                to_status="RECOVERY_REQUIRED",
-                reason=reason,
-                conn=conn,
-            )
-            set_status(
-                client_order_id,
-                "RECOVERY_REQUIRED",
-                last_error=reason,
-                conn=conn,
-            )
-            notify(
-                format_event(
-                    "recovery_required_transition",
-                    client_order_id=client_order_id,
-                    side=side,
-                    status="RECOVERY_REQUIRED",
-                    reason=reason,
-                )
-            )
-            conn.commit()
+        if order is None:
             return None
 
         fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)

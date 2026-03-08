@@ -105,6 +105,11 @@ class _TimeoutBroker(_FakeBroker):
         raise BrokerTemporaryError("timeout")
 
 
+class _FailingSubmitBroker(_FakeBroker):
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        raise RuntimeError("exchange rejected")
+
+
 class _CanceledBroker(_FakeBroker):
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return []
@@ -474,6 +479,48 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert "to=SUBMIT_UNKNOWN" in str(transition["message"])
     assert any("event=order_submit_started" in msg for msg in notifications)
     assert any("event=order_submit_unknown" in msg for msg in notifications)
+
+
+def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_failed.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    trade = live_execute_signal(_FailingSubmitBroker(), "BUY", 1000, 100000000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "submit_failed.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    started_event = conn.execute(
+        "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
+        (row["client_order_id"],),
+    ).fetchone()
+    transition = conn.execute(
+        """
+        SELECT message, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='status_transition'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "FAILED"
+    assert "submit failed" in str(row["last_error"])
+    assert started_event is not None
+    assert transition is not None
+    assert transition["order_status"] == "FAILED"
+    assert "from=PENDING_SUBMIT" in str(transition["message"])
+    assert "to=FAILED" in str(transition["message"])
+    assert any("event=order_submit_started" in msg for msg in notifications)
+    assert any("event=order_submit_failed" in msg for msg in notifications)
 
 
 def test_live_submit_without_exchange_id_marks_recovery_required(monkeypatch, tmp_path):
