@@ -96,6 +96,13 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "halt_new_orders_blocked": state.halt_new_orders_blocked,
         "halt_reason_code": state.halt_reason_code,
         "halt_state_unresolved": state.halt_state_unresolved,
+        "halt_policy_stage": state.halt_policy_stage,
+        "halt_policy_block_new_orders": state.halt_policy_block_new_orders,
+        "halt_policy_attempt_cancel_open_orders": state.halt_policy_attempt_cancel_open_orders,
+        "halt_policy_auto_liquidate_positions": state.halt_policy_auto_liquidate_positions,
+        "halt_position_present": state.halt_position_present,
+        "halt_open_orders_present": state.halt_open_orders_present,
+        "halt_operator_action_required": state.halt_operator_action_required,
         "unresolved_open_order_count": state.unresolved_open_order_count,
         "oldest_unresolved_order_age_sec": state.oldest_unresolved_order_age_sec,
         "recovery_required_count": state.recovery_required_count,
@@ -159,6 +166,7 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
         reason=reason.detail,
         unresolved=unresolved,
     )
+    halt_state = runtime_state.snapshot()
     notify(
         format_event(
             "trading_halted",
@@ -167,6 +175,13 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
             reason=reason.detail,
             reason_code=reason.code,
             unresolved=int(unresolved),
+            halt_policy_stage=halt_state.halt_policy_stage,
+            block_new_orders=int(halt_state.halt_policy_block_new_orders),
+            attempt_cancel_open_orders=int(halt_state.halt_policy_attempt_cancel_open_orders),
+            auto_liquidate_positions=int(halt_state.halt_policy_auto_liquidate_positions),
+            halt_position_present=int(halt_state.halt_position_present),
+            halt_open_orders_present=int(halt_state.halt_open_orders_present),
+            operator_action_required=int(halt_state.halt_operator_action_required),
         )
     )
 

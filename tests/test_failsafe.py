@@ -169,7 +169,11 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
     assert state.halt_state_unresolved is True
-    assert any("event=trading_halted" in n for n in notifications)
+    halted = [n for n in notifications if "event=trading_halted" in n]
+    assert halted
+    assert any("halt_policy_stage=SAFE_HALT_REVIEW_ONLY" in n for n in halted)
+    assert any("auto_liquidate_positions=0" in n for n in halted)
+    assert any("operator_action_required=1" in n for n in halted)
 
 
 def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
@@ -285,7 +289,10 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert called["n"] == 0
     assert any("event=startup_gate_blocked" in n for n in notifications)
     assert any("reason_code=STARTUP_SAFETY_GATE" in n for n in notifications)
-    assert any("event=trading_halted" in n and "alert_kind=halt" in n for n in notifications)
+    halted = [n for n in notifications if "event=trading_halted" in n and "alert_kind=halt" in n]
+    assert halted
+    assert any("halt_open_orders_present=1" in n for n in halted)
+    assert any("operator_action_required=1" in n for n in halted)
 
 
 

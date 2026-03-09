@@ -8,6 +8,8 @@ from threading import Lock
 from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
 
+HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
+
 
 def _clip(v: str | None, max_len: int = 500) -> str | None:
     if v is None:
@@ -21,6 +23,13 @@ class RuntimeState:
     halt_new_orders_blocked: bool = False
     halt_reason_code: str | None = None
     halt_state_unresolved: bool = False
+    halt_policy_stage: str = HALT_POLICY_STAGE
+    halt_policy_block_new_orders: bool = True
+    halt_policy_attempt_cancel_open_orders: bool = True
+    halt_policy_auto_liquidate_positions: bool = False
+    halt_position_present: bool = False
+    halt_open_orders_present: bool = False
+    halt_operator_action_required: bool = False
     error_count: int = 0
     last_candle_age_sec: float | None = None
     retry_at_epoch_sec: float | None = None
@@ -53,6 +62,13 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.halt_new_orders_blocked = persisted.halt_new_orders_blocked
     _STATE.halt_reason_code = persisted.halt_reason_code
     _STATE.halt_state_unresolved = persisted.halt_state_unresolved
+    _STATE.halt_policy_stage = persisted.halt_policy_stage
+    _STATE.halt_policy_block_new_orders = persisted.halt_policy_block_new_orders
+    _STATE.halt_policy_attempt_cancel_open_orders = persisted.halt_policy_attempt_cancel_open_orders
+    _STATE.halt_policy_auto_liquidate_positions = persisted.halt_policy_auto_liquidate_positions
+    _STATE.halt_position_present = persisted.halt_position_present
+    _STATE.halt_open_orders_present = persisted.halt_open_orders_present
+    _STATE.halt_operator_action_required = persisted.halt_operator_action_required
     _STATE.error_count = persisted.error_count
     _STATE.last_candle_age_sec = persisted.last_candle_age_sec
     _STATE.retry_at_epoch_sec = persisted.retry_at_epoch_sec
@@ -83,6 +99,13 @@ def _persist_state(state: RuntimeState) -> None:
                 halt_new_orders_blocked,
                 halt_reason_code,
                 halt_state_unresolved,
+                halt_policy_stage,
+                halt_policy_block_new_orders,
+                halt_policy_attempt_cancel_open_orders,
+                halt_policy_auto_liquidate_positions,
+                halt_position_present,
+                halt_open_orders_present,
+                halt_operator_action_required,
                 error_count,
                 last_candle_age_sec,
                 retry_at_epoch_sec,
@@ -102,12 +125,19 @@ def _persist_state(state: RuntimeState) -> None:
                 startup_gate_reason,
                 updated_ts
             )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
             ON CONFLICT(id) DO UPDATE SET
                 trading_enabled=excluded.trading_enabled,
                 halt_new_orders_blocked=excluded.halt_new_orders_blocked,
                 halt_reason_code=excluded.halt_reason_code,
                 halt_state_unresolved=excluded.halt_state_unresolved,
+                halt_policy_stage=excluded.halt_policy_stage,
+                halt_policy_block_new_orders=excluded.halt_policy_block_new_orders,
+                halt_policy_attempt_cancel_open_orders=excluded.halt_policy_attempt_cancel_open_orders,
+                halt_policy_auto_liquidate_positions=excluded.halt_policy_auto_liquidate_positions,
+                halt_position_present=excluded.halt_position_present,
+                halt_open_orders_present=excluded.halt_open_orders_present,
+                halt_operator_action_required=excluded.halt_operator_action_required,
                 error_count=excluded.error_count,
                 last_candle_age_sec=excluded.last_candle_age_sec,
                 retry_at_epoch_sec=excluded.retry_at_epoch_sec,
@@ -132,6 +162,13 @@ def _persist_state(state: RuntimeState) -> None:
                 1 if state.halt_new_orders_blocked else 0,
                 _clip(state.halt_reason_code),
                 1 if state.halt_state_unresolved else 0,
+                _clip(state.halt_policy_stage),
+                1 if state.halt_policy_block_new_orders else 0,
+                1 if state.halt_policy_attempt_cancel_open_orders else 0,
+                1 if state.halt_policy_auto_liquidate_positions else 0,
+                1 if state.halt_position_present else 0,
+                1 if state.halt_open_orders_present else 0,
+                1 if state.halt_operator_action_required else 0,
                 int(state.error_count),
                 state.last_candle_age_sec,
                 state.retry_at_epoch_sec,
@@ -166,6 +203,13 @@ def _read_persisted_state() -> RuntimeState | None:
                 halt_new_orders_blocked,
                 halt_reason_code,
                 halt_state_unresolved,
+                halt_policy_stage,
+                halt_policy_block_new_orders,
+                halt_policy_attempt_cancel_open_orders,
+                halt_policy_auto_liquidate_positions,
+                halt_position_present,
+                halt_open_orders_present,
+                halt_operator_action_required,
                 error_count,
                 last_candle_age_sec,
                 retry_at_epoch_sec,
@@ -198,6 +242,13 @@ def _read_persisted_state() -> RuntimeState | None:
         halt_new_orders_blocked=bool(int(row["halt_new_orders_blocked"])),
         halt_reason_code=(str(row["halt_reason_code"]) if row["halt_reason_code"] is not None else None),
         halt_state_unresolved=bool(int(row["halt_state_unresolved"])),
+        halt_policy_stage=(str(row["halt_policy_stage"]) if row["halt_policy_stage"] is not None else HALT_POLICY_STAGE),
+        halt_policy_block_new_orders=bool(int(row["halt_policy_block_new_orders"])),
+        halt_policy_attempt_cancel_open_orders=bool(int(row["halt_policy_attempt_cancel_open_orders"])),
+        halt_policy_auto_liquidate_positions=bool(int(row["halt_policy_auto_liquidate_positions"])),
+        halt_position_present=bool(int(row["halt_position_present"])),
+        halt_open_orders_present=bool(int(row["halt_open_orders_present"])),
+        halt_operator_action_required=bool(int(row["halt_operator_action_required"])),
         error_count=max(0, int(row["error_count"])),
         last_candle_age_sec=(
             float(row["last_candle_age_sec"]) if row["last_candle_age_sec"] is not None else None
@@ -404,6 +455,30 @@ def disable_trading_until(
         _STATE.halt_reason_code = _clip(reason_code)
         _STATE.halt_new_orders_blocked = bool(halt_new_orders_blocked)
         _STATE.halt_state_unresolved = bool(unresolved)
+        _STATE.halt_policy_stage = HALT_POLICY_STAGE
+        _STATE.halt_policy_block_new_orders = True
+        _STATE.halt_policy_attempt_cancel_open_orders = True
+        _STATE.halt_policy_auto_liquidate_positions = False
+        _STATE.halt_position_present = False
+        _STATE.halt_open_orders_present = False
+        _STATE.halt_operator_action_required = bool(unresolved)
+        if halt_new_orders_blocked:
+            conn = ensure_db()
+            try:
+                open_row = conn.execute(
+                    "SELECT COUNT(*) AS open_count FROM orders WHERE status IN ({})".format(",".join("?" for _ in OPEN_ORDER_STATUSES)),
+                    OPEN_ORDER_STATUSES,
+                ).fetchone()
+                portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+            finally:
+                conn.close()
+            open_count = int(open_row["open_count"] if open_row else 0)
+            asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+            _STATE.halt_open_orders_present = open_count > 0
+            _STATE.halt_position_present = asset_qty > 1e-12
+            _STATE.halt_operator_action_required = bool(
+                unresolved or _STATE.halt_open_orders_present or _STATE.halt_position_present
+            )
         _persist_state(_STATE)
 
 
@@ -437,4 +512,7 @@ def enable_trading() -> None:
         _STATE.halt_new_orders_blocked = False
         _STATE.halt_reason_code = None
         _STATE.halt_state_unresolved = False
+        _STATE.halt_position_present = False
+        _STATE.halt_open_orders_present = False
+        _STATE.halt_operator_action_required = False
         _persist_state(_STATE)

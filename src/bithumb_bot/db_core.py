@@ -126,6 +126,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             halt_new_orders_blocked INTEGER NOT NULL DEFAULT 0,
             halt_reason_code TEXT,
             halt_state_unresolved INTEGER NOT NULL DEFAULT 0,
+            halt_policy_stage TEXT NOT NULL DEFAULT 'SAFE_HALT_REVIEW_ONLY',
+            halt_policy_block_new_orders INTEGER NOT NULL DEFAULT 1,
+            halt_policy_attempt_cancel_open_orders INTEGER NOT NULL DEFAULT 1,
+            halt_policy_auto_liquidate_positions INTEGER NOT NULL DEFAULT 0,
+            halt_position_present INTEGER NOT NULL DEFAULT 0,
+            halt_open_orders_present INTEGER NOT NULL DEFAULT 0,
+            halt_operator_action_required INTEGER NOT NULL DEFAULT 0,
             error_count INTEGER NOT NULL DEFAULT 0,
             last_candle_age_sec REAL,
             retry_at_epoch_sec REAL,
@@ -160,6 +167,48 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "halt_state_unresolved",
         "halt_state_unresolved INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_policy_stage",
+        "halt_policy_stage TEXT NOT NULL DEFAULT 'SAFE_HALT_REVIEW_ONLY'",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_policy_block_new_orders",
+        "halt_policy_block_new_orders INTEGER NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_policy_attempt_cancel_open_orders",
+        "halt_policy_attempt_cancel_open_orders INTEGER NOT NULL DEFAULT 1",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_policy_auto_liquidate_positions",
+        "halt_policy_auto_liquidate_positions INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_position_present",
+        "halt_position_present INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_open_orders_present",
+        "halt_open_orders_present INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_operator_action_required",
+        "halt_operator_action_required INTEGER NOT NULL DEFAULT 0",
     )
 
     _ensure_column(
@@ -243,31 +292,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
-        INSERT INTO bot_health (
-            id,
-            trading_enabled,
-            halt_new_orders_blocked,
-            halt_reason_code,
-            halt_state_unresolved,
-            error_count,
-            last_candle_age_sec,
-            retry_at_epoch_sec,
-            last_disable_reason,
-            unresolved_open_order_count,
-            oldest_unresolved_order_age_sec,
-            recovery_required_count,
-            last_reconcile_epoch_sec,
-            last_reconcile_status,
-            last_reconcile_error,
-            last_reconcile_reason_code,
-            last_reconcile_metadata,
-            last_cancel_open_orders_epoch_sec,
-            last_cancel_open_orders_trigger,
-            last_cancel_open_orders_status,
-            last_cancel_open_orders_summary,
-            startup_gate_reason
-        )
-        VALUES (1, 1, 0, NULL, 0, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        INSERT INTO bot_health (id)
+        VALUES (1)
         ON CONFLICT(id) DO NOTHING
         """
     )

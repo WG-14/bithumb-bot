@@ -36,6 +36,13 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 halt_new_orders_blocked,
                 halt_reason_code,
                 halt_state_unresolved,
+                halt_policy_stage,
+                halt_policy_block_new_orders,
+                halt_policy_attempt_cancel_open_orders,
+                halt_policy_auto_liquidate_positions,
+                halt_position_present,
+                halt_open_orders_present,
+                halt_operator_action_required,
                 error_count,
                 last_candle_age_sec,
                 retry_at_epoch_sec,
@@ -65,6 +72,13 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert int(row["halt_new_orders_blocked"]) == 0
     assert row["halt_reason_code"] is None
     assert int(row["halt_state_unresolved"]) == 0
+    assert str(row["halt_policy_stage"]) == "SAFE_HALT_REVIEW_ONLY"
+    assert int(row["halt_policy_block_new_orders"]) == 1
+    assert int(row["halt_policy_attempt_cancel_open_orders"]) == 1
+    assert int(row["halt_policy_auto_liquidate_positions"]) == 0
+    assert int(row["halt_position_present"]) == 0
+    assert int(row["halt_open_orders_present"]) == 0
+    assert int(row["halt_operator_action_required"]) == 0
     assert int(row["error_count"]) == 4
     assert float(row["last_candle_age_sec"]) == 8.5
     assert float(row["retry_at_epoch_sec"]) == 456.0
@@ -112,6 +126,45 @@ def test_enter_halt_sets_consistent_halted_state_for_all_reason_codes(tmp_path):
         assert state.halt_new_orders_blocked is True
         assert state.halt_reason_code == code
         assert state.last_disable_reason == f"halt triggered by {code}"
+        assert state.halt_policy_stage == "SAFE_HALT_REVIEW_ONLY"
+        assert state.halt_policy_block_new_orders is True
+        assert state.halt_policy_attempt_cancel_open_orders is True
+        assert state.halt_policy_auto_liquidate_positions is False
+
+
+
+def test_enter_halt_tracks_position_and_open_order_visibility(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio(id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked) VALUES (1, 1000000.0, 0.25, 900000.0, 100000.0, 0.2, 0.05)"
+        )
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, NULL, 'NEW', 'SELL', NULL, 0.1, 0.0, ?, ?, NULL)
+            """,
+            ("halt_visibility_open_order", 10, 10),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.enter_halt(
+        reason_code="MANUAL_HALT",
+        reason="manual halt for review",
+        unresolved=False,
+    )
+
+    state = runtime_state.snapshot()
+    assert state.halt_policy_auto_liquidate_positions is False
+    assert state.halt_position_present is True
+    assert state.halt_open_orders_present is True
+    assert state.halt_operator_action_required is True
 
 def test_startup_gate_reason_is_persisted_to_health_state(tmp_path):
     _set_tmp_db(tmp_path)
