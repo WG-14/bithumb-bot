@@ -225,6 +225,46 @@ class _UnmatchedRecentFillBroker(_FakeBroker):
         ]
 
 
+class _ConflictingRecoverySourcesBroker(_FakeBroker):
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return [
+            BrokerOrder("", "ex_conflict", "BUY", "NEW", 100.0, 0.01, 0.0, 1001, 1002)
+        ]
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder("", "ex_conflict", "BUY", "FILLED", 100.0, 0.01, 0.01, 1001, 1003)
+        ]
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="recent_fill_conflict",
+                fill_ts=1003,
+                price=100000000.0,
+                qty=0.01,
+                fee=10.0,
+                exchange_order_id="ex_conflict",
+            )
+        ]
+
+
+class _OpenOrderPreferredBroker(_FakeBroker):
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return [
+            BrokerOrder("", "ex_precedence", "BUY", "NEW", 100.0, 0.02, 0.0, 2001, 2002)
+        ]
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder("", "ex_precedence", "BUY", "PARTIAL", 100.0, 0.02, 0.01, 2001, 2003)
+        ]
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return []
+
+
 
 
 @pytest.fixture(autouse=True)
@@ -777,6 +817,41 @@ def test_manual_recover_order_attaches_exchange_order_id_and_applies_fills(tmp_p
     assert row["exchange_order_id"] == "ex_manual_fill"
     assert float(row["qty_filled"]) == 0.01
     assert fill is not None
+
+
+def test_reconcile_conflicting_sources_halts_conservatively(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "source_conflict.sqlite"))
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.recovery.notify", lambda msg: notifications.append(msg))
+
+    reconcile_with_broker(_ConflictingRecoverySourcesBroker())
+
+    state = runtime_state.snapshot()
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_state_unresolved is True
+    assert state.halt_reason_code == "RECOVERY_SOURCE_CONFLICT"
+    assert state.last_reconcile_reason_code == "SOURCE_CONFLICT_HALT"
+    assert state.last_disable_reason is not None
+    assert "source conflict" in state.last_disable_reason
+    assert any("event=reconcile_source_conflict" in msg for msg in notifications)
+
+
+def test_reconcile_precedence_prefers_open_orders_over_recent_orders(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "source_precedence.sqlite"))
+
+    reconcile_with_broker(_OpenOrderPreferredBroker())
+
+    conn = ensure_db(str(tmp_path / "source_precedence.sqlite"))
+    row = conn.execute(
+        "SELECT status FROM orders WHERE exchange_order_id='ex_precedence'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "PARTIAL"
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_reason_code == "REMOTE_OPEN_ORDER_FOUND"
 
 
 def test_validate_order_rejects_invalid_qty():

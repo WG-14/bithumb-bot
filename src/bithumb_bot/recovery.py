@@ -16,8 +16,11 @@ REASON_REMOTE_OPEN_ORDER_FOUND = "REMOTE_OPEN_ORDER_FOUND"
 REASON_RECENT_FILL_APPLIED = "RECENT_FILL_APPLIED"
 REASON_SUBMIT_UNKNOWN_UNRESOLVED = "SUBMIT_UNKNOWN_UNRESOLVED"
 REASON_STARTUP_GATE_BLOCKED = "STARTUP_GATE_BLOCKED"
+REASON_SOURCE_CONFLICT_HALT = "SOURCE_CONFLICT_HALT"
 REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
+
+OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 
 
 def assert_no_open_orders() -> None:
@@ -64,16 +67,33 @@ def _record_unmatched_recent_activity(
     set_status(oid, status, last_error=message, conn=conn)
 
 
-def _sync_recent_order_activity(conn, recent_orders: list[BrokerOrder]) -> None:
+def _sync_recent_order_activity(
+    conn,
+    recent_orders: list[BrokerOrder],
+    *,
+    trusted_open_exchange_ids: set[str],
+) -> list[str]:
     local_rows = conn.execute(
         "SELECT client_order_id, exchange_order_id FROM orders"
     ).fetchall()
     by_exchange_id = {str(r["exchange_order_id"]): str(r["client_order_id"]) for r in local_rows if r["exchange_order_id"]}
     by_client_order_id = {str(r["client_order_id"]): str(r["client_order_id"]) for r in local_rows}
 
+    conflicts: list[str] = []
+
     for remote in recent_orders:
         remote_exchange_id = str(remote.exchange_order_id or "")
         remote_client_order_id = str(remote.client_order_id or "")
+
+        if (
+            remote_exchange_id
+            and remote_exchange_id in trusted_open_exchange_ids
+            and remote.status not in OPEN_ORDER_TRUSTED_STATUSES
+        ):
+            conflicts.append(
+                f"exchange_order_id={remote_exchange_id} open_orders=OPEN recent_orders={remote.status}"
+            )
+            continue
 
         local_id = by_exchange_id.get(remote_exchange_id)
         if local_id is None and remote_client_order_id:
@@ -96,8 +116,15 @@ def _sync_recent_order_activity(conn, recent_orders: list[BrokerOrder]) -> None:
             message="unmatched recent remote order detected; manual recovery required",
         )
 
+    return conflicts
 
-def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> bool:
+
+def _apply_recent_fills(
+    conn,
+    recent_fills: list[BrokerFill],
+    *,
+    trusted_open_exchange_ids: set[str],
+) -> tuple[bool, list[str]]:
     local_rows = conn.execute(
         "SELECT client_order_id, exchange_order_id, side, qty_req, qty_filled FROM orders"
     ).fetchall()
@@ -105,10 +132,15 @@ def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> bool:
     by_client_order_id = {str(r["client_order_id"]): r for r in local_rows}
 
     applied = False
+    conflicts: list[str] = []
 
     for fill in recent_fills:
         remote_exchange_id = str(fill.exchange_order_id or "")
         remote_client_order_id = str(fill.client_order_id or "")
+
+        if remote_exchange_id and remote_exchange_id in trusted_open_exchange_ids:
+            conflicts.append(f"exchange_order_id={remote_exchange_id} open_orders=OPEN recent_fills=HAS_FILL")
+            continue
 
         local = by_exchange_id.get(remote_exchange_id)
         if local is None and remote_client_order_id:
@@ -156,17 +188,40 @@ def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> bool:
         elif qty_filled > 1e-12:
             set_status(local_id, "PARTIAL", conn=conn)
 
-    return applied
+    return applied, conflicts
+
+
+def _halt_on_source_conflict(conflicts: list[str]) -> None:
+    detail = "; ".join(conflicts[:3])
+    if len(conflicts) > 3:
+        detail = f"{detail}; +{len(conflicts) - 3} more"
+    reason = f"recovery source conflict detected; manual review required ({detail})"
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=reason,
+        reason_code="RECOVERY_SOURCE_CONFLICT",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    notify(
+        format_event(
+            "reconcile_source_conflict",
+            alert_kind="halt",
+            reason=reason,
+        )
+    )
 
 
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
+    source_conflicts: list[str] = []
     metadata: dict[str, int] = {
         "remote_open_order_found": 0,
         "recent_fill_applied": 0,
         "submit_unknown_unresolved": 0,
         "startup_gate_blocked": 0,
+        "source_conflict_halt": 0,
     }
     try:
         init_portfolio(conn)
@@ -247,6 +302,11 @@ def reconcile_with_broker(broker: Broker) -> None:
                 )
 
         remote_open = broker.get_open_orders()
+        trusted_open_exchange_ids = {
+            str(order.exchange_order_id)
+            for order in remote_open
+            if order.exchange_order_id
+        }
         known_exchange_ids = {
             str(r["exchange_order_id"])
             for r in conn.execute(
@@ -283,11 +343,27 @@ def reconcile_with_broker(broker: Broker) -> None:
                 )
             )
 
-        _sync_recent_order_activity(conn, broker.get_recent_orders(limit=100))
-        if _apply_recent_fills(conn, broker.get_recent_fills(limit=100)):
+        conflicts = _sync_recent_order_activity(
+            conn,
+            broker.get_recent_orders(limit=100),
+            trusted_open_exchange_ids=trusted_open_exchange_ids,
+        )
+        applied_recent_fill, fill_conflicts = _apply_recent_fills(
+            conn,
+            broker.get_recent_fills(limit=100),
+            trusted_open_exchange_ids=trusted_open_exchange_ids,
+        )
+        conflicts.extend(fill_conflicts)
+
+        if applied_recent_fill:
             metadata["recent_fill_applied"] += 1
             if reason_code == REASON_RECONCILE_OK:
                 reason_code = REASON_RECENT_FILL_APPLIED
+
+        if conflicts:
+            source_conflicts = conflicts
+            metadata["source_conflict_halt"] = len(conflicts)
+            reason_code = REASON_SOURCE_CONFLICT_HALT
 
         bal = broker.get_balance()
         _, local_cash_locked, _, local_asset_locked = get_portfolio_breakdown(conn)
@@ -318,6 +394,8 @@ def reconcile_with_broker(broker: Broker) -> None:
         runtime_state.refresh_open_order_health()
         raise
     else:
+        if source_conflicts:
+            _halt_on_source_conflict(source_conflicts)
         if metadata["startup_gate_blocked"] > 0:
             reason_code = REASON_STARTUP_GATE_BLOCKED
         runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
