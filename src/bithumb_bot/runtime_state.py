@@ -30,6 +30,8 @@ class RuntimeState:
     last_reconcile_epoch_sec: float | None = None
     last_reconcile_status: str | None = None
     last_reconcile_error: str | None = None
+    last_reconcile_reason_code: str | None = None
+    last_reconcile_metadata: str | None = None
     last_cancel_open_orders_epoch_sec: float | None = None
     last_cancel_open_orders_trigger: str | None = None
     last_cancel_open_orders_status: str | None = None
@@ -59,6 +61,8 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_reconcile_epoch_sec = persisted.last_reconcile_epoch_sec
     _STATE.last_reconcile_status = persisted.last_reconcile_status
     _STATE.last_reconcile_error = persisted.last_reconcile_error
+    _STATE.last_reconcile_reason_code = persisted.last_reconcile_reason_code
+    _STATE.last_reconcile_metadata = persisted.last_reconcile_metadata
     _STATE.last_cancel_open_orders_epoch_sec = persisted.last_cancel_open_orders_epoch_sec
     _STATE.last_cancel_open_orders_trigger = persisted.last_cancel_open_orders_trigger
     _STATE.last_cancel_open_orders_status = persisted.last_cancel_open_orders_status
@@ -87,6 +91,8 @@ def _persist_state(state: RuntimeState) -> None:
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
                 last_reconcile_error,
+                last_reconcile_reason_code,
+                last_reconcile_metadata,
                 last_cancel_open_orders_epoch_sec,
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
@@ -94,7 +100,7 @@ def _persist_state(state: RuntimeState) -> None:
                 startup_gate_reason,
                 updated_ts
             )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
             ON CONFLICT(id) DO UPDATE SET
                 trading_enabled=excluded.trading_enabled,
                 halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -110,6 +116,8 @@ def _persist_state(state: RuntimeState) -> None:
                 last_reconcile_epoch_sec=excluded.last_reconcile_epoch_sec,
                 last_reconcile_status=excluded.last_reconcile_status,
                 last_reconcile_error=excluded.last_reconcile_error,
+                last_reconcile_reason_code=excluded.last_reconcile_reason_code,
+                last_reconcile_metadata=excluded.last_reconcile_metadata,
                 last_cancel_open_orders_epoch_sec=excluded.last_cancel_open_orders_epoch_sec,
                 last_cancel_open_orders_trigger=excluded.last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status=excluded.last_cancel_open_orders_status,
@@ -132,6 +140,8 @@ def _persist_state(state: RuntimeState) -> None:
                 state.last_reconcile_epoch_sec,
                 _clip(state.last_reconcile_status),
                 _clip(state.last_reconcile_error),
+                _clip(state.last_reconcile_reason_code),
+                _clip(state.last_reconcile_metadata, max_len=1000),
                 state.last_cancel_open_orders_epoch_sec,
                 _clip(state.last_cancel_open_orders_trigger),
                 _clip(state.last_cancel_open_orders_status),
@@ -164,6 +174,8 @@ def _read_persisted_state() -> RuntimeState | None:
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
                 last_reconcile_error,
+                last_reconcile_reason_code,
+                last_reconcile_metadata,
                 last_cancel_open_orders_epoch_sec,
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
@@ -210,6 +222,16 @@ def _read_persisted_state() -> RuntimeState | None:
         last_reconcile_error=(
             str(row["last_reconcile_error"])
             if row["last_reconcile_error"] is not None
+            else None
+        ),
+        last_reconcile_reason_code=(
+            str(row["last_reconcile_reason_code"])
+            if row["last_reconcile_reason_code"] is not None
+            else None
+        ),
+        last_reconcile_metadata=(
+            str(row["last_reconcile_metadata"])
+            if row["last_reconcile_metadata"] is not None
             else None
         ),
         last_cancel_open_orders_epoch_sec=(
@@ -283,18 +305,31 @@ def refresh_open_order_health(now_epoch_sec: float | None = None) -> None:
         _persist_state(_STATE)
 
 
-def record_reconcile_result(*, success: bool, error: str | None = None, now_epoch_sec: float | None = None) -> None:
+def record_reconcile_result(
+    *,
+    success: bool,
+    error: str | None = None,
+    reason_code: str | None = None,
+    metadata: dict[str, int | float | str | bool | None] | None = None,
+    now_epoch_sec: float | None = None,
+) -> None:
     ts = now_epoch_sec
     if ts is None:
         import time
 
         ts = time.time()
 
+    payload = None
+    if metadata is not None:
+        payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+
     with _LOCK:
         _sync_state_from_persisted_locked()
         _STATE.last_reconcile_epoch_sec = float(ts)
         _STATE.last_reconcile_status = "ok" if success else "error"
         _STATE.last_reconcile_error = None if success else (error[:500] if error else "unknown")
+        _STATE.last_reconcile_reason_code = _clip(reason_code)
+        _STATE.last_reconcile_metadata = _clip(payload, max_len=1000)
         _persist_state(_STATE)
 
 
@@ -328,6 +363,12 @@ def set_startup_gate_reason(reason: str | None) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
         _STATE.startup_gate_reason = _clip(reason)
+        if reason:
+            _STATE.last_reconcile_reason_code = "STARTUP_GATE_BLOCKED"
+            _STATE.last_reconcile_metadata = _clip(
+                json.dumps({"startup_gate_reason": reason}, ensure_ascii=False, sort_keys=True),
+                max_len=1000,
+            )
         _persist_state(_STATE)
 
 

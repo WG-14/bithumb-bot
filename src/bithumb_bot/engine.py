@@ -101,6 +101,8 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "last_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
         "last_reconcile_status": state.last_reconcile_status,
         "last_reconcile_error": state.last_reconcile_error,
+        "last_reconcile_reason_code": state.last_reconcile_reason_code,
+        "last_reconcile_metadata": state.last_reconcile_metadata,
         "last_cancel_open_orders_epoch_sec": state.last_cancel_open_orders_epoch_sec,
         "last_cancel_open_orders_trigger": state.last_cancel_open_orders_trigger,
         "last_cancel_open_orders_status": state.last_cancel_open_orders_status,

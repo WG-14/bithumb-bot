@@ -46,6 +46,8 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
                 last_reconcile_error,
+                last_reconcile_reason_code,
+                last_reconcile_metadata,
                 last_cancel_open_orders_epoch_sec,
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
@@ -73,6 +75,8 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert row["last_reconcile_epoch_sec"] is None
     assert row["last_reconcile_status"] is None
     assert row["last_reconcile_error"] is None
+    assert row["last_reconcile_reason_code"] is None
+    assert row["last_reconcile_metadata"] is None
     assert row["last_cancel_open_orders_epoch_sec"] is None
     assert row["last_cancel_open_orders_trigger"] is None
     assert row["last_cancel_open_orders_status"] is None
@@ -180,6 +184,8 @@ def test_reconcile_result_persisted_on_success_and_failure(tmp_path):
     state = runtime_state.snapshot()
     assert state.last_reconcile_status == "ok"
     assert state.last_reconcile_error is None
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
+    assert state.last_reconcile_metadata is not None
     assert state.last_reconcile_epoch_sec is not None
 
     try:
@@ -191,6 +197,8 @@ def test_reconcile_result_persisted_on_success_and_failure(tmp_path):
     assert failed.last_reconcile_status == "error"
     assert failed.last_reconcile_error is not None
     assert "RuntimeError" in failed.last_reconcile_error
+    assert failed.last_reconcile_reason_code == "RECONCILE_FAILED"
+    assert failed.last_reconcile_metadata is not None
 
 
 def test_healthcheck_reports_disabled_state_from_persistent_store(tmp_path):
@@ -284,3 +292,14 @@ def test_cancel_open_orders_result_is_persisted(tmp_path):
     assert state.last_cancel_open_orders_status == "ok"
     assert state.last_cancel_open_orders_summary is not None
     assert '"failed_count": 0' in state.last_cancel_open_orders_summary
+
+
+def test_startup_gate_sets_structured_reason_code(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    runtime_state.set_startup_gate_reason("unresolved_open_orders=1")
+    state = runtime_state.snapshot()
+
+    assert state.last_reconcile_reason_code == "STARTUP_GATE_BLOCKED"
+    assert state.last_reconcile_metadata is not None
+    assert "startup_gate_reason" in state.last_reconcile_metadata

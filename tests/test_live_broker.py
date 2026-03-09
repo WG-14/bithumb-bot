@@ -7,6 +7,7 @@ from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, Brok
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
+from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from tests.fakes import FakeMarketData
 
@@ -594,6 +595,9 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
     assert row["status"] == "NEW"
     assert row["side"] == "BUY"
 
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_reason_code == "REMOTE_OPEN_ORDER_FOUND"
+
 
 def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_open_orders.sqlite"))
@@ -720,6 +724,9 @@ def test_reconcile_recovers_known_local_order_from_recent_activity(tmp_path):
     assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == 0.01
     assert fill is not None
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_reason_code == "RECENT_FILL_APPLIED"
 
 
 def test_reconcile_unmatched_recent_activity_creates_recovery_required_record(tmp_path):

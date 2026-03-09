@@ -344,6 +344,8 @@ def cmd_health() -> None:
     print(f"  last_reconcile_epoch_sec={health['last_reconcile_epoch_sec']}")
     print(f"  last_reconcile_status={health['last_reconcile_status']}")
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
+    print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
+    print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
     print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
     print(f"  halt_reason_code={health['halt_reason_code']}")

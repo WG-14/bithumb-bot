@@ -136,6 +136,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_reconcile_epoch_sec REAL,
             last_reconcile_status TEXT,
             last_reconcile_error TEXT,
+            last_reconcile_reason_code TEXT,
+            last_reconcile_metadata TEXT,
             last_cancel_open_orders_epoch_sec REAL,
             last_cancel_open_orders_trigger TEXT,
             last_cancel_open_orders_status TEXT,
@@ -199,6 +201,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn,
         "bot_health",
+        "last_reconcile_reason_code",
+        "last_reconcile_reason_code TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_reconcile_metadata",
+        "last_reconcile_metadata TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
         "last_cancel_open_orders_epoch_sec",
         "last_cancel_open_orders_epoch_sec REAL",
     )
@@ -245,13 +259,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_reconcile_epoch_sec,
             last_reconcile_status,
             last_reconcile_error,
+            last_reconcile_reason_code,
+            last_reconcile_metadata,
             last_cancel_open_orders_epoch_sec,
             last_cancel_open_orders_trigger,
             last_cancel_open_orders_status,
             last_cancel_open_orders_summary,
             startup_gate_reason
         )
-        VALUES (1, 1, 0, NULL, 0, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+        VALUES (1, 1, 0, NULL, 0, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         ON CONFLICT(id) DO NOTHING
         """
     )

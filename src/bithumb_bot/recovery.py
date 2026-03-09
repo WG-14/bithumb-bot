@@ -12,6 +12,13 @@ from .notifier import format_event, notify
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
 
+REASON_REMOTE_OPEN_ORDER_FOUND = "REMOTE_OPEN_ORDER_FOUND"
+REASON_RECENT_FILL_APPLIED = "RECENT_FILL_APPLIED"
+REASON_SUBMIT_UNKNOWN_UNRESOLVED = "SUBMIT_UNKNOWN_UNRESOLVED"
+REASON_STARTUP_GATE_BLOCKED = "STARTUP_GATE_BLOCKED"
+REASON_RECONCILE_OK = "RECONCILE_OK"
+REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
+
 
 def assert_no_open_orders() -> None:
     open_orders = get_open_orders()
@@ -90,12 +97,14 @@ def _sync_recent_order_activity(conn, recent_orders: list[BrokerOrder]) -> None:
         )
 
 
-def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> None:
+def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> bool:
     local_rows = conn.execute(
         "SELECT client_order_id, exchange_order_id, side, qty_req, qty_filled FROM orders"
     ).fetchall()
     by_exchange_id = {str(r["exchange_order_id"]): r for r in local_rows if r["exchange_order_id"]}
     by_client_order_id = {str(r["client_order_id"]): r for r in local_rows}
+
+    applied = False
 
     for fill in recent_fills:
         remote_exchange_id = str(fill.exchange_order_id or "")
@@ -132,6 +141,7 @@ def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> None:
             fee=fill.fee,
             note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
         )
+        applied = True
 
         order_row = conn.execute(
             "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
@@ -146,9 +156,18 @@ def _apply_recent_fills(conn, recent_fills: list[BrokerFill]) -> None:
         elif qty_filled > 1e-12:
             set_status(local_id, "PARTIAL", conn=conn)
 
+    return applied
+
 
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
+    reason_code = REASON_RECONCILE_OK
+    metadata: dict[str, int] = {
+        "remote_open_order_found": 0,
+        "recent_fill_applied": 0,
+        "submit_unknown_unresolved": 0,
+        "startup_gate_blocked": 0,
+    }
     try:
         init_portfolio(conn)
 
@@ -174,6 +193,8 @@ def reconcile_with_broker(broker: Broker) -> None:
                     last_error=reason,
                     conn=conn,
                 )
+                metadata["submit_unknown_unresolved"] += 1
+                reason_code = REASON_SUBMIT_UNKNOWN_UNRESOLVED
                 notify(
                     format_event(
                         "recovery_required_transition",
@@ -248,6 +269,9 @@ def reconcile_with_broker(broker: Broker) -> None:
             )
             set_exchange_order_id(oid, exid, conn=conn)
             set_status(oid, remote.status, last_error="stray remote open order detected", conn=conn)
+            metadata["remote_open_order_found"] += 1
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_REMOTE_OPEN_ORDER_FOUND
             notify(
                 format_event(
                     "reconcile_status_change",
@@ -260,7 +284,10 @@ def reconcile_with_broker(broker: Broker) -> None:
             )
 
         _sync_recent_order_activity(conn, broker.get_recent_orders(limit=100))
-        _apply_recent_fills(conn, broker.get_recent_fills(limit=100))
+        if _apply_recent_fills(conn, broker.get_recent_fills(limit=100)):
+            metadata["recent_fill_applied"] += 1
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_RECENT_FILL_APPLIED
 
         bal = broker.get_balance()
         _, local_cash_locked, _, local_asset_locked = get_portfolio_breakdown(conn)
@@ -285,11 +312,15 @@ def reconcile_with_broker(broker: Broker) -> None:
         runtime_state.record_reconcile_result(
             success=False,
             error=f"{type(e).__name__}: {e}",
+            reason_code=REASON_RECONCILE_FAILED,
+            metadata=metadata,
         )
         runtime_state.refresh_open_order_health()
         raise
     else:
-        runtime_state.record_reconcile_result(success=True)
+        if metadata["startup_gate_blocked"] > 0:
+            reason_code = REASON_STARTUP_GATE_BLOCKED
+        runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
         runtime_state.refresh_open_order_health()
     finally:
         conn.close()
