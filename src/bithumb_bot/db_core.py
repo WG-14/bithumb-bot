@@ -331,10 +331,27 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             qty REAL,
             price REAL,
             message TEXT,
+            symbol TEXT,
+            side TEXT,
+            submit_ts INTEGER,
+            payload_fingerprint TEXT,
+            broker_response_summary TEXT,
+            exception_class TEXT,
+            timeout_flag INTEGER,
+            exchange_order_id_obtained INTEGER,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
     )
+
+    _ensure_column(conn, "order_events", "symbol", "symbol TEXT")
+    _ensure_column(conn, "order_events", "side", "side TEXT")
+    _ensure_column(conn, "order_events", "submit_ts", "submit_ts INTEGER")
+    _ensure_column(conn, "order_events", "payload_fingerprint", "payload_fingerprint TEXT")
+    _ensure_column(conn, "order_events", "broker_response_summary", "broker_response_summary TEXT")
+    _ensure_column(conn, "order_events", "exception_class", "exception_class TEXT")
+    _ensure_column(conn, "order_events", "timeout_flag", "timeout_flag INTEGER")
+    _ensure_column(conn, "order_events", "exchange_order_id_obtained", "exchange_order_id_obtained INTEGER")
 
     conn.execute(
         """

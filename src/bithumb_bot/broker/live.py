@@ -11,7 +11,7 @@ from ..notifier import format_event, notify
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
-from ..oms import TERMINAL_ORDER_STATUSES, evaluate_unresolved_order_gate, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
+from ..oms import TERMINAL_ORDER_STATUSES, evaluate_unresolved_order_gate, new_client_order_id, payload_fingerprint, record_status_transition, record_submit_attempt, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -226,6 +226,18 @@ def _block_new_submission_for_unresolved_risk(*, conn, client_order_id: str, sid
     )
 
 def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, submit_attempt_id: str, side: str, qty: float, ts: int):
+    symbol = settings.PAIR
+    payload = {
+        "client_order_id": client_order_id,
+        "submit_attempt_id": submit_attempt_id,
+        "symbol": symbol,
+        "side": side,
+        "qty": float(qty),
+        "price": None,
+        "submit_ts": int(ts),
+    }
+    payload_hash = payload_fingerprint(payload)
+
     record_order_if_missing(
         conn,
         client_order_id=client_order_id,
@@ -245,11 +257,41 @@ def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, sub
     except BrokerTemporaryError as e:
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
         _mark_submit_unknown(conn=conn, client_order_id=client_order_id, side=side, reason=str(err))
+        record_submit_attempt(
+            conn=conn,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            price=None,
+            submit_ts=ts,
+            payload_fingerprint=payload_hash,
+            broker_response_summary=None,
+            exception_class=type(e).__name__,
+            timeout_flag=True,
+            exchange_order_id_obtained=False,
+            order_status="SUBMIT_UNKNOWN",
+        )
         conn.commit()
         return None
     except Exception as e:
         reason = f"submit failed: {type(e).__name__}: {e}"
         _mark_submit_failed(conn=conn, client_order_id=client_order_id, side=side, reason=reason)
+        record_submit_attempt(
+            conn=conn,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            price=None,
+            submit_ts=ts,
+            payload_fingerprint=payload_hash,
+            broker_response_summary=None,
+            exception_class=type(e).__name__,
+            timeout_flag=False,
+            exchange_order_id_obtained=False,
+            order_status="FAILED",
+        )
         conn.commit()
         return None
 
@@ -275,9 +317,39 @@ def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, sub
             from_status=order.status,
             reason=reason,
         )
+        record_submit_attempt(
+            conn=conn,
+            client_order_id=client_order_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            price=None,
+            submit_ts=ts,
+            payload_fingerprint=payload_hash,
+            broker_response_summary=f"status={order.status};exchange_order_id=-",
+            exception_class=None,
+            timeout_flag=False,
+            exchange_order_id_obtained=False,
+            order_status="RECOVERY_REQUIRED",
+        )
         conn.commit()
         return None
 
+    record_submit_attempt(
+        conn=conn,
+        client_order_id=client_order_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        price=None,
+        submit_ts=ts,
+        payload_fingerprint=payload_hash,
+        broker_response_summary=f"status={order.status};exchange_order_id={order.exchange_order_id}",
+        exception_class=None,
+        timeout_flag=False,
+        exchange_order_id_obtained=True,
+        order_status=order.status,
+    )
     conn.commit()
     return order
 

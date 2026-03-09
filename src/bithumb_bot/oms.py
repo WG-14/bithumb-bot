@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import uuid
 from typing import Any
@@ -88,12 +90,36 @@ def _record_order_event(
     qty: float | None = None,
     price: float | None = None,
     message: str | None = None,
+    symbol: str | None = None,
+    side: str | None = None,
+    submit_ts: int | None = None,
+    payload_fingerprint: str | None = None,
+    broker_response_summary: str | None = None,
+    exception_class: str | None = None,
+    timeout_flag: bool | None = None,
+    exchange_order_id_obtained: bool | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO order_events(
-            client_order_id, event_type, event_ts, order_status, exchange_order_id, fill_id, qty, price, message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            client_order_id,
+            event_type,
+            event_ts,
+            order_status,
+            exchange_order_id,
+            fill_id,
+            qty,
+            price,
+            message,
+            symbol,
+            side,
+            submit_ts,
+            payload_fingerprint,
+            broker_response_summary,
+            exception_class,
+            timeout_flag,
+            exchange_order_id_obtained
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             client_order_id,
@@ -105,7 +131,55 @@ def _record_order_event(
             (float(qty) if qty is not None else None),
             (float(price) if price is not None else None),
             (message[:500] if message else None),
+            symbol,
+            side,
+            int(submit_ts) if submit_ts is not None else None,
+            payload_fingerprint,
+            (broker_response_summary[:500] if broker_response_summary else None),
+            exception_class,
+            (1 if timeout_flag else 0) if timeout_flag is not None else None,
+            (1 if exchange_order_id_obtained else 0) if exchange_order_id_obtained is not None else None,
         ),
+    )
+
+
+def payload_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def record_submit_attempt(
+    *,
+    client_order_id: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    price: float | None,
+    submit_ts: int,
+    payload_fingerprint: str,
+    broker_response_summary: str | None,
+    exception_class: str | None,
+    timeout_flag: bool,
+    exchange_order_id_obtained: bool,
+    order_status: str,
+    conn: sqlite3.Connection,
+) -> None:
+    _record_order_event(
+        conn,
+        client_order_id=client_order_id,
+        event_type="submit_attempt_recorded",
+        event_ts=submit_ts,
+        order_status=order_status,
+        qty=qty,
+        price=price,
+        symbol=symbol,
+        side=side,
+        submit_ts=submit_ts,
+        payload_fingerprint=payload_fingerprint,
+        broker_response_summary=broker_response_summary,
+        exception_class=exception_class,
+        timeout_flag=timeout_flag,
+        exchange_order_id_obtained=exchange_order_id_obtained,
     )
 
 

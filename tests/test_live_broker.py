@@ -624,6 +624,42 @@ def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
     assert trade is not None
 
 
+def test_live_success_persists_submit_attempt_record(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_success.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+    assert trade is not None
+
+    conn = ensure_db(str(tmp_path / "submit_success.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    assert submit_attempt is not None
+    assert submit_attempt["symbol"] == settings.PAIR
+    assert submit_attempt["side"] == "BUY"
+    assert float(submit_attempt["qty"]) > 0
+    assert submit_attempt["price"] is None
+    assert int(submit_attempt["submit_ts"]) == 1000
+    assert submit_attempt["payload_fingerprint"]
+    assert "exchange_order_id=ex1" in str(submit_attempt["broker_response_summary"])
+    assert submit_attempt["exception_class"] is None
+    assert submit_attempt["timeout_flag"] == 0
+    assert submit_attempt["exchange_order_id_obtained"] == 1
+
+
 def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
@@ -636,6 +672,16 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
 
     conn = ensure_db(str(tmp_path / "submit_unknown.sqlite"))
     row = conn.execute("SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1").fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     transition = conn.execute(
         """
         SELECT message, order_status
@@ -651,6 +697,18 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert row is not None
     assert row["status"] == "SUBMIT_UNKNOWN"
     assert "submit unknown" in str(row["last_error"])
+    assert submit_attempt is not None
+    assert submit_attempt["symbol"] == settings.PAIR
+    assert submit_attempt["side"] == "BUY"
+    assert float(submit_attempt["qty"]) > 0
+    assert submit_attempt["price"] is None
+    assert int(submit_attempt["submit_ts"]) == 1000
+    assert submit_attempt["payload_fingerprint"]
+    assert submit_attempt["broker_response_summary"] is None
+    assert submit_attempt["exception_class"] == "BrokerTemporaryError"
+    assert submit_attempt["timeout_flag"] == 1
+    assert submit_attempt["exchange_order_id_obtained"] == 0
+    assert submit_attempt["order_status"] == "SUBMIT_UNKNOWN"
     assert transition is not None
     assert transition["order_status"] == "SUBMIT_UNKNOWN"
     assert "from=PENDING_SUBMIT" in str(transition["message"])
@@ -677,6 +735,16 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
         "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
         (row["client_order_id"],),
     ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT symbol, side, qty, submit_ts, payload_fingerprint, broker_response_summary, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     transition = conn.execute(
         """
         SELECT message, order_status
@@ -693,6 +761,17 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
     assert row["status"] == "FAILED"
     assert "submit failed" in str(row["last_error"])
     assert started_event is not None
+    assert submit_attempt is not None
+    assert submit_attempt["symbol"] == settings.PAIR
+    assert submit_attempt["side"] == "BUY"
+    assert float(submit_attempt["qty"]) > 0
+    assert int(submit_attempt["submit_ts"]) == 1000
+    assert submit_attempt["payload_fingerprint"]
+    assert submit_attempt["broker_response_summary"] is None
+    assert submit_attempt["exception_class"] == "RuntimeError"
+    assert submit_attempt["timeout_flag"] == 0
+    assert submit_attempt["exchange_order_id_obtained"] == 0
+    assert submit_attempt["order_status"] == "FAILED"
     assert transition is not None
     assert transition["order_status"] == "FAILED"
     assert "from=PENDING_SUBMIT" in str(transition["message"])
