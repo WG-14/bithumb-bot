@@ -220,18 +220,49 @@ def test_recovery_report_summarizes_unresolved_and_recovery_required(tmp_path):
     _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 30_000)
     _insert_order(status="RECOVERY_REQUIRED", client_order_id="open_2", created_ts=now_ms - 20_000)
 
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={"remote_open_order_found": 2},
+        now_epoch_sec=time.time() - 3,
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="periodic reconcile failed",
+        reason_code="PERIODIC_RECONCILE_FAILED",
+        unresolved=True,
+    )
+
     report = _load_recovery_report()
 
     assert int(report["unresolved_count"]) == 2
     assert int(report["recovery_required_count"]) == 1
     assert report["oldest_unresolved_age_sec"] is not None
     assert float(report["oldest_unresolved_age_sec"]) >= 20.0
+    assert "status=ok" in str(report["last_reconcile_summary"])
+    assert "reason_code=RECONCILE_OK" in str(report["last_reconcile_summary"])
+    assert "code=PERIODIC_RECONCILE_FAILED" in str(report["recent_halt_reason"])
+    assert int(report["unprocessed_remote_open_orders"]) == 2
     oldest_orders = report["oldest_orders"]
     assert isinstance(oldest_orders, list)
     assert len(oldest_orders) == 2
     assert oldest_orders[0]["client_order_id"] == "open_1"
     assert oldest_orders[0]["status"] == "NEW"
     assert oldest_orders[1]["client_order_id"] == "open_2"
+
+
+def test_recovery_report_shows_defaults_when_empty(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    report = _load_recovery_report()
+
+    assert int(report["unresolved_count"]) == 0
+    assert int(report["recovery_required_count"]) == 0
+    assert report["oldest_unresolved_age_sec"] is None
+    assert report["oldest_orders"] == []
+    assert report["last_reconcile_summary"] == "none"
+    assert report["recent_halt_reason"] == "none"
+    assert int(report["unprocessed_remote_open_orders"]) == 0
 
 
 def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
@@ -252,8 +283,13 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "[RECOVERY-REPORT]" in out
-    assert "unresolved_open_orders=6" in out
-    assert "recovery_required_orders=3" in out
+    assert "[P1] unresolved_open_orders" in out
+    assert "count=6" in out
+    assert "[P2] recovery_required_orders" in out
+    assert "count=3" in out
+    assert "[P3] last_reconcile_summary" in out
+    assert "[P4] recent_halt_reason" in out
+    assert "[P5] unprocessed_remote_open_orders" in out
     assert "oldest_unresolved_orders(top 5):" in out
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out

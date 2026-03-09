@@ -7,6 +7,7 @@ import time
 import argparse
 import sqlite3
 import math
+import json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
@@ -601,7 +602,7 @@ def cmd_cancel_open_orders() -> None:
 def _load_recovery_report(
     *,
     oldest_limit: int = 5,
-) -> dict[str, int | float | None | list[dict[str, str | float]]]:
+) -> dict[str, int | float | str | None | list[dict[str, str | float]]]:
     conn = ensure_db(settings.DB_PATH)
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
@@ -626,6 +627,21 @@ def _load_recovery_report(
             """,
             (*OPEN_ORDER_STATUSES, oldest_limit),
         ).fetchall()
+        health_row = conn.execute(
+            """
+            SELECT
+                halt_reason_code,
+                halt_state_unresolved,
+                last_disable_reason,
+                last_reconcile_epoch_sec,
+                last_reconcile_status,
+                last_reconcile_error,
+                last_reconcile_reason_code,
+                last_reconcile_metadata
+            FROM bot_health
+            WHERE id=1
+            """
+        ).fetchone()
     finally:
         conn.close()
 
@@ -650,19 +666,61 @@ def _load_recovery_report(
             }
         )
 
+    last_reconcile_summary = "none"
+    if health_row and health_row["last_reconcile_status"]:
+        pieces = [
+            f"status={health_row['last_reconcile_status']}",
+            f"reason_code={health_row['last_reconcile_reason_code'] or '-'}",
+        ]
+        if health_row["last_reconcile_epoch_sec"] is not None:
+            pieces.append(f"age_sec={max(0.0, time.time() - float(health_row['last_reconcile_epoch_sec'])):.1f}")
+        if health_row["last_reconcile_error"]:
+            pieces.append(f"error={health_row['last_reconcile_error']}")
+        last_reconcile_summary = " ".join(pieces)
+
+    recent_halt_reason = "none"
+    if health_row and (health_row["halt_reason_code"] or health_row["last_disable_reason"]):
+        recent_halt_reason = (
+            f"code={health_row['halt_reason_code'] or '-'} reason={health_row['last_disable_reason'] or '-'} "
+            f"unresolved={1 if int(health_row['halt_state_unresolved']) else 0}"
+        )
+
+    unprocessed_remote_open_orders = 0
+    if health_row and health_row["last_reconcile_metadata"]:
+        try:
+            reconcile_meta = json.loads(str(health_row["last_reconcile_metadata"]))
+        except json.JSONDecodeError:
+            reconcile_meta = {}
+        raw_count = reconcile_meta.get("remote_open_order_found", 0)
+        try:
+            unprocessed_remote_open_orders = max(0, int(raw_count))
+        except (TypeError, ValueError):
+            unprocessed_remote_open_orders = 0
+
     return {
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
         "oldest_unresolved_age_sec": oldest_age_sec,
         "oldest_orders": oldest_orders,
+        "last_reconcile_summary": last_reconcile_summary,
+        "recent_halt_reason": recent_halt_reason,
+        "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
     }
 
 
 def cmd_recovery_report() -> None:
     report = _load_recovery_report()
     print("[RECOVERY-REPORT]")
-    print(f"  unresolved_open_orders={report['unresolved_count']}")
-    print(f"  recovery_required_orders={report['recovery_required_count']}")
+    print("  [P1] unresolved_open_orders")
+    print(f"    count={report['unresolved_count']}")
+    print("  [P2] recovery_required_orders")
+    print(f"    count={report['recovery_required_count']}")
+    print("  [P3] last_reconcile_summary")
+    print(f"    {report['last_reconcile_summary']}")
+    print("  [P4] recent_halt_reason")
+    print(f"    {report['recent_halt_reason']}")
+    print("  [P5] unprocessed_remote_open_orders")
+    print(f"    count={report['unprocessed_remote_open_orders']}")
     if report["oldest_unresolved_age_sec"] is None:
         print("  oldest_unresolved_age_sec=none")
     else:
