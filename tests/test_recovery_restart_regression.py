@@ -84,6 +84,11 @@ class _CancelRaceBroker(_NoopBroker):
         return BrokerOrder(client_order_id, exchange_order_id or "ex-cancel-race", "BUY", self.remote_status, 100.0, 1.0, 0.0, 1, 1)
 
 
+class _ApiErrorBroker(_NoopBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        raise RuntimeError("broker api unavailable")
+
+
 
 def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):
     conn = ensure_db(str(isolated_db))
@@ -108,6 +113,44 @@ def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):
     assert "unresolved_open_orders=1" in reason
     assert state.unresolved_open_order_count == 1
     assert state.startup_gate_reason == reason
+
+
+def test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocked(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_NoopBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    reason = evaluate_startup_safety_gate()
+    state = runtime_state.snapshot()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert reason is not None
+    assert "recovery_required_orders=1" in reason
+    assert state.unresolved_open_order_count == 1
 
 
 
@@ -159,6 +202,42 @@ def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated
     assert fills == 2
     assert reason is None
     assert state.unresolved_open_order_count == 0
+
+
+def test_submit_success_then_crash_restart_blocks_new_submit_attempt(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_success_crash",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("submit_success_crash", "ex-submit-success", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    run_loop(5, 20)
+
+    reason = evaluate_startup_safety_gate()
+    state = runtime_state.snapshot()
+    assert reason is not None
+    assert "unresolved_open_orders=1" in reason
+    assert state.trading_enabled is False
+    assert live_execute_calls["n"] == 0
 
 
 
@@ -259,6 +338,41 @@ def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monk
     assert float(row["qty_filled"]) == pytest.approx(1.0)
     assert fills_after_retry == 2
     assert evaluate_startup_safety_gate() is None
+
+
+def test_restart_reconcile_api_exception_halts_and_prevents_resume(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="reconcile_api_exception",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("reconcile_api_exception", "ex-api-down", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _ApiErrorBroker())
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "INITIAL_RECONCILE_FAILED"
+    assert live_execute_calls["n"] == 0
 
 
 def _patch_single_tick_run_loop(monkeypatch) -> None:
