@@ -8,15 +8,26 @@ from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
+from ..observability import safety_event
+from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_TIMEOUT
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
-from ..oms import TERMINAL_ORDER_STATUSES, evaluate_unresolved_order_gate, new_client_order_id, payload_fingerprint, record_status_transition, record_submit_attempt, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
+from ..oms import (
+    TERMINAL_ORDER_STATUSES,
+    evaluate_unresolved_order_gate,
+    new_client_order_id,
+    payload_fingerprint,
+    record_status_transition,
+    record_submit_attempt,
+    record_submit_blocked,
+    record_submit_started,
+    set_exchange_order_id,
+    set_status,
+)
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
-
-
 VALID_ORDER_SIDES = {"BUY", "SELL"}
 
 
@@ -145,9 +156,12 @@ def _mark_submit_unknown(*, conn, client_order_id: str, side: str, reason: str) 
     )
     set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=reason, conn=conn)
     notify(
-        format_event(
+        safety_event(
             "order_submit_unknown",
             client_order_id=client_order_id,
+            state_from="PENDING_SUBMIT",
+            state_to="SUBMIT_UNKNOWN",
+            reason_code=SUBMIT_TIMEOUT,
             side=side,
             status="SUBMIT_UNKNOWN",
             reason=reason,
@@ -190,9 +204,12 @@ def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_statu
         conn=conn,
     )
     notify(
-        format_event(
+        safety_event(
             "recovery_required_transition",
             client_order_id=client_order_id,
+            state_from=from_status,
+            state_to="RECOVERY_REQUIRED",
+            reason_code=AMBIGUOUS_SUBMIT,
             side=side,
             status="RECOVERY_REQUIRED",
             reason=reason,
@@ -200,9 +217,16 @@ def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_statu
     )
 
 
-
-
-def _block_new_submission_for_unresolved_risk(*, conn, client_order_id: str, side: str, qty: float, ts: int, reason_code: str, reason: str) -> None:
+def _block_new_submission_for_unresolved_risk(
+    *,
+    conn,
+    client_order_id: str,
+    side: str,
+    qty: float,
+    ts: int,
+    reason_code: str,
+    reason: str,
+) -> None:
     record_order_if_missing(
         conn,
         client_order_id=client_order_id,
@@ -216,16 +240,29 @@ def _block_new_submission_for_unresolved_risk(*, conn, client_order_id: str, sid
     persisted_reason = f"code={reason_code};reason={reason}"
     record_submit_blocked(client_order_id, status="FAILED", reason=persisted_reason, conn=conn)
     notify(
-        format_event(
+        safety_event(
             "order_submit_blocked",
             client_order_id=client_order_id,
+            submit_attempt_id=client_order_id.split("_")[-1],
+            reason_code=RISKY_ORDER_BLOCK,
             side=side,
             status="FAILED",
+            reason_detail_code=reason_code,
             reason=persisted_reason,
         )
     )
 
-def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, submit_attempt_id: str, side: str, qty: float, ts: int):
+
+def _submit_via_standard_path(
+    *,
+    conn,
+    broker: Broker,
+    client_order_id: str,
+    submit_attempt_id: str,
+    side: str,
+    qty: float,
+    ts: int,
+):
     symbol = settings.PAIR
     payload = {
         "client_order_id": client_order_id,
@@ -359,15 +396,21 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
     try:
         init_portfolio(conn)
         state = runtime_state.snapshot()
+
         if state.halt_new_orders_blocked:
+            halt_reason = f"runtime halted: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}"
             notify(
-                format_event(
+                safety_event(  # CHANGED
                     "order_submit_blocked",
                     status="HALTED",
-                    reason=f"runtime halted: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+                    state_to="HALTED",
+                    reason_code=RISKY_ORDER_BLOCK,
+                    halt_detail_code=state.halt_reason_code or "-",
+                    reason=halt_reason,
                 )
             )
             return None
+
         cash, qty = get_portfolio(conn)
 
         if signal == "BUY" and qty <= POSITION_EPSILON:
@@ -378,16 +421,20 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             blocked, _ = evaluate_buy_guardrails(conn=conn, ts_ms=ts, cash=cash, qty=qty, price=market_price)
             if blocked:
                 return None
+
             spend = cash * float(settings.BUY_FRACTION)
             if settings.MAX_ORDER_KRW > 0:
                 spend = min(spend, float(settings.MAX_ORDER_KRW))
             if spend <= 0:
                 return None
+
             order_qty = max(0.0, spend / market_price)
             side = "BUY"
+
         elif signal == "SELL" and qty > POSITION_EPSILON:
             order_qty = qty
             side = "SELL"
+
         else:
             return None
 
@@ -428,6 +475,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 )
                 conn.commit()
                 return None
+
             notify(f"live order placement blocked ({side}): {reason}")
             return None
 
@@ -441,11 +489,13 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 reason = f"duplicate submit blocked: terminal status {existing_status}"
                 record_submit_blocked(client_order_id, status=existing_status, reason=reason, conn=conn)
                 notify(
-                    format_event(
+                    safety_event(  # CHANGED
                         "order_submit_blocked",
                         client_order_id=client_order_id,
+                        submit_attempt_id=submit_attempt_id,
                         side=side,
                         status=existing_status,
+                        reason_code=RISKY_ORDER_BLOCK,
                         reason=reason,
                     )
                 )
@@ -483,5 +533,6 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         set_status(client_order_id, refreshed.status, conn=conn)
         conn.commit()
         return trade
+
     finally:
         conn.close()

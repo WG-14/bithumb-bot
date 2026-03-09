@@ -287,7 +287,7 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert state.halt_new_orders_blocked is True
     assert state.halt_state_unresolved is True
     assert called["n"] == 0
-    assert any("event=startup_gate_blocked" in n for n in notifications)
+    assert any("event=startup_gate_blocked" in n and "reason_code=STARTUP_BLOCKED" in n and "timestamp=" in n for n in notifications)
     assert any("reason_code=STARTUP_SAFETY_GATE" in n for n in notifications)
     halted = [n for n in notifications if "event=trading_halted" in n and "alert_kind=halt" in n]
     assert halted
@@ -442,7 +442,7 @@ def test_attempt_open_order_cancellation_failure_emits_reason_code(monkeypatch):
 
     assert ok is False
     assert any("event=cancel_open_orders_failed" in n for n in notifications)
-    assert any("reason_code=CANCEL_OPEN_ORDERS_ERROR" in n for n in notifications)
+    assert any("reason_code=CANCEL_FAILURE" in n and "cancel_detail_code=CANCEL_OPEN_ORDERS_ERROR" in n for n in notifications)
 
 class _DummyClient:
     def __init__(self, responses):

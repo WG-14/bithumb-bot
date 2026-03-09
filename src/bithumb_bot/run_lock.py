@@ -3,12 +3,16 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-import fcntl
 import logging
 import os
 import tempfile
 import time
 from typing import Iterator
+
+try:
+    import fcntl  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    fcntl = None
 
 
 class RunLockError(RuntimeError):
@@ -74,6 +78,9 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
 
 @contextmanager
 def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
+    if fcntl is None:
+        raise RunLockError("run lock is not supported on this platform; use WSL or Linux")
+
     path = lock_path or _default_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 

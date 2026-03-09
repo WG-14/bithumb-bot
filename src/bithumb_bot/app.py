@@ -608,6 +608,11 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
 
 
+def _last_reconcile_failed(state) -> bool:
+    status = str(getattr(state, "last_reconcile_status", "") or "").upper()
+    return status in {"FAILED", "ERROR"}
+
+
 def _load_recovery_report(
     *,
     oldest_limit: int = 5,
@@ -666,16 +671,31 @@ def _load_recovery_report(
 
     unresolved_count = int(unresolved_row["unresolved_count"] if unresolved_row else 0)
     recovery_required_count = int(recovery_required_row["recovery_required_count"] if recovery_required_row else 0)
+
     oldest_created_ts = unresolved_row["oldest_created_ts"] if unresolved_row else None
     oldest_age_sec = None
     if unresolved_count > 0 and oldest_created_ts is not None:
         oldest_age_sec = max(0.0, (time.time() * 1000 - float(oldest_created_ts)) / 1000)
 
     now_ms = time.time() * 1000
+
     oldest_orders: list[dict[str, str | float]] = []
     for row in oldest_rows:
         last_error = str(row["last_error"] or "").strip()
         oldest_orders.append(
+            {
+                "client_order_id": str(row["client_order_id"]),
+                "status": str(row["status"]),
+                "exchange_order_id": str(row["exchange_order_id"] or "-"),
+                "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
+                "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+            }
+        )
+
+    recovery_required_orders: list[dict[str, str | float]] = []
+    for row in recovery_required_rows:
+        last_error = str(row["last_error"] or "").strip()
+        recovery_required_orders.append(
             {
                 "client_order_id": str(row["client_order_id"]),
                 "status": str(row["status"]),
@@ -700,8 +720,9 @@ def _load_recovery_report(
     recent_halt_reason = "none"
     if health_row and (health_row["halt_reason_code"] or health_row["last_disable_reason"]):
         recent_halt_reason = (
-            f"code={health_row['halt_reason_code'] or '-'} reason={health_row['last_disable_reason'] or '-'} "
-            f"unresolved={1 if int(health_row['halt_state_unresolved']) else 0}"
+            f"code={health_row['halt_reason_code'] or '-'} "
+            f"reason={health_row['last_disable_reason'] or '-'} "
+            f"unresolved={1 if bool(health_row['halt_state_unresolved']) else 0}"
         )
 
     unprocessed_remote_open_orders = 0
@@ -717,19 +738,6 @@ def _load_recovery_report(
             unprocessed_remote_open_orders = 0
 
     state = runtime_state.snapshot()
-
-    recovery_required_orders: list[dict[str, str | float]] = []
-    for row in recovery_required_rows:
-        last_error = str(row["last_error"] or "").strip()
-        recovery_required_orders.append(
-            {
-                "client_order_id": str(row["client_order_id"]),
-                "status": str(row["status"]),
-                "exchange_order_id": str(row["exchange_order_id"] or "-"),
-                "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
-                "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
-            }
-        )
 
     return {
         "unresolved_count": unresolved_count,
@@ -762,10 +770,12 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    {report['recent_halt_reason']}")
     print("  [P5] unprocessed_remote_open_orders")
     print(f"    count={report['unprocessed_remote_open_orders']}")
+
     if report["oldest_unresolved_age_sec"] is None:
         print("  oldest_unresolved_age_sec=none")
     else:
         print(f"  oldest_unresolved_age_sec={float(report['oldest_unresolved_age_sec']):.1f}")
+
     oldest_orders = report.get("oldest_orders") or []
     if oldest_orders:
         print(f"  oldest_unresolved_orders(top {len(oldest_orders)}):")
@@ -779,6 +789,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                 f"last_error={item['last_error']}"
             )
 
+def _last_reconcile_failed(state) -> bool:
+    status = str(getattr(state, "last_reconcile_status", "") or "").upper()
+    return status in {"FAILED", "ERROR"}
 
 def cmd_pause() -> None:
     runtime_state.enter_halt(
@@ -790,6 +803,20 @@ def cmd_pause() -> None:
 
 
 def cmd_resume(force: bool = False) -> None:
+    state = runtime_state.snapshot()
+
+    if (not force) and _last_reconcile_failed(state):
+        last_reason_code = str(getattr(state, "last_reconcile_reason_code", "") or "-")
+        last_reason = str(getattr(state, "last_reconcile_error", "") or "-")
+        print("[RESUME] refused:")
+        print(
+            "  - code=LAST_RECONCILE_FAILED "
+            f"detail=reason_code={last_reason_code} reason={last_reason}"
+        )
+        print("  run `uv run python bot.py recovery-report` for details")
+        print("  or resume explicitly with `uv run python bot.py resume --force`")
+        raise SystemExit(1)
+
     if settings.MODE == "live":
         from .broker.bithumb import BithumbBroker
 
@@ -809,7 +836,7 @@ def cmd_resume(force: bool = False) -> None:
     if force and resume_blocks:
         block_summary = "; ".join(f"{code}:{detail}" for code, detail in resume_blocks)
         print(f"[RESUME] forced: trading enabled despite blocks={block_summary}")
-        print(f"[RESUME] override_applied=1 override_reason=operator_force_resume")
+        print("[RESUME] override_applied=1 override_reason=operator_force_resume")
     else:
         print("[RESUME] trading enabled")
 

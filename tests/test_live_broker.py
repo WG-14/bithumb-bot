@@ -398,7 +398,7 @@ def test_live_duplicate_attempt_with_terminal_status_blocks_resubmit(monkeypatch
     assert blocked["event_type"] == "submit_blocked"
     assert blocked["order_status"] == "CANCELED"
     assert "terminal status CANCELED" in str(blocked["message"])
-    assert any("event=order_submit_blocked" in msg for msg in notifications)
+    assert any("event=order_submit_blocked" in msg and "reason_code=RISKY_ORDER_BLOCK" in msg for msg in notifications)
 
 
 def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, tmp_path):
@@ -438,7 +438,7 @@ def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, 
 
     assert blocked is not None
     assert "code=SUBMIT_UNKNOWN_PRESENT" in str(blocked["message"])
-    assert any("event=order_submit_blocked" in msg for msg in notifications)
+    assert any("event=order_submit_blocked" in msg and "reason_code=RISKY_ORDER_BLOCK" in msg and "submit_attempt_id=" in msg for msg in notifications)
 
 
 def test_live_open_order_guard_blocks_new_order(tmp_path):
@@ -479,7 +479,7 @@ def test_live_runtime_halt_blocks_new_order_submission(monkeypatch, tmp_path):
 
     assert trade is None
     assert broker.place_order_calls == 0
-    assert any("event=order_submit_blocked" in msg and "status=HALTED" in msg for msg in notifications)
+    assert any("event=order_submit_blocked" in msg and "status=HALTED" in msg and "timestamp=" in msg for msg in notifications)
 
 def test_live_kill_switch_blocks_new_order(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "kill_switch.sqlite"))
@@ -714,7 +714,7 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert "from=PENDING_SUBMIT" in str(transition["message"])
     assert "to=SUBMIT_UNKNOWN" in str(transition["message"])
     assert any("event=order_submit_started" in msg for msg in notifications)
-    assert any("event=order_submit_unknown" in msg for msg in notifications)
+    assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg and "state_to=SUBMIT_UNKNOWN" in msg for msg in notifications)
 
 
 def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, tmp_path):
@@ -800,7 +800,7 @@ def test_live_submit_without_exchange_id_marks_recovery_required(monkeypatch, tm
     assert row["status"] == "RECOVERY_REQUIRED"
     assert row["exchange_order_id"] is None
     assert "manual recovery required" in str(row["last_error"])
-    assert any("event=recovery_required_transition" in msg for msg in notifications)
+    assert any("event=recovery_required_transition" in msg and "reason_code=AMBIGUOUS_SUBMIT" in msg for msg in notifications)
 
 
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
@@ -934,7 +934,7 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert "to=RECOVERY_REQUIRED" in str(transition["message"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
-    assert any("event=recovery_required_transition" in msg for msg in notifications)
+    assert any("event=recovery_required_transition" in msg and "reason_code=AMBIGUOUS_SUBMIT" in msg for msg in notifications)
     assert any(
         "event=reconcile_status_change" in msg and "client_order_id=live_2000_buy" in msg
         for msg in notifications
@@ -1038,7 +1038,7 @@ def test_reconcile_conflicting_sources_halts_conservatively(monkeypatch, tmp_pat
     assert state.last_reconcile_reason_code == "SOURCE_CONFLICT_HALT"
     assert state.last_disable_reason is not None
     assert "source conflict" in state.last_disable_reason
-    assert any("event=reconcile_source_conflict" in msg for msg in notifications)
+    assert any("event=reconcile_source_conflict" in msg and "reason_code=RECONCILE_MISMATCH" in msg for msg in notifications)
 
 
 def test_reconcile_precedence_prefers_open_orders_over_recent_orders(tmp_path):

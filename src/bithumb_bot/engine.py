@@ -14,6 +14,8 @@ from .broker.base import BrokerError
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
+from .observability import safety_event
+from .reason_codes import CANCEL_FAILURE, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach
 from .oms import collect_risky_order_state
@@ -239,11 +241,12 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
             summary={"error": f"{type(e).__name__}: {e}"},
         )
         notify(
-            format_event(
+            safety_event(
                 "cancel_open_orders_failed",
                 alert_kind="cancel_failure",
                 trigger=trigger,
-                reason_code=reason_code,
+                reason_code=CANCEL_FAILURE,
+                cancel_detail_code=reason_code,
                 error_type=type(e).__name__,
                 reason=str(e),
             )
@@ -274,11 +277,12 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
 
     if failed_count > 0:
         notify(
-            format_event(
+            safety_event(
                 "cancel_open_orders_failed",
                 alert_kind="cancel_failure",
                 trigger=trigger,
-                reason_code="CANCEL_OPEN_ORDERS_INCOMPLETE",
+                reason_code=CANCEL_FAILURE,
+                cancel_detail_code="CANCEL_OPEN_ORDERS_INCOMPLETE",
                 failed_count=failed_count,
             )
         )
@@ -318,11 +322,12 @@ def run_loop(short_n: int, long_n: int) -> None:
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
             notify(
-                format_event(
+                safety_event(
                     "startup_gate_blocked",
                     alert_kind="startup_gate",
-                    reason_code="STARTUP_SAFETY_GATE",
+                    reason_code=STARTUP_BLOCKED,
                     reason=startup_gate_reason,
+                    state_to="HALTED",
                 )
             )
             _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
@@ -514,7 +519,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                             continue
 
                     if open_count > 0:
-                        notify("unresolved open order exists; skip new order placement")
+                        notify(safety_event("order_submit_blocked", reason_code=RISKY_ORDER_BLOCK, reason="unresolved open order exists; skip new order placement"))
                         continue
 
             conn = ensure_db()

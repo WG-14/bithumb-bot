@@ -8,6 +8,8 @@ from .execution import apply_fill_and_trade, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status
 from . import runtime_state
 from .notifier import format_event, notify
+from .observability import safety_event
+from .reason_codes import AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH
 
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
@@ -202,9 +204,10 @@ def _halt_on_source_conflict(conflicts: list[str]) -> None:
         unresolved=True,
     )
     notify(
-        format_event(
+        safety_event(
             "reconcile_source_conflict",
             alert_kind="halt",
+            reason_code=RECONCILE_MISMATCH,
             reason=reason,
         )
     )
@@ -249,11 +252,14 @@ def reconcile_with_broker(broker: Broker) -> None:
                 metadata["submit_unknown_unresolved"] += 1
                 reason_code = REASON_SUBMIT_UNKNOWN_UNRESOLVED
                 notify(
-                    format_event(
+                    safety_event(
                         "recovery_required_transition",
                         client_order_id=oid,
                         side=row["side"],
                         status="RECOVERY_REQUIRED",
+                        state_from="SUBMIT_UNKNOWN",
+                        state_to="RECOVERY_REQUIRED",
+                        reason_code=AMBIGUOUS_SUBMIT,
                         reason=reason,
                     )
                 )

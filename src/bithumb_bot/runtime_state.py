@@ -7,6 +7,8 @@ from threading import Lock
 
 from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
+from .reason_codes import HALT_ENTERED, STARTUP_BLOCKED
+from .observability import safety_event
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
 
@@ -496,10 +498,14 @@ def enter_halt(
         unresolved=unresolved,
     )
     _LOG.error(
-        "event=trading_halted reason_code=%s unresolved=%s reason=%s",
-        reason_code,
-        int(unresolved),
-        reason,
+        safety_event(
+            "trading_halted",
+            reason_code=HALT_ENTERED,
+            state_to="HALTED",
+            unresolved=int(unresolved),
+            halt_detail_code=reason_code,
+            reason=reason,
+        )
     )
 
 
