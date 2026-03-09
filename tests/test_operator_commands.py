@@ -429,3 +429,27 @@ def test_resume_succeeds_after_manual_recovery_clears_recovery_required(monkeypa
     assert int(report["recovery_required_count"]) == 0
     assert int(report["unresolved_count"]) == 0
     assert state.trading_enabled is True
+
+
+def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
+    from bithumb_bot.app import cmd_run
+    from bithumb_bot.run_lock import RunLockError
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.app.notify", lambda msg: notifications.append(msg))
+
+    class _RaiseOnEnter:
+        def __enter__(self):
+            raise RunLockError("another bot run loop is already running")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", lambda: _RaiseOnEnter())
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_run(5, 20)
+
+    assert exc.value.code == 1
+    assert any("event=run_lock_conflict" in n for n in notifications)
+    assert any("reason_code=RUN_LOCK_CONFLICT" in n for n in notifications)

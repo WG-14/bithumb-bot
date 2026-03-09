@@ -279,7 +279,9 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert state.halt_new_orders_blocked is True
     assert state.halt_state_unresolved is True
     assert called["n"] == 0
-    assert sum("event=trading_halted" in n for n in notifications) == 1
+    assert any("event=startup_gate_blocked" in n for n in notifications)
+    assert any("reason_code=STARTUP_SAFETY_GATE" in n for n in notifications)
+    assert any("event=trading_halted" in n and "alert_kind=halt" in n for n in notifications)
 
 
 
@@ -392,6 +394,44 @@ def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
     assert state.trading_enabled is False
     assert state.retry_at_epoch_sec == float("inf")
     assert all("attempting auto-resume" not in n for n in notifications)
+
+
+
+def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monkeypatch):
+    _prepare_run_loop(monkeypatch, open_order_created_ts=0)
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 5)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.engine._attempt_open_order_cancellation", lambda *_args, **_kwargs: False)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
+    run_loop(5, 20)
+
+    assert any("event=recovery_required_marked" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
+    assert any("event=trading_halted" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
+
+
+def test_attempt_open_order_cancellation_failure_emits_reason_code(monkeypatch):
+    err = RuntimeError("boom")
+    monkeypatch.setattr(
+        "bithumb_bot.recovery.cancel_open_orders_with_broker",
+        lambda _broker: (_ for _ in ()).throw(err),
+        raising=False,
+    )
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
+    from bithumb_bot.engine import _attempt_open_order_cancellation
+
+    ok = _attempt_open_order_cancellation(object(), trigger="kill-switch")
+
+    assert ok is False
+    assert any("event=cancel_open_orders_failed" in n for n in notifications)
+    assert any("reason_code=CANCEL_OPEN_ORDERS_ERROR" in n for n in notifications)
 
 class _DummyClient:
     def __init__(self, responses):

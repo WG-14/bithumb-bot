@@ -172,7 +172,16 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
         halt_new_orders_blocked=True,
         unresolved=unresolved,
     )
-    notify(format_event("trading_halted", status="HALTED", reason=reason.detail, reason_code=reason.code))
+    notify(
+        format_event(
+            "trading_halted",
+            status="HALTED",
+            alert_kind="halt",
+            reason=reason.detail,
+            reason_code=reason.code,
+            unresolved=int(unresolved),
+        )
+    )
 
 
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
@@ -181,14 +190,21 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     try:
         summary = cancel_open_orders_with_broker(broker)
     except Exception as e:
+        reason_code = "CANCEL_OPEN_ORDERS_ERROR"
         runtime_state.record_cancel_open_orders_result(
             trigger=trigger,
             status="error",
             summary={"error": f"{type(e).__name__}: {e}"},
         )
         notify(
-            f"emergency open-order cancellation failed ({trigger}): "
-            f"{type(e).__name__}: {e}"
+            format_event(
+                "cancel_open_orders_failed",
+                alert_kind="cancel_failure",
+                trigger=trigger,
+                reason_code=reason_code,
+                error_type=type(e).__name__,
+                reason=str(e),
+            )
         )
         return False
 
@@ -196,9 +212,14 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     canceled_count = int(summary["canceled_count"])
     failed_count = int(summary["failed_count"])
     notify(
-        "emergency open-order cancellation pass "
-        f"({trigger}): remote_open={remote_open_count} "
-        f"canceled={canceled_count} failed={failed_count}"
+        format_event(
+            "cancel_open_orders_result",
+            trigger=trigger,
+            remote_open_count=remote_open_count,
+            canceled_count=canceled_count,
+            failed_count=failed_count,
+            status="partial" if failed_count > 0 else "ok",
+        )
     )
 
     for message in summary["stray_messages"]:
@@ -210,7 +231,15 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     runtime_state.record_cancel_open_orders_result(trigger=trigger, status=status, summary=summary)
 
     if failed_count > 0:
-        notify("emergency stop remains halted: open-order cancellation incomplete")
+        notify(
+            format_event(
+                "cancel_open_orders_failed",
+                alert_kind="cancel_failure",
+                trigger=trigger,
+                reason_code="CANCEL_OPEN_ORDERS_INCOMPLETE",
+                failed_count=failed_count,
+            )
+        )
         return False
     return True
 
@@ -231,6 +260,14 @@ def run_loop(short_n: int, long_n: int) -> None:
 
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
+            notify(
+                format_event(
+                    "startup_gate_blocked",
+                    alert_kind="startup_gate",
+                    reason_code="STARTUP_SAFETY_GATE",
+                    reason=startup_gate_reason,
+                )
+            )
             _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
             return
 
@@ -388,6 +425,15 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             marked = _mark_open_orders_recovery_required(
                                 reason, int(now * 1000)
+                            )
+                            notify(
+                                format_event(
+                                    "recovery_required_marked",
+                                    alert_kind="recovery_required",
+                                    reason_code="STALE_OPEN_ORDER",
+                                    marked_count=marked,
+                                    reason=reason,
+                                )
                             )
                             canceled_ok = _attempt_open_order_cancellation(
                                 broker, trigger="stale-open-order-halt"
