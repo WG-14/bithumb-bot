@@ -8,6 +8,7 @@ from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
+from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from ..oms import TERMINAL_ORDER_STATUSES, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
@@ -48,11 +49,13 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
     if not math.isfinite(normalized) or normalized <= 0:
         raise ValueError(f"invalid order qty: {qty}")
 
-    step = float(settings.LIVE_ORDER_QTY_STEP)
+    rules = get_effective_order_rules(settings.PAIR).rules
+
+    step = float(rules.qty_step)
     if math.isfinite(step) and step > 0:
         normalized = math.floor((normalized / step) + POSITION_EPSILON) * step
 
-    max_decimals = int(settings.LIVE_ORDER_MAX_QTY_DECIMALS)
+    max_decimals = int(rules.max_qty_decimals)
     if max_decimals > 0:
         scale = 10 ** max_decimals
         normalized = math.floor((normalized * scale) + POSITION_EPSILON) / scale
@@ -60,11 +63,11 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
     if normalized <= 0:
         raise ValueError(f"normalized order qty is non-positive: {normalized}")
 
-    min_qty = float(settings.LIVE_MIN_ORDER_QTY)
+    min_qty = float(rules.min_qty)
     if min_qty > 0 and normalized < min_qty:
         raise ValueError(f"order qty below minimum: {normalized:.12f} < {min_qty:.12f}")
 
-    min_notional = float(settings.MIN_ORDER_NOTIONAL_KRW)
+    min_notional = float(rules.min_notional_krw)
     if min_notional > 0 and normalized * float(market_price) < min_notional:
         raise ValueError(
             f"normalized order notional below minimum: {normalized * float(market_price):.2f} < {min_notional:.2f}"
@@ -85,8 +88,10 @@ def validate_pretrade(
     if not math.isfinite(float(market_price)) or float(market_price) <= 0:
         raise ValueError(f"invalid market/reference price: {market_price}")
 
+    rules = get_effective_order_rules(settings.PAIR).rules
+
     notional = float(qty) * float(market_price)
-    min_notional = float(settings.MIN_ORDER_NOTIONAL_KRW)
+    min_notional = float(rules.min_notional_krw)
     if min_notional > 0 and notional < min_notional:
         raise ValueError(f"order notional below minimum: {notional:.2f} < {min_notional:.2f}")
 
