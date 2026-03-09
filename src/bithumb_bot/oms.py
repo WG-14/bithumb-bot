@@ -12,6 +12,49 @@ OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RE
 TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED", "RECOVERY_REQUIRED")
 
 
+def evaluate_unresolved_order_gate(
+    conn: sqlite3.Connection,
+    *,
+    now_ms: int,
+    max_open_order_age_sec: int,
+) -> tuple[bool, str, str]:
+    """Returns whether unresolved risky order states should block new submissions."""
+    submit_unknown = conn.execute(
+        "SELECT 1 FROM orders WHERE status='SUBMIT_UNKNOWN' LIMIT 1"
+    ).fetchone()
+    if submit_unknown is not None:
+        return True, "SUBMIT_UNKNOWN_PRESENT", "submit-unknown unresolved order exists"
+
+    recovery_required = conn.execute(
+        "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
+    ).fetchone()
+    if recovery_required is not None:
+        return True, "RECOVERY_REQUIRED_PRESENT", "recovery-required order exists"
+
+    placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
+    open_row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS open_count, MIN(created_ts) AS oldest_created_ts
+        FROM orders
+        WHERE status IN ({placeholders})
+        """,
+        OPEN_ORDER_STATUSES,
+    ).fetchone()
+    open_count = int(open_row["open_count"] if hasattr(open_row, "keys") else open_row[0])
+    oldest_created_ts = open_row["oldest_created_ts"] if hasattr(open_row, "keys") else open_row[1]
+    if open_count <= 0:
+        return False, "OK", "ok"
+
+    age_sec = 0.0
+    if oldest_created_ts is not None:
+        age_sec = max(0.0, (int(now_ms) - int(oldest_created_ts)) / 1000)
+    max_age_sec = max(1, int(max_open_order_age_sec))
+    if age_sec > max_age_sec:
+        return True, "STALE_UNRESOLVED_OPEN_ORDER", f"stale unresolved open order exists: age={age_sec:.1f}s > {max_age_sec}s"
+
+    return True, "UNRESOLVED_OPEN_ORDER_PRESENT", "unresolved open order exists"
+
+
 ALLOWED_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "PENDING_SUBMIT": ("PENDING_SUBMIT", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"),
     "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),

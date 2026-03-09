@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
@@ -399,6 +401,46 @@ def test_live_duplicate_attempt_with_terminal_status_blocks_resubmit(monkeypatch
     assert any("event=order_submit_blocked" in msg for msg in notifications)
 
 
+def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_gate.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    conn = ensure_db(str(tmp_path / "submit_unknown_gate.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('unknown_open',NULL,'SUBMIT_UNKNOWN','BUY',NULL,0.01,0,999,999,'submit timeout')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "submit_unknown_gate.sqlite"))
+    blocked = conn.execute(
+        """
+        SELECT message
+        FROM order_events
+        WHERE client_order_id LIKE 'live_2000_buy_%' AND event_type='submit_blocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert blocked is not None
+    assert "code=SUBMIT_UNKNOWN_PRESENT" in str(blocked["message"])
+    assert any("event=order_submit_blocked" in msg for msg in notifications)
+
+
 def test_live_open_order_guard_blocks_new_order(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "open_guard.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
@@ -446,9 +488,13 @@ def test_live_daily_loss_limit_blocks_new_order(tmp_path):
     assert broker.place_order_calls == 0
 
 
-def test_live_recovery_required_order_blocks_new_order(tmp_path):
+def test_live_recovery_required_order_blocks_new_order(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "recovery_guard.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
     conn = ensure_db(str(tmp_path / "recovery_guard.sqlite"))
     conn.execute(
         """
@@ -464,6 +510,64 @@ def test_live_recovery_required_order_blocks_new_order(tmp_path):
 
     assert trade is None
     assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "recovery_guard.sqlite"))
+    blocked = conn.execute(
+        """
+        SELECT message
+        FROM order_events
+        WHERE client_order_id LIKE 'live_2000_buy_%' AND event_type='submit_blocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert blocked is not None
+    assert "code=RECOVERY_REQUIRED_PRESENT" in str(blocked["message"])
+    assert any("event=order_submit_blocked" in msg for msg in notifications)
+
+
+def test_live_unresolved_open_order_blocks_and_persists_reason(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "open_guard_persisted.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    now_ms = int(time.time() * 1000)
+    conn = ensure_db(str(tmp_path / "open_guard_persisted.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('existing_open','ex_open','NEW','BUY',NULL,0.01,0,?,?,NULL)
+        """,
+        (now_ms, now_ms),
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "open_guard_persisted.sqlite"))
+    blocked = conn.execute(
+        """
+        SELECT message
+        FROM order_events
+        WHERE client_order_id LIKE 'live_2000_buy_%' AND event_type='submit_blocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert blocked is not None
+    assert "code=UNRESOLVED_OPEN_ORDER_PRESENT" in str(blocked["message"])
+    assert any("event=order_submit_blocked" in msg for msg in notifications)
 
 
 def test_live_stale_unresolved_open_order_blocks_new_order(tmp_path):

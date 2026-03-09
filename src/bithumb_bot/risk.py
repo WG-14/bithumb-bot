@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from .config import settings
-from .oms import OPEN_ORDER_STATUSES
+from .oms import evaluate_unresolved_order_gate
 
 KST = timezone(timedelta(hours=9))
 POSITION_EPSILON = 1e-12
@@ -132,30 +132,12 @@ def evaluate_order_submission_halt(
     if blocked:
         return True, reason
 
-    recovery_required = conn.execute(
-        "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
-    ).fetchone()
-    if recovery_required is not None:
-        return True, "recovery-required order exists"
+    blocked, _, reason = evaluate_unresolved_order_gate(
+        conn,
+        now_ms=now_ms,
+        max_open_order_age_sec=int(settings.MAX_OPEN_ORDER_AGE_SEC),
+    )
+    if blocked:
+        return True, reason
 
-    placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
-    open_row = conn.execute(
-        f"""
-        SELECT COUNT(*) AS open_count, MIN(created_ts) AS oldest_created_ts
-        FROM orders
-        WHERE status IN ({placeholders})
-        """,
-        OPEN_ORDER_STATUSES,
-    ).fetchone()
-    open_count = int(open_row["open_count"] if hasattr(open_row, "keys") else open_row[0])
-    oldest_created_ts = open_row["oldest_created_ts"] if hasattr(open_row, "keys") else open_row[1]
-    if open_count <= 0:
-        return False, "ok"
-
-    if oldest_created_ts is not None:
-        age_sec = max(0.0, (int(now_ms) - int(oldest_created_ts)) / 1000)
-        max_age_sec = max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC))
-        if age_sec > max_age_sec:
-            return True, f"stale unresolved open order exists: age={age_sec:.1f}s > {max_age_sec}s"
-
-    return True, "unresolved open order exists"
+    return False, "ok"

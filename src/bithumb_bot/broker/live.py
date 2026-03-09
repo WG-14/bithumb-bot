@@ -10,7 +10,7 @@ from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
-from ..oms import TERMINAL_ORDER_STATUSES, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
+from ..oms import TERMINAL_ORDER_STATUSES, evaluate_unresolved_order_gate, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
@@ -199,6 +199,31 @@ def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_statu
     )
 
 
+
+
+def _block_new_submission_for_unresolved_risk(*, conn, client_order_id: str, side: str, qty: float, ts: int, reason_code: str, reason: str) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=None,
+        side=side,
+        qty_req=qty,
+        price=None,
+        ts_ms=ts,
+        status="FAILED",
+    )
+    persisted_reason = f"code={reason_code};reason={reason}"
+    record_submit_blocked(client_order_id, status="FAILED", reason=persisted_reason, conn=conn)
+    notify(
+        format_event(
+            "order_submit_blocked",
+            client_order_id=client_order_id,
+            side=side,
+            status="FAILED",
+            reason=persisted_reason,
+        )
+    )
+
 def _submit_via_standard_path(*, conn, broker: Broker, client_order_id: str, submit_attempt_id: str, side: str, qty: float, ts: int):
     record_order_if_missing(
         conn,
@@ -291,6 +316,9 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             notify(f"live pretrade validation blocked ({side}): {e}")
             return None
 
+        submit_attempt_id = _submit_attempt_id()
+        client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
+
         blocked, reason = evaluate_order_submission_halt(
             conn,
             ts_ms=int(ts),
@@ -300,11 +328,25 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             price=float(market_price),
         )
         if blocked:
+            gate_blocked, reason_code, gate_reason = evaluate_unresolved_order_gate(
+                conn,
+                now_ms=int(time.time() * 1000),
+                max_open_order_age_sec=int(settings.MAX_OPEN_ORDER_AGE_SEC),
+            )
+            if gate_blocked:
+                _block_new_submission_for_unresolved_risk(
+                    conn=conn,
+                    client_order_id=client_order_id,
+                    side=side,
+                    qty=normalized_qty,
+                    ts=ts,
+                    reason_code=reason_code,
+                    reason=gate_reason,
+                )
+                conn.commit()
+                return None
             notify(f"live order placement blocked ({side}): {reason}")
             return None
-
-        submit_attempt_id = _submit_attempt_id()
-        client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
 
         existing = conn.execute(
             "SELECT status FROM orders WHERE client_order_id=?",
