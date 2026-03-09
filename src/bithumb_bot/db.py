@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from .config import settings
+from .sqlite_resilience import configure_connection
 
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -26,9 +27,7 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
 
     # Recommended pragmas for trading logs (still safe for sqlite)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
+        configure_connection(conn)
     except Exception:
         pass
 

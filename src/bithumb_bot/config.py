@@ -25,6 +25,9 @@ class Settings:
 
     # storage
     DB_PATH: str = os.getenv("DB_PATH", "data/bithumb_1m.sqlite")
+    DB_BUSY_TIMEOUT_MS: int = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
+    DB_LOCK_RETRY_COUNT: int = int(os.getenv("DB_LOCK_RETRY_COUNT", "2"))
+    DB_LOCK_RETRY_BACKOFF_MS: int = int(os.getenv("DB_LOCK_RETRY_BACKOFF_MS", "50"))
 
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))

@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from .config import settings
+from .sqlite_resilience import configure_connection
 
 
 def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
@@ -20,9 +21,7 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
+        configure_connection(conn)
     except Exception:
         pass
 

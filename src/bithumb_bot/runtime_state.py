@@ -9,6 +9,7 @@ from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
 from .reason_codes import HALT_ENTERED, STARTUP_BLOCKED
 from .observability import safety_event
+from .sqlite_resilience import run_with_locked_db_retry
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
 
@@ -91,106 +92,113 @@ def _sync_state_from_persisted_locked() -> None:
 
 
 def _persist_state(state: RuntimeState) -> None:
+    """Persist runtime health with retry for transient SQLite lock contention.
+
+    This path is shared by runtime loop, healthcheck, and systemd backup windows.
+    """
     conn = ensure_db()
     try:
-        conn.execute(
-            """
-            INSERT INTO bot_health (
-                id,
-                trading_enabled,
-                halt_new_orders_blocked,
-                halt_reason_code,
-                halt_state_unresolved,
-                halt_policy_stage,
-                halt_policy_block_new_orders,
-                halt_policy_attempt_cancel_open_orders,
-                halt_policy_auto_liquidate_positions,
-                halt_position_present,
-                halt_open_orders_present,
-                halt_operator_action_required,
-                error_count,
-                last_candle_age_sec,
-                retry_at_epoch_sec,
-                last_disable_reason,
-                unresolved_open_order_count,
-                oldest_unresolved_order_age_sec,
-                recovery_required_count,
-                last_reconcile_epoch_sec,
-                last_reconcile_status,
-                last_reconcile_error,
-                last_reconcile_reason_code,
-                last_reconcile_metadata,
-                last_cancel_open_orders_epoch_sec,
-                last_cancel_open_orders_trigger,
-                last_cancel_open_orders_status,
-                last_cancel_open_orders_summary,
-                startup_gate_reason,
-                updated_ts
+        def _write() -> None:
+            conn.execute(
+                """
+                INSERT INTO bot_health (
+                    id,
+                    trading_enabled,
+                    halt_new_orders_blocked,
+                    halt_reason_code,
+                    halt_state_unresolved,
+                    halt_policy_stage,
+                    halt_policy_block_new_orders,
+                    halt_policy_attempt_cancel_open_orders,
+                    halt_policy_auto_liquidate_positions,
+                    halt_position_present,
+                    halt_open_orders_present,
+                    halt_operator_action_required,
+                    error_count,
+                    last_candle_age_sec,
+                    retry_at_epoch_sec,
+                    last_disable_reason,
+                    unresolved_open_order_count,
+                    oldest_unresolved_order_age_sec,
+                    recovery_required_count,
+                    last_reconcile_epoch_sec,
+                    last_reconcile_status,
+                    last_reconcile_error,
+                    last_reconcile_reason_code,
+                    last_reconcile_metadata,
+                    last_cancel_open_orders_epoch_sec,
+                    last_cancel_open_orders_trigger,
+                    last_cancel_open_orders_status,
+                    last_cancel_open_orders_summary,
+                    startup_gate_reason,
+                    updated_ts
+                )
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                ON CONFLICT(id) DO UPDATE SET
+                    trading_enabled=excluded.trading_enabled,
+                    halt_new_orders_blocked=excluded.halt_new_orders_blocked,
+                    halt_reason_code=excluded.halt_reason_code,
+                    halt_state_unresolved=excluded.halt_state_unresolved,
+                    halt_policy_stage=excluded.halt_policy_stage,
+                    halt_policy_block_new_orders=excluded.halt_policy_block_new_orders,
+                    halt_policy_attempt_cancel_open_orders=excluded.halt_policy_attempt_cancel_open_orders,
+                    halt_policy_auto_liquidate_positions=excluded.halt_policy_auto_liquidate_positions,
+                    halt_position_present=excluded.halt_position_present,
+                    halt_open_orders_present=excluded.halt_open_orders_present,
+                    halt_operator_action_required=excluded.halt_operator_action_required,
+                    error_count=excluded.error_count,
+                    last_candle_age_sec=excluded.last_candle_age_sec,
+                    retry_at_epoch_sec=excluded.retry_at_epoch_sec,
+                    last_disable_reason=excluded.last_disable_reason,
+                    unresolved_open_order_count=excluded.unresolved_open_order_count,
+                    oldest_unresolved_order_age_sec=excluded.oldest_unresolved_order_age_sec,
+                    recovery_required_count=excluded.recovery_required_count,
+                    last_reconcile_epoch_sec=excluded.last_reconcile_epoch_sec,
+                    last_reconcile_status=excluded.last_reconcile_status,
+                    last_reconcile_error=excluded.last_reconcile_error,
+                    last_reconcile_reason_code=excluded.last_reconcile_reason_code,
+                    last_reconcile_metadata=excluded.last_reconcile_metadata,
+                    last_cancel_open_orders_epoch_sec=excluded.last_cancel_open_orders_epoch_sec,
+                    last_cancel_open_orders_trigger=excluded.last_cancel_open_orders_trigger,
+                    last_cancel_open_orders_status=excluded.last_cancel_open_orders_status,
+                    last_cancel_open_orders_summary=excluded.last_cancel_open_orders_summary,
+                    startup_gate_reason=excluded.startup_gate_reason,
+                    updated_ts=excluded.updated_ts
+                """,
+                (
+                    1 if state.trading_enabled else 0,
+                    1 if state.halt_new_orders_blocked else 0,
+                    _clip(state.halt_reason_code),
+                    1 if state.halt_state_unresolved else 0,
+                    _clip(state.halt_policy_stage),
+                    1 if state.halt_policy_block_new_orders else 0,
+                    1 if state.halt_policy_attempt_cancel_open_orders else 0,
+                    1 if state.halt_policy_auto_liquidate_positions else 0,
+                    1 if state.halt_position_present else 0,
+                    1 if state.halt_open_orders_present else 0,
+                    1 if state.halt_operator_action_required else 0,
+                    int(state.error_count),
+                    state.last_candle_age_sec,
+                    state.retry_at_epoch_sec,
+                    _clip(state.last_disable_reason),
+                    int(state.unresolved_open_order_count),
+                    state.oldest_unresolved_order_age_sec,
+                    int(state.recovery_required_count),
+                    state.last_reconcile_epoch_sec,
+                    _clip(state.last_reconcile_status),
+                    _clip(state.last_reconcile_error),
+                    _clip(state.last_reconcile_reason_code),
+                    _clip(state.last_reconcile_metadata, max_len=1000),
+                    state.last_cancel_open_orders_epoch_sec,
+                    _clip(state.last_cancel_open_orders_trigger),
+                    _clip(state.last_cancel_open_orders_status),
+                    _clip(state.last_cancel_open_orders_summary, max_len=1000),
+                    _clip(state.startup_gate_reason),
+                ),
             )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
-            ON CONFLICT(id) DO UPDATE SET
-                trading_enabled=excluded.trading_enabled,
-                halt_new_orders_blocked=excluded.halt_new_orders_blocked,
-                halt_reason_code=excluded.halt_reason_code,
-                halt_state_unresolved=excluded.halt_state_unresolved,
-                halt_policy_stage=excluded.halt_policy_stage,
-                halt_policy_block_new_orders=excluded.halt_policy_block_new_orders,
-                halt_policy_attempt_cancel_open_orders=excluded.halt_policy_attempt_cancel_open_orders,
-                halt_policy_auto_liquidate_positions=excluded.halt_policy_auto_liquidate_positions,
-                halt_position_present=excluded.halt_position_present,
-                halt_open_orders_present=excluded.halt_open_orders_present,
-                halt_operator_action_required=excluded.halt_operator_action_required,
-                error_count=excluded.error_count,
-                last_candle_age_sec=excluded.last_candle_age_sec,
-                retry_at_epoch_sec=excluded.retry_at_epoch_sec,
-                last_disable_reason=excluded.last_disable_reason,
-                unresolved_open_order_count=excluded.unresolved_open_order_count,
-                oldest_unresolved_order_age_sec=excluded.oldest_unresolved_order_age_sec,
-                recovery_required_count=excluded.recovery_required_count,
-                last_reconcile_epoch_sec=excluded.last_reconcile_epoch_sec,
-                last_reconcile_status=excluded.last_reconcile_status,
-                last_reconcile_error=excluded.last_reconcile_error,
-                last_reconcile_reason_code=excluded.last_reconcile_reason_code,
-                last_reconcile_metadata=excluded.last_reconcile_metadata,
-                last_cancel_open_orders_epoch_sec=excluded.last_cancel_open_orders_epoch_sec,
-                last_cancel_open_orders_trigger=excluded.last_cancel_open_orders_trigger,
-                last_cancel_open_orders_status=excluded.last_cancel_open_orders_status,
-                last_cancel_open_orders_summary=excluded.last_cancel_open_orders_summary,
-                startup_gate_reason=excluded.startup_gate_reason,
-                updated_ts=excluded.updated_ts
-            """,
-            (
-                1 if state.trading_enabled else 0,
-                1 if state.halt_new_orders_blocked else 0,
-                _clip(state.halt_reason_code),
-                1 if state.halt_state_unresolved else 0,
-                _clip(state.halt_policy_stage),
-                1 if state.halt_policy_block_new_orders else 0,
-                1 if state.halt_policy_attempt_cancel_open_orders else 0,
-                1 if state.halt_policy_auto_liquidate_positions else 0,
-                1 if state.halt_position_present else 0,
-                1 if state.halt_open_orders_present else 0,
-                1 if state.halt_operator_action_required else 0,
-                int(state.error_count),
-                state.last_candle_age_sec,
-                state.retry_at_epoch_sec,
-                _clip(state.last_disable_reason),
-                int(state.unresolved_open_order_count),
-                state.oldest_unresolved_order_age_sec,
-                int(state.recovery_required_count),
-                state.last_reconcile_epoch_sec,
-                _clip(state.last_reconcile_status),
-                _clip(state.last_reconcile_error),
-                _clip(state.last_reconcile_reason_code),
-                _clip(state.last_reconcile_metadata, max_len=1000),
-                state.last_cancel_open_orders_epoch_sec,
-                _clip(state.last_cancel_open_orders_trigger),
-                _clip(state.last_cancel_open_orders_status),
-                _clip(state.last_cancel_open_orders_summary, max_len=1000),
-                _clip(state.startup_gate_reason),
-            ),
-        )
-        conn.commit()
+            conn.commit()
+
+        run_with_locked_db_retry(_write)
     finally:
         conn.close()
 
