@@ -236,6 +236,21 @@ def run_loop(short_n: int, long_n: int) -> None:
 
     validate_live_mode_preflight(settings)
 
+    state = runtime_state.snapshot()
+    if state.halt_new_orders_blocked:
+        reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
+        reason_code = state.halt_reason_code or "PERSISTED_HALT_STATE"
+        notify(
+            format_event(
+                "startup_halt_state_blocked",
+                alert_kind="startup_gate",
+                reason_code=reason_code,
+                reason=reason,
+            )
+        )
+        print("[RUN] persisted runtime halt is active. refusing to enter trading loop.")
+        return
+
     broker = None
     if settings.MODE == "live":
         broker = BithumbBroker()

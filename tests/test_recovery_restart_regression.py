@@ -338,6 +338,37 @@ def test_restart_with_risky_state_does_not_resume_trading_loop(isolated_db, monk
     assert live_execute_calls["n"] == 0
 
 
+def test_restart_while_persisted_halted_does_not_resume_trading_loop(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    runtime_state.enter_halt(
+        reason_code="MANUAL_HALT",
+        reason="operator requested stop",
+        unresolved=True,
+    )
+
+    reconcile_calls = {"n": 0}
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.recovery.reconcile_with_broker",
+        lambda _broker: reconcile_calls.__setitem__("n", reconcile_calls["n"] + 1),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "MANUAL_HALT"
+    assert reconcile_calls["n"] == 0
+    assert live_execute_calls["n"] == 0
+
+
 def test_restart_startup_proceeds_when_reconcile_clears_risky_state(isolated_db, monkeypatch):
     _patch_single_tick_run_loop(monkeypatch)
 

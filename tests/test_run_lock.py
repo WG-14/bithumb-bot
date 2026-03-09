@@ -53,6 +53,17 @@ def test_stale_lock_is_reclaimed_when_not_actively_held(
     assert "reclaiming stale run lock file" in caplog.text
 
 
+def test_stale_lock_with_non_pid_owner_text_is_reclaimed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text("legacy-owner\n", encoding="utf-8")
+    stale_mtime = time.time() - (STALE_LOCK_MAX_AGE_SECONDS + 5)
+    os.utime(lock_path, (stale_mtime, stale_mtime))
+
+    with acquire_run_lock(lock_path):
+        assert lock_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+    assert "reclaiming stale run lock file" in caplog.text
+
 def test_error_message_includes_lock_owner_context_on_collision(tmp_path: Path) -> None:
     lock_path = tmp_path / "run.lock"
 

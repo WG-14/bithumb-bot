@@ -512,7 +512,12 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
     from bithumb_bot.run_lock import RunLockError
 
     notifications: list[str] = []
+    run_loop_calls = {"n": 0}
     monkeypatch.setattr("bithumb_bot.app.notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr(
+        "bithumb_bot.engine.run_loop",
+        lambda *_args, **_kwargs: run_loop_calls.__setitem__("n", run_loop_calls["n"] + 1),
+    )
 
     class _RaiseOnEnter:
         def __enter__(self):
@@ -527,5 +532,6 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
         cmd_run(5, 20)
 
     assert exc.value.code == 1
+    assert run_loop_calls["n"] == 0
     assert any("event=run_lock_conflict" in n for n in notifications)
     assert any("reason_code=RUN_LOCK_CONFLICT" in n for n in notifications)

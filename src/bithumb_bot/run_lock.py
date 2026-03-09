@@ -23,12 +23,12 @@ STALE_LOCK_MAX_AGE_SECONDS = 60 * 10
 class _LockFileState:
     pid: int | None
     age_seconds: float | None
+    owner_text: str | None
 
     @property
     def is_stale_candidate(self) -> bool:
         return (
-            self.pid is not None
-            and not _pid_is_running(self.pid)
+            (self.pid is None or not _pid_is_running(self.pid))
             and self.age_seconds is not None
             and self.age_seconds >= STALE_LOCK_MAX_AGE_SECONDS
         )
@@ -53,10 +53,12 @@ def _pid_is_running(pid: int) -> bool:
 def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     pid: int | None = None
     age_seconds: float | None = None
+    owner_text: str | None = None
 
     try:
         raw = os.pread(fd, 256, 0).decode("utf-8", errors="ignore").strip()
         if raw:
+            owner_text = raw
             pid = int(raw)
     except (ValueError, OSError):
         pid = None
@@ -67,7 +69,7 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     except OSError:
         age_seconds = None
 
-    return _LockFileState(pid=pid, age_seconds=age_seconds)
+    return _LockFileState(pid=pid, age_seconds=age_seconds, owner_text=owner_text)
 
 
 @contextmanager
@@ -82,16 +84,17 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             state = _read_lock_file_state(path, fd)
+            owner_pid = state.pid if state.pid is not None else "unknown"
             stale_hint = ""
             if state.is_stale_candidate:
                 stale_hint = (
                     "; stale lock candidate detected "
-                    f"(pid={state.pid}, age={state.age_seconds:.0f}s). "
+                    f"(owner={state.owner_text or 'unknown'}, age={state.age_seconds:.0f}s). "
                     "Auto-reclaim is only allowed when lock acquisition succeeds"
                 )
             raise RunLockError(
                 "another bot run loop is already running "
-                f"(lock: {path}, owner_pid={state.pid}){stale_hint}"
+                f"(lock: {path}, owner_pid={owner_pid}){stale_hint}"
             ) from exc
 
         if previous_state.is_stale_candidate:
