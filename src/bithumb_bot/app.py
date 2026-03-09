@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
-from .engine import evaluate_startup_safety_gate, get_health_status
+from .engine import evaluate_resume_eligibility, get_health_status
 from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import format_event, notify
@@ -795,28 +795,21 @@ def cmd_resume(force: bool = False) -> None:
 
         reconcile_with_broker(BithumbBroker())
 
-    startup_gate_reason = evaluate_startup_safety_gate()
-    state = runtime_state.snapshot()
+    eligible, resume_blocks = evaluate_resume_eligibility()
 
-    resume_blocks: list[str] = []
-    if startup_gate_reason:
-        resume_blocks.append(startup_gate_reason)
-    if state.halt_state_unresolved:
-        resume_blocks.append(
-            f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}"
-        )
-
-    if resume_blocks and not force:
+    if (not eligible) and (not force):
         print("[RESUME] refused:")
-        for item in resume_blocks:
-            print(f"  - {item}")
+        for code, detail in resume_blocks:
+            print(f"  - code={code} detail={detail}")
         print("  run `uv run python bot.py recovery-report` for details")
         print("  or resume explicitly with `uv run python bot.py resume --force`")
         raise SystemExit(1)
 
     enable_trading()
     if force and resume_blocks:
-        print(f"[RESUME] forced: trading enabled despite blocks={'; '.join(resume_blocks)}")
+        block_summary = "; ".join(f"{code}:{detail}" for code, detail in resume_blocks)
+        print(f"[RESUME] forced: trading enabled despite blocks={block_summary}")
+        print(f"[RESUME] override_applied=1 override_reason=operator_force_resume")
     else:
         print("[RESUME] trading enabled")
 

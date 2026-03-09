@@ -160,6 +160,46 @@ def evaluate_startup_safety_gate() -> str | None:
     runtime_state.set_startup_gate_reason(reason)
     return reason
 
+
+def evaluate_resume_eligibility() -> tuple[bool, list[tuple[str, str]]]:
+    """Returns whether operator resume may proceed and blocking reasons.
+
+    The reason tuple format is (machine_readable_reason_code, human_detail).
+    """
+    startup_gate_reason = evaluate_startup_safety_gate()
+    state = runtime_state.snapshot()
+
+    reasons: list[tuple[str, str]] = []
+    if state.last_reconcile_status == "error":
+        reasons.append(
+            (
+                "LAST_RECONCILE_FAILED",
+                "last reconcile failed: "
+                f"reason_code={state.last_reconcile_reason_code or '-'} "
+                f"error={state.last_reconcile_error or '-'}",
+            )
+        )
+
+    if startup_gate_reason:
+        reasons.append(("STARTUP_SAFETY_GATE_BLOCKED", startup_gate_reason))
+        if state.last_reconcile_status == "ok":
+            reasons.append(
+                (
+                    "LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+                    "latest reconcile reported ok but startup safety gate still blocks resume",
+                )
+            )
+
+    if state.halt_state_unresolved:
+        reasons.append(
+            (
+                "HALT_STATE_UNRESOLVED",
+                f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+            )
+        )
+
+    return (len(reasons) == 0), reasons
+
 def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
     runtime_state.enter_halt(
         reason_code=reason.code,

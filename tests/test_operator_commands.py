@@ -98,7 +98,7 @@ def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
     assert state.halt_state_unresolved is False
 
 
-def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path):
+def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
@@ -108,6 +108,8 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path):
     with pytest.raises(SystemExit) as exc:
         cmd_resume(force=False)
 
+    out = capsys.readouterr().out
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert exc.value.code == 1
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
@@ -147,7 +149,7 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monk
     assert state.halt_new_orders_blocked is False
 
 
-def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_path):
+def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(
         float("inf"),
@@ -160,10 +162,31 @@ def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_
     with pytest.raises(SystemExit) as exc:
         cmd_resume(force=False)
 
+    out = capsys.readouterr().out
+    assert "code=HALT_STATE_UNRESOLVED" in out
     assert exc.value.code == 1
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.halt_state_unresolved is True
+
+
+
+def test_resume_refuses_when_last_reconcile_failed(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    runtime_state.record_reconcile_result(
+        success=False,
+        error="boom",
+        reason_code="PERIODIC_RECONCILE_FAILED",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    out = capsys.readouterr().out
+    assert "code=LAST_RECONCILE_FAILED" in out
+    assert "PERIODIC_RECONCILE_FAILED" in out
+    assert exc.value.code == 1
 
 def test_resume_force_enables_even_when_unresolved_state_exists(tmp_path):
     _set_tmp_db(tmp_path)
