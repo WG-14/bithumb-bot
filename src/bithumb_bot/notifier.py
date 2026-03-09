@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import httpx
+
+
+_RECENT_MESSAGES: dict[str, float] = {}
 
 
 def _is_enabled() -> bool:
@@ -23,6 +27,25 @@ def _post_json(url: str, payload: dict[str, Any]) -> None:
     timeout = _timeout_sec()
     httpx.post(url, json=payload, timeout=timeout)
 
+
+def _dedupe_window_sec() -> float:
+    raw = os.getenv("NOTIFIER_DEDUPE_WINDOW_SEC", "20")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 20.0
+
+
+def _should_suppress_duplicate(msg: str, *, now: float) -> bool:
+    window = _dedupe_window_sec()
+    if window <= 0:
+        return False
+    previous = _RECENT_MESSAGES.get(msg)
+    _RECENT_MESSAGES[msg] = now
+    if previous is None:
+        return False
+    return (now - previous) < window
+
 def format_event(event: str, **fields: Any) -> str:
     parts = [f"event={event}"]
     for key, value in fields.items():
@@ -36,6 +59,9 @@ def format_event(event: str, **fields: Any) -> str:
 
 def notify(msg: str) -> None:
     if not _is_enabled():
+        return
+
+    if _should_suppress_duplicate(msg, now=time.monotonic()):
         return
 
     delivered = False

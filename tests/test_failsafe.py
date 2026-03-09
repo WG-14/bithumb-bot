@@ -83,6 +83,10 @@ class _LoopConn:
                 return _Rows(None, rowcount=0)
             self.marked_recovery_required = 1
             return _Rows(None, rowcount=1)
+        if "SELECT client_order_id, exchange_order_id" in q and "WHERE status IN" in q:
+            if self.open_order_created_ts is None:
+                return _Rows(None)
+            return _Rows({"client_order_id": "open_1", "exchange_order_id": "ex-open-1"})
         raise AssertionError(f"unexpected query: {query}")
 
     def commit(self):
@@ -174,6 +178,9 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert any("halt_policy_stage=SAFE_HALT_REVIEW_ONLY" in n for n in halted)
     assert any("auto_liquidate_positions=0" in n for n in halted)
     assert any("operator_action_required=1" in n for n in halted)
+    assert any("unresolved_order_count=" in n for n in halted)
+    assert any("position_may_remain=" in n for n in halted)
+    assert any("operator_next_action=" in n for n in halted)
 
 
 def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
@@ -288,11 +295,16 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert state.halt_state_unresolved is True
     assert called["n"] == 0
     assert any("event=startup_gate_blocked" in n and "reason_code=STARTUP_BLOCKED" in n and "timestamp=" in n for n in notifications)
+    assert any("operator_action_required=1" in n for n in notifications if "event=startup_gate_blocked" in n)
+    assert any("operator_next_action=operator must reconcile unresolved orders before startup" in n for n in notifications if "event=startup_gate_blocked" in n)
     assert any("reason_code=STARTUP_SAFETY_GATE" in n for n in notifications)
     halted = [n for n in notifications if "event=trading_halted" in n and "alert_kind=halt" in n]
     assert halted
     assert any("halt_open_orders_present=1" in n for n in halted)
     assert any("operator_action_required=1" in n for n in halted)
+    assert any("unresolved_order_count=" in n for n in halted)
+    assert any("position_may_remain=" in n for n in halted)
+    assert any("operator_next_action=" in n for n in halted)
 
 
 

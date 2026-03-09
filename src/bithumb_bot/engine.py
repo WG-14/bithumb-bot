@@ -209,6 +209,8 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
         unresolved=unresolved,
     )
     halt_state = runtime_state.snapshot()
+    latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
+    operator_action_required = bool(halt_state.halt_operator_action_required)
     notify(
         format_event(
             "trading_halted",
@@ -217,17 +219,54 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
             reason=reason.detail,
             reason_code=reason.code,
             unresolved=int(unresolved),
+            unresolved_order_count=halt_state.unresolved_open_order_count,
+            position_may_remain=int(halt_state.halt_position_present),
+            latest_client_order_id=latest_client_order_id,
+            latest_exchange_order_id=latest_exchange_order_id,
+            operator_action_required=int(operator_action_required),
+            operator_next_action=_format_operator_next_action(
+                unresolved=unresolved,
+                operator_action_required=operator_action_required,
+                open_orders_present=bool(halt_state.halt_open_orders_present),
+                position_present=bool(halt_state.halt_position_present),
+            ),
             halt_policy_stage=halt_state.halt_policy_stage,
             block_new_orders=int(halt_state.halt_policy_block_new_orders),
             attempt_cancel_open_orders=int(halt_state.halt_policy_attempt_cancel_open_orders),
             auto_liquidate_positions=int(halt_state.halt_policy_auto_liquidate_positions),
             halt_position_present=int(halt_state.halt_position_present),
             halt_open_orders_present=int(halt_state.halt_open_orders_present),
-            operator_action_required=int(halt_state.halt_operator_action_required),
         )
     )
 
 
+
+
+def _format_operator_next_action(*, unresolved: bool, operator_action_required: bool, open_orders_present: bool, position_present: bool) -> str:
+    if operator_action_required or unresolved:
+        if open_orders_present or position_present:
+            return "operator must review open exposure and reconcile before resume"
+        return "operator must review halt reason and run safe resume checks"
+    return "no immediate operator action required"
+
+
+def _latest_order_identifiers() -> tuple[str | None, str | None]:
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT client_order_id, exchange_order_id
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            ORDER BY updated_ts DESC, created_ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None, None
+        return row['client_order_id'], row['exchange_order_id']
+    finally:
+        conn.close()
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
     from .recovery import cancel_open_orders_with_broker
 
@@ -299,12 +338,24 @@ def run_loop(short_n: int, long_n: int) -> None:
     if state.halt_new_orders_blocked:
         reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
         reason_code = state.halt_reason_code or "PERSISTED_HALT_STATE"
+        latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
         notify(
             format_event(
                 "startup_halt_state_blocked",
                 alert_kind="startup_gate",
                 reason_code=reason_code,
                 reason=reason,
+                unresolved_order_count=state.unresolved_open_order_count,
+                position_may_remain=int(state.halt_position_present),
+                latest_client_order_id=latest_client_order_id,
+                latest_exchange_order_id=latest_exchange_order_id,
+                operator_action_required=int(state.halt_operator_action_required),
+                operator_next_action=_format_operator_next_action(
+                    unresolved=bool(state.halt_state_unresolved),
+                    operator_action_required=bool(state.halt_operator_action_required),
+                    open_orders_present=bool(state.halt_open_orders_present),
+                    position_present=bool(state.halt_position_present),
+                ),
             )
         )
         print("[RUN] persisted runtime halt is active. refusing to enter trading loop.")
@@ -321,12 +372,19 @@ def run_loop(short_n: int, long_n: int) -> None:
 
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
+            latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
             notify(
                 safety_event(
                     "startup_gate_blocked",
                     alert_kind="startup_gate",
                     reason_code=STARTUP_BLOCKED,
                     reason=startup_gate_reason,
+                    unresolved_order_count=state.unresolved_open_order_count,
+                    position_may_remain=int(state.halt_position_present),
+                    latest_client_order_id=latest_client_order_id,
+                    latest_exchange_order_id=latest_exchange_order_id,
+                    operator_action_required=1,
+                    operator_next_action="operator must reconcile unresolved orders before startup",
                     state_to="HALTED",
                 )
             )

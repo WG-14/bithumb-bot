@@ -17,6 +17,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch):
         "TELEGRAM_CHAT_ID",
     ]:
         monkeypatch.delenv(key, raising=False)
+    notifier._RECENT_MESSAGES.clear()
 
 
 def test_notify_uses_generic_webhook(monkeypatch: pytest.MonkeyPatch):
@@ -26,7 +27,7 @@ def test_notify_uses_generic_webhook(monkeypatch: pytest.MonkeyPatch):
         calls.append((url, json, timeout))
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/webhook")
-    monkeypatch.setattr(notifier.httpx, "post", fake_post)
+    monkeypatch.setattr(notifier, "_post_json", lambda url, payload: fake_post(url, payload, 5.0))
 
     notifier.notify("hello")
 
@@ -43,7 +44,7 @@ def test_notify_uses_telegram_without_logging_secret(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token-secret")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1234")
-    monkeypatch.setattr(notifier.httpx, "post", fake_post)
+    monkeypatch.setattr(notifier, "_post_json", lambda url, payload: fake_post(url, payload, 5.0))
 
     notifier.notify("ping")
 
@@ -74,3 +75,22 @@ def test_format_event_skips_empty_fields():
         "event=reconcile_status_change client_order_id=live_1000_buy "
         "exchange_order_id=ex1 side=BUY status=FILLED"
     )
+
+
+def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, json: dict, timeout: float):
+        calls.append((url, json, timeout))
+
+    ticks = iter([10.0, 15.0, 40.0])
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/webhook")
+    monkeypatch.setenv("NOTIFIER_DEDUPE_WINDOW_SEC", "20")
+    monkeypatch.setattr(notifier, "_post_json", lambda url, payload: fake_post(url, payload, 5.0))
+    monkeypatch.setattr(notifier.time, "monotonic", lambda: next(ticks))
+
+    notifier.notify("dupe")
+    notifier.notify("dupe")
+    notifier.notify("dupe")
+
+    assert len(calls) == 2
