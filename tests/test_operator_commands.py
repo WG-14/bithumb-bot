@@ -92,6 +92,9 @@ def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
     assert state.trading_enabled is False
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason == "manual operator pause"
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "MANUAL_PAUSE"
+    assert state.halt_state_unresolved is False
 
 
 def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path):
@@ -105,7 +108,10 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path):
         cmd_resume(force=False)
 
     assert exc.value.code == 1
-    assert runtime_state.snapshot().trading_enabled is False
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_reason_code is None
 
 
 
@@ -135,7 +141,28 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monk
 
     assert exc.value.code == 1
     assert calls["n"] == 1
-    assert runtime_state.snapshot().trading_enabled is False
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is False
+
+
+def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="initial reconcile failed (RuntimeError): boom",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    assert exc.value.code == 1
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_state_unresolved is True
 
 def test_resume_force_enables_even_when_unresolved_state_exists(tmp_path):
     _set_tmp_db(tmp_path)
@@ -148,7 +175,44 @@ def test_resume_force_enables_even_when_unresolved_state_exists(tmp_path):
     state = runtime_state.snapshot()
     assert state.trading_enabled is True
     assert state.retry_at_epoch_sec is None
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_reason_code is None
+    assert state.halt_state_unresolved is False
 
+
+
+def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
+    monkeypatch.setattr(
+        "bithumb_bot.app.cancel_open_orders_with_broker",
+        lambda _broker: {
+            "remote_open_count": 2,
+            "canceled_count": 1,
+            "matched_local_count": 1,
+            "stray_canceled_count": 0,
+            "failed_count": 1,
+            "stray_messages": [],
+            "error_messages": ["cancel failed: order_2"],
+        },
+    )
+
+    try:
+        from bithumb_bot.app import cmd_cancel_open_orders
+
+        cmd_cancel_open_orders()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    state = runtime_state.snapshot()
+    assert state.last_cancel_open_orders_trigger == "operator-command"
+    assert state.last_cancel_open_orders_status == "partial"
+    assert state.last_cancel_open_orders_epoch_sec is not None
+    assert state.last_cancel_open_orders_summary is not None
+    assert '"failed_count": 1' in state.last_cancel_open_orders_summary
 
 def test_recovery_report_summarizes_unresolved_and_recovery_required(tmp_path):
     _set_tmp_db(tmp_path)

@@ -123,6 +123,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS bot_health (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             trading_enabled INTEGER NOT NULL DEFAULT 1,
+            halt_new_orders_blocked INTEGER NOT NULL DEFAULT 0,
+            halt_reason_code TEXT,
+            halt_state_unresolved INTEGER NOT NULL DEFAULT 0,
             error_count INTEGER NOT NULL DEFAULT 0,
             last_candle_age_sec REAL,
             retry_at_epoch_sec REAL,
@@ -133,10 +136,28 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_reconcile_epoch_sec REAL,
             last_reconcile_status TEXT,
             last_reconcile_error TEXT,
+            last_cancel_open_orders_epoch_sec REAL,
+            last_cancel_open_orders_trigger TEXT,
+            last_cancel_open_orders_status TEXT,
+            last_cancel_open_orders_summary TEXT,
             startup_gate_reason TEXT,
             updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
+    )
+
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_new_orders_blocked",
+        "halt_new_orders_blocked INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(conn, "bot_health", "halt_reason_code", "halt_reason_code TEXT")
+    _ensure_column(
+        conn,
+        "bot_health",
+        "halt_state_unresolved",
+        "halt_state_unresolved INTEGER NOT NULL DEFAULT 0",
     )
 
     _ensure_column(
@@ -178,6 +199,30 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(
         conn,
         "bot_health",
+        "last_cancel_open_orders_epoch_sec",
+        "last_cancel_open_orders_epoch_sec REAL",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_cancel_open_orders_trigger",
+        "last_cancel_open_orders_trigger TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_cancel_open_orders_status",
+        "last_cancel_open_orders_status TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_cancel_open_orders_summary",
+        "last_cancel_open_orders_summary TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
         "startup_gate_reason",
         "startup_gate_reason TEXT",
     )
@@ -187,6 +232,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         INSERT INTO bot_health (
             id,
             trading_enabled,
+            halt_new_orders_blocked,
+            halt_reason_code,
+            halt_state_unresolved,
             error_count,
             last_candle_age_sec,
             retry_at_epoch_sec,
@@ -197,9 +245,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_reconcile_epoch_sec,
             last_reconcile_status,
             last_reconcile_error,
+            last_cancel_open_orders_epoch_sec,
+            last_cancel_open_orders_trigger,
+            last_cancel_open_orders_status,
+            last_cancel_open_orders_summary,
             startup_gate_reason
         )
-        VALUES (1, 1, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL)
+        VALUES (1, 1, 0, NULL, 0, 0, NULL, NULL, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
         ON CONFLICT(id) DO NOTHING
         """
     )

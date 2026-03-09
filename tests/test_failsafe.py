@@ -11,8 +11,25 @@ from bithumb_bot.config import settings
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.engine import run_loop
 
+import pytest
+from pathlib import Path
 
+from bithumb_bot.config import settings
+from bithumb_bot.db_core import ensure_db
+from bithumb_bot import runtime_state
 
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path):
+    original_db_path = settings.DB_PATH
+    db_path = tmp_path / "failsafe.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    ensure_db().close()
+    runtime_state.enable_trading()
+    runtime_state.set_error_count(0)
+    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.set_startup_gate_reason(None)
+    yield
+    object.__setattr__(settings, "DB_PATH", original_db_path)
 
 def _set_tmp_db(tmp_path):
     db_path = tmp_path / "failsafe.sqlite"
@@ -145,6 +162,9 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert "BrokerRejectError" in state.last_disable_reason
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
+    assert state.halt_state_unresolved is True
     assert any("event=trading_halted" in n for n in notifications)
 
 
@@ -168,6 +188,9 @@ def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert "reconcile failed" in state.last_disable_reason
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "POST_TRADE_RECONCILE_FAILED"
+    assert state.halt_state_unresolved is True
 
 
 def test_run_loop_periodically_reconciles_when_open_order_exists(monkeypatch):
@@ -200,6 +223,9 @@ def test_run_loop_stale_open_order_halts_and_marks_recovery_required(monkeypatch
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert "stale unresolved open order" in state.last_disable_reason
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "STALE_OPEN_ORDER"
+    assert state.halt_state_unresolved is True
     assert loop_conn.marked_recovery_required == 1
 
 
@@ -218,7 +244,9 @@ def test_run_loop_unresolved_open_order_blocks_new_trading(monkeypatch):
     run_loop(5, 20)
 
     assert called["n"] == 0
-    assert runtime_state.snapshot().trading_enabled is True
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.halt_new_orders_blocked is False
 
 
 
@@ -247,6 +275,9 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert state.last_disable_reason.startswith("startup safety gate:")
+    assert state.halt_reason_code == "STARTUP_SAFETY_GATE"
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_state_unresolved is True
     assert called["n"] == 0
     assert sum("event=trading_halted" in n for n in notifications) == 1
 
@@ -313,6 +344,8 @@ def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
     assert state.retry_at_epoch_sec == float("inf")
     assert state.last_disable_reason is not None
     assert "daily loss limit exceeded" in state.last_disable_reason
+    assert state.halt_reason_code == "DAILY_LOSS_LIMIT"
+    assert state.halt_new_orders_blocked is True
     assert called["n"] == 0
 
 
@@ -400,6 +433,9 @@ def test_health_status_contains_runtime_flags():
     assert health["trading_enabled"] is False
     assert health["retry_at_epoch_sec"] == 999.0
     assert health["last_disable_reason"] is None
+    assert health["halt_new_orders_blocked"] is False
+    assert health["halt_reason_code"] is None
+    assert health["halt_state_unresolved"] is False
     assert int(health["unresolved_open_order_count"]) >= 0
     assert int(health["recovery_required_count"]) >= 0
     if int(health["unresolved_open_order_count"]) == 0:

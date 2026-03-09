@@ -15,6 +15,7 @@ from .utils_time import kst_str, parse_interval_sec
 from .engine import evaluate_startup_safety_gate, get_health_status
 from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
+from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 
 import httpx
@@ -344,6 +345,13 @@ def cmd_health() -> None:
     print(f"  last_reconcile_status={health['last_reconcile_status']}")
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
+    print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
+    print(f"  halt_reason_code={health['halt_reason_code']}")
+    print(f"  halt_state_unresolved={health['halt_state_unresolved']}")
+    print(f"  last_cancel_open_orders_epoch_sec={health['last_cancel_open_orders_epoch_sec']}")
+    print(f"  last_cancel_open_orders_trigger={health['last_cancel_open_orders_trigger']}")
+    print(f"  last_cancel_open_orders_status={health['last_cancel_open_orders_status']}")
+    print(f"  last_cancel_open_orders_summary={health['last_cancel_open_orders_summary']}")
     print(f"  startup_gate_reason={health['startup_gate_reason']}")
 
 
@@ -569,6 +577,12 @@ def cmd_cancel_open_orders() -> None:
 
     broker = BithumbBroker()
     summary = cancel_open_orders_with_broker(broker)
+    status = "partial" if int(summary["failed_count"]) > 0 else "ok"
+    runtime_state.record_cancel_open_orders_result(
+        trigger="operator-command",
+        status=status,
+        summary=summary,
+    )
 
     print("[CANCEL-OPEN-ORDERS]")
     print(f"  remote_open_count={summary['remote_open_count']}")
@@ -666,7 +680,13 @@ def cmd_recovery_report() -> None:
 
 
 def cmd_pause() -> None:
-    disable_trading_until(float("inf"), reason="manual operator pause")
+    disable_trading_until(
+        float("inf"),
+        reason="manual operator pause",
+        reason_code="MANUAL_PAUSE",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
     print("[PAUSE] trading disabled via persistent runtime state")
 
 
@@ -677,15 +697,27 @@ def cmd_resume(force: bool = False) -> None:
         reconcile_with_broker(BithumbBroker())
 
     startup_gate_reason = evaluate_startup_safety_gate()
-    if startup_gate_reason and not force:
-        print(f"[RESUME] refused: {startup_gate_reason}")
+    state = runtime_state.snapshot()
+
+    resume_blocks: list[str] = []
+    if startup_gate_reason:
+        resume_blocks.append(startup_gate_reason)
+    if state.halt_state_unresolved:
+        resume_blocks.append(
+            f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}"
+        )
+
+    if resume_blocks and not force:
+        print("[RESUME] refused:")
+        for item in resume_blocks:
+            print(f"  - {item}")
         print("  run `uv run python bot.py recovery-report` for details")
         print("  or resume explicitly with `uv run python bot.py resume --force`")
         raise SystemExit(1)
 
     enable_trading()
-    if force and startup_gate_reason:
-        print(f"[RESUME] forced: trading enabled despite gate={startup_gate_reason}")
+    if force and resume_blocks:
+        print(f"[RESUME] forced: trading enabled despite blocks={'; '.join(resume_blocks)}")
     else:
         print("[RESUME] trading enabled")
 

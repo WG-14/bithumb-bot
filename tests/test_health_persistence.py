@@ -33,6 +33,9 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
             """
             SELECT
                 trading_enabled,
+                halt_new_orders_blocked,
+                halt_reason_code,
+                halt_state_unresolved,
                 error_count,
                 last_candle_age_sec,
                 retry_at_epoch_sec,
@@ -43,6 +46,10 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 last_reconcile_epoch_sec,
                 last_reconcile_status,
                 last_reconcile_error,
+                last_cancel_open_orders_epoch_sec,
+                last_cancel_open_orders_trigger,
+                last_cancel_open_orders_status,
+                last_cancel_open_orders_summary,
                 startup_gate_reason
             FROM bot_health
             WHERE id = 1
@@ -53,6 +60,9 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
 
     assert row is not None
     assert int(row["trading_enabled"]) == 0
+    assert int(row["halt_new_orders_blocked"]) == 0
+    assert row["halt_reason_code"] is None
+    assert int(row["halt_state_unresolved"]) == 0
     assert int(row["error_count"]) == 4
     assert float(row["last_candle_age_sec"]) == 8.5
     assert float(row["retry_at_epoch_sec"]) == 456.0
@@ -63,6 +73,10 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert row["last_reconcile_epoch_sec"] is None
     assert row["last_reconcile_status"] is None
     assert row["last_reconcile_error"] is None
+    assert row["last_cancel_open_orders_epoch_sec"] is None
+    assert row["last_cancel_open_orders_trigger"] is None
+    assert row["last_cancel_open_orders_status"] is None
+    assert row["last_cancel_open_orders_summary"] is None
     assert row["startup_gate_reason"] is None
 
 
@@ -252,3 +266,21 @@ def test_healthcheck_healthy_default_path(tmp_path):
 
     assert proc.returncode == 0
     assert "[HEALTHCHECK] OK" in proc.stdout
+
+
+def test_cancel_open_orders_result_is_persisted(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    runtime_state.record_cancel_open_orders_result(
+        trigger="test",
+        status="ok",
+        summary={"remote_open_count": 0, "failed_count": 0},
+        now_epoch_sec=123.0,
+    )
+
+    state = runtime_state.snapshot()
+    assert state.last_cancel_open_orders_epoch_sec == 123.0
+    assert state.last_cancel_open_orders_trigger == "test"
+    assert state.last_cancel_open_orders_status == "ok"
+    assert state.last_cancel_open_orders_summary is not None
+    assert '"failed_count": 0' in state.last_cancel_open_orders_summary

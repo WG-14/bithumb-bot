@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 
 from .config import settings, validate_live_mode_preflight
 from .marketdata import cmd_sync
@@ -19,6 +20,17 @@ from .risk import evaluate_daily_loss_breach
 
 FAILSAFE_RETRY_DELAY_SEC = 180
 STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
+
+
+@dataclass(frozen=True)
+class HaltReason:
+    code: str
+    detail: str
+
+
+def _halt_reason(code: str, detail: str) -> HaltReason:
+    return HaltReason(code=code, detail=detail)
+
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
     "NEW",
@@ -80,15 +92,21 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "trading_enabled": state.trading_enabled,
         "retry_at_epoch_sec": state.retry_at_epoch_sec,
         "last_disable_reason": state.last_disable_reason,
+        "halt_new_orders_blocked": state.halt_new_orders_blocked,
+        "halt_reason_code": state.halt_reason_code,
+        "halt_state_unresolved": state.halt_state_unresolved,
         "unresolved_open_order_count": state.unresolved_open_order_count,
         "oldest_unresolved_order_age_sec": state.oldest_unresolved_order_age_sec,
         "recovery_required_count": state.recovery_required_count,
         "last_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
         "last_reconcile_status": state.last_reconcile_status,
         "last_reconcile_error": state.last_reconcile_error,
+        "last_cancel_open_orders_epoch_sec": state.last_cancel_open_orders_epoch_sec,
+        "last_cancel_open_orders_trigger": state.last_cancel_open_orders_trigger,
+        "last_cancel_open_orders_status": state.last_cancel_open_orders_status,
+        "last_cancel_open_orders_summary": state.last_cancel_open_orders_summary,
         "startup_gate_reason": state.startup_gate_reason,
     }
-
 
 
 
@@ -144,9 +162,15 @@ def evaluate_startup_safety_gate() -> str | None:
     runtime_state.set_startup_gate_reason(reason)
     return reason
 
-def _halt_trading(reason: str) -> None:
-    runtime_state.disable_trading_until(float("inf"), reason=reason)
-    notify(format_event("trading_halted", status="HALTED", reason=reason))
+def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=reason.detail,
+        reason_code=reason.code,
+        halt_new_orders_blocked=True,
+        unresolved=unresolved,
+    )
+    notify(format_event("trading_halted", status="HALTED", reason=reason.detail, reason_code=reason.code))
 
 
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
@@ -155,6 +179,11 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     try:
         summary = cancel_open_orders_with_broker(broker)
     except Exception as e:
+        runtime_state.record_cancel_open_orders_result(
+            trigger=trigger,
+            status="error",
+            summary={"error": f"{type(e).__name__}: {e}"},
+        )
         notify(
             f"emergency open-order cancellation failed ({trigger}): "
             f"{type(e).__name__}: {e}"
@@ -175,6 +204,9 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     for message in summary["error_messages"]:
         notify(message)
 
+    status = "partial" if failed_count > 0 else "ok"
+    runtime_state.record_cancel_open_orders_result(trigger=trigger, status=status, summary=summary)
+
     if failed_count > 0:
         notify("emergency stop remains halted: open-order cancellation incomplete")
         return False
@@ -192,12 +224,12 @@ def run_loop(short_n: int, long_n: int) -> None:
         try:
             reconcile_with_broker(broker)
         except Exception as e:
-            _halt_trading(f"initial reconcile failed ({type(e).__name__}): {e}")
+            _halt_trading(_halt_reason("INITIAL_RECONCILE_FAILED", f"initial reconcile failed ({type(e).__name__}): {e}"), unresolved=True)
             return
 
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
-            _halt_trading(startup_gate_reason)
+            _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
             return
 
     sec = parse_interval_sec(settings.INTERVAL)
@@ -278,9 +310,15 @@ def run_loop(short_n: int, long_n: int) -> None:
                         broker, trigger="kill-switch"
                     )
                     if not canceled_ok:
-                        _halt_trading("KILL_SWITCH=ON; emergency cancellation failed")
+                        _halt_trading(
+                            _halt_reason("KILL_SWITCH", "KILL_SWITCH=ON; emergency cancellation failed"),
+                            unresolved=True,
+                        )
                     else:
-                        _halt_trading("KILL_SWITCH=ON; emergency cancellation attempted")
+                        _halt_trading(
+                            _halt_reason("KILL_SWITCH", "KILL_SWITCH=ON; emergency cancellation attempted"),
+                            unresolved=False,
+                        )
                     continue
 
                 conn = ensure_db()
@@ -306,7 +344,10 @@ def run_loop(short_n: int, long_n: int) -> None:
                                 if canceled_ok
                                 else "emergency cancellation failed"
                             )
-                            _halt_trading(f"{reason}; {suffix}")
+                            _halt_trading(
+                                _halt_reason("DAILY_LOSS_LIMIT", f"{reason}; {suffix}"),
+                                unresolved=not canceled_ok,
+                            )
                             continue
                 finally:
                     conn.close()
@@ -325,7 +366,11 @@ def run_loop(short_n: int, long_n: int) -> None:
                             last_open_order_reconcile_at = now
                         except Exception as e:
                             _halt_trading(
-                                f"periodic reconcile failed ({type(e).__name__}): {e}"
+                                _halt_reason(
+                                    "PERIODIC_RECONCILE_FAILED",
+                                    f"periodic reconcile failed ({type(e).__name__}): {e}",
+                                ),
+                                unresolved=True,
                             )
                             continue
 
@@ -347,13 +392,19 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             if not canceled_ok:
                                 _halt_trading(
-                                    f"{reason}; marked={marked} recovery_required; "
-                                    "emergency cancellation failed"
+                                    _halt_reason(
+                                        "STALE_OPEN_ORDER",
+                                        f"{reason}; marked={marked} recovery_required; emergency cancellation failed",
+                                    ),
+                                    unresolved=True,
                                 )
                             else:
                                 _halt_trading(
-                                    f"{reason}; marked={marked} recovery_required; "
-                                    "emergency cancellation attempted"
+                                    _halt_reason(
+                                        "STALE_OPEN_ORDER",
+                                        f"{reason}; marked={marked} recovery_required; emergency cancellation attempted",
+                                    ),
+                                    unresolved=True,
                                 )
                             continue
 
@@ -387,15 +438,33 @@ def run_loop(short_n: int, long_n: int) -> None:
                         broker, r["signal"], r["ts"], r["last_close"]
                     )
                 except BrokerError as e:
-                    _halt_trading(f"live execution broker error ({type(e).__name__}): {e}")
+                    _halt_trading(
+                        _halt_reason(
+                            "LIVE_EXECUTION_BROKER_ERROR",
+                            f"live execution broker error ({type(e).__name__}): {e}",
+                        ),
+                        unresolved=True,
+                    )
                     continue
                 except Exception as e:
-                    _halt_trading(f"live execution failed ({type(e).__name__}): {e}")
+                    _halt_trading(
+                        _halt_reason(
+                            "LIVE_EXECUTION_FAILED",
+                            f"live execution failed ({type(e).__name__}): {e}",
+                        ),
+                        unresolved=True,
+                    )
                     continue
                 try:
                     reconcile_with_broker(broker)
                 except Exception as e:
-                    _halt_trading(f"reconcile failed ({type(e).__name__}): {e}")
+                    _halt_trading(
+                        _halt_reason(
+                            "POST_TRADE_RECONCILE_FAILED",
+                            f"reconcile failed ({type(e).__name__}): {e}",
+                        ),
+                        unresolved=True,
+                    )
                     continue
 
             if trade:
