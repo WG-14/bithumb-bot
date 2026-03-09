@@ -16,6 +16,7 @@ from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach
+from .oms import collect_risky_order_state
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
@@ -115,25 +116,15 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
 def evaluate_startup_safety_gate() -> str | None:
     runtime_state.refresh_open_order_health()
     state = runtime_state.snapshot()
+    now_ms = int(time.time() * 1000)
 
     conn = ensure_db()
     try:
-        submit_unknown_without_exchange_row = conn.execute(
-            """
-            SELECT COUNT(*) AS cnt
-            FROM orders
-            WHERE status='SUBMIT_UNKNOWN'
-              AND (exchange_order_id IS NULL OR TRIM(exchange_order_id)='')
-            """
-        ).fetchone()
-        stray_remote_open_row = conn.execute(
-            """
-            SELECT COUNT(*) AS cnt
-            FROM orders
-            WHERE client_order_id LIKE 'remote_%'
-              AND status IN ('PENDING_SUBMIT','NEW','PARTIAL','SUBMIT_UNKNOWN','RECOVERY_REQUIRED')
-            """
-        ).fetchone()
+        risky_state = collect_risky_order_state(
+            conn,
+            now_ms=now_ms,
+            max_open_order_age_sec=max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC)),
+        )
     finally:
         conn.close()
 
@@ -143,16 +134,14 @@ def evaluate_startup_safety_gate() -> str | None:
     if state.recovery_required_count > 0:
         reasons.append(f"recovery_required_orders={state.recovery_required_count}")
 
-    submit_unknown_without_exchange_count = int(
-        submit_unknown_without_exchange_row["cnt"] if submit_unknown_without_exchange_row else 0
-    )
+    submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])
     if submit_unknown_without_exchange_count > 0:
         reasons.append(
             "submit_unknown_without_exchange_id="
             f"{submit_unknown_without_exchange_count}"
         )
 
-    stray_remote_open_count = int(stray_remote_open_row["cnt"] if stray_remote_open_row else 0)
+    stray_remote_open_count = int(risky_state["stray_remote_open_order_count"])
     if stray_remote_open_count > 0:
         reasons.append(f"stray_remote_open_orders={stray_remote_open_count}")
 

@@ -69,6 +69,10 @@ class _LoopConn:
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
         if "FROM portfolio" in q:
             return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
+        if "SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'" in q:
+            return _Rows({"cnt": 0})
+        if "SELECT COUNT(*) AS cnt FROM orders WHERE status='RECOVERY_REQUIRED'" in q:
+            return _Rows({"cnt": 0})
         if "status='SUBMIT_UNKNOWN'" in q and "exchange_order_id" in q:
             return _Rows({"cnt": 0})
         if "client_order_id LIKE 'remote_%'" in q:

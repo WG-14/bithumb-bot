@@ -6,7 +6,7 @@ from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.engine import evaluate_startup_safety_gate
+from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.recovery import reconcile_with_broker
@@ -259,3 +259,121 @@ def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monk
     assert float(row["qty_filled"]) == pytest.approx(1.0)
     assert fills_after_retry == 2
     assert evaluate_startup_safety_gate() is None
+
+
+def _patch_single_tick_run_loop(monkeypatch) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "KILL_SWITCH", False)
+    object.__setattr__(settings, "INTERVAL", "1m")
+    object.__setattr__(settings, "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", 30)
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 900)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+
+    monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
+    monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "BUY",
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: object())
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (False, "ok"),
+    )
+
+    ticks = iter([10.0, 11.0])
+    monkeypatch.setattr("bithumb_bot.engine.time.time", lambda: next(ticks, 11.0))
+
+    sleeps = {"n": 0}
+
+    def _sleep(_sec: float):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
+
+
+def test_restart_with_risky_state_does_not_resume_trading_loop(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="restart_block",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="RECOVERY_REQUIRED",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.startup_gate_reason is not None
+    assert "recovery_required_orders=1" in state.startup_gate_reason
+    assert live_execute_calls["n"] == 0
+
+
+def test_restart_startup_proceeds_when_reconcile_clears_risky_state(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="restart_clear",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("restart_clear", "ex-restart-clear", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _ResolveToCanceledBroker(_NoopBroker):
+        def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+            return BrokerOrder(client_order_id, exchange_order_id or "ex-restart-clear", "BUY", "CANCELED", 100.0, 1.0, 0.0, 1, 1)
+
+    monkeypatch.setattr(
+        "bithumb_bot.recovery.reconcile_with_broker",
+        lambda _broker: reconcile_with_broker(_ResolveToCanceledBroker()),
+        raising=False,
+    )
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.startup_gate_reason is None
+    assert state.trading_enabled is True

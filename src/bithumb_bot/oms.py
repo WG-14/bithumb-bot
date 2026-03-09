@@ -21,17 +21,54 @@ def evaluate_unresolved_order_gate(
     max_open_order_age_sec: int,
 ) -> tuple[bool, str, str]:
     """Returns whether unresolved risky order states should block new submissions."""
-    submit_unknown = conn.execute(
-        "SELECT 1 FROM orders WHERE status='SUBMIT_UNKNOWN' LIMIT 1"
-    ).fetchone()
-    if submit_unknown is not None:
+    state = collect_risky_order_state(conn, now_ms=now_ms, max_open_order_age_sec=max_open_order_age_sec)
+    if state["submit_unknown_count"] > 0:
         return True, "SUBMIT_UNKNOWN_PRESENT", "submit-unknown unresolved order exists"
 
-    recovery_required = conn.execute(
-        "SELECT 1 FROM orders WHERE status='RECOVERY_REQUIRED' LIMIT 1"
-    ).fetchone()
-    if recovery_required is not None:
+    if state["recovery_required_count"] > 0:
         return True, "RECOVERY_REQUIRED_PRESENT", "recovery-required order exists"
+
+    open_count = int(state["unresolved_open_order_count"])
+    if open_count <= 0:
+        return False, "OK", "ok"
+
+    age_sec = float(state["oldest_unresolved_open_order_age_sec"] or 0.0)
+    max_age_sec = max(1, int(max_open_order_age_sec))
+    if age_sec > max_age_sec:
+        return True, "STALE_UNRESOLVED_OPEN_ORDER", f"stale unresolved open order exists: age={age_sec:.1f}s > {max_age_sec}s"
+
+    return True, "UNRESOLVED_OPEN_ORDER_PRESENT", "unresolved open order exists"
+
+
+def collect_risky_order_state(
+    conn: sqlite3.Connection,
+    *,
+    now_ms: int,
+    max_open_order_age_sec: int,
+) -> dict[str, int | float]:
+    """Collects risky local order-state counters used by startup and submit gates."""
+    submit_unknown_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'"
+    ).fetchone()
+    recovery_required_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM orders WHERE status='RECOVERY_REQUIRED'"
+    ).fetchone()
+    submit_unknown_without_exchange_row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM orders
+        WHERE status='SUBMIT_UNKNOWN'
+          AND (exchange_order_id IS NULL OR TRIM(exchange_order_id)='')
+        """
+    ).fetchone()
+    stray_remote_open_row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM orders
+        WHERE client_order_id LIKE 'remote_%'
+          AND status IN ('PENDING_SUBMIT','NEW','PARTIAL','SUBMIT_UNKNOWN','RECOVERY_REQUIRED')
+        """
+    ).fetchone()
 
     placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
     open_row = conn.execute(
@@ -44,17 +81,22 @@ def evaluate_unresolved_order_gate(
     ).fetchone()
     open_count = int(open_row["open_count"] if hasattr(open_row, "keys") else open_row[0])
     oldest_created_ts = open_row["oldest_created_ts"] if hasattr(open_row, "keys") else open_row[1]
-    if open_count <= 0:
-        return False, "OK", "ok"
 
     age_sec = 0.0
     if oldest_created_ts is not None:
         age_sec = max(0.0, (int(now_ms) - int(oldest_created_ts)) / 1000)
     max_age_sec = max(1, int(max_open_order_age_sec))
-    if age_sec > max_age_sec:
-        return True, "STALE_UNRESOLVED_OPEN_ORDER", f"stale unresolved open order exists: age={age_sec:.1f}s > {max_age_sec}s"
-
-    return True, "UNRESOLVED_OPEN_ORDER_PRESENT", "unresolved open order exists"
+    return {
+        "submit_unknown_count": int(submit_unknown_row["cnt"] if submit_unknown_row else 0),
+        "recovery_required_count": int(recovery_required_row["cnt"] if recovery_required_row else 0),
+        "unresolved_open_order_count": open_count,
+        "oldest_unresolved_open_order_age_sec": age_sec,
+        "stale_unresolved_open_order": int(open_count > 0 and age_sec > max_age_sec),
+        "submit_unknown_without_exchange_id_count": int(
+            submit_unknown_without_exchange_row["cnt"] if submit_unknown_without_exchange_row else 0
+        ),
+        "stray_remote_open_order_count": int(stray_remote_open_row["cnt"] if stray_remote_open_row else 0),
+    }
 
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
