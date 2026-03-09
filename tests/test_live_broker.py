@@ -8,6 +8,7 @@ from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, va
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot.config import settings
+from tests.fakes import FakeMarketData
 
 
 class _FakeBroker:
@@ -222,6 +223,16 @@ class _UnmatchedRecentFillBroker(_FakeBroker):
             )
         ]
 
+
+
+
+@pytest.fixture(autouse=True)
+def _fake_market_data(monkeypatch):
+    fake = FakeMarketData()
+    from bithumb_bot.broker import live as live_module
+
+    monkeypatch.setattr(live_module, "fetch_orderbook_top", fake.fetch_orderbook_top)
+    return fake
 
 @pytest.fixture(autouse=True)
 def _reset_pretrade_guards():

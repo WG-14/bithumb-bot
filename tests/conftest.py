@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import socket
 import sys
 import types
+
+import pytest
 
 
 try:
@@ -57,3 +60,11 @@ except ModuleNotFoundError:
     mod.Client = Client
 
     sys.modules["httpx"] = mod
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(monkeypatch):
+    def _deny(*args, **kwargs):
+        raise RuntimeError("external network is disabled in tests")
+
+    monkeypatch.setattr(socket, "create_connection", _deny)
