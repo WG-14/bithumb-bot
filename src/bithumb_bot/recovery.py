@@ -196,11 +196,9 @@ def _halt_on_source_conflict(conflicts: list[str]) -> None:
     if len(conflicts) > 3:
         detail = f"{detail}; +{len(conflicts) - 3} more"
     reason = f"recovery source conflict detected; manual review required ({detail})"
-    runtime_state.disable_trading_until(
-        float("inf"),
-        reason=reason,
+    runtime_state.enter_halt(
         reason_code="RECOVERY_SOURCE_CONFLICT",
-        halt_new_orders_blocked=True,
+        reason=reason,
         unresolved=True,
     )
     notify(

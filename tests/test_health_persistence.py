@@ -86,6 +86,33 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
 
 
 
+
+
+def test_enter_halt_sets_consistent_halted_state_for_all_reason_codes(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    reason_codes = [
+        "MANUAL_PAUSE",
+        "KILL_SWITCH",
+        "DAILY_LOSS_LIMIT",
+        "RECOVERY_REQUIRED_PRESENT",
+        "STALE_OPEN_ORDER",
+    ]
+
+    for code in reason_codes:
+        runtime_state.enable_trading()
+        runtime_state.enter_halt(
+            reason_code=code,
+            reason=f"halt triggered by {code}",
+            unresolved=(code != "MANUAL_PAUSE"),
+        )
+        state = runtime_state.snapshot()
+        assert state.trading_enabled is False
+        assert state.retry_at_epoch_sec == float("inf")
+        assert state.halt_new_orders_blocked is True
+        assert state.halt_reason_code == code
+        assert state.last_disable_reason == f"halt triggered by {code}"
+
 def test_startup_gate_reason_is_persisted_to_health_state(tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = 1_730_000_000_000

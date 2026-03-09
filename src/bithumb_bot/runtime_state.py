@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from threading import Lock
 
@@ -41,6 +42,7 @@ class RuntimeState:
 
 _STATE = RuntimeState()
 _LOCK = Lock()
+_LOG = logging.getLogger(__name__)
 
 
 def _sync_state_from_persisted_locked() -> None:
@@ -403,6 +405,27 @@ def disable_trading_until(
         _STATE.halt_new_orders_blocked = bool(halt_new_orders_blocked)
         _STATE.halt_state_unresolved = bool(unresolved)
         _persist_state(_STATE)
+
+
+def enter_halt(
+    *,
+    reason_code: str,
+    reason: str,
+    unresolved: bool,
+) -> None:
+    disable_trading_until(
+        float("inf"),
+        reason=reason,
+        reason_code=reason_code,
+        halt_new_orders_blocked=True,
+        unresolved=unresolved,
+    )
+    _LOG.error(
+        "event=trading_halted reason_code=%s unresolved=%s reason=%s",
+        reason_code,
+        int(unresolved),
+        reason,
+    )
 
 
 def enable_trading() -> None:

@@ -459,6 +459,28 @@ def test_live_open_order_guard_blocks_new_order(tmp_path):
     assert trade is None
 
 
+
+
+def test_live_runtime_halt_blocks_new_order_submission(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "runtime_halt.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    runtime_state.enter_halt(
+        reason_code="MANUAL_PAUSE",
+        reason="manual operator pause",
+        unresolved=False,
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert any("event=order_submit_blocked" in msg and "status=HALTED" in msg for msg in notifications)
+
 def test_live_kill_switch_blocks_new_order(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "kill_switch.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)

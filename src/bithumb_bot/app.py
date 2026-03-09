@@ -781,11 +781,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
 
 
 def cmd_pause() -> None:
-    disable_trading_until(
-        float("inf"),
-        reason="manual operator pause",
+    runtime_state.enter_halt(
         reason_code="MANUAL_PAUSE",
-        halt_new_orders_blocked=True,
+        reason="manual operator pause",
         unresolved=False,
     )
     print("[PAUSE] trading disabled via persistent runtime state")

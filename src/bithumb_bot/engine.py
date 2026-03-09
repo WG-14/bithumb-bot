@@ -165,11 +165,9 @@ def evaluate_startup_safety_gate() -> str | None:
     return reason
 
 def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
-    runtime_state.disable_trading_until(
-        float("inf"),
-        reason=reason.detail,
+    runtime_state.enter_halt(
         reason_code=reason.code,
-        halt_new_orders_blocked=True,
+        reason=reason.detail,
         unresolved=unresolved,
     )
     notify(

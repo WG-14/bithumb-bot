@@ -10,6 +10,7 @@ from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
+from .. import runtime_state
 from ..oms import TERMINAL_ORDER_STATUSES, evaluate_unresolved_order_gate, new_client_order_id, record_status_transition, record_submit_blocked, record_submit_started, set_exchange_order_id, set_status
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
@@ -285,6 +286,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
     conn = ensure_db()
     try:
         init_portfolio(conn)
+        state = runtime_state.snapshot()
+        if state.halt_new_orders_blocked:
+            notify(
+                format_event(
+                    "order_submit_blocked",
+                    status="HALTED",
+                    reason=f"runtime halted: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+                )
+            )
+            return None
         cash, qty = get_portfolio(conn)
 
         if signal == "BUY" and qty <= POSITION_EPSILON:
