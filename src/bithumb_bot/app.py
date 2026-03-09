@@ -636,6 +636,16 @@ def _load_recovery_report(
             """,
             (*OPEN_ORDER_STATUSES, oldest_limit),
         ).fetchall()
+        recovery_required_rows = conn.execute(
+            """
+            SELECT client_order_id, status, exchange_order_id, created_ts, last_error
+            FROM orders
+            WHERE status='RECOVERY_REQUIRED'
+            ORDER BY created_ts ASC
+            LIMIT ?
+            """,
+            (oldest_limit,),
+        ).fetchall()
         health_row = conn.execute(
             """
             SELECT
@@ -706,6 +716,21 @@ def _load_recovery_report(
         except (TypeError, ValueError):
             unprocessed_remote_open_orders = 0
 
+    state = runtime_state.snapshot()
+
+    recovery_required_orders: list[dict[str, str | float]] = []
+    for row in recovery_required_rows:
+        last_error = str(row["last_error"] or "").strip()
+        recovery_required_orders.append(
+            {
+                "client_order_id": str(row["client_order_id"]),
+                "status": str(row["status"]),
+                "exchange_order_id": str(row["exchange_order_id"] or "-"),
+                "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
+                "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+            }
+        )
+
     return {
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
@@ -714,11 +739,18 @@ def _load_recovery_report(
         "last_reconcile_summary": last_reconcile_summary,
         "recent_halt_reason": recent_halt_reason,
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
+        "trading_enabled": bool(state.trading_enabled),
+        "unresolved_summary": oldest_orders,
+        "recovery_required_summary": recovery_required_orders,
     }
 
 
-def cmd_recovery_report() -> None:
+def cmd_recovery_report(*, as_json: bool = False) -> None:
     report = _load_recovery_report()
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
+
     print("[RECOVERY-REPORT]")
     print("  [P1] unresolved_open_orders")
     print(f"    count={report['unresolved_count']}")
@@ -864,7 +896,8 @@ def main(argv: list[str] | None = None) -> int:
     resume.add_argument("--force", action="store_true")
 
     sub.add_parser("reconcile")
-    sub.add_parser("recovery-report")
+    recovery_report = sub.add_parser("recovery-report")
+    recovery_report.add_argument("--json", action="store_true")
     recover_order = sub.add_parser("recover-order")
     recover_order.add_argument("--client-order-id", required=True)
     recover_order.add_argument("--exchange-order-id", required=True)
@@ -916,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "reconcile":
         cmd_reconcile()
     elif args.cmd == "recovery-report":
-        cmd_recovery_report()
+        cmd_recovery_report(as_json=bool(args.json))
     elif args.cmd == "recover-order":
         cmd_recover_order(
             client_order_id=str(args.client_order_id),

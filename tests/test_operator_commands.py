@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -295,6 +296,81 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "client_order_id=open_4" in out
     assert "client_order_id=open_5" not in out
     assert "last_error=timeout while polling exchange status endpoint due to transi..." in out
+
+
+
+def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 40_000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="recovery_1", created_ts=now_ms - 30_000)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={"remote_open_order_found": 1},
+        now_epoch_sec=time.time() - 2,
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="periodic reconcile failed",
+        reason_code="PERIODIC_RECONCILE_FAILED",
+        unresolved=True,
+    )
+
+    cmd_recovery_report(as_json=True)
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+
+    assert set(payload.keys()) == {
+        "last_reconcile_summary",
+        "oldest_orders",
+        "oldest_unresolved_age_sec",
+        "recent_halt_reason",
+        "recovery_required_count",
+        "recovery_required_summary",
+        "trading_enabled",
+        "unprocessed_remote_open_orders",
+        "unresolved_count",
+        "unresolved_summary",
+    }
+
+
+def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 50_000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="recovery_1", created_ts=now_ms - 20_000)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={"remote_open_order_found": 3},
+        now_epoch_sec=time.time() - 1,
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="manual operator pause",
+        reason_code="MANUAL_PAUSE",
+        unresolved=True,
+    )
+
+    cmd_recovery_report(as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["trading_enabled"] is False
+    assert "code=" in payload["recent_halt_reason"]
+    assert payload["recent_halt_reason"] != "none"
+    assert payload["unresolved_count"] >= 1
+    assert isinstance(payload["unresolved_summary"], list)
+    assert payload["unresolved_summary"]
+    assert payload["unresolved_summary"][0]["client_order_id"]
+    assert payload["recovery_required_count"] >= 1
+    assert isinstance(payload["recovery_required_summary"], list)
+    assert payload["recovery_required_summary"]
+    assert payload["recovery_required_summary"][0]["client_order_id"]
+    assert payload["last_reconcile_summary"] != "none"
+    assert "status=" in payload["last_reconcile_summary"]
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
