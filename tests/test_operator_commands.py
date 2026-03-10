@@ -436,19 +436,21 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "[RECOVERY-REPORT]" in out
-    assert "[P1] unresolved_open_orders" in out
-    assert "count=6" in out
-    assert "[P2] recovery_required_orders" in out
-    assert "count=3" in out
-    assert "[P3] last_reconcile_summary" in out
-    assert "[P4] recent_halt_reason" in out
-    assert "[P5] unprocessed_remote_open_orders" in out
-    assert "[P6] balance_split_mismatch" in out
+    assert "[P1] order_recovery_status" in out
+    assert "unresolved_count=6" in out
+    assert "recovery_required_count=3" in out
+    assert "[P2] resume_eligibility" in out
+    assert "[P3] balance_mismatch" in out
     assert "summary=none" in out
-    assert "[P7] resume_eligibility" in out
+    assert "[P4] last_reconcile_summary" in out
+    assert "[P5] recent_halt_reason" in out
+    assert "[P6] operator_next_action" in out
+    assert "action=manual_recovery_required" in out
+    assert "command=uv run python bot.py recover-order --client-order-id <id>" in out
+    assert "[P7] unprocessed_remote_open_orders" in out
     assert "resume_allowed=0" in out
     assert "force_resume_allowed=0" in out
-    assert "blockers_count=" in out
+    assert "blocker_summary=total=" in out
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "overridable=0" in out
     assert "oldest_unresolved_orders(top 5):" in out
@@ -484,12 +486,16 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
 
     assert set(payload.keys()) == {
         "balance_split_mismatch_summary",
+        "blocker_summary",
         "blockers",
         "force_resume_allowed",
         "last_reconcile_summary",
         "oldest_orders",
         "oldest_unresolved_age_sec",
+        "operator_next_action",
+        "non_overridable_blockers",
         "recent_halt_reason",
+        "recommended_command",
         "recovery_required_count",
         "recovery_required_summary",
         "resume_allowed",
@@ -541,6 +547,16 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["blockers"]
     assert payload["blockers"][0]["code"]
     assert isinstance(payload["blockers"][0]["overridable"], bool)
+    assert "total=" in payload["blocker_summary"]
+    assert "non_overridable=" in payload["blocker_summary"]
+    assert isinstance(payload["non_overridable_blockers"], list)
+    assert payload["operator_next_action"] in {
+        "resume_now",
+        "review_and_force_resume",
+        "manual_recovery_required",
+        "investigate_blockers",
+    }
+    assert payload["recommended_command"]
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):

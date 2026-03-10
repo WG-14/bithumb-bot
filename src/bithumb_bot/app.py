@@ -745,6 +745,25 @@ def _load_recovery_report(
         {"code": b.code, "detail": b.detail, "overridable": bool(b.overridable)}
         for b in blockers
     ]
+    non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
+    blocker_summary = (
+        f"total={len(blocker_list)} "
+        f"non_overridable={len(non_overridable_blockers)} "
+        f"overridable={len(blocker_list) - len(non_overridable_blockers)}"
+    )
+
+    if bool(resume_allowed):
+        operator_next_action = "resume_now"
+        recommended_command = "uv run python bot.py resume"
+    elif blocker_list and all(bool(b["overridable"]) for b in blocker_list):
+        operator_next_action = "review_and_force_resume"
+        recommended_command = "uv run python bot.py resume --force"
+    elif recovery_required_count > 0:
+        operator_next_action = "manual_recovery_required"
+        recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
+    else:
+        operator_next_action = "investigate_blockers"
+        recommended_command = "uv run python bot.py recovery-report --json"
 
     state = runtime_state.snapshot()
 
@@ -761,8 +780,12 @@ def _load_recovery_report(
         "resume_allowed": bool(resume_allowed),
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
         "blockers": blocker_list,
+        "blocker_summary": blocker_summary,
+        "non_overridable_blockers": non_overridable_blockers,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
+        "operator_next_action": operator_next_action,
+        "recommended_command": recommended_command,
     }
 
 
@@ -773,23 +796,14 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         return
 
     print("[RECOVERY-REPORT]")
-    print("  [P1] unresolved_open_orders")
-    print(f"    count={report['unresolved_count']}")
-    print("  [P2] recovery_required_orders")
-    print(f"    count={report['recovery_required_count']}")
-    print("  [P3] last_reconcile_summary")
-    print(f"    {report['last_reconcile_summary']}")
-    print("  [P4] recent_halt_reason")
-    print(f"    {report['recent_halt_reason']}")
-    print("  [P5] unprocessed_remote_open_orders")
-    print(f"    count={report['unprocessed_remote_open_orders']}")
-    print("  [P6] balance_split_mismatch")
-    print(f"    summary={report['balance_split_mismatch_summary']}")
-    print("  [P7] resume_eligibility")
+    print("  [P1] order_recovery_status")
+    print(f"    unresolved_count={report['unresolved_count']}")
+    print(f"    recovery_required_count={report['recovery_required_count']}")
+    print("  [P2] resume_eligibility")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
-    print(f"    blockers_count={len(blockers)}")
+    print(f"    blocker_summary={report['blocker_summary']}")
     for blocker in blockers:
         print(
             "    - "
@@ -797,6 +811,17 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
             f"overridable={1 if bool(blocker['overridable']) else 0} "
             f"detail={blocker['detail']}"
         )
+    print("  [P3] balance_mismatch")
+    print(f"    summary={report['balance_split_mismatch_summary']}")
+    print("  [P4] last_reconcile_summary")
+    print(f"    {report['last_reconcile_summary']}")
+    print("  [P5] recent_halt_reason")
+    print(f"    {report['recent_halt_reason']}")
+    print("  [P6] operator_next_action")
+    print(f"    action={report['operator_next_action']}")
+    print(f"    command={report['recommended_command']}")
+    print("  [P7] unprocessed_remote_open_orders")
+    print(f"    count={report['unprocessed_remote_open_orders']}")
 
     if report["oldest_unresolved_age_sec"] is None:
         print("  oldest_unresolved_age_sec=none")
