@@ -5,6 +5,7 @@ import os
 import pytest
 
 from bithumb_bot import notifier
+from bithumb_bot.observability import safety_event
 
 
 @pytest.fixture(autouse=True)
@@ -112,3 +113,24 @@ def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytes
     notifier.notify("dupe")
 
     assert len(calls) == 2
+
+
+def test_safety_event_keeps_common_operator_fields_in_payload():
+    message = safety_event(
+        "order_submit_unknown",
+        client_order_id="live_1000_buy_attempt1",
+        submit_attempt_id="attempt1",
+        exchange_order_id="-",
+        reason_code="SUBMIT_TIMEOUT",
+        state_from="PENDING_SUBMIT",
+        state_to="SUBMIT_UNKNOWN",
+    )
+
+    assert "event=order_submit_unknown" in message
+    assert "symbol=" in message
+    assert "client_order_id=live_1000_buy_attempt1" in message
+    assert "submit_attempt_id=attempt1" in message
+    assert "exchange_order_id=-" in message
+    assert "reason_code=SUBMIT_TIMEOUT" in message
+    assert "state_from=PENDING_SUBMIT" in message
+    assert "state_to=SUBMIT_UNKNOWN" in message

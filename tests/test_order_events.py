@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
+from bithumb_bot.observability import safety_event
 
 
 def test_order_events_written_for_major_transitions(tmp_path):
@@ -246,3 +247,43 @@ def test_disallowed_status_transition_records_block_event(tmp_path):
     assert row["event_type"] == "status_transition_blocked"
     assert row["order_status"] == "FILLED"
     assert "FILLED->NEW" in str(row["message"])
+
+
+def test_critical_safety_event_payloads_include_common_fields():
+    submit_msg = safety_event(
+        "order_submit_started",
+        client_order_id="cid-1",
+        submit_attempt_id="attempt-1",
+        exchange_order_id="-",
+        reason_code="-",
+        state_to="PENDING_SUBMIT",
+    )
+    halt_msg = safety_event(
+        "order_submit_blocked",
+        client_order_id="-",
+        submit_attempt_id="-",
+        exchange_order_id="-",
+        reason_code="RISKY_ORDER_BLOCK",
+        state_to="HALTED",
+    )
+    recovery_msg = safety_event(
+        "recovery_required_transition",
+        client_order_id="cid-2",
+        submit_attempt_id="-",
+        exchange_order_id="-",
+        reason_code="AMBIGUOUS_SUBMIT",
+        state_from="SUBMIT_UNKNOWN",
+        state_to="RECOVERY_REQUIRED",
+    )
+
+    for msg in (submit_msg, halt_msg, recovery_msg):
+        assert "symbol=" in msg
+        assert "client_order_id=" in msg
+        assert "submit_attempt_id=" in msg
+        assert "exchange_order_id=" in msg
+        assert "reason_code=" in msg
+
+    assert "state_to=PENDING_SUBMIT" in submit_msg
+    assert "state_to=HALTED" in halt_msg
+    assert "state_from=SUBMIT_UNKNOWN" in recovery_msg
+    assert "state_to=RECOVERY_REQUIRED" in recovery_msg

@@ -9,7 +9,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import safety_event
-from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_TIMEOUT
+from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -29,6 +29,7 @@ from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
 VALID_ORDER_SIDES = {"BUY", "SELL"}
+UNSET_EVENT_FIELD = "-"
 
 
 def _submit_attempt_id() -> str:
@@ -146,7 +147,7 @@ def validate_pretrade(
         raise ValueError(f"slippage guard blocked: bps={slippage_bps:.2f} > limit={slip_limit_bps:.2f}")
 
 
-def _mark_submit_unknown(*, conn, client_order_id: str, side: str, reason: str) -> None:
+def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str) -> None:
     record_status_transition(
         client_order_id,
         from_status="PENDING_SUBMIT",
@@ -159,6 +160,8 @@ def _mark_submit_unknown(*, conn, client_order_id: str, side: str, reason: str) 
         safety_event(
             "order_submit_unknown",
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            exchange_order_id=UNSET_EVENT_FIELD,
             state_from="PENDING_SUBMIT",
             state_to="SUBMIT_UNKNOWN",
             reason_code=SUBMIT_TIMEOUT,
@@ -169,7 +172,7 @@ def _mark_submit_unknown(*, conn, client_order_id: str, side: str, reason: str) 
     )
 
 
-def _mark_submit_failed(*, conn, client_order_id: str, side: str, reason: str) -> None:
+def _mark_submit_failed(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str) -> None:
     record_status_transition(
         client_order_id,
         from_status="PENDING_SUBMIT",
@@ -179,9 +182,14 @@ def _mark_submit_failed(*, conn, client_order_id: str, side: str, reason: str) -
     )
     set_status(client_order_id, "FAILED", last_error=reason, conn=conn)
     notify(
-        format_event(
+        safety_event(
             "order_submit_failed",
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            state_from="PENDING_SUBMIT",
+            state_to="FAILED",
+            reason_code=SUBMIT_FAILED,
             side=side,
             status="FAILED",
             reason=reason,
@@ -207,6 +215,8 @@ def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_statu
         safety_event(
             "recovery_required_transition",
             client_order_id=client_order_id,
+            submit_attempt_id=UNSET_EVENT_FIELD,
+            exchange_order_id=UNSET_EVENT_FIELD,
             state_from=from_status,
             state_to="RECOVERY_REQUIRED",
             reason_code=AMBIGUOUS_SUBMIT,
@@ -320,14 +330,31 @@ def _submit_via_standard_path(
         status="PENDING_SUBMIT",
     )
     record_submit_started(client_order_id, conn=conn)
-    notify(format_event("order_submit_started", client_order_id=client_order_id, side=side, status="PENDING_SUBMIT"))
+    notify(
+        safety_event(
+            "order_submit_started",
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            state_to="PENDING_SUBMIT",
+            reason_code=UNSET_EVENT_FIELD,
+            side=side,
+            status="PENDING_SUBMIT",
+        )
+    )
     conn.commit()
 
     try:
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
     except BrokerTemporaryError as e:
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
-        _mark_submit_unknown(conn=conn, client_order_id=client_order_id, side=side, reason=str(err))
+        _mark_submit_unknown(
+            conn=conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            side=side,
+            reason=str(err),
+        )
         _record_submit_attempt_result(
             conn=conn,
             client_order_id=client_order_id,
@@ -347,7 +374,13 @@ def _submit_via_standard_path(
         return None
     except Exception as e:
         reason = f"submit failed: {type(e).__name__}: {e}"
-        _mark_submit_failed(conn=conn, client_order_id=client_order_id, side=side, reason=reason)
+        _mark_submit_failed(
+            conn=conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            side=side,
+            reason=reason,
+        )
         _record_submit_attempt_result(
             conn=conn,
             client_order_id=client_order_id,
@@ -369,10 +402,12 @@ def _submit_via_standard_path(
     if order.exchange_order_id:
         set_exchange_order_id(client_order_id, order.exchange_order_id, conn=conn)
         notify(
-            format_event(
+            safety_event(
                 "exchange_order_id_attached",
                 client_order_id=client_order_id,
+                submit_attempt_id=submit_attempt_id,
                 exchange_order_id=order.exchange_order_id,
+                reason_code=UNSET_EVENT_FIELD,
                 side=side,
                 status=order.status,
             )
@@ -382,6 +417,7 @@ def _submit_via_standard_path(
         _mark_submit_unknown(
             conn=conn,
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
             side=side,
             reason=reason,
         )
@@ -435,6 +471,9 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             notify(
                 safety_event(  # CHANGED
                     "order_submit_blocked",
+                    client_order_id=UNSET_EVENT_FIELD,
+                    submit_attempt_id=UNSET_EVENT_FIELD,
+                    exchange_order_id=UNSET_EVENT_FIELD,
                     status="HALTED",
                     state_to="HALTED",
                     reason_code=RISKY_ORDER_BLOCK,

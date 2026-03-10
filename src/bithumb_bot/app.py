@@ -16,7 +16,8 @@ from .utils_time import kst_str, parse_interval_sec
 from .engine import evaluate_resume_eligibility, get_health_status
 from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
-from .notifier import format_event, notify
+from .notifier import notify
+from .observability import safety_event
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 
@@ -328,10 +329,13 @@ def cmd_run(short_n: int, long_n: int):
             run_loop(short_n, long_n)
     except RunLockError as e:
         notify(
-            format_event(
+            safety_event(
                 "run_lock_conflict",
-                alert_kind="run_lock_conflict",
+                client_order_id="-",
+                submit_attempt_id="-",
+                exchange_order_id="-",
                 reason_code="RUN_LOCK_CONFLICT",
+                alert_kind="run_lock_conflict",
                 reason=str(e),
             )
         )

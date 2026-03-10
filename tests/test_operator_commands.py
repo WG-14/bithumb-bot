@@ -747,3 +747,6 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
     assert run_loop_calls["n"] == 0
     assert any("event=run_lock_conflict" in n for n in notifications)
     assert any("reason_code=RUN_LOCK_CONFLICT" in n for n in notifications)
+    assert any("client_order_id=-" in n for n in notifications)
+    assert any("submit_attempt_id=-" in n for n in notifications)
+    assert any("exchange_order_id=-" in n for n in notifications)
