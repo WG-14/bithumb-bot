@@ -8,6 +8,7 @@ from typing import Any
 import sqlite3
 
 from .db_core import ensure_db
+from .config import settings
 
 
 OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
@@ -134,6 +135,9 @@ def _record_order_event(
     message: str | None = None,
     symbol: str | None = None,
     side: str | None = None,
+    submit_attempt_id: str | None = None,
+    mode: str | None = None,
+    intent_ts: int | None = None,
     submit_ts: int | None = None,
     payload_fingerprint: str | None = None,
     broker_response_summary: str | None = None,
@@ -155,13 +159,16 @@ def _record_order_event(
             message,
             symbol,
             side,
+            submit_attempt_id,
+            mode,
+            intent_ts,
             submit_ts,
             payload_fingerprint,
             broker_response_summary,
             exception_class,
             timeout_flag,
             exchange_order_id_obtained
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             client_order_id,
@@ -175,6 +182,9 @@ def _record_order_event(
             (message[:500] if message else None),
             symbol,
             side,
+            submit_attempt_id,
+            mode,
+            int(intent_ts) if intent_ts is not None else None,
             int(submit_ts) if submit_ts is not None else None,
             payload_fingerprint,
             (broker_response_summary[:500] if broker_response_summary else None),
@@ -233,6 +243,8 @@ def create_order(
     *,
     client_order_id: str,
     submit_attempt_id: str | None = None,
+    symbol: str | None = None,
+    mode: str | None = None,
     side: str,
     qty_req: float,
     price: float | None,
@@ -261,6 +273,11 @@ def create_order(
             order_status=status,
             qty=qty_req,
             price=price,
+            symbol=symbol or settings.PAIR,
+            side=side,
+            submit_attempt_id=submit_attempt_id,
+            mode=mode or settings.MODE,
+            intent_ts=ts,
         )
         if own_conn:
             conn.commit()

@@ -358,6 +358,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             message TEXT,
             symbol TEXT,
             side TEXT,
+            submit_attempt_id TEXT,
+            mode TEXT,
+            intent_ts INTEGER,
             submit_ts INTEGER,
             payload_fingerprint TEXT,
             broker_response_summary TEXT,
@@ -371,6 +374,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "order_events", "symbol", "symbol TEXT")
     _ensure_column(conn, "order_events", "side", "side TEXT")
+    _ensure_column(conn, "order_events", "submit_attempt_id", "submit_attempt_id TEXT")
+    _ensure_column(conn, "order_events", "mode", "mode TEXT")
+    _ensure_column(conn, "order_events", "intent_ts", "intent_ts INTEGER")
     _ensure_column(conn, "order_events", "submit_ts", "submit_ts INTEGER")
     _ensure_column(conn, "order_events", "payload_fingerprint", "payload_fingerprint TEXT")
     _ensure_column(conn, "order_events", "broker_response_summary", "broker_response_summary TEXT")

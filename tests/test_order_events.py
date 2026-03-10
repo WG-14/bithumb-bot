@@ -55,6 +55,57 @@ def test_order_events_written_for_major_transitions(tmp_path):
     assert "submit unknown" in str(timeout_row["message"])
 
 
+def test_intent_event_persists_submit_intent_metadata(tmp_path):
+    db_path = tmp_path / "order_events_intent_metadata.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_intent_meta",
+            submit_attempt_id="attempt_meta",
+            symbol="ETH_KRW",
+            mode="live",
+            side="SELL",
+            qty_req=0.123,
+            price=123456.0,
+            status="PENDING_SUBMIT",
+            ts_ms=1234567890,
+            conn=conn,
+        )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                client_order_id,
+                submit_attempt_id,
+                symbol,
+                side,
+                qty,
+                price,
+                mode,
+                intent_ts,
+                payload_fingerprint
+            FROM order_events
+            WHERE client_order_id='o_intent_meta' AND event_type='intent_created'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["client_order_id"] == "o_intent_meta"
+    assert row["submit_attempt_id"] == "attempt_meta"
+    assert row["symbol"] == "ETH_KRW"
+    assert row["side"] == "SELL"
+    assert row["qty"] == 0.123
+    assert row["price"] == 123456.0
+    assert row["mode"] == "live"
+    assert row["intent_ts"] == 1234567890
+    assert row["payload_fingerprint"] is None
+
+
 def test_order_lifecycle_reconstructable_in_timestamp_order(tmp_path):
     db_path = tmp_path / "order_events_timeline.sqlite"
     conn = ensure_db(str(db_path))
