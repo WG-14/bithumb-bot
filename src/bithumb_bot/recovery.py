@@ -246,12 +246,17 @@ def _mark_recovery_required_with_reason(
         safety_event(
             "recovery_required_transition",
             client_order_id=client_order_id,
+            exchange_order_id="-",
             side=side,
             status="RECOVERY_REQUIRED",
             state_from=from_status,
             state_to="RECOVERY_REQUIRED",
             reason_code=reason_code,
             reason=reason,
+            operator_next_action="review submit ambiguity and recover order with exchange_order_id",
+            operator_hint_command=(
+                f"uv run python bot.py recover-order --client-order-id {client_order_id} --exchange-order-id <exchange_order_id>"
+            ),
         )
     )
 

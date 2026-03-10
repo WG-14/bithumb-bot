@@ -341,11 +341,19 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
     )
     latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
     operator_action_required = bool(halt_state.halt_operator_action_required)
+    operator_next_action = _format_operator_next_action(
+        reason_code=reason.code,
+        unresolved=unresolved,
+        operator_action_required=operator_action_required,
+        open_orders_present=bool(halt_state.halt_open_orders_present),
+        position_present=bool(halt_state.halt_position_present),
+    )
     notify(
         format_event(
             "trading_halted",
             status="HALTED",
             alert_kind="halt",
+            symbol=settings.PAIR,
             reason=reason.detail,
             reason_code=reason.code,
             unresolved=int(unresolved),
@@ -354,12 +362,8 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
             latest_client_order_id=latest_client_order_id,
             latest_exchange_order_id=latest_exchange_order_id,
             operator_action_required=int(operator_action_required),
-            operator_next_action=_format_operator_next_action(
-                unresolved=unresolved,
-                operator_action_required=operator_action_required,
-                open_orders_present=bool(halt_state.halt_open_orders_present),
-                position_present=bool(halt_state.halt_position_present),
-            ),
+            operator_next_action=operator_next_action,
+            operator_hint_command=_operator_hint_command(reason.code),
             primary_blocker_code=primary_blocker_code,
             blocker_summary=blocker_summary,
             force_resume_allowed=int(force_resume_allowed),
@@ -375,12 +379,22 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
 
 
 
-def _format_operator_next_action(*, unresolved: bool, operator_action_required: bool, open_orders_present: bool, position_present: bool) -> str:
+def _format_operator_next_action(*, reason_code: str, unresolved: bool, operator_action_required: bool, open_orders_present: bool, position_present: bool) -> str:
+    if reason_code in {"DAILY_LOSS_LIMIT", POSITION_LOSS_LIMIT}:
+        return "review risk breach details, verify exposure, then run recovery-report"
+    if "RECONCILE" in reason_code:
+        return "run reconcile, validate order state, then run recovery-report before resume"
     if operator_action_required or unresolved:
         if open_orders_present or position_present:
             return "operator must review open exposure and reconcile before resume"
         return "operator must review halt reason and run safe resume checks"
     return "no immediate operator action required"
+
+
+def _operator_hint_command(reason_code: str) -> str:
+    if "RECONCILE" in reason_code:
+        return "uv run python bot.py reconcile && uv run python bot.py recovery-report"
+    return "uv run python bot.py recovery-report"
 
 
 def _latest_order_identifiers() -> tuple[str | None, str | None]:
@@ -479,6 +493,7 @@ def run_loop(short_n: int, long_n: int) -> None:
             format_event(
                 "startup_halt_state_blocked",
                 alert_kind="startup_gate",
+                symbol=settings.PAIR,
                 reason_code=reason_code,
                 reason=reason,
                 unresolved_order_count=state.unresolved_open_order_count,
@@ -487,6 +502,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                 latest_exchange_order_id=latest_exchange_order_id,
                 operator_action_required=int(state.halt_operator_action_required),
                 operator_next_action=_format_operator_next_action(
+                    reason_code=reason_code,
                     unresolved=bool(state.halt_state_unresolved),
                     operator_action_required=bool(state.halt_operator_action_required),
                     open_orders_present=bool(state.halt_open_orders_present),
@@ -715,13 +731,19 @@ def run_loop(short_n: int, long_n: int) -> None:
                             marked = _mark_open_orders_recovery_required(
                                 reason, int(now * 1000)
                             )
+                            latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
                             notify(
                                 format_event(
                                     "recovery_required_marked",
                                     alert_kind="recovery_required",
+                                    symbol=settings.PAIR,
                                     reason_code="STALE_OPEN_ORDER",
                                     marked_count=marked,
+                                    latest_client_order_id=latest_client_order_id,
+                                    latest_exchange_order_id=latest_exchange_order_id,
                                     reason=reason,
+                                    operator_next_action="inspect stale order(s), run reconcile, then recovery-report",
+                                    operator_hint_command="uv run python bot.py reconcile && uv run python bot.py recovery-report",
                                 )
                             )
                             canceled_ok = _attempt_open_order_cancellation(

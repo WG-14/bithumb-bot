@@ -238,6 +238,9 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
 def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     _prepare_run_loop(monkeypatch)
 
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
     calls = {"n": 0}
 
     def _reconcile(_broker):
@@ -258,6 +261,11 @@ def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "POST_TRADE_RECONCILE_FAILED"
     assert state.halt_state_unresolved is True
+    halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=POST_TRADE_RECONCILE_FAILED" in n]
+    assert halted
+    assert any("symbol=" in n for n in halted)
+    assert any("operator_next_action=run reconcile, validate order state, then run recovery-report before resume" in n for n in halted)
+    assert any("operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n for n in halted)
 
 
 def test_run_loop_periodically_reconciles_when_open_order_exists(monkeypatch):
@@ -501,6 +509,10 @@ def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
     assert state.trading_enabled is False
     assert state.retry_at_epoch_sec == float("inf")
     assert all("attempting auto-resume" not in n for n in notifications)
+    halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=DAILY_LOSS_LIMIT" in n]
+    assert halted
+    assert any("symbol=" in n for n in halted)
+    assert any("operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n for n in halted)
 
 
 
@@ -517,7 +529,11 @@ def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monk
 
     run_loop(5, 20)
 
-    assert any("event=recovery_required_marked" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
+    marked = [n for n in notifications if "event=recovery_required_marked" in n and "reason_code=STALE_OPEN_ORDER" in n]
+    assert marked
+    assert any("symbol=" in n for n in marked)
+    assert any("latest_client_order_id=" in n for n in marked)
+    assert any("operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n for n in marked)
     assert any("event=trading_halted" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
 
 
@@ -650,4 +666,7 @@ def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
 
     run_loop(5, 20)
 
-    assert any("event=trading_halted" in n and "reason_code=POSITION_LOSS_LIMIT" in n for n in notifications)
+    halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=POSITION_LOSS_LIMIT" in n]
+    assert halted
+    assert any("symbol=" in n for n in halted)
+    assert any("operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n for n in halted)

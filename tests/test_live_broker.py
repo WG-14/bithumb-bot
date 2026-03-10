@@ -1088,7 +1088,15 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert "to=RECOVERY_REQUIRED" in str(transition["message"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
-    assert any("event=recovery_required_transition" in msg and "reason_code=WEAK_ORDER_CORRELATION" in msg for msg in notifications)
+    recovery_alerts = [
+        msg for msg in notifications
+        if "event=recovery_required_transition" in msg and "reason_code=WEAK_ORDER_CORRELATION" in msg
+    ]
+    assert recovery_alerts
+    assert any("symbol=" in msg for msg in recovery_alerts)
+    assert any("exchange_order_id=-" in msg for msg in recovery_alerts)
+    assert any("operator_next_action=review submit ambiguity and recover order with exchange_order_id" in msg for msg in recovery_alerts)
+    assert any("operator_hint_command=uv run python bot.py recover-order --client-order-id ambiguous_missing_exid --exchange-order-id <exchange_order_id>" in msg for msg in recovery_alerts)
     assert any(
         "event=reconcile_status_change" in msg and "client_order_id=live_2000_buy" in msg
         for msg in notifications
