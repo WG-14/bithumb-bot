@@ -59,7 +59,9 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
                 last_cancel_open_orders_summary,
-                startup_gate_reason
+                startup_gate_reason,
+                resume_gate_blocked,
+                resume_gate_reason
             FROM bot_health
             WHERE id = 1
             """
@@ -96,6 +98,8 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert row["last_cancel_open_orders_status"] is None
     assert row["last_cancel_open_orders_summary"] is None
     assert row["startup_gate_reason"] is None
+    assert int(row["resume_gate_blocked"]) == 0
+    assert row["resume_gate_reason"] is None
 
 
 
@@ -416,3 +420,34 @@ def test_startup_gate_sets_structured_reason_code(tmp_path):
     assert state.last_reconcile_reason_code == "STARTUP_GATE_BLOCKED"
     assert state.last_reconcile_metadata is not None
     assert "startup_gate_reason" in state.last_reconcile_metadata
+
+
+def test_resume_gate_fields_roundtrip_in_health_persistence(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    runtime_state.set_resume_gate(
+        blocked=True,
+        reason="LAST_RECONCILE_FAILED:last reconcile failed: reason_code=RECONCILE_FAILED",
+    )
+    state = runtime_state.snapshot()
+
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "LAST_RECONCILE_FAILED" in state.resume_gate_reason
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT resume_gate_blocked, resume_gate_reason FROM bot_health WHERE id=1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert int(row["resume_gate_blocked"]) == 1
+    assert "LAST_RECONCILE_FAILED" in str(row["resume_gate_reason"])
+
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    cleared = runtime_state.snapshot()
+    assert cleared.resume_gate_blocked is False
+    assert cleared.resume_gate_reason is None

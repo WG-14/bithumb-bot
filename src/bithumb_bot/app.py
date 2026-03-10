@@ -859,20 +859,6 @@ def cmd_pause() -> None:
 
 
 def cmd_resume(force: bool = False) -> None:
-    state = runtime_state.snapshot()
-
-    if (not force) and _last_reconcile_failed(state):
-        last_reason_code = str(getattr(state, "last_reconcile_reason_code", "") or "-")
-        last_reason = str(getattr(state, "last_reconcile_error", "") or "-")
-        print("[RESUME] refused:")
-        print(
-            "  - code=LAST_RECONCILE_FAILED "
-            f"detail=reason_code={last_reason_code} reason={last_reason}"
-        )
-        print("  run `uv run python bot.py recovery-report` for details")
-        print("  or resume explicitly with `uv run python bot.py resume --force`")
-        raise SystemExit(1)
-
     if settings.MODE == "live":
         from .broker.bithumb import BithumbBroker
 

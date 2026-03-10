@@ -98,6 +98,20 @@ def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
     assert state.halt_state_unresolved is False
 
 
+def test_manual_pause_then_resume_success_path(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    cmd_pause()
+    cmd_resume(force=False)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_reason_code is None
+    assert state.resume_gate_blocked is False
+    assert state.resume_gate_reason is None
+
+
 def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -115,6 +129,9 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, cap
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is False
     assert state.halt_reason_code is None
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in state.resume_gate_reason
 
 
 
@@ -219,6 +236,11 @@ def test_resume_refuses_when_last_reconcile_failed(tmp_path, capsys):
     assert "code=LAST_RECONCILE_FAILED" in out
     assert "PERIODIC_RECONCILE_FAILED" in out
     assert exc.value.code == 1
+
+    state = runtime_state.snapshot()
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "LAST_RECONCILE_FAILED" in state.resume_gate_reason
 
 def test_resume_force_refuses_when_last_reconcile_failed(tmp_path, capsys):
     _set_tmp_db(tmp_path)

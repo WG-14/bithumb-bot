@@ -130,6 +130,8 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "last_cancel_open_orders_status": state.last_cancel_open_orders_status,
         "last_cancel_open_orders_summary": state.last_cancel_open_orders_summary,
         "startup_gate_reason": state.startup_gate_reason,
+        "resume_gate_blocked": state.resume_gate_blocked,
+        "resume_gate_reason": state.resume_gate_reason,
     }
 
 
@@ -289,6 +291,10 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 )
             )
 
+    gate_reason = None
+    if reasons:
+        gate_reason = "; ".join(f"{blocker.code}:{blocker.detail}" for blocker in reasons)
+    runtime_state.set_resume_gate(blocked=bool(reasons), reason=gate_reason)
     return (len(reasons) == 0), reasons
 
 def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:

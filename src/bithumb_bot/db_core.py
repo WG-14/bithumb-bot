@@ -149,6 +149,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_cancel_open_orders_status TEXT,
             last_cancel_open_orders_summary TEXT,
             startup_gate_reason TEXT,
+            resume_gate_blocked INTEGER NOT NULL DEFAULT 0,
+            resume_gate_reason TEXT,
             updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
@@ -287,6 +289,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "startup_gate_reason",
         "startup_gate_reason TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "resume_gate_blocked",
+        "resume_gate_blocked INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "resume_gate_reason",
+        "resume_gate_reason TEXT",
     )
 
     conn.execute(

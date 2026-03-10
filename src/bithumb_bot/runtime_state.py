@@ -50,6 +50,8 @@ class RuntimeState:
     last_cancel_open_orders_status: str | None = None
     last_cancel_open_orders_summary: str | None = None
     startup_gate_reason: str | None = None
+    resume_gate_blocked: bool = False
+    resume_gate_reason: str | None = None
 
 
 _STATE = RuntimeState()
@@ -89,6 +91,8 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_cancel_open_orders_status = persisted.last_cancel_open_orders_status
     _STATE.last_cancel_open_orders_summary = persisted.last_cancel_open_orders_summary
     _STATE.startup_gate_reason = persisted.startup_gate_reason
+    _STATE.resume_gate_blocked = persisted.resume_gate_blocked
+    _STATE.resume_gate_reason = persisted.resume_gate_reason
 
 
 def _persist_state(state: RuntimeState) -> None:
@@ -131,9 +135,11 @@ def _persist_state(state: RuntimeState) -> None:
                     last_cancel_open_orders_status,
                     last_cancel_open_orders_summary,
                     startup_gate_reason,
+                    resume_gate_blocked,
+                    resume_gate_reason,
                     updated_ts
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                     trading_enabled=excluded.trading_enabled,
                     halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -163,6 +169,8 @@ def _persist_state(state: RuntimeState) -> None:
                     last_cancel_open_orders_status=excluded.last_cancel_open_orders_status,
                     last_cancel_open_orders_summary=excluded.last_cancel_open_orders_summary,
                     startup_gate_reason=excluded.startup_gate_reason,
+                    resume_gate_blocked=excluded.resume_gate_blocked,
+                    resume_gate_reason=excluded.resume_gate_reason,
                     updated_ts=excluded.updated_ts
                 """,
                 (
@@ -194,6 +202,8 @@ def _persist_state(state: RuntimeState) -> None:
                     _clip(state.last_cancel_open_orders_status),
                     _clip(state.last_cancel_open_orders_summary, max_len=1000),
                     _clip(state.startup_gate_reason),
+                    1 if state.resume_gate_blocked else 0,
+                    _clip(state.resume_gate_reason),
                 ),
             )
             conn.commit()
@@ -236,7 +246,9 @@ def _read_persisted_state() -> RuntimeState | None:
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
                 last_cancel_open_orders_summary,
-                startup_gate_reason
+                startup_gate_reason,
+                resume_gate_blocked,
+                resume_gate_reason
             FROM bot_health
             WHERE id = 1
             """
@@ -319,6 +331,10 @@ def _read_persisted_state() -> RuntimeState | None:
         ),
         startup_gate_reason=(
             str(row["startup_gate_reason"]) if row["startup_gate_reason"] is not None else None
+        ),
+        resume_gate_blocked=bool(int(row["resume_gate_blocked"])),
+        resume_gate_reason=(
+            str(row["resume_gate_reason"]) if row["resume_gate_reason"] is not None else None
         ),
     )
 
@@ -435,6 +451,14 @@ def set_startup_gate_reason(reason: str | None) -> None:
         _persist_state(_STATE)
 
 
+def set_resume_gate(*, blocked: bool, reason: str | None) -> None:
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        _STATE.resume_gate_blocked = bool(blocked)
+        _STATE.resume_gate_reason = _clip(reason) if blocked else None
+        _persist_state(_STATE)
+
+
 def set_error_count(n: int) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -529,4 +553,6 @@ def enable_trading() -> None:
         _STATE.halt_position_present = False
         _STATE.halt_open_orders_present = False
         _STATE.halt_operator_action_required = False
+        _STATE.resume_gate_blocked = False
+        _STATE.resume_gate_reason = None
         _persist_state(_STATE)
