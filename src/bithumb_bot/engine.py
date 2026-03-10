@@ -81,6 +81,18 @@ def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
         conn.close()
 
 
+def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
+    open_count, _ = _get_open_order_snapshot(now_ms)
+    conn = ensure_db()
+    try:
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+    finally:
+        conn.close()
+
+    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+    return open_count > 0, asset_qty > 1e-12
+
+
 def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
     conn = ensure_db()
     try:
@@ -267,6 +279,21 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             _resume_blocker(
                 code="HALT_STATE_UNRESOLVED",
                 detail=f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+                overridable=False,
+            )
+        )
+
+    if state.halt_new_orders_blocked and (state.halt_position_present or state.halt_open_orders_present):
+        reasons.append(
+            _resume_blocker(
+                code="HALT_RISK_OPEN_POSITION",
+                detail=(
+                    "halt blocked with open exposure: "
+                    f"position_present={1 if state.halt_position_present else 0} "
+                    f"open_orders_present={1 if state.halt_open_orders_present else 0} "
+                    f"reason_code={state.halt_reason_code or '-'} "
+                    f"reason={state.last_disable_reason or '-'}"
+                ),
                 overridable=False,
             )
         )
@@ -584,15 +611,29 @@ def run_loop(short_n: int, long_n: int) -> None:
                     canceled_ok = _attempt_open_order_cancellation(
                         broker, trigger="kill-switch"
                     )
+                    open_orders_present, position_present = _get_exposure_snapshot(int(now * 1000))
+                    risk_open = open_orders_present or position_present
+                    cancel_status = (
+                        "emergency cancellation attempted"
+                        if canceled_ok
+                        else "emergency cancellation failed"
+                    )
+                    reason_detail = f"KILL_SWITCH=ON; {cancel_status}"
+                    if risk_open:
+                        reason_detail += (
+                            "; risk_open_exposure_remains"
+                            f"(open_orders={1 if open_orders_present else 0},"
+                            f"position={1 if position_present else 0})"
+                        )
                     if not canceled_ok:
                         _halt_trading(
-                            _halt_reason("KILL_SWITCH", "KILL_SWITCH=ON; emergency cancellation failed"),
+                            _halt_reason("KILL_SWITCH", reason_detail),
                             unresolved=True,
                         )
                     else:
                         _halt_trading(
-                            _halt_reason("KILL_SWITCH", "KILL_SWITCH=ON; emergency cancellation attempted"),
-                            unresolved=False,
+                            _halt_reason("KILL_SWITCH", reason_detail),
+                            unresolved=risk_open,
                         )
                     continue
 

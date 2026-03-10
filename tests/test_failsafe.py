@@ -395,6 +395,38 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
 
 
 
+
+
+def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+    object.__setattr__(settings, "KILL_SWITCH", True)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    cancel_calls = {"n": 0}
+
+    def _cancel(_broker, trigger: str):
+        cancel_calls["n"] += 1
+        assert trigger == "kill-switch"
+        return True
+
+    monkeypatch.setattr("bithumb_bot.engine._attempt_open_order_cancellation", _cancel)
+    monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
+
+    run_loop(5, 20)
+
+    assert cancel_calls["n"] == 1
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_operator_action_required is True
+    assert state.halt_state_unresolved is True
+    assert state.last_disable_reason is not None
+    assert "risk_open_exposure_remains" in state.last_disable_reason
+
+
 def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
     _prepare_run_loop(monkeypatch)
 

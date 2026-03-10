@@ -170,6 +170,37 @@ def test_enter_halt_tracks_position_and_open_order_visibility(tmp_path):
     assert state.halt_open_orders_present is True
     assert state.halt_operator_action_required is True
 
+
+
+def test_kill_switch_risk_open_reason_persists_in_health_state(tmp_path):
+    _set_tmp_db(tmp_path)
+    reason = "KILL_SWITCH=ON; emergency cancellation attempted; risk_open_exposure_remains(open_orders=0,position=1)"
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=reason,
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.last_disable_reason == reason
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT halt_reason_code, last_disable_reason, halt_new_orders_blocked FROM bot_health WHERE id=1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["halt_reason_code"] == "KILL_SWITCH"
+    assert row["last_disable_reason"] == reason
+    assert int(row["halt_new_orders_blocked"]) == 1
+
+
 def test_startup_gate_reason_is_persisted_to_health_state(tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = 1_730_000_000_000

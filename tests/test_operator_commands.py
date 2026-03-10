@@ -373,6 +373,41 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
     assert exc.value.code == 1
 
 
+
+
+def test_resume_refuses_when_kill_switch_halt_has_open_position(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio(id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked) VALUES (1, 1000000.0, 0.5, 900000.0, 100000.0, 0.5, 0.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="KILL_SWITCH=ON; emergency cancellation attempted; risk_open_exposure_remains(open_orders=0,position=1)",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    out = capsys.readouterr().out
+    assert "code=HALT_RISK_OPEN_POSITION" in out
+    assert "open exposure" in out
+    assert "position_present=1" in out
+    assert exc.value.code == 1
+    state = runtime_state.snapshot()
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "HALT_RISK_OPEN_POSITION" in state.resume_gate_reason
+
+
 def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(
     tmp_path, capsys
 ):
