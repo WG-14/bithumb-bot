@@ -215,12 +215,13 @@ def record_submit_attempt(
     exchange_order_id_obtained: bool,
     order_status: str,
     submit_attempt_id: str,
+    event_type: str = "submit_attempt_recorded",
     conn: sqlite3.Connection,
 ) -> None:
     _record_order_event(
         conn,
         client_order_id=client_order_id,
-        event_type="submit_attempt_recorded",
+        event_type=event_type,
         event_ts=submit_ts,
         order_status=order_status,
         qty=qty,

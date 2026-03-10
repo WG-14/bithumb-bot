@@ -297,6 +297,36 @@ def _record_submit_attempt_result(
     )
 
 
+def _record_submit_attempt_preflight(
+    *,
+    conn,
+    client_order_id: str,
+    submit_attempt_id: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    ts: int,
+    payload_hash: str,
+) -> None:
+    record_submit_attempt(
+        conn=conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        price=None,
+        submit_ts=ts,
+        payload_fingerprint=payload_hash,
+        broker_response_summary="submit_dispatched",
+        exception_class=None,
+        timeout_flag=False,
+        exchange_order_id_obtained=False,
+        order_status="PENDING_SUBMIT",
+        event_type="submit_attempt_preflight",
+    )
+
+
 def _submit_via_standard_path(
     *,
     conn,
@@ -330,6 +360,16 @@ def _submit_via_standard_path(
         status="PENDING_SUBMIT",
     )
     record_submit_started(client_order_id, conn=conn)
+    _record_submit_attempt_preflight(
+        conn=conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        ts=ts,
+        payload_hash=payload_hash,
+    )
     notify(
         safety_event(
             "order_submit_started",

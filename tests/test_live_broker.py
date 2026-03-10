@@ -8,6 +8,7 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
+from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot import runtime_state
@@ -99,6 +100,11 @@ class _CommitCheckingBroker(_FakeBroker):
                 (client_order_id,),
             ).fetchone()
             assert event is not None
+            preflight = conn.execute(
+                "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_attempt_preflight'",
+                (client_order_id,),
+            ).fetchone()
+            assert preflight is not None
         finally:
             conn.close()
 
@@ -694,9 +700,20 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
         """,
         (row["client_order_id"],),
     ).fetchone()
+    preflight = conn.execute(
+        """
+        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     conn.close()
 
     assert submit_attempt is not None
+    assert preflight is not None
     assert submit_attempt["submit_attempt_id"]
     assert submit_attempt["symbol"] == settings.PAIR
     assert submit_attempt["side"] == "BUY"
@@ -708,6 +725,26 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_attempt["exception_class"] is None
     assert submit_attempt["timeout_flag"] == 0
     assert submit_attempt["exchange_order_id_obtained"] == 1
+    assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
+    assert preflight["symbol"] == settings.PAIR
+    assert preflight["side"] == "BUY"
+    assert float(preflight["qty"]) > 0
+    assert preflight["price"] is None
+    assert int(preflight["submit_ts"]) == 1000
+    assert preflight["order_status"] == "PENDING_SUBMIT"
+    expected_fp = payload_fingerprint(
+        {
+            "client_order_id": row["client_order_id"],
+            "submit_attempt_id": submit_attempt["submit_attempt_id"],
+            "symbol": settings.PAIR,
+            "side": "BUY",
+            "qty": float(submit_attempt["qty"]),
+            "price": None,
+            "submit_ts": 1000,
+        }
+    )
+    assert preflight["payload_fingerprint"] == expected_fp
+    assert submit_attempt["payload_fingerprint"] == expected_fp
 
 
 def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
@@ -742,6 +779,16 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
         """,
         (row["client_order_id"],),
     ).fetchone()
+    preflight = conn.execute(
+        """
+        SELECT submit_attempt_id, symbol, side, qty, submit_ts, payload_fingerprint, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     conn.close()
 
     assert row is not None
@@ -760,6 +807,10 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert submit_attempt["timeout_flag"] == 1
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert submit_attempt["order_status"] == "SUBMIT_UNKNOWN"
+    assert preflight is not None
+    assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
+    assert preflight["order_status"] == "PENDING_SUBMIT"
+    assert preflight["payload_fingerprint"] == submit_attempt["payload_fingerprint"]
     assert transition is not None
     assert transition["order_status"] == "SUBMIT_UNKNOWN"
     assert "from=PENDING_SUBMIT" in str(transition["message"])
