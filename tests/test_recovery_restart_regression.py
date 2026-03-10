@@ -370,6 +370,37 @@ def test_submit_unknown_recent_order_restart_path_avoids_manual_recovery_and_cle
     assert state.unresolved_open_order_count == 0
 
 
+def test_ambiguous_submit_persists_across_restart_until_reconcile_runs(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    startup_blocker = evaluate_startup_safety_gate()
+    state_before = runtime_state.snapshot()
+
+    assert startup_blocker is not None
+    assert "submit_unknown_orders=1" in startup_blocker
+    assert state_before.startup_gate_reason == startup_blocker
+
+    reconcile_with_broker(_SubmitUnknownRecentOrderBroker())
+
+    startup_blocker_after_reconcile = evaluate_startup_safety_gate()
+    state_after = runtime_state.snapshot()
+    assert startup_blocker_after_reconcile is None
+    assert state_after.unresolved_open_order_count == 0
+
+
 
 def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated_db):
     conn = ensure_db(str(isolated_db))

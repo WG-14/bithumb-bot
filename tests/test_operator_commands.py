@@ -83,6 +83,36 @@ class _RecoverAmbiguousBroker(_RecoverSuccessBroker):
         return BrokerOrder(client_order_id, exchange_order_id, "BUY", "NEW", None, 0.01, 0.0, 1, 1)
 
 
+class _SubmitUnknownRecoveredByRecentFillBroker:
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-submit-unknown-1", "BUY", "FILLED", 100.0, 0.01, 0.01, 1, 1)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+    def get_open_orders(self):
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100):
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100):
+        return [
+            BrokerFill(
+                client_order_id="ambiguous_resume_case",
+                fill_id="ambiguous_submit_fill_1",
+                fill_ts=1000,
+                price=100.0,
+                qty=0.01,
+                fee=0.0,
+                exchange_order_id="ex-submit-unknown-1",
+            )
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
+
+
 def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -132,6 +162,35 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, cap
     assert state.resume_gate_blocked is True
     assert state.resume_gate_reason is not None
     assert "STARTUP_SAFETY_GATE_BLOCKED" in state.resume_gate_reason
+
+
+def test_resume_refused_until_ambiguous_submit_blocker_is_cleared_by_reconcile(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="ambiguous_resume_case", created_ts=now_ms)
+
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+
+    with pytest.raises(SystemExit):
+        cmd_resume(force=False)
+
+    state_blocked = runtime_state.snapshot()
+    assert state_blocked.resume_gate_blocked is True
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in str(state_blocked.resume_gate_reason)
+    assert "submit_unknown_orders=1" in str(state_blocked.resume_gate_reason)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _SubmitUnknownRecoveredByRecentFillBroker())
+    try:
+        cmd_reconcile()
+        cmd_resume(force=False)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    state_after = runtime_state.snapshot()
+    assert state_after.trading_enabled is True
+    assert state_after.resume_gate_blocked is False
 
 
 
@@ -717,6 +776,42 @@ def test_resume_succeeds_after_manual_recovery_clears_recovery_required(monkeypa
     assert int(report["recovery_required_count"]) == 0
     assert int(report["unresolved_count"]) == 0
     assert state.trading_enabled is True
+
+
+def test_halt_resume_flow_requires_manual_recover_order_before_resume(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="halt_resume_recovery", created_ts=now_ms)
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="initial reconcile failed (RuntimeError): broker timeout",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    with pytest.raises(SystemExit):
+        cmd_resume(force=False)
+
+    state_blocked = runtime_state.snapshot()
+    assert state_blocked.halt_state_unresolved is True
+
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+    try:
+        cmd_recover_order(client_order_id="halt_resume_recovery", exchange_order_id="ex_halt_resume_1")
+        cmd_resume(force=False)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    state_after = runtime_state.snapshot()
+    assert state_after.halt_state_unresolved is False
+    assert state_after.trading_enabled is True
 
 
 def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
