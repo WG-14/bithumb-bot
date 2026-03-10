@@ -1026,9 +1026,87 @@ def cmd_reconcile() -> None:
     print("[RECONCILE] completed one live reconciliation pass")
 
 
-def cmd_recover_order(*, client_order_id: str, exchange_order_id: str) -> None:
+def _build_recover_order_preview(*, client_order_id: str, exchange_order_id: str) -> dict[str, object]:
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT client_order_id, status, exchange_order_id, qty_filled, last_error
+            FROM orders
+            WHERE client_order_id=?
+            """,
+            (client_order_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return {
+            "exists": False,
+            "safe_to_apply": False,
+            "target_client_order_id": client_order_id,
+            "target_exchange_order_id": exchange_order_id,
+            "current_status": "UNKNOWN",
+            "current_exchange_order_id": "-",
+            "proposed_action": "manual_recover_with_exchange_id",
+            "state_changes": ["none (client_order_id not found)"],
+        }
+
+    current_status = str(row["status"] or "UNKNOWN")
+    return {
+        "exists": True,
+        "safe_to_apply": current_status == "RECOVERY_REQUIRED",
+        "target_client_order_id": client_order_id,
+        "target_exchange_order_id": exchange_order_id,
+        "current_status": current_status,
+        "current_exchange_order_id": str(row["exchange_order_id"] or "-"),
+        "proposed_action": "manual_recover_with_exchange_id",
+        "state_changes": [
+            f"exchange_order_id -> {exchange_order_id}",
+            "fetch remote order + fills and apply missing fills",
+            "final order status updated from broker snapshot",
+            "trading remains disabled until explicit resume",
+        ],
+        "last_error": str(row["last_error"] or "-"),
+        "qty_filled": float(row["qty_filled"] or 0.0),
+    }
+
+
+def cmd_recover_order(*, client_order_id: str, exchange_order_id: str, dry_run: bool = False, confirm: bool = False) -> None:
     if settings.MODE != "live":
         print(f"[RECOVER-ORDER] skipped: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    preview = _build_recover_order_preview(
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+    )
+    print("[RECOVER-ORDER] preview")
+    print(
+        "  target_order_id="
+        f"{preview['target_client_order_id']} exchange_order_id={preview['target_exchange_order_id']}"
+    )
+    print(
+        "  current_known_state="
+        f"status={preview['current_status']} "
+        f"exchange_order_id={preview['current_exchange_order_id']}"
+    )
+    print(f"  proposed_recovery_action={preview['proposed_action']}")
+    print("  important_state_changes:")
+    for change in preview.get("state_changes", []):
+        print(f"    - {change}")
+
+    if dry_run:
+        print("[RECOVER-ORDER] dry-run: no changes applied")
+        return
+
+    if not bool(preview.get("safe_to_apply")):
+        print("[RECOVER-ORDER] refused: unsafe recovery request")
+        print("  reason=client_order_id must exist and be RECOVERY_REQUIRED")
+        raise SystemExit(1)
+
+    if not confirm:
+        print("[RECOVER-ORDER] confirmation required: re-run with --yes to apply")
         raise SystemExit(1)
 
     from .broker.bithumb import BithumbBroker
@@ -1093,6 +1171,8 @@ def main(argv: list[str] | None = None) -> int:
     recover_order = sub.add_parser("recover-order")
     recover_order.add_argument("--client-order-id", required=True)
     recover_order.add_argument("--exchange-order-id", required=True)
+    recover_order.add_argument("--dry-run", action="store_true")
+    recover_order.add_argument("--yes", action="store_true")
 
     report = sub.add_parser("report")
     report.add_argument("--days", type=int, default=30)
@@ -1146,6 +1226,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_recover_order(
             client_order_id=str(args.client_order_id),
             exchange_order_id=str(args.exchange_order_id),
+            dry_run=bool(args.dry_run),
+            confirm=bool(args.yes),
         )
     elif args.cmd == "run":
         cmd_run(args.short, args.long)

@@ -1043,6 +1043,7 @@ def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path
         cmd_recover_order(
             client_order_id="needs_recovery",
             exchange_order_id="ex_manual_1",
+            confirm=True,
         )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
@@ -1105,6 +1106,7 @@ def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(
             cmd_recover_order(
                 client_order_id="needs_recovery",
                 exchange_order_id="ex_manual_2",
+                confirm=True,
             )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
@@ -1130,6 +1132,105 @@ def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(
     assert "manual recovery failed" in str(row["last_error"])
 
 
+def test_recover_order_dry_run_prints_preview_and_makes_no_changes(capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    try:
+        cmd_recover_order(
+            client_order_id="needs_recovery",
+            exchange_order_id="ex_preview_1",
+            dry_run=True,
+        )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    assert "[RECOVER-ORDER] preview" in out
+    assert "target_order_id=needs_recovery exchange_order_id=ex_preview_1" in out
+    assert "current_known_state=status=RECOVERY_REQUIRED" in out
+    assert "proposed_recovery_action=manual_recover_with_exchange_id" in out
+    assert "[RECOVER-ORDER] dry-run: no changes applied" in out
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id FROM orders WHERE client_order_id='needs_recovery'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+
+
+def test_recover_order_requires_explicit_confirmation(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    broker_calls = {"n": 0}
+
+    def _unexpected_broker():
+        broker_calls["n"] += 1
+        return _RecoverSuccessBroker()
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _unexpected_broker)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_recover_order(
+                client_order_id="needs_recovery",
+                exchange_order_id="ex_confirm_needed",
+            )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert exc.value.code == 1
+    assert broker_calls["n"] == 0
+
+
+def test_recover_order_refuses_when_order_not_recovery_required(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="FILLED",
+        client_order_id="already_filled",
+        created_ts=now_ms,
+    )
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    broker_calls = {"n": 0}
+
+    def _unexpected_broker():
+        broker_calls["n"] += 1
+        return _RecoverSuccessBroker()
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _unexpected_broker)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_recover_order(
+                client_order_id="already_filled",
+                exchange_order_id="ex_should_refuse",
+                confirm=True,
+            )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert exc.value.code == 1
+    assert broker_calls["n"] == 0
+
+
 def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -1152,6 +1253,7 @@ def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
         cmd_recover_order(
             client_order_id="needs_recovery",
             exchange_order_id="ex_manual_3",
+            confirm=True,
         )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
@@ -1186,6 +1288,7 @@ def test_resume_succeeds_after_manual_recovery_clears_recovery_required(
         cmd_recover_order(
             client_order_id="needs_recovery",
             exchange_order_id="ex_manual_4",
+            confirm=True,
         )
         cmd_resume(force=False)
     finally:
@@ -1236,6 +1339,7 @@ def test_halt_resume_flow_requires_manual_recover_order_before_resume(
         cmd_recover_order(
             client_order_id="halt_resume_recovery",
             exchange_order_id="ex_halt_resume_1",
+            confirm=True,
         )
         cmd_resume(force=False)
     finally:
