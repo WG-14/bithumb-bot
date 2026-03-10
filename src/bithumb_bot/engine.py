@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+import json
 from dataclasses import dataclass
 
 from .config import settings, validate_live_mode_preflight
@@ -218,6 +219,26 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 overridable=False,
             )
         )
+
+    if settings.MODE == "live" and state.last_reconcile_metadata:
+        try:
+            reconcile_meta = json.loads(str(state.last_reconcile_metadata))
+        except json.JSONDecodeError:
+            reconcile_meta = {}
+        mismatch_raw = reconcile_meta.get("balance_split_mismatch_count", 0)
+        try:
+            mismatch_count = max(0, int(mismatch_raw))
+        except (TypeError, ValueError):
+            mismatch_count = 0
+        if mismatch_count > 0:
+            mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "-")
+            reasons.append(
+                _resume_blocker(
+                    code="BALANCE_SPLIT_MISMATCH",
+                    detail=f"balance split mismatch detected after reconcile: count={mismatch_count} summary={mismatch_summary}",
+                    overridable=False,
+                )
+            )
 
     return (len(reasons) == 0), reasons
 

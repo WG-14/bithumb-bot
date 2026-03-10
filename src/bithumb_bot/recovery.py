@@ -25,6 +25,57 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 
 
+CASH_SPLIT_ABS_TOL = 1e-6
+ASSET_SPLIT_ABS_TOL = 1e-10
+
+
+def _balance_split_mismatch_summary(
+    *,
+    broker_cash_available: float,
+    broker_cash_locked: float,
+    broker_asset_available: float,
+    broker_asset_locked: float,
+    local_cash_available: float,
+    local_cash_locked: float,
+    local_asset_available: float,
+    local_asset_locked: float,
+) -> tuple[int, str]:
+    mismatches: list[str] = []
+
+    def _append_if_mismatch(*, field: str, local: float, broker: float, tol: float) -> None:
+        delta = float(broker) - float(local)
+        if abs(delta) <= tol:
+            return
+        mismatches.append(f"{field}(local={local:.12g},broker={broker:.12g},delta={delta:.12g})")
+
+    _append_if_mismatch(
+        field="cash_available",
+        local=local_cash_available,
+        broker=broker_cash_available,
+        tol=CASH_SPLIT_ABS_TOL,
+    )
+    _append_if_mismatch(
+        field="cash_locked",
+        local=local_cash_locked,
+        broker=broker_cash_locked,
+        tol=CASH_SPLIT_ABS_TOL,
+    )
+    _append_if_mismatch(
+        field="asset_available",
+        local=local_asset_available,
+        broker=broker_asset_available,
+        tol=ASSET_SPLIT_ABS_TOL,
+    )
+    _append_if_mismatch(
+        field="asset_locked",
+        local=local_asset_locked,
+        broker=broker_asset_locked,
+        tol=ASSET_SPLIT_ABS_TOL,
+    )
+
+    return len(mismatches), "; ".join(mismatches)
+
+
 def assert_no_open_orders() -> None:
     open_orders = get_open_orders()
     if open_orders:
@@ -312,12 +363,13 @@ def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
     source_conflicts: list[str] = []
-    metadata: dict[str, int] = {
+    metadata: dict[str, int | str] = {
         "remote_open_order_found": 0,
         "recent_fill_applied": 0,
         "submit_unknown_unresolved": 0,
         "startup_gate_blocked": 0,
         "source_conflict_halt": 0,
+        "balance_split_mismatch_count": 0,
     }
     try:
         init_portfolio(conn)
@@ -479,7 +531,7 @@ def reconcile_with_broker(broker: Broker) -> None:
             reason_code = REASON_SOURCE_CONFLICT_HALT
 
         bal = broker.get_balance()
-        _, local_cash_locked, _, local_asset_locked = get_portfolio_breakdown(conn)
+        local_cash_available, local_cash_locked, local_asset_available, local_asset_locked = get_portfolio_breakdown(conn)
         has_open_orders = bool(local_open) or bool(remote_open)
 
         cash_locked = float(bal.cash_locked)
@@ -488,6 +540,20 @@ def reconcile_with_broker(broker: Broker) -> None:
             cash_locked = local_cash_locked
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
             asset_locked = local_asset_locked
+
+        mismatch_count, mismatch_summary = _balance_split_mismatch_summary(
+            broker_cash_available=float(bal.cash_available),
+            broker_cash_locked=cash_locked,
+            broker_asset_available=float(bal.asset_available),
+            broker_asset_locked=asset_locked,
+            local_cash_available=local_cash_available,
+            local_cash_locked=local_cash_locked,
+            local_asset_available=local_asset_available,
+            local_asset_locked=local_asset_locked,
+        )
+        metadata["balance_split_mismatch_count"] = mismatch_count
+        if mismatch_summary:
+            metadata["balance_split_mismatch_summary"] = mismatch_summary[:500]
 
         set_portfolio_breakdown(
             conn,

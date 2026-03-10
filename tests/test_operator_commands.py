@@ -75,7 +75,7 @@ class _RecoverSuccessBroker:
         return []
 
     def get_balance(self) -> BrokerBalance:
-        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
 
 
 class _RecoverAmbiguousBroker(_RecoverSuccessBroker):
@@ -147,6 +147,36 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monk
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is False
+
+
+def test_resume_refuses_when_reconcile_has_balance_split_mismatch(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 2,
+            "balance_split_mismatch_summary": "cash_available(local=1000000,broker=900000,delta=-100000)",
+        },
+    )
+
+    monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", lambda _broker: None)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_resume(force=False)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    assert "code=BALANCE_SPLIT_MISMATCH" in out
+    assert "balance split mismatch detected after reconcile" in out
+    assert exc.value.code == 1
 
 
 def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_path, capsys):
@@ -413,7 +443,9 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "[P3] last_reconcile_summary" in out
     assert "[P4] recent_halt_reason" in out
     assert "[P5] unprocessed_remote_open_orders" in out
-    assert "[P6] resume_eligibility" in out
+    assert "[P6] balance_split_mismatch" in out
+    assert "summary=none" in out
+    assert "[P7] resume_eligibility" in out
     assert "resume_allowed=0" in out
     assert "force_resume_allowed=0" in out
     assert "blockers_count=" in out
@@ -451,6 +483,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     payload = json.loads(out)
 
     assert set(payload.keys()) == {
+        "balance_split_mismatch_summary",
         "blockers",
         "force_resume_allowed",
         "last_reconcile_summary",

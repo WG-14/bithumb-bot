@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
-from bithumb_bot.db_core import ensure_db
+from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
@@ -265,6 +266,16 @@ class _OpenOrderPreferredBroker(_FakeBroker):
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         return []
+
+
+class _BalanceMismatchBroker(_FakeBroker):
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(
+            cash_available=900000.0,
+            cash_locked=20000.0,
+            asset_available=0.2,
+            asset_locked=0.1,
+        )
 
 
 class _SubmitUnknownRecentFillBroker(_StrictRecoveryBroker):
@@ -1208,6 +1219,29 @@ def test_reconcile_precedence_prefers_open_orders_over_recent_orders(tmp_path):
 
     state = runtime_state.snapshot()
     assert state.last_reconcile_reason_code == "REMOTE_OPEN_ORDER_FOUND"
+
+
+def test_reconcile_records_balance_split_mismatch_metadata(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "balance_mismatch.sqlite"))
+
+    conn = ensure_db(str(tmp_path / "balance_mismatch.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1000000.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_BalanceMismatchBroker())
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_metadata is not None
+    payload = json.loads(state.last_reconcile_metadata)
+    assert int(payload.get("balance_split_mismatch_count", 0)) >= 1
+    assert "cash_available" in str(payload.get("balance_split_mismatch_summary", ""))
 
 
 def test_validate_order_rejects_invalid_qty():

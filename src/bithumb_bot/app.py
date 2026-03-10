@@ -725,6 +725,7 @@ def _load_recovery_report(
         )
 
     unprocessed_remote_open_orders = 0
+    balance_split_mismatch_summary = "none"
     if health_row and health_row["last_reconcile_metadata"]:
         try:
             reconcile_meta = json.loads(str(health_row["last_reconcile_metadata"]))
@@ -735,6 +736,9 @@ def _load_recovery_report(
             unprocessed_remote_open_orders = max(0, int(raw_count))
         except (TypeError, ValueError):
             unprocessed_remote_open_orders = 0
+        raw_mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "").strip()
+        if raw_mismatch_summary:
+            balance_split_mismatch_summary = raw_mismatch_summary
 
     resume_allowed, blockers = evaluate_resume_eligibility()
     blocker_list: list[dict[str, str | bool]] = [
@@ -752,6 +756,7 @@ def _load_recovery_report(
         "last_reconcile_summary": last_reconcile_summary,
         "recent_halt_reason": recent_halt_reason,
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
+        "balance_split_mismatch_summary": balance_split_mismatch_summary,
         "trading_enabled": bool(state.trading_enabled),
         "resume_allowed": bool(resume_allowed),
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
@@ -778,7 +783,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    {report['recent_halt_reason']}")
     print("  [P5] unprocessed_remote_open_orders")
     print(f"    count={report['unprocessed_remote_open_orders']}")
-    print("  [P6] resume_eligibility")
+    print("  [P6] balance_split_mismatch")
+    print(f"    summary={report['balance_split_mismatch_summary']}")
+    print("  [P7] resume_eligibility")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
