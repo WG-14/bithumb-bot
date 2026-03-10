@@ -17,3 +17,5 @@ data/
 .cache/
 
 *.egg-info/
+.pytest-order.txt
+tmp/*.db
