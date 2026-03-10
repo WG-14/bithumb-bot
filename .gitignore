@@ -1,9 +1,13 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
 
-# venv
+# virtual environments
 .venv/
+.venv-wsl/
+.venv-linux/
+.venv-linux-313/
 venv/
 
 # env / secrets
@@ -13,12 +17,9 @@ venv/
 
 # logs / runtime
 *.log
-data/
 .cache/
+data/
+tmp/
 
-*.egg-info/
+# test artifacts
 .pytest-order.txt
-tmp/*.db
-
-.venv-linux/
-.venv-linux-313/
