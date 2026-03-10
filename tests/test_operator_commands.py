@@ -13,6 +13,7 @@ from bithumb_bot.app import (
     cmd_reconcile,
     cmd_recover_order,
     cmd_recovery_report,
+    cmd_restart_checklist,
     cmd_resume,
 )
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
@@ -1384,3 +1385,62 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
     assert any("client_order_id=-" in n for n in notifications)
     assert any("submit_attempt_id=-" in n for n in notifications)
     assert any("exchange_order_id=-" in n for n in notifications)
+
+
+def test_restart_checklist_blocks_when_restart_risks_exist(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(status="NEW", client_order_id="open_order", created_ts=now_ms)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.25, 1000000.0, 0.0, 0.25, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=False,
+        error="timeout",
+        reason_code="RECONCILE_TIMEOUT",
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="initial reconcile failed",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    cmd_restart_checklist()
+    out = capsys.readouterr().out
+
+    assert "[RESTART-SAFETY-CHECKLIST]" in out
+    assert "BLOCKED unresolved/recovery-required orders" in out
+    assert "BLOCKED open orders" in out
+    assert "BLOCKED open position" in out
+    assert "BLOCKED halt state" in out
+    assert "BLOCKED last reconcile" in out
+    assert "safe_to_resume=0" in out
+
+
+def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+
+    cmd_restart_checklist()
+    out = capsys.readouterr().out
+
+    assert "PASS    unresolved/recovery-required orders" in out
+    assert "PASS    open orders" in out
+    assert "PASS    open position" in out
+    assert "PASS    halt state" in out
+    assert "PASS    last reconcile" in out
+    assert "safe_to_resume=1" in out

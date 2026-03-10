@@ -953,6 +953,89 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                 f"reason={item['last_error']}"
             )
 
+
+def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
+    report = _load_recovery_report()
+    state = runtime_state.snapshot()
+
+    conn = ensure_db()
+    try:
+        open_row = conn.execute(
+            """
+            SELECT COUNT(*) AS open_count
+            FROM orders
+            WHERE status IN ({})
+              AND status != 'RECOVERY_REQUIRED'
+            """.format(",".join("?" for _ in OPEN_ORDER_STATUSES)),
+            OPEN_ORDER_STATUSES,
+        ).fetchone()
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+    finally:
+        conn.close()
+
+    unresolved_count = int(report.get("unresolved_count") or 0)
+    recovery_required_count = int(report.get("recovery_required_count") or 0)
+    open_order_count = int(open_row["open_count"] if open_row else 0)
+    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
+
+    last_reconcile_summary = str(report.get("last_reconcile_summary") or "none")
+    last_reconcile_ok = (
+        last_reconcile_summary == "none" or "status=ok" in last_reconcile_summary.lower()
+    )
+
+    halt_reason = str(report.get("recent_halt_reason") or "none")
+    halt_clear = (
+        not state.halt_new_orders_blocked
+        and not state.halt_state_unresolved
+        and halt_reason == "none"
+    )
+
+    return [
+        (
+            "unresolved/recovery-required orders",
+            unresolved_count == 0 and recovery_required_count == 0,
+            (
+                f"unresolved={unresolved_count} "
+                f"recovery_required={recovery_required_count}"
+            ),
+        ),
+        (
+            "open orders",
+            open_order_count == 0,
+            f"open_orders={open_order_count}",
+        ),
+        (
+            "open position",
+            asset_qty <= 1e-12,
+            f"asset_qty={asset_qty:.12f}",
+        ),
+        (
+            "halt state",
+            halt_clear,
+            (
+                f"halt_blocked={1 if state.halt_new_orders_blocked else 0} "
+                f"halt_unresolved={1 if state.halt_state_unresolved else 0} "
+                f"detail={halt_reason}"
+            ),
+        ),
+        (
+            "last reconcile",
+            last_reconcile_ok,
+            last_reconcile_summary,
+        ),
+    ]
+
+
+def cmd_restart_checklist() -> None:
+    checklist = _load_restart_safety_checklist()
+    blocked = [item for item in checklist if not item[1]]
+
+    print("[RESTART-SAFETY-CHECKLIST]")
+    for label, ok, detail in checklist:
+        status = "PASS" if ok else "BLOCKED"
+        print(f"  - {status:<7} {label}: {detail}")
+    print(f"  safe_to_resume={1 if not blocked else 0}")
+
 def _last_reconcile_failed(state) -> bool:
     status = str(getattr(state, "last_reconcile_status", "") or "").upper()
     return status in {"FAILED", "ERROR"}
@@ -1168,6 +1251,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reconcile")
     recovery_report = sub.add_parser("recovery-report")
     recovery_report.add_argument("--json", action="store_true")
+    sub.add_parser("restart-checklist")
     recover_order = sub.add_parser("recover-order")
     recover_order.add_argument("--client-order-id", required=True)
     recover_order.add_argument("--exchange-order-id", required=True)
@@ -1222,6 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_reconcile()
     elif args.cmd == "recovery-report":
         cmd_recovery_report(as_json=bool(args.json))
+    elif args.cmd == "restart-checklist":
+        cmd_restart_checklist()
     elif args.cmd == "recover-order":
         cmd_recover_order(
             client_order_id=str(args.client_order_id),
