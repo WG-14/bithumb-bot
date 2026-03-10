@@ -213,6 +213,101 @@ def _halt_on_source_conflict(conflicts: list[str]) -> None:
     )
 
 
+def _try_resolve_submit_unknown_from_recent_activity(
+    conn,
+    *,
+    row,
+    recent_orders: list[BrokerOrder],
+    recent_fills: list[BrokerFill],
+) -> tuple[bool, bool]:
+    client_order_id = str(row["client_order_id"])
+    side = str(row["side"])
+
+    matched_exchange_order_id: str | None = None
+    matched_order: BrokerOrder | None = None
+
+    for remote in recent_orders:
+        remote_client_order_id = str(remote.client_order_id or "")
+        if remote_client_order_id != client_order_id:
+            continue
+        matched_order = remote
+        if remote.exchange_order_id:
+            matched_exchange_order_id = str(remote.exchange_order_id)
+        break
+
+    matched_fills: list[BrokerFill] = []
+    for fill in recent_fills:
+        remote_client_order_id = str(fill.client_order_id or "")
+        if remote_client_order_id != client_order_id:
+            continue
+        matched_fills.append(fill)
+        if matched_exchange_order_id is None and fill.exchange_order_id:
+            matched_exchange_order_id = str(fill.exchange_order_id)
+
+    if matched_exchange_order_id:
+        set_exchange_order_id(client_order_id, matched_exchange_order_id, conn=conn)
+        notify(
+            format_event(
+                "exchange_order_id_attached",
+                client_order_id=client_order_id,
+                exchange_order_id=matched_exchange_order_id,
+                side=side,
+                status=(matched_order.status if matched_order else "SUBMIT_UNKNOWN"),
+                reason="reconcile_recent_activity",
+            )
+        )
+
+    if matched_order is None and not matched_fills:
+        return False, False
+
+    applied_fill = False
+    for fill in matched_fills:
+        apply_fill_and_trade(
+            conn,
+            client_order_id=client_order_id,
+            side=side,
+            fill_id=fill.fill_id,
+            fill_ts=fill.fill_ts,
+            price=fill.price,
+            qty=fill.qty,
+            fee=fill.fee,
+            note=f"reconcile submit_unknown recent exchange_order_id={matched_exchange_order_id or '<none>'}",
+        )
+        applied_fill = True
+
+    prev_status = str(row["status"])
+    next_status = prev_status
+    if matched_order is not None:
+        next_status = matched_order.status
+    elif applied_fill:
+        order_row = conn.execute(
+            "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        if order_row is not None:
+            qty_req = float(order_row["qty_req"])
+            qty_filled = float(order_row["qty_filled"])
+            if qty_req > 0 and qty_filled >= qty_req - 1e-12:
+                next_status = "FILLED"
+            elif qty_filled > 1e-12:
+                next_status = "PARTIAL"
+
+    set_status(client_order_id, next_status, conn=conn)
+    if prev_status != next_status:
+        notify(
+            format_event(
+                "reconcile_status_change",
+                client_order_id=client_order_id,
+                exchange_order_id=matched_exchange_order_id,
+                side=side,
+                status=next_status,
+                reason=f"from={prev_status}",
+            )
+        )
+
+    return True, applied_fill
+
+
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
@@ -232,9 +327,23 @@ def reconcile_with_broker(broker: Broker) -> None:
             f"SELECT client_order_id, exchange_order_id, side, qty_req, status FROM orders WHERE status IN ({placeholders})",
             LOCAL_RECONCILE_STATUSES,
         ).fetchall()
+        recent_orders = broker.get_recent_orders(limit=100)
+        recent_fills = broker.get_recent_fills(limit=100)
         for row in local_open:
             oid = row["client_order_id"]
             if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
+                recovered, applied_fill = _try_resolve_submit_unknown_from_recent_activity(
+                    conn,
+                    row=row,
+                    recent_orders=recent_orders,
+                    recent_fills=recent_fills,
+                )
+                if recovered:
+                    if applied_fill:
+                        metadata["recent_fill_applied"] += 1
+                        if reason_code == REASON_RECONCILE_OK:
+                            reason_code = REASON_RECENT_FILL_APPLIED
+                    continue
                 reason = "submit_unknown without exchange_order_id; manual recovery required"
                 record_status_transition(
                     oid,
@@ -349,12 +458,12 @@ def reconcile_with_broker(broker: Broker) -> None:
 
         conflicts = _sync_recent_order_activity(
             conn,
-            broker.get_recent_orders(limit=100),
+            recent_orders,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         applied_recent_fill, fill_conflicts = _apply_recent_fills(
             conn,
-            broker.get_recent_fills(limit=100),
+            recent_fills,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         conflicts.extend(fill_conflicts)
