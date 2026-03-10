@@ -314,6 +314,12 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "[P3] last_reconcile_summary" in out
     assert "[P4] recent_halt_reason" in out
     assert "[P5] unprocessed_remote_open_orders" in out
+    assert "[P6] resume_eligibility" in out
+    assert "resume_allowed=0" in out
+    assert "force_resume_allowed=1" in out
+    assert "blockers_count=" in out
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
+    assert "overridable=1" in out
     assert "oldest_unresolved_orders(top 5):" in out
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out
@@ -346,12 +352,15 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     payload = json.loads(out)
 
     assert set(payload.keys()) == {
+        "blockers",
+        "force_resume_allowed",
         "last_reconcile_summary",
         "oldest_orders",
         "oldest_unresolved_age_sec",
         "recent_halt_reason",
         "recovery_required_count",
         "recovery_required_summary",
+        "resume_allowed",
         "trading_enabled",
         "unprocessed_remote_open_orders",
         "unresolved_count",
@@ -394,6 +403,12 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["recovery_required_summary"][0]["client_order_id"]
     assert payload["last_reconcile_summary"] != "none"
     assert "status=" in payload["last_reconcile_summary"]
+    assert payload["resume_allowed"] is False
+    assert payload["force_resume_allowed"] is True
+    assert isinstance(payload["blockers"], list)
+    assert payload["blockers"]
+    assert payload["blockers"][0]["code"]
+    assert isinstance(payload["blockers"][0]["overridable"], bool)
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):

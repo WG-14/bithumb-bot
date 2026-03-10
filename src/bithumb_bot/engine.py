@@ -31,8 +31,19 @@ class HaltReason:
     detail: str
 
 
+@dataclass(frozen=True)
+class ResumeBlocker:
+    code: str
+    detail: str
+    overridable: bool
+
+
 def _halt_reason(code: str, detail: str) -> HaltReason:
     return HaltReason(code=code, detail=detail)
+
+
+def _resume_blocker(*, code: str, detail: str, overridable: bool) -> ResumeBlocker:
+    return ResumeBlocker(code=code, detail=detail, overridable=overridable)
 
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
@@ -163,40 +174,48 @@ def evaluate_startup_safety_gate() -> str | None:
     return reason
 
 
-def evaluate_resume_eligibility() -> tuple[bool, list[tuple[str, str]]]:
-    """Returns whether operator resume may proceed and blocking reasons.
-
-    The reason tuple format is (machine_readable_reason_code, human_detail).
-    """
+def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
+    """Returns whether operator resume may proceed and structured blockers."""
     startup_gate_reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
 
-    reasons: list[tuple[str, str]] = []
+    reasons: list[ResumeBlocker] = []
     if state.last_reconcile_status == "error":
         reasons.append(
-            (
-                "LAST_RECONCILE_FAILED",
-                "last reconcile failed: "
-                f"reason_code={state.last_reconcile_reason_code or '-'} "
-                f"error={state.last_reconcile_error or '-'}",
+            _resume_blocker(
+                code="LAST_RECONCILE_FAILED",
+                detail=(
+                    "last reconcile failed: "
+                    f"reason_code={state.last_reconcile_reason_code or '-'} "
+                    f"error={state.last_reconcile_error or '-'}"
+                ),
+                overridable=True,
             )
         )
 
     if startup_gate_reason:
-        reasons.append(("STARTUP_SAFETY_GATE_BLOCKED", startup_gate_reason))
+        reasons.append(
+            _resume_blocker(
+                code="STARTUP_SAFETY_GATE_BLOCKED",
+                detail=startup_gate_reason,
+                overridable=True,
+            )
+        )
         if state.last_reconcile_status == "ok":
             reasons.append(
-                (
-                    "LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
-                    "latest reconcile reported ok but startup safety gate still blocks resume",
+                _resume_blocker(
+                    code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+                    detail="latest reconcile reported ok but startup safety gate still blocks resume",
+                    overridable=True,
                 )
             )
 
     if state.halt_state_unresolved:
         reasons.append(
-            (
-                "HALT_STATE_UNRESOLVED",
-                f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+            _resume_blocker(
+                code="HALT_STATE_UNRESOLVED",
+                detail=f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+                overridable=True,
             )
         )
 

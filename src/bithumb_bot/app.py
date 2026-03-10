@@ -616,7 +616,7 @@ def _last_reconcile_failed(state) -> bool:
 def _load_recovery_report(
     *,
     oldest_limit: int = 5,
-) -> dict[str, int | float | str | None | list[dict[str, str | float]]]:
+) -> dict[str, int | float | str | bool | None | list[dict[str, str | float | bool]]]:
     conn = ensure_db(settings.DB_PATH)
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
@@ -737,6 +737,12 @@ def _load_recovery_report(
         except (TypeError, ValueError):
             unprocessed_remote_open_orders = 0
 
+    resume_allowed, blockers = evaluate_resume_eligibility()
+    blocker_list: list[dict[str, str | bool]] = [
+        {"code": b.code, "detail": b.detail, "overridable": bool(b.overridable)}
+        for b in blockers
+    ]
+
     state = runtime_state.snapshot()
 
     return {
@@ -748,6 +754,9 @@ def _load_recovery_report(
         "recent_halt_reason": recent_halt_reason,
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
         "trading_enabled": bool(state.trading_enabled),
+        "resume_allowed": bool(resume_allowed),
+        "force_resume_allowed": all(bool(b.overridable) for b in blockers),
+        "blockers": blocker_list,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
     }
@@ -770,6 +779,18 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    {report['recent_halt_reason']}")
     print("  [P5] unprocessed_remote_open_orders")
     print(f"    count={report['unprocessed_remote_open_orders']}")
+    print("  [P6] resume_eligibility")
+    print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
+    print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
+    blockers = report.get("blockers") or []
+    print(f"    blockers_count={len(blockers)}")
+    for blocker in blockers:
+        print(
+            "    - "
+            f"code={blocker['code']} "
+            f"overridable={1 if bool(blocker['overridable']) else 0} "
+            f"detail={blocker['detail']}"
+        )
 
     if report["oldest_unresolved_age_sec"] is None:
         print("  oldest_unresolved_age_sec=none")
@@ -826,15 +847,23 @@ def cmd_resume(force: bool = False) -> None:
 
     if (not eligible) and (not force):
         print("[RESUME] refused:")
-        for code, detail in resume_blocks:
-            print(f"  - code={code} detail={detail}")
+        for blocker in resume_blocks:
+            print(
+                "  - "
+                f"code={blocker.code} "
+                f"overridable={1 if bool(blocker.overridable) else 0} "
+                f"detail={blocker.detail}"
+            )
         print("  run `uv run python bot.py recovery-report` for details")
         print("  or resume explicitly with `uv run python bot.py resume --force`")
         raise SystemExit(1)
 
     enable_trading()
     if force and resume_blocks:
-        block_summary = "; ".join(f"{code}:{detail}" for code, detail in resume_blocks)
+        block_summary = "; ".join(
+            f"{blocker.code}[overridable={1 if bool(blocker.overridable) else 0}]:{blocker.detail}"
+            for blocker in resume_blocks
+        )
         print(f"[RESUME] forced: trading enabled despite blocks={block_summary}")
         print("[RESUME] override_applied=1 override_reason=operator_force_resume")
     else:
