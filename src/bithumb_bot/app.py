@@ -14,7 +14,12 @@ from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
 from .engine import evaluate_resume_eligibility, get_health_status
-from .recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
+from .recovery import (
+    cancel_open_orders_with_broker,
+    load_recent_order_lifecycle,
+    reconcile_with_broker,
+    recover_order_with_exchange_id,
+)
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
@@ -707,6 +712,7 @@ def _load_recovery_report(
             WHERE id=1
             """
         ).fetchone()
+        recent_order_lifecycle = load_recent_order_lifecycle(conn, limit=oldest_limit)
     finally:
         conn.close()
 
@@ -858,6 +864,7 @@ def _load_recovery_report(
         "recommended_next_action": recommended_next_action,
         "resume_blocked_reason": resume_blocked_reason,
         "recommended_command": recommended_command,
+        "recent_order_lifecycle": recent_order_lifecycle,
     }
 
 
@@ -901,6 +908,20 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("    hint=check blocker code then run command")
     print("  [P7] unprocessed_remote_open_orders")
     print(f"    count={report['unprocessed_remote_open_orders']}")
+    lifecycle = report.get("recent_order_lifecycle") or []
+    if lifecycle:
+        print(f"  [P8] recent_order_lifecycle(top {len(lifecycle)}):")
+        for item in lifecycle:
+            print(
+                "    - "
+                f"client_order_id={item['client_order_id']} "
+                f"intent_ts={item['intent_ts']} "
+                f"submit_ts={item['submit_ts']} "
+                f"correlation={item['correlation']} "
+                f"mapping={item['mapping_status']} "
+                f"state={item['state']} "
+                f"unresolved={item['unresolved']}"
+            )
 
     if report["oldest_unresolved_age_sec"] is None:
         print("  oldest_unresolved_age_sec=none")

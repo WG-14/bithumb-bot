@@ -57,6 +57,44 @@ def _set_last_error(*, client_order_id: str, last_error: str) -> None:
         conn.close()
 
 
+def _insert_order_event(
+    *,
+    client_order_id: str,
+    event_type: str,
+    event_ts: int,
+    submit_attempt_id: str | None = None,
+    intent_ts: int | None = None,
+    submit_ts: int | None = None,
+    timeout_flag: int | None = None,
+    exchange_order_id_obtained: int | None = None,
+    order_status: str | None = None,
+) -> None:
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO order_events(
+                client_order_id, event_type, event_ts, order_status, submit_attempt_id,
+                intent_ts, submit_ts, timeout_flag, exchange_order_id_obtained, side, qty
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BUY', 0.01)
+            """,
+            (
+                client_order_id,
+                event_type,
+                event_ts,
+                order_status,
+                submit_attempt_id,
+                intent_ts,
+                submit_ts,
+                timeout_flag,
+                exchange_order_id_obtained,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class _RecoverSuccessBroker:
     def get_order(
         self, *, client_order_id: str, exchange_order_id: str | None = None
@@ -723,7 +761,6 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "recovery_required_orders(top 3):" in out
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out
-    assert "client_order_id=open_5" not in out
     assert "reason=timeout while polling exchange status endpoint due to transi..." in out
     assert (
         "last_error=timeout while polling exchange status endpoint due to transi..."
@@ -731,7 +768,66 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     )
 
 
-def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys):
+def test_recovery_report_includes_recent_order_lifecycle_block(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="o_submit_unknown", created_ts=now_ms - 20_000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="o_recovery", created_ts=now_ms - 10_000)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "UPDATE orders SET submit_attempt_id=?, exchange_order_id=NULL WHERE client_order_id=?",
+            ("attempt_a", "o_submit_unknown"),
+        )
+        conn.execute(
+            "UPDATE orders SET submit_attempt_id=?, exchange_order_id=? WHERE client_order_id=?",
+            ("attempt_b", "ex-123", "o_recovery"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    _insert_order_event(
+        client_order_id="o_submit_unknown",
+        event_type="intent_created",
+        event_ts=now_ms - 20_000,
+        submit_attempt_id="attempt_a",
+        intent_ts=now_ms - 20_000,
+    )
+    _insert_order_event(
+        client_order_id="o_submit_unknown",
+        event_type="submit_attempt_preflight",
+        event_ts=now_ms - 19_500,
+        submit_attempt_id="attempt_a",
+    )
+    _insert_order_event(
+        client_order_id="o_submit_unknown",
+        event_type="submit_attempt_recorded",
+        event_ts=now_ms - 19_000,
+        submit_attempt_id="attempt_a",
+        submit_ts=now_ms - 19_000,
+        timeout_flag=1,
+        exchange_order_id_obtained=0,
+        order_status="SUBMIT_UNKNOWN",
+    )
+
+    cmd_recovery_report()
+    out = capsys.readouterr().out
+
+    assert "[P8] recent_order_lifecycle(top 2):" in out
+    assert "client_order_id=o_submit_unknown" in out
+    assert "submit_ts=" in out
+    assert "correlation=attempt=attempt_a meta=1 timeout=1" in out
+    assert "mapping=submit_no_mapping" in out
+    assert "state=SUBMIT_UNKNOWN unresolved=1" in out
+    assert "client_order_id=o_recovery" in out
+    assert "mapping=mapped" in out
+    assert "state=RECOVERY_REQUIRED unresolved=1" in out
+
+
+def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
     monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
         "bithumb_bot.app.get_health_status",
@@ -837,6 +933,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "primary_blocker_code",
         "recent_halt_reason",
         "recommended_command",
+        "recent_order_lifecycle",
         "recovery_required_count",
         "recovery_required_summary",
         "submit_unknown_count",

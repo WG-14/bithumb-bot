@@ -23,6 +23,96 @@ REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
+UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+
+
+def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int]]:
+    rows = conn.execute(
+        """
+        SELECT client_order_id, submit_attempt_id, exchange_order_id, status, side, qty_req, created_ts
+        FROM orders
+        ORDER BY created_ts DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit)),),
+    ).fetchall()
+
+    lifecycle: list[dict[str, str | int]] = []
+    for row in rows:
+        context = _load_submit_attempt_context(conn, row=row)
+        submit_attempt_id = str(context.get("submit_attempt_id") or "")
+        submit_event = None
+        intent_event = conn.execute(
+            """
+            SELECT intent_ts, event_ts
+            FROM order_events
+            WHERE client_order_id=? AND event_type='intent_created'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (str(row["client_order_id"]),),
+        ).fetchone()
+        if submit_attempt_id:
+            submit_event = conn.execute(
+                """
+                SELECT submit_ts, event_ts, timeout_flag, exchange_order_id_obtained
+                FROM order_events
+                WHERE client_order_id=? AND submit_attempt_id=?
+                    AND event_type='submit_attempt_recorded'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(row["client_order_id"]), submit_attempt_id),
+            ).fetchone()
+
+        exchange_order_id = str(row["exchange_order_id"] or "").strip()
+        if exchange_order_id:
+            mapping_status = "mapped"
+        elif submit_event and submit_event["exchange_order_id_obtained"] is not None:
+            mapping_status = (
+                "submit_no_mapping"
+                if not bool(submit_event["exchange_order_id_obtained"])
+                else "submit_mapped"
+            )
+        elif submit_attempt_id:
+            mapping_status = "submit_attempt_only"
+        else:
+            mapping_status = "unknown"
+
+        correlation = "none"
+        if submit_attempt_id:
+            correlation = (
+                f"attempt={submit_attempt_id} "
+                f"meta={1 if bool(context.get('metadata_present')) else 0} "
+                f"timeout={1 if bool(context.get('timeout_submit_unknown')) else 0}"
+            )
+
+        intent_ts = int(row["created_ts"])
+        if intent_event and intent_event["intent_ts"] is not None:
+            intent_ts = int(intent_event["intent_ts"])
+        elif intent_event and intent_event["event_ts"] is not None:
+            intent_ts = int(intent_event["event_ts"])
+
+        submit_ts = None
+        if submit_event and submit_event["submit_ts"] is not None:
+            submit_ts = int(submit_event["submit_ts"])
+        elif submit_event and submit_event["event_ts"] is not None:
+            submit_ts = int(submit_event["event_ts"])
+
+        status = str(row["status"])
+        lifecycle.append(
+            {
+                "client_order_id": str(row["client_order_id"]),
+                "intent_ts": intent_ts,
+                "submit_ts": submit_ts if submit_ts is not None else "-",
+                "correlation": correlation,
+                "mapping_status": mapping_status,
+                "state": status,
+                "unresolved": 1 if status in UNRESOLVED_ORDER_STATUSES else 0,
+            }
+        )
+
+    return lifecycle
 
 
 def _extract_submit_attempt_id(*, client_order_id: str, submit_attempt_id: str | None) -> str:
