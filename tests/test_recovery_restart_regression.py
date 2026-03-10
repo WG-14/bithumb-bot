@@ -149,6 +149,50 @@ def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):
     assert state.startup_gate_reason == reason
 
 
+def test_startup_gate_explicitly_blocks_pending_submit_order(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="pending_submit_blocker",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="PENDING_SUBMIT",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reason = evaluate_startup_safety_gate()
+
+    assert reason is not None
+    assert "pending_submit_orders=1" in reason
+
+
+def test_startup_gate_explicitly_blocks_submit_unknown_order(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_unknown_blocker",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reason = evaluate_startup_safety_gate()
+
+    assert reason is not None
+    assert "submit_unknown_orders=1" in reason
+
+
 def test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocked(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:

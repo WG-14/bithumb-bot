@@ -79,6 +79,52 @@ class _LoopConn:
             return _Rows({"cnt": 0})
         if "client_order_id LIKE 'remote_%'" in q:
             return _Rows({"cnt": 0})
+
+        if (
+            "AS pending_submit_count" in q
+            and "AS submit_unknown_count" in q
+            and "AS recovery_required_count" in q
+            and "AS stale_new_partial_count" in q
+            and "FROM orders" in q
+        ):
+            # open_order_created_ts 기반 시나리오는 기존 failsafe 테스트 의도를 유지하기 위해
+            # startup safety gate 쿼리에서는 깨끗한 상태로 취급한다.
+            if self.open_order_created_ts is not None:
+                return _Rows(
+                    {
+                        "pending_submit_count": 0,
+                        "submit_unknown_count": 0,
+                        "recovery_required_count": 0,
+                        "stale_new_partial_count": 0,
+                    }
+                )
+
+            # tmp DB에 실제로 넣은 주문(RECOVERY_REQUIRED / NEW 등)은
+            # 실제 sqlite DB에서 읽어 startup gate 테스트가 계속 유효하도록 한다.
+            real_conn = ensure_db()
+            try:
+                row = real_conn.execute(query, params or ()).fetchone()
+            finally:
+                real_conn.close()
+
+            if row is None:
+                return _Rows(
+                    {
+                        "pending_submit_count": 0,
+                        "submit_unknown_count": 0,
+                        "recovery_required_count": 0,
+                        "stale_new_partial_count": 0,
+                    }
+                )
+
+            return _Rows(
+                {
+                    "pending_submit_count": row["pending_submit_count"] or 0,
+                    "submit_unknown_count": row["submit_unknown_count"] or 0,
+                    "recovery_required_count": row["recovery_required_count"] or 0,
+                    "stale_new_partial_count": row["stale_new_partial_count"] or 0,
+                }
+            )
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0

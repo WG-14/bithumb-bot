@@ -149,10 +149,59 @@ def evaluate_startup_safety_gate() -> str | None:
     finally:
         conn.close()
 
+    status_counts = {
+        "pending_submit": 0,
+        "submit_unknown": 0,
+        "recovery_required": 0,
+        "stale_new_partial": 0,
+    }
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN status='PENDING_SUBMIT' THEN 1 ELSE 0 END) AS pending_submit_count,
+                SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
+                SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count,
+                SUM(
+                    CASE
+                        WHEN status IN ('NEW', 'PARTIAL')
+                         AND (? - created_ts) > (? * 1000)
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS stale_new_partial_count
+            FROM orders
+            """,
+            (
+                now_ms,
+                max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC)),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is not None:
+        status_counts = {
+            "pending_submit": int(row["pending_submit_count"] or 0),
+            "submit_unknown": int(row["submit_unknown_count"] or 0),
+            "recovery_required": int(row["recovery_required_count"] or 0),
+            "stale_new_partial": int(row["stale_new_partial_count"] or 0),
+        }
+
     reasons: list[str] = []
+    if status_counts["pending_submit"] > 0:
+        reasons.append(f"pending_submit_orders={status_counts['pending_submit']}")
+    if status_counts["submit_unknown"] > 0:
+        reasons.append(f"submit_unknown_orders={status_counts['submit_unknown']}")
+    if status_counts["recovery_required"] > 0:
+        reasons.append(f"recovery_required_orders={status_counts['recovery_required']}")
+    if status_counts["stale_new_partial"] > 0:
+        reasons.append(f"stale_new_partial_orders={status_counts['stale_new_partial']}")
+
     if state.unresolved_open_order_count > 0:
         reasons.append(f"unresolved_open_orders={state.unresolved_open_order_count}")
-    if state.recovery_required_count > 0:
+    if state.recovery_required_count > status_counts["recovery_required"]:
         reasons.append(f"recovery_required_orders={state.recovery_required_count}")
 
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])

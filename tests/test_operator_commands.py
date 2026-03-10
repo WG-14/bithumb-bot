@@ -147,6 +147,8 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monk
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is False
+    assert state.startup_gate_reason is not None
+    assert "recovery_required_orders=1" in str(state.startup_gate_reason)
 
 
 def test_resume_refuses_when_reconcile_has_balance_split_mismatch(monkeypatch, tmp_path, capsys):

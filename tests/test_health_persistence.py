@@ -199,6 +199,39 @@ def test_startup_gate_reason_is_persisted_to_health_state(tmp_path):
     assert row is not None
     assert row["startup_gate_reason"] == reason
 
+
+def test_startup_gate_exposes_stale_unresolved_open_order_blocker(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = 1_730_000_000_000
+    old_max_open_order_age_sec = settings.MAX_OPEN_ORDER_AGE_SEC
+    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 60)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, NULL, 'NEW', 'BUY', NULL, 0.01, 0.0, ?, ?, NULL)
+            """,
+            ("stale_open_order", now_ms - 120_000, now_ms - 120_000),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        reason = evaluate_startup_safety_gate()
+    finally:
+        object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", old_max_open_order_age_sec)
+
+    assert reason is not None
+    assert "stale_new_partial_orders=1" in reason
+
+    health = runtime_state.snapshot()
+    assert health.startup_gate_reason is not None
+    assert "stale_new_partial_orders=1" in str(health.startup_gate_reason)
+
 def test_open_order_health_fields_are_persisted(tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = 1_730_000_000_000

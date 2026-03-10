@@ -4,8 +4,6 @@ import os
 import time
 from typing import Any
 
-import httpx
-
 
 _RECENT_MESSAGES: dict[str, float] = {}
 
@@ -24,6 +22,8 @@ def _timeout_sec() -> float:
 
 
 def _post_json(url: str, payload: dict[str, Any]) -> None:
+    import httpx
+
     timeout = _timeout_sec()
     httpx.post(url, json=payload, timeout=timeout)
 
