@@ -189,7 +189,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                     f"reason_code={state.last_reconcile_reason_code or '-'} "
                     f"error={state.last_reconcile_error or '-'}"
                 ),
-                overridable=True,
+                overridable=False,
             )
         )
 
@@ -198,7 +198,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             _resume_blocker(
                 code="STARTUP_SAFETY_GATE_BLOCKED",
                 detail=startup_gate_reason,
-                overridable=True,
+                overridable=False,
             )
         )
         if state.last_reconcile_status == "ok":
@@ -206,7 +206,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 _resume_blocker(
                     code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
                     detail="latest reconcile reported ok but startup safety gate still blocks resume",
-                    overridable=True,
+                    overridable=False,
                 )
             )
 
@@ -215,7 +215,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             _resume_blocker(
                 code="HALT_STATE_UNRESOLVED",
                 detail=f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
-                overridable=True,
+                overridable=False,
             )
         )
 

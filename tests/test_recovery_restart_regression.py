@@ -16,6 +16,7 @@ import bithumb_bot.recovery as recovery_module
 @pytest.fixture
 def isolated_db(tmp_path):
     old_db_path = settings.DB_PATH
+    old_mode = settings.MODE
     db_path = tmp_path / "restart_regression.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
     ensure_db().close()
@@ -24,6 +25,7 @@ def isolated_db(tmp_path):
     runtime_state.record_reconcile_result(success=True, reason_code=None, metadata=None, now_epoch_sec=0.0)
     yield db_path
     object.__setattr__(settings, "DB_PATH", old_db_path)
+    object.__setattr__(settings, "MODE", old_mode)
 
 
 class _NoopBroker:

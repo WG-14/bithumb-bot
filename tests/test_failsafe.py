@@ -21,6 +21,7 @@ from bithumb_bot import runtime_state
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path):
     original_db_path = settings.DB_PATH
+    original_mode = settings.MODE
     db_path = tmp_path / "failsafe.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
     ensure_db().close()
@@ -30,6 +31,7 @@ def _isolated_db(tmp_path):
     runtime_state.set_startup_gate_reason(None)
     yield
     object.__setattr__(settings, "DB_PATH", original_db_path)
+    object.__setattr__(settings, "MODE", original_mode)
 
 def _set_tmp_db(tmp_path):
     db_path = tmp_path / "failsafe.sqlite"

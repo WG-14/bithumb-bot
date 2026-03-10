@@ -32,7 +32,6 @@ SMA_LONG = settings.SMA_LONG
 COOLDOWN_MIN = settings.COOLDOWN_MIN
 MIN_GAP = settings.MIN_GAP
 
-DB_PATH = settings.DB_PATH
 START_CASH_KRW = settings.START_CASH_KRW
 BUY_FRACTION = settings.BUY_FRACTION
 FEE_RATE = settings.FEE_RATE
@@ -69,7 +68,7 @@ def sma(values, n: int):
 
 
 def cmd_signal(short_n: int, long_n: int):
-    conn = ensure_db(settings.DB_PATH)
+    conn = conn = ensure_db()
     r = compute_signal(conn, short_n, long_n)
     conn.close()
     if r is None:
@@ -86,7 +85,7 @@ def cmd_signal(short_n: int, long_n: int):
 def cmd_explain(short_n: int, long_n: int):
     """왜 HOLD/BUY/SELL이 나왔는지 '마지막 구간 숫자'를 눈으로 보게 해줌"""
     need = long_n + 2
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     rows_closes = load_recent(conn, need)
     conn.close()
 
@@ -99,7 +98,7 @@ def cmd_explain(short_n: int, long_n: int):
     for (ts, close) in rows:
         print(f"  {kst_str(int(ts))}  close={float(close):.2f}")
 
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     r = compute_signal(conn, short_n, long_n)
     conn.close()
     print("")
@@ -115,7 +114,7 @@ def cmd_explain(short_n: int, long_n: int):
 
 
 def cmd_status():
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     init_portfolio(conn)
     cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
     cash = cash_available + cash_locked
@@ -143,7 +142,7 @@ def cmd_status():
 
 
 def cmd_trades(limit: int):
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     rows = conn.execute(
         """
         SELECT ts, side, price, qty, fee, cash_after, asset_after, note
@@ -166,7 +165,7 @@ def cmd_trades(limit: int):
 
 
 def cmd_orders(limit: int = 50):
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     rows = conn.execute(
         """
         SELECT client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts
@@ -184,7 +183,7 @@ def cmd_orders(limit: int = 50):
 
 
 def cmd_fills(limit: int = 50):
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     rows = conn.execute(
         """
         SELECT client_order_id, fill_ts, price, qty, fee
@@ -202,7 +201,7 @@ def cmd_fills(limit: int = 50):
 
 
 def cmd_audit():
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     init_portfolio(conn)
 
     errors: list[str] = []
@@ -443,7 +442,7 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
 
 
 def cmd_audit_ledger() -> None:
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     try:
         replay = _ledger_replay(conn)
     finally:
@@ -465,7 +464,7 @@ def cmd_audit_ledger() -> None:
 
 
 def cmd_report(days: int) -> None:
-    conn = ensure_db(DB_PATH)
+    conn = ensure_db()
     try:
         now_kst = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).date()
         start_day = now_kst - timedelta(days=days - 1)
@@ -617,7 +616,7 @@ def _load_recovery_report(
     *,
     oldest_limit: int = 5,
 ) -> dict[str, int | float | str | bool | None | list[dict[str, str | float | bool]]]:
-    conn = ensure_db(settings.DB_PATH)
+    conn = conn = ensure_db()
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
         unresolved_row = conn.execute(
@@ -857,6 +856,21 @@ def cmd_resume(force: bool = False) -> None:
         print("  run `uv run python bot.py recovery-report` for details")
         print("  or resume explicitly with `uv run python bot.py resume --force`")
         raise SystemExit(1)
+
+    if force and resume_blocks:
+        non_overridable_blocks = [b for b in resume_blocks if not bool(b.overridable)]
+        if non_overridable_blocks:
+            print("[RESUME] refused: force override denied")
+            print("  non_overridable_blockers:")
+            for blocker in non_overridable_blocks:
+                print(
+                    "  - "
+                    f"code={blocker.code} "
+                    f"overridable={1 if bool(blocker.overridable) else 0} "
+                    f"detail={blocker.detail}"
+                )
+            print("  run `uv run python bot.py recovery-report` for details")
+            raise SystemExit(1)
 
     enable_trading()
     if force and resume_blocks:

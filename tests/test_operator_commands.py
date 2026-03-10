@@ -15,8 +15,8 @@ from bithumb_bot.db_core import ensure_db
 def _set_tmp_db(tmp_path):
     db_path = tmp_path / "operator.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "paper")
     return db_path
-
 
 def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:
     conn = ensure_db()
@@ -188,12 +188,69 @@ def test_resume_refuses_when_last_reconcile_failed(tmp_path, capsys):
     assert "PERIODIC_RECONCILE_FAILED" in out
     assert exc.value.code == 1
 
-def test_resume_force_enables_even_when_unresolved_state_exists(tmp_path):
+def test_resume_force_refuses_when_last_reconcile_failed(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    runtime_state.record_reconcile_result(
+        success=False,
+        error="boom",
+        reason_code="PERIODIC_RECONCILE_FAILED",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=True)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused: force override denied" in out
+    assert "code=LAST_RECONCILE_FAILED" in out
+    assert "overridable=0" in out
+    assert exc.value.code == 1
+
+
+def test_resume_force_refuses_when_startup_safety_gate_blocked(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
-
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=True)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused: force override denied" in out
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
+    assert "overridable=0" in out
+    assert exc.value.code == 1
+
+
+def test_resume_force_refuses_when_halt_state_unresolved(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="initial reconcile failed (RuntimeError): boom",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=True)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused: force override denied" in out
+    assert "code=HALT_STATE_UNRESOLVED" in out
+    assert "overridable=0" in out
+    assert exc.value.code == 1
+
+
+def test_resume_force_enables_for_safe_manual_pause(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="manual operator pause",
+        reason_code="MANUAL_PAUSE",
+        unresolved=False,
+    )
     cmd_resume(force=True)
 
     state = runtime_state.snapshot()
@@ -316,10 +373,10 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "[P5] unprocessed_remote_open_orders" in out
     assert "[P6] resume_eligibility" in out
     assert "resume_allowed=0" in out
-    assert "force_resume_allowed=1" in out
+    assert "force_resume_allowed=0" in out
     assert "blockers_count=" in out
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
-    assert "overridable=1" in out
+    assert "overridable=0" in out
     assert "oldest_unresolved_orders(top 5):" in out
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out
@@ -404,7 +461,7 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["last_reconcile_summary"] != "none"
     assert "status=" in payload["last_reconcile_summary"]
     assert payload["resume_allowed"] is False
-    assert payload["force_resume_allowed"] is True
+    assert payload["force_resume_allowed"] is False
     assert isinstance(payload["blockers"], list)
     assert payload["blockers"]
     assert payload["blockers"][0]["code"]
