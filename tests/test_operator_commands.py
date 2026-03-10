@@ -523,12 +523,16 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "unresolved_count=6" in out
     assert "recovery_required_count=3" in out
     assert "[P2] resume_eligibility" in out
+    assert "active_blocker_summary=" in out
+    assert "risk_level=high" in out
     assert "[P3] balance_mismatch" in out
     assert "summary=none" in out
     assert "[P4] last_reconcile_summary" in out
     assert "[P5] recent_halt_reason" in out
     assert "[P6] operator_next_action" in out
     assert "action=manual_recovery_required" in out
+    assert "recommended_next_action=Recover RECOVERY_REQUIRED orders before attempting resume." in out
+    assert "resume_blocked_reason=resume blocked by RECOVERY_REQUIRED orders" in out
     assert "command=uv run python bot.py recover-order --client-order-id <id>" in out
     assert "[P7] unprocessed_remote_open_orders" in out
     assert "resume_allowed=0" in out
@@ -569,6 +573,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
 
     assert set(payload.keys()) == {
         "balance_split_mismatch_summary",
+        "active_blocker_summary",
         "blocker_summary",
         "blockers",
         "force_resume_allowed",
@@ -576,13 +581,16 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "oldest_orders",
         "oldest_unresolved_age_sec",
         "operator_next_action",
+        "recommended_next_action",
         "non_overridable_blockers",
         "primary_blocker_code",
         "recent_halt_reason",
         "recommended_command",
         "recovery_required_count",
         "recovery_required_summary",
+        "resume_blocked_reason",
         "resume_allowed",
+        "risk_level",
         "trading_enabled",
         "unprocessed_remote_open_orders",
         "unresolved_count",
@@ -634,6 +642,8 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert isinstance(payload["blockers"][0]["overridable"], bool)
     assert "total=" in payload["blocker_summary"]
     assert "non_overridable=" in payload["blocker_summary"]
+    assert payload["active_blocker_summary"]
+    assert payload["risk_level"] in {"low", "medium", "high"}
     assert isinstance(payload["non_overridable_blockers"], list)
     assert payload["operator_next_action"] in {
         "resume_now",
@@ -641,6 +651,8 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
         "manual_recovery_required",
         "investigate_blockers",
     }
+    assert payload["recommended_next_action"]
+    assert payload["resume_blocked_reason"]
     assert payload["recommended_command"]
 
 

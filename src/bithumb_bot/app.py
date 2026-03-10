@@ -760,15 +760,36 @@ def _load_recovery_report(
     if bool(resume_allowed):
         operator_next_action = "resume_now"
         recommended_command = "uv run python bot.py resume"
+        recommended_next_action = "No active blocker. Resume trading now."
+        resume_blocked_reason = "none"
     elif blocker_list and all(bool(b["overridable"]) for b in blocker_list):
         operator_next_action = "review_and_force_resume"
         recommended_command = "uv run python bot.py resume --force"
+        recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
+        resume_blocked_reason = "resume blocked by overridable blockers"
     elif recovery_required_count > 0:
         operator_next_action = "manual_recovery_required"
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
+        recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
+        resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
     else:
         operator_next_action = "investigate_blockers"
         recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+        resume_blocked_reason = "resume blocked by non-overridable safety blockers"
+
+    active_blocker_summary = "none"
+    if blocker_list:
+        active_blocker_summary = " | ".join(
+            f"{b['code']}(overridable={1 if bool(b['overridable']) else 0})"
+            for b in blocker_list[:3]
+        )
+
+    risk_level = "low"
+    if recovery_required_count > 0 or non_overridable_blockers:
+        risk_level = "high"
+    elif unresolved_count > 0 or blocker_list:
+        risk_level = "medium"
 
     state = runtime_state.snapshot()
 
@@ -786,11 +807,15 @@ def _load_recovery_report(
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
         "blockers": blocker_list,
         "blocker_summary": blocker_summary,
+        "active_blocker_summary": active_blocker_summary,
+        "risk_level": risk_level,
         "primary_blocker_code": primary_blocker_code,
         "non_overridable_blockers": non_overridable_blockers,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
         "operator_next_action": operator_next_action,
+        "recommended_next_action": recommended_next_action,
+        "resume_blocked_reason": resume_blocked_reason,
         "recommended_command": recommended_command,
     }
 
@@ -810,6 +835,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
     print(f"    blocker_summary={report['blocker_summary']}")
+    print(f"    active_blocker_summary={report['active_blocker_summary']}")
+    print(f"    risk_level={report['risk_level']}")
     print(f"    primary_blocker_code={report['primary_blocker_code']}")
     for blocker in blockers:
         print(
@@ -826,6 +853,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    {report['recent_halt_reason']}")
     print("  [P6] operator_next_action")
     print(f"    action={report['operator_next_action']}")
+    print(f"    recommended_next_action={report['recommended_next_action']}")
+    print(f"    resume_blocked_reason={report['resume_blocked_reason']}")
     print(f"    command={report['recommended_command']}")
     print("    hint=check blocker code then run command")
     print("  [P7] unprocessed_remote_open_orders")
