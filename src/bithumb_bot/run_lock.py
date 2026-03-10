@@ -147,6 +147,23 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     )
 
 
+def _format_lock_conflict_details(path: Path, state: _LockFileState) -> str:
+    owner_pid = state.pid if state.pid is not None else "unknown"
+    owner_host = state.hostname or "unknown"
+    owner_created_at = state.created_at or "unknown"
+    owner_age = f"{state.age_seconds:.0f}s" if state.age_seconds is not None else "unknown"
+    reclaim_hint = (
+        "maybe (metadata looks stale; reclaim can only happen after the current holder exits)"
+        if state.is_stale_candidate
+        else "no (lock is actively held by another process)"
+    )
+    return (
+        f"lock={path} owner_pid={owner_pid} owner_host={owner_host} "
+        f"owner_created_at={owner_created_at} lock_age={owner_age} "
+        f"reclaim_possible={reclaim_hint}"
+    )
+
+
 def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
     path = lock_path or _default_lock_path()
 
@@ -191,27 +208,16 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             state = _read_lock_file_state(path, fd)
-            owner_pid = state.pid if state.pid is not None else "unknown"
-            owner_host = state.hostname or "unknown"
-            owner_created_at = state.created_at or "unknown"
-            owner_age = f"{state.age_seconds:.0f}s" if state.age_seconds is not None else "unknown"
-            stale_hint = ""
-            if state.is_stale_candidate:
-                stale_hint = (
-                    "; stale lock candidate detected "
-                    f"(owner={state.owner_text or 'unknown'}, age={owner_age}). "
-                    "Auto-reclaim is only allowed when lock acquisition succeeds"
-                )
             raise RunLockError(
-                "another bot run loop is already running. "
-                "If this looks stale, wait for current run to exit or inspect lock owner details: "
-                f"(lock: {path}, owner_pid={owner_pid}, owner_host={owner_host}, "
-                f"owner_created_at={owner_created_at}, lock_age={owner_age}){stale_hint}"
+                "another bot run loop is already running; lock acquisition failed. "
+                "Current lock context: "
+                f"{_format_lock_conflict_details(path, state)}"
             ) from exc
 
         if previous_state.is_stale_candidate:
             LOGGER.warning(
-                "reclaiming stale run lock file at %s (pid=%s host=%s created_at=%s age=%.0fs)",
+                "reclaimed stale run lock file at %s (previous_pid=%s previous_host=%s previous_created_at=%s age=%.0fs); "
+                "prior owner appears inactive and file lock was free",
                 path,
                 previous_state.pid,
                 previous_state.hostname,

@@ -54,10 +54,12 @@ def test_stale_lock_is_reclaimed_when_not_actively_held(
         assert "host=" in owner_text
         assert "created_at=" in owner_text
 
-    assert "reclaiming stale run lock file" in caplog.text
+    assert "reclaimed stale run lock file" in caplog.text
 
 
-def test_stale_lock_with_non_pid_owner_text_is_reclaimed(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_stale_lock_with_non_pid_owner_text_is_reclaimed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     lock_path = tmp_path / "run.lock"
     lock_path.write_text("legacy-owner\n", encoding="utf-8")
     stale_mtime = time.time() - (STALE_LOCK_MAX_AGE_SECONDS + 5)
@@ -69,7 +71,8 @@ def test_stale_lock_with_non_pid_owner_text_is_reclaimed(tmp_path: Path, caplog:
         assert "host=" in owner_text
         assert "created_at=" in owner_text
 
-    assert "reclaiming stale run lock file" in caplog.text
+    assert "reclaimed stale run lock file" in caplog.text
+
 
 def test_error_message_includes_lock_owner_context_on_collision(tmp_path: Path) -> None:
     lock_path = tmp_path / "run.lock"
@@ -80,11 +83,39 @@ def test_error_message_includes_lock_owner_context_on_collision(tmp_path: Path) 
                 pass
 
     message = str(exc.value)
-    assert f"lock: {lock_path}" in message
+    assert f"lock={lock_path}" in message
     assert "owner_pid=" in message
     assert "owner_host=" in message
     assert "owner_created_at=" in message
     assert "lock_age=" in message
+    assert "reclaim_possible=" in message
+
+
+def test_collision_message_flags_stale_metadata_when_lock_is_still_held(
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "run.lock"
+    lock_path.write_text(
+        "pid=999999 host=ghost created_at=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+    stale_mtime = time.time() - (STALE_LOCK_MAX_AGE_SECONDS + 5)
+    os.utime(lock_path, (stale_mtime, stale_mtime))
+
+    fd = os.open(lock_path, os.O_RDWR)
+    try:
+        import fcntl  # type: ignore[attr-defined]
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RunLockError) as exc:
+            with acquire_run_lock(lock_path):
+                pass
+    finally:
+        os.close(fd)
+
+    message = str(exc.value)
+    assert "owner_pid=999999" in message
+    assert "reclaim_possible=maybe" in message
 
 
 def test_abnormal_termination_stale_lock_file_is_reclaimed(tmp_path: Path) -> None:
