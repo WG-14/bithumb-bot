@@ -8,6 +8,7 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.app import (
     _load_recovery_report,
+    cmd_health,
     cmd_pause,
     cmd_reconcile,
     cmd_recover_order,
@@ -691,6 +692,44 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
         "last_error=timeout while polling exchange status endpoint due to transi..."
         in out
     )
+
+
+def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys):
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 2.0,
+            "error_count": 0,
+            "trading_enabled": False,
+            "retry_at_epoch_sec": 1200.0,
+            "unresolved_open_order_count": 4,
+            "oldest_unresolved_order_age_sec": 95.0,
+            "recovery_required_count": 2,
+            "last_reconcile_epoch_sec": 1000.0,
+            "last_reconcile_status": "error",
+            "last_reconcile_error": "timeout",
+            "last_reconcile_reason_code": "RECONCILE_TIMEOUT",
+            "last_reconcile_metadata": None,
+            "last_disable_reason": "periodic reconcile failed",
+            "halt_new_orders_blocked": True,
+            "halt_reason_code": "PERIODIC_RECONCILE_FAILED",
+            "halt_state_unresolved": True,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "[RISK-SNAPSHOT]" in out
+    assert "unresolved_open_order_count=4 recovery_required_count=2" in out
+    assert "halt_state=blocked:1,unresolved:1,reason_code:PERIODIC_RECONCILE_FAILED" in out
+    assert "reconcile_state=status:error,reason_code:RECONCILE_TIMEOUT,last_error:timeout" in out
 
 
 def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):

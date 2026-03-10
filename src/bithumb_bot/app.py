@@ -347,6 +347,24 @@ def cmd_health() -> None:
     refresh_open_order_health()
     health = get_health_status()
     print("[HEALTH]")
+    print("  [RISK-SNAPSHOT]")
+    print(
+        "    "
+        f"unresolved_open_order_count={health['unresolved_open_order_count']} "
+        f"recovery_required_count={health['recovery_required_count']}"
+    )
+    print(
+        "    "
+        f"halt_state=blocked:{1 if bool(health['halt_new_orders_blocked']) else 0},"
+        f"unresolved:{1 if bool(health['halt_state_unresolved']) else 0},"
+        f"reason_code:{health['halt_reason_code'] or '-'}"
+    )
+    print(
+        "    "
+        f"reconcile_state=status:{health['last_reconcile_status'] or '-'},"
+        f"reason_code:{health['last_reconcile_reason_code'] or '-'},"
+        f"last_error:{health['last_reconcile_error'] or '-'}"
+    )
     print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")
