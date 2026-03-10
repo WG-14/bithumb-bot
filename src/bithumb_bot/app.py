@@ -746,6 +746,7 @@ def _load_recovery_report(
         for b in blockers
     ]
     non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
+    primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
     blocker_summary = (
         f"total={len(blocker_list)} "
         f"non_overridable={len(non_overridable_blockers)} "
@@ -781,6 +782,7 @@ def _load_recovery_report(
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
         "blockers": blocker_list,
         "blocker_summary": blocker_summary,
+        "primary_blocker_code": primary_blocker_code,
         "non_overridable_blockers": non_overridable_blockers,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
@@ -804,6 +806,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
     print(f"    blocker_summary={report['blocker_summary']}")
+    print(f"    primary_blocker_code={report['primary_blocker_code']}")
     for blocker in blockers:
         print(
             "    - "
@@ -820,6 +823,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P6] operator_next_action")
     print(f"    action={report['operator_next_action']}")
     print(f"    command={report['recommended_command']}")
+    print("    hint=check blocker code then run command")
     print("  [P7] unprocessed_remote_open_orders")
     print(f"    count={report['unprocessed_remote_open_orders']}")
 

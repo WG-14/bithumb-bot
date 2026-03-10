@@ -249,6 +249,14 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
         unresolved=unresolved,
     )
     halt_state = runtime_state.snapshot()
+    _, resume_blockers = evaluate_resume_eligibility()
+    force_resume_allowed = bool(resume_blockers) and all(bool(b.overridable) for b in resume_blockers)
+    primary_blocker_code = resume_blockers[0].code if resume_blockers else "-"
+    blocker_summary = (
+        f"total={len(resume_blockers)} "
+        f"non_overridable={sum(1 for b in resume_blockers if not bool(b.overridable))} "
+        f"overridable={sum(1 for b in resume_blockers if bool(b.overridable))}"
+    )
     latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
     operator_action_required = bool(halt_state.halt_operator_action_required)
     notify(
@@ -270,6 +278,9 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
                 open_orders_present=bool(halt_state.halt_open_orders_present),
                 position_present=bool(halt_state.halt_position_present),
             ),
+            primary_blocker_code=primary_blocker_code,
+            blocker_summary=blocker_summary,
+            force_resume_allowed=int(force_resume_allowed),
             halt_policy_stage=halt_state.halt_policy_stage,
             block_new_orders=int(halt_state.halt_policy_block_new_orders),
             attempt_cancel_open_orders=int(halt_state.halt_policy_attempt_cancel_open_orders),
@@ -379,6 +390,9 @@ def run_loop(short_n: int, long_n: int) -> None:
         reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
         reason_code = state.halt_reason_code or "PERSISTED_HALT_STATE"
         latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
+        _, resume_blockers = evaluate_resume_eligibility()
+        force_resume_allowed = bool(resume_blockers) and all(bool(b.overridable) for b in resume_blockers)
+        primary_blocker_code = resume_blockers[0].code if resume_blockers else "-"
         notify(
             format_event(
                 "startup_halt_state_blocked",
@@ -395,6 +409,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                     operator_action_required=bool(state.halt_operator_action_required),
                     open_orders_present=bool(state.halt_open_orders_present),
                     position_present=bool(state.halt_position_present),
+                ),
+                primary_blocker_code=primary_blocker_code,
+                force_resume_allowed=int(force_resume_allowed),
+                operator_hint_command=(
+                    "uv run python bot.py resume --force"
+                    if force_resume_allowed
+                    else "uv run python bot.py recovery-report"
                 ),
             )
         )

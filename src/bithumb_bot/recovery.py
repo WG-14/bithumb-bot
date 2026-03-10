@@ -260,6 +260,10 @@ def _halt_on_source_conflict(conflicts: list[str]) -> None:
             alert_kind="halt",
             reason_code=RECONCILE_MISMATCH,
             reason=reason,
+            primary_blocker_code="RECOVERY_SOURCE_CONFLICT",
+            operator_next_action="review conflicted orders and recover each unresolved order",
+            force_resume_allowed=0,
+            operator_hint_command="uv run python bot.py recovery-report --json",
         )
     )
 

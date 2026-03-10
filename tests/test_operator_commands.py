@@ -494,6 +494,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "oldest_unresolved_age_sec",
         "operator_next_action",
         "non_overridable_blockers",
+        "primary_blocker_code",
         "recent_halt_reason",
         "recommended_command",
         "recovery_required_count",
@@ -538,6 +539,7 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["recovery_required_count"] >= 1
     assert isinstance(payload["recovery_required_summary"], list)
     assert payload["recovery_required_summary"]
+    assert payload["primary_blocker_code"] != "-"
     assert payload["recovery_required_summary"][0]["client_order_id"]
     assert payload["last_reconcile_summary"] != "none"
     assert "status=" in payload["last_reconcile_summary"]

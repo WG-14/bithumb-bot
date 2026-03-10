@@ -77,6 +77,24 @@ def test_format_event_skips_empty_fields():
     )
 
 
+def test_format_event_includes_operator_hint_fields():
+    message = notifier.format_event(
+        "trading_halted",
+        reason_code="DAILY_LOSS_LIMIT",
+        primary_blocker_code="HALT_STATE_UNRESOLVED",
+        operator_next_action="review halt reason and run recovery-report",
+        force_resume_allowed=0,
+        operator_hint_command="uv run python bot.py recovery-report",
+    )
+
+    assert message == (
+        "event=trading_halted reason_code=DAILY_LOSS_LIMIT "
+        "primary_blocker_code=HALT_STATE_UNRESOLVED "
+        "operator_next_action=review halt reason and run recovery-report "
+        "force_resume_allowed=0 operator_hint_command=uv run python bot.py recovery-report"
+    )
+
+
 def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytest.MonkeyPatch):
     calls = []
 
