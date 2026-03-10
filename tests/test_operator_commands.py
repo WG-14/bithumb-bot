@@ -6,7 +6,14 @@ import time
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.app import _load_recovery_report, cmd_pause, cmd_reconcile, cmd_recover_order, cmd_recovery_report, cmd_resume
+from bithumb_bot.app import (
+    _load_recovery_report,
+    cmd_pause,
+    cmd_reconcile,
+    cmd_recover_order,
+    cmd_recovery_report,
+    cmd_resume,
+)
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
@@ -17,6 +24,7 @@ def _set_tmp_db(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(db_path))
     object.__setattr__(settings, "MODE", "paper")
     return db_path
+
 
 def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:
     conn = ensure_db()
@@ -49,10 +57,27 @@ def _set_last_error(*, client_order_id: str, last_error: str) -> None:
 
 
 class _RecoverSuccessBroker:
-    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
-        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "FILLED", None, 0.01, 0.01, 1, 1)
+    def get_order(
+        self, *, client_order_id: str, exchange_order_id: str | None = None
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id,
+            "BUY",
+            "FILLED",
+            None,
+            0.01,
+            0.01,
+            1,
+            1,
+        )
 
-    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id=str(client_order_id or ""),
@@ -75,19 +100,53 @@ class _RecoverSuccessBroker:
         return []
 
     def get_balance(self) -> BrokerBalance:
-        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
+        return BrokerBalance(
+            cash_available=0.0,
+            cash_locked=0.0,
+            asset_available=0.01,
+            asset_locked=0.0,
+        )
 
 
 class _RecoverAmbiguousBroker(_RecoverSuccessBroker):
-    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
-        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "NEW", None, 0.01, 0.0, 1, 1)
+    def get_order(
+        self, *, client_order_id: str, exchange_order_id: str | None = None
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id,
+            "BUY",
+            "NEW",
+            None,
+            0.01,
+            0.0,
+            1,
+            1,
+        )
 
 
 class _SubmitUnknownRecoveredByRecentFillBroker:
-    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
-        return BrokerOrder(client_order_id, exchange_order_id or "ex-submit-unknown-1", "BUY", "FILLED", 100.0, 0.01, 0.01, 1, 1)
+    def get_order(
+        self, *, client_order_id: str, exchange_order_id: str | None = None
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "ex-submit-unknown-1",
+            "BUY",
+            "FILLED",
+            100.0,
+            0.01,
+            0.01,
+            1,
+            1,
+        )
 
-    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> list[BrokerFill]:
         return []
 
     def get_open_orders(self):
@@ -110,7 +169,12 @@ class _SubmitUnknownRecoveredByRecentFillBroker:
         ]
 
     def get_balance(self) -> BrokerBalance:
-        return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.01, asset_locked=0.0)
+        return BrokerBalance(
+            cash_available=0.0,
+            cash_locked=0.0,
+            asset_available=0.01,
+            asset_locked=0.0,
+        )
 
 
 def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
@@ -145,7 +209,11 @@ def test_manual_pause_then_resume_success_path(tmp_path):
 def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
 
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
 
@@ -164,10 +232,16 @@ def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, cap
     assert "STARTUP_SAFETY_GATE_BLOCKED" in state.resume_gate_reason
 
 
-def test_resume_refused_until_ambiguous_submit_blocker_is_cleared_by_reconcile(monkeypatch, tmp_path):
+def test_resume_refused_when_ambiguous_submit_only_weakly_matches_recent_fill(
+    monkeypatch, tmp_path, capsys
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="ambiguous_resume_case", created_ts=now_ms)
+    _insert_order(
+        status="SUBMIT_UNKNOWN",
+        client_order_id="ambiguous_resume_case",
+        created_ts=now_ms,
+    )
 
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
 
@@ -181,24 +255,61 @@ def test_resume_refused_until_ambiguous_submit_blocker_is_cleared_by_reconcile(m
 
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _SubmitUnknownRecoveredByRecentFillBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _SubmitUnknownRecoveredByRecentFillBroker(),
+    )
     try:
         cmd_reconcile()
-        cmd_resume(force=False)
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_resume(force=False)
     finally:
         object.__setattr__(settings, "MODE", original_mode)
 
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
+    assert "recovery_required_orders=1" in out
+    assert "LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS" in out
+
     state_after = runtime_state.snapshot()
-    assert state_after.trading_enabled is True
-    assert state_after.resume_gate_blocked is False
+    assert state_after.trading_enabled is False
+    assert state_after.resume_gate_blocked is True
+    assert state_after.resume_gate_reason is not None
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in str(state_after.resume_gate_reason)
+    assert "recovery_required_orders=1" in str(state_after.resume_gate_reason)
+    assert "LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS" in str(
+        state_after.resume_gate_reason
+    )
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT status, last_error
+            FROM orders
+            WHERE client_order_id='ambiguous_resume_case'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "manual recovery required" in str(row["last_error"])
 
 
-
-
-def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monkeypatch, tmp_path):
+def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(
+    monkeypatch, tmp_path
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
 
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
@@ -227,7 +338,9 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(monk
     assert "recovery_required_orders=1" in str(state.startup_gate_reason)
 
 
-def test_resume_refuses_when_reconcile_has_balance_split_mismatch(monkeypatch, tmp_path, capsys):
+def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
+    monkeypatch, tmp_path, capsys
+):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
@@ -238,7 +351,9 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(monkeypatch, t
         reason_code="RECONCILE_OK",
         metadata={
             "balance_split_mismatch_count": 2,
-            "balance_split_mismatch_summary": "cash_available(local=1000000,broker=900000,delta=-100000)",
+            "balance_split_mismatch_summary": (
+                "cash_available(local=1000000,broker=900000,delta=-100000)"
+            ),
         },
     )
 
@@ -257,7 +372,9 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(monkeypatch, t
     assert exc.value.code == 1
 
 
-def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_path, capsys):
+def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(
+    tmp_path, capsys
+):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(
         float("inf"),
@@ -276,7 +393,6 @@ def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(tmp_
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.halt_state_unresolved is True
-
 
 
 def test_resume_refuses_when_last_reconcile_failed(tmp_path, capsys):
@@ -301,6 +417,7 @@ def test_resume_refuses_when_last_reconcile_failed(tmp_path, capsys):
     assert state.resume_gate_reason is not None
     assert "LAST_RECONCILE_FAILED" in state.resume_gate_reason
 
+
 def test_resume_force_refuses_when_last_reconcile_failed(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
@@ -324,7 +441,11 @@ def test_resume_force_refuses_when_last_reconcile_failed(tmp_path, capsys):
 def test_resume_force_refuses_when_startup_safety_gate_blocked(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
 
     with pytest.raises(SystemExit) as exc:
@@ -338,10 +459,16 @@ def test_resume_force_refuses_when_startup_safety_gate_blocked(tmp_path, capsys)
     assert exc.value.code == 1
 
 
-def test_resume_force_rejects_startup_blocker_before_clearing_manual_pause(tmp_path, capsys):
+def test_resume_force_rejects_startup_blocker_before_clearing_manual_pause(
+    tmp_path, capsys
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="NEW", client_order_id="still_open_on_startup", created_ts=now_ms)
+    _insert_order(
+        status="NEW",
+        client_order_id="still_open_on_startup",
+        created_ts=now_ms,
+    )
     runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
 
     with pytest.raises(SystemExit) as exc:
@@ -377,7 +504,9 @@ def test_resume_force_refuses_when_halt_state_unresolved(tmp_path, capsys):
     assert exc.value.code == 1
 
 
-def test_resume_force_rejects_initial_reconcile_failure_with_operator_readable_reason(tmp_path, capsys):
+def test_resume_force_rejects_initial_reconcile_failure_with_operator_readable_reason(
+    tmp_path, capsys
+):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(
         float("inf"),
@@ -416,7 +545,6 @@ def test_resume_force_enables_for_safe_manual_pause(tmp_path):
     assert state.halt_state_unresolved is False
 
 
-
 def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
@@ -450,11 +578,16 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
     assert state.last_cancel_open_orders_summary is not None
     assert '"failed_count": 1' in state.last_cancel_open_orders_summary
 
+
 def test_recovery_report_summarizes_unresolved_and_recovery_required(tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 30_000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="open_2", created_ts=now_ms - 20_000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="open_2",
+        created_ts=now_ms - 20_000,
+    )
 
     runtime_state.record_reconcile_result(
         success=True,
@@ -512,7 +645,10 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
         )
     _set_last_error(
         client_order_id="open_0",
-        last_error="timeout while polling exchange status endpoint due to transient error and retry budget exceeded",
+        last_error=(
+            "timeout while polling exchange status endpoint due to transient "
+            "error and retry budget exceeded"
+        ),
     )
 
     cmd_recovery_report()
@@ -531,9 +667,16 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "[P5] recent_halt_reason" in out
     assert "[P6] operator_next_action" in out
     assert "action=manual_recovery_required" in out
-    assert "recommended_next_action=Recover RECOVERY_REQUIRED orders before attempting resume." in out
-    assert "resume_blocked_reason=resume blocked by RECOVERY_REQUIRED orders" in out
-    assert "command=uv run python bot.py recover-order --client-order-id <id>" in out
+    assert (
+        "recommended_next_action="
+        "Recover RECOVERY_REQUIRED orders before attempting resume."
+    ) in out
+    assert (
+        "resume_blocked_reason=resume blocked by RECOVERY_REQUIRED orders" in out
+    )
+    assert (
+        "command=uv run python bot.py recover-order --client-order-id <id>" in out
+    )
     assert "[P7] unprocessed_remote_open_orders" in out
     assert "resume_allowed=0" in out
     assert "force_resume_allowed=0" in out
@@ -544,15 +687,21 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out
     assert "client_order_id=open_5" not in out
-    assert "last_error=timeout while polling exchange status endpoint due to transi..." in out
-
+    assert (
+        "last_error=timeout while polling exchange status endpoint due to transi..."
+        in out
+    )
 
 
 def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 40_000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="recovery_1", created_ts=now_ms - 30_000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="recovery_1",
+        created_ts=now_ms - 30_000,
+    )
 
     runtime_state.record_reconcile_result(
         success=True,
@@ -602,7 +751,11 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="NEW", client_order_id="open_1", created_ts=now_ms - 50_000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="recovery_1", created_ts=now_ms - 20_000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="recovery_1",
+        created_ts=now_ms - 20_000,
+    )
 
     runtime_state.record_reconcile_result(
         success=True,
@@ -672,15 +825,25 @@ def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
 def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
     original_mode = settings.MODE
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoverSuccessBroker(),
+    )
 
     try:
-        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_1")
+        cmd_recover_order(
+            client_order_id="needs_recovery",
+            exchange_order_id="ex_manual_1",
+        )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
@@ -688,10 +851,18 @@ def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path
     conn = ensure_db()
     try:
         row = conn.execute(
-            "SELECT status, exchange_order_id, qty_filled FROM orders WHERE client_order_id='needs_recovery'"
+            """
+            SELECT status, exchange_order_id, qty_filled
+            FROM orders
+            WHERE client_order_id='needs_recovery'
+            """
         ).fetchone()
         fills = conn.execute(
-            "SELECT fill_id, qty, fee FROM fills WHERE client_order_id='needs_recovery'"
+            """
+            SELECT fill_id, qty, fee
+            FROM fills
+            WHERE client_order_id='needs_recovery'
+            """
         ).fetchall()
         trades = conn.execute(
             "SELECT side, qty, fee FROM trades WHERE note LIKE 'manual recovery%'"
@@ -710,19 +881,31 @@ def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path
     assert trades[0]["side"] == "BUY"
 
 
-def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(monkeypatch, tmp_path):
+def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(
+    monkeypatch, tmp_path
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
     original_mode = settings.MODE
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverAmbiguousBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoverAmbiguousBroker(),
+    )
 
     try:
         with pytest.raises(SystemExit) as exc:
-            cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_2")
+            cmd_recover_order(
+                client_order_id="needs_recovery",
+                exchange_order_id="ex_manual_2",
+            )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
@@ -732,7 +915,11 @@ def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(monkey
     conn = ensure_db()
     try:
         row = conn.execute(
-            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='needs_recovery'"
+            """
+            SELECT status, exchange_order_id, last_error
+            FROM orders
+            WHERE client_order_id='needs_recovery'
+            """
         ).fetchone()
     finally:
         conn.close()
@@ -746,16 +933,26 @@ def test_recover_order_failure_keeps_recovery_required_and_exits_non_zero(monkey
 def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
     original_mode = settings.MODE
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoverSuccessBroker(),
+    )
 
     runtime_state.enable_trading()
     try:
-        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_3")
+        cmd_recover_order(
+            client_order_id="needs_recovery",
+            exchange_order_id="ex_manual_3",
+        )
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
@@ -765,19 +962,31 @@ def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
     assert state.retry_at_epoch_sec == float("inf")
 
 
-def test_resume_succeeds_after_manual_recovery_clears_recovery_required(monkeypatch, tmp_path):
+def test_resume_succeeds_after_manual_recovery_clears_recovery_required(
+    monkeypatch, tmp_path
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="needs_recovery",
+        created_ts=now_ms,
+    )
     original_mode = settings.MODE
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoverSuccessBroker(),
+    )
 
     try:
         runtime_state.disable_trading_until(float("inf"), reason="startup recovery gate")
-        cmd_recover_order(client_order_id="needs_recovery", exchange_order_id="ex_manual_4")
+        cmd_recover_order(
+            client_order_id="needs_recovery",
+            exchange_order_id="ex_manual_4",
+        )
         cmd_resume(force=False)
     finally:
         object.__setattr__(settings, "MODE", original_mode)
@@ -790,10 +999,16 @@ def test_resume_succeeds_after_manual_recovery_clears_recovery_required(monkeypa
     assert state.trading_enabled is True
 
 
-def test_halt_resume_flow_requires_manual_recover_order_before_resume(monkeypatch, tmp_path):
+def test_halt_resume_flow_requires_manual_recover_order_before_resume(
+    monkeypatch, tmp_path
+):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
-    _insert_order(status="RECOVERY_REQUIRED", client_order_id="halt_resume_recovery", created_ts=now_ms)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="halt_resume_recovery",
+        created_ts=now_ms,
+    )
 
     runtime_state.disable_trading_until(
         float("inf"),
@@ -813,9 +1028,15 @@ def test_halt_resume_flow_requires_manual_recover_order_before_resume(monkeypatc
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _RecoverSuccessBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoverSuccessBroker(),
+    )
     try:
-        cmd_recover_order(client_order_id="halt_resume_recovery", exchange_order_id="ex_halt_resume_1")
+        cmd_recover_order(
+            client_order_id="halt_resume_recovery",
+            exchange_order_id="ex_halt_resume_1",
+        )
         cmd_resume(force=False)
     finally:
         object.__setattr__(settings, "MODE", original_mode)
@@ -835,7 +1056,9 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
     monkeypatch.setattr("bithumb_bot.app.notify", lambda msg: notifications.append(msg))
     monkeypatch.setattr(
         "bithumb_bot.engine.run_loop",
-        lambda *_args, **_kwargs: run_loop_calls.__setitem__("n", run_loop_calls["n"] + 1),
+        lambda *_args, **_kwargs: run_loop_calls.__setitem__(
+            "n", run_loop_calls["n"] + 1
+        ),
     )
 
     class _RaiseOnEnter:

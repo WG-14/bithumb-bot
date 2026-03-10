@@ -9,7 +9,7 @@ from .oms import get_open_orders, record_status_transition, set_exchange_order_i
 from . import runtime_state
 from .notifier import format_event, notify
 from .observability import safety_event
-from .reason_codes import AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH
+from .reason_codes import AMBIGUOUS_RECENT_FILL, AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH, WEAK_ORDER_CORRELATION
 
 
 LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
@@ -24,6 +24,52 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 
+
+def _strong_order_correlation(*, local_client_order_id: str, local_exchange_order_id: str | None, remote_client_order_id: str | None, remote_exchange_order_id: str | None) -> bool:
+    local_client = str(local_client_order_id or "")
+    local_exchange = str(local_exchange_order_id or "")
+    remote_client = str(remote_client_order_id or "")
+    remote_exchange = str(remote_exchange_order_id or "")
+
+    if local_exchange and remote_exchange and local_exchange == remote_exchange:
+        return True
+    return False
+
+
+def _mark_recovery_required_with_reason(
+    conn,
+    *,
+    client_order_id: str,
+    side: str,
+    from_status: str,
+    reason_code: str,
+    reason: str,
+) -> None:
+    record_status_transition(
+        client_order_id,
+        from_status=from_status,
+        to_status="RECOVERY_REQUIRED",
+        reason=reason,
+        conn=conn,
+    )
+    set_status(
+        client_order_id,
+        "RECOVERY_REQUIRED",
+        last_error=reason,
+        conn=conn,
+    )
+    notify(
+        safety_event(
+            "recovery_required_transition",
+            client_order_id=client_order_id,
+            side=side,
+            status="RECOVERY_REQUIRED",
+            state_from=from_status,
+            state_to="RECOVERY_REQUIRED",
+            reason_code=reason_code,
+            reason=reason,
+        )
+    )
 
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
@@ -127,10 +173,10 @@ def _sync_recent_order_activity(
     trusted_open_exchange_ids: set[str],
 ) -> list[str]:
     local_rows = conn.execute(
-        "SELECT client_order_id, exchange_order_id FROM orders"
+        "SELECT client_order_id, exchange_order_id, side, status FROM orders"
     ).fetchall()
-    by_exchange_id = {str(r["exchange_order_id"]): str(r["client_order_id"]) for r in local_rows if r["exchange_order_id"]}
-    by_client_order_id = {str(r["client_order_id"]): str(r["client_order_id"]) for r in local_rows}
+    by_exchange_id = {str(r["exchange_order_id"]): r for r in local_rows if r["exchange_order_id"]}
+    by_client_order_id = {str(r["client_order_id"]): r for r in local_rows}
 
     conflicts: list[str] = []
 
@@ -148,15 +194,44 @@ def _sync_recent_order_activity(
             )
             continue
 
-        local_id = by_exchange_id.get(remote_exchange_id)
-        if local_id is None and remote_client_order_id:
-            local_id = by_client_order_id.get(remote_client_order_id)
+        local = by_exchange_id.get(remote_exchange_id)
+        weak_match_local = None
+        if local is None and remote_client_order_id:
+            candidate = by_client_order_id.get(remote_client_order_id)
+            if candidate is not None:
+                candidate_exchange = str(candidate["exchange_order_id"] or "")
+                if _strong_order_correlation(
+                    local_client_order_id=str(candidate["client_order_id"]),
+                    local_exchange_order_id=(candidate_exchange or None),
+                    remote_client_order_id=remote_client_order_id,
+                    remote_exchange_order_id=(remote_exchange_id or None),
+                ):
+                    local = candidate
+                else:
+                    weak_match_local = candidate
 
-        if local_id:
+        if local is not None:
+            local_id = str(local["client_order_id"])
             if remote_exchange_id:
                 set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
-                by_exchange_id[remote_exchange_id] = local_id
+                refreshed = conn.execute(
+                    "SELECT client_order_id, exchange_order_id, side, status FROM orders WHERE client_order_id=?",
+                    (local_id,),
+                ).fetchone()
+                if refreshed is not None and refreshed["exchange_order_id"]:
+                    by_exchange_id[str(refreshed["exchange_order_id"])] = refreshed
             set_status(local_id, remote.status, conn=conn)
+            continue
+
+        if weak_match_local is not None:
+            _mark_recovery_required_with_reason(
+                conn,
+                client_order_id=str(weak_match_local["client_order_id"]),
+                side=str(weak_match_local["side"]),
+                from_status=str(weak_match_local["status"]),
+                reason_code=WEAK_ORDER_CORRELATION,
+                reason="recent order matched only weakly by client_order_id; manual recovery required",
+            )
             continue
 
         _record_unmatched_recent_activity(
@@ -179,7 +254,7 @@ def _apply_recent_fills(
     trusted_open_exchange_ids: set[str],
 ) -> tuple[bool, list[str]]:
     local_rows = conn.execute(
-        "SELECT client_order_id, exchange_order_id, side, qty_req, qty_filled FROM orders"
+        "SELECT client_order_id, exchange_order_id, side, status, qty_req, qty_filled FROM orders"
     ).fetchall()
     by_exchange_id = {str(r["exchange_order_id"]): r for r in local_rows if r["exchange_order_id"]}
     by_client_order_id = {str(r["client_order_id"]): r for r in local_rows}
@@ -196,10 +271,33 @@ def _apply_recent_fills(
             continue
 
         local = by_exchange_id.get(remote_exchange_id)
+        weak_match_client_order_id: str | None = None
         if local is None and remote_client_order_id:
-            local = by_client_order_id.get(remote_client_order_id)
+            local_by_client = by_client_order_id.get(remote_client_order_id)
+            if local_by_client is not None:
+                local_exchange = str(local_by_client["exchange_order_id"] or "")
+                if _strong_order_correlation(
+                    local_client_order_id=str(local_by_client["client_order_id"]),
+                    local_exchange_order_id=(local_exchange or None),
+                    remote_client_order_id=remote_client_order_id,
+                    remote_exchange_order_id=(remote_exchange_id or None),
+                ):
+                    local = local_by_client
+                else:
+                    weak_match_client_order_id = str(local_by_client["client_order_id"])
 
         if local is None:
+            if weak_match_client_order_id:
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=weak_match_client_order_id,
+                    side=str(local_by_client["side"]),
+                    from_status=str(local_by_client["status"]),
+                    reason_code=AMBIGUOUS_RECENT_FILL,
+                    reason="recent fill matched only weakly by client_order_id; manual recovery required",
+                )
+                applied = False
+                continue
             _record_unmatched_recent_activity(
                 conn,
                 exchange_order_id=(remote_exchange_id or None),
@@ -277,27 +375,43 @@ def _try_resolve_submit_unknown_from_recent_activity(
 ) -> tuple[bool, bool]:
     client_order_id = str(row["client_order_id"])
     side = str(row["side"])
+    local_exchange_order_id = str(row["exchange_order_id"] or "")
 
     matched_exchange_order_id: str | None = None
     matched_order: BrokerOrder | None = None
 
     for remote in recent_orders:
         remote_client_order_id = str(remote.client_order_id or "")
-        if remote_client_order_id != client_order_id:
+        remote_exchange_order_id = str(remote.exchange_order_id or "")
+        if not _strong_order_correlation(
+            local_client_order_id=client_order_id,
+            local_exchange_order_id=local_exchange_order_id or None,
+            remote_client_order_id=remote_client_order_id or None,
+            remote_exchange_order_id=remote_exchange_order_id or None,
+        ):
             continue
         matched_order = remote
-        if remote.exchange_order_id:
-            matched_exchange_order_id = str(remote.exchange_order_id)
+        if remote_exchange_order_id:
+            matched_exchange_order_id = remote_exchange_order_id
         break
 
     matched_fills: list[BrokerFill] = []
     for fill in recent_fills:
         remote_client_order_id = str(fill.client_order_id or "")
-        if remote_client_order_id != client_order_id:
+        remote_exchange_order_id = str(fill.exchange_order_id or "")
+        if not _strong_order_correlation(
+            local_client_order_id=client_order_id,
+            local_exchange_order_id=local_exchange_order_id or None,
+            remote_client_order_id=remote_client_order_id or None,
+            remote_exchange_order_id=remote_exchange_order_id or None,
+        ):
             continue
         matched_fills.append(fill)
-        if matched_exchange_order_id is None and fill.exchange_order_id:
-            matched_exchange_order_id = str(fill.exchange_order_id)
+        if matched_exchange_order_id is None and remote_exchange_order_id:
+            matched_exchange_order_id = remote_exchange_order_id
+
+    if matched_order is None and not matched_fills:
+        return False, False
 
     if matched_exchange_order_id:
         set_exchange_order_id(client_order_id, matched_exchange_order_id, conn=conn)
@@ -311,9 +425,6 @@ def _try_resolve_submit_unknown_from_recent_activity(
                 reason="reconcile_recent_activity",
             )
         )
-
-    if matched_order is None and not matched_fills:
-        return False, False
 
     applied_fill = False
     for fill in matched_fills:
@@ -400,34 +511,17 @@ def reconcile_with_broker(broker: Broker) -> None:
                         if reason_code == REASON_RECONCILE_OK:
                             reason_code = REASON_RECENT_FILL_APPLIED
                     continue
-                reason = "submit_unknown without exchange_order_id; manual recovery required"
-                record_status_transition(
-                    oid,
+                reason = "submit_unknown without strong recent correlation; manual recovery required"
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
                     from_status="SUBMIT_UNKNOWN",
-                    to_status="RECOVERY_REQUIRED",
+                    reason_code=WEAK_ORDER_CORRELATION,
                     reason=reason,
-                    conn=conn,
-                )
-                set_status(
-                    oid,
-                    "RECOVERY_REQUIRED",
-                    last_error=reason,
-                    conn=conn,
                 )
                 metadata["submit_unknown_unresolved"] += 1
                 reason_code = REASON_SUBMIT_UNKNOWN_UNRESOLVED
-                notify(
-                    safety_event(
-                        "recovery_required_transition",
-                        client_order_id=oid,
-                        side=row["side"],
-                        status="RECOVERY_REQUIRED",
-                        state_from="SUBMIT_UNKNOWN",
-                        state_to="RECOVERY_REQUIRED",
-                        reason_code=AMBIGUOUS_SUBMIT,
-                        reason=reason,
-                    )
-                )
                 continue
 
             remote = broker.get_order(client_order_id=oid, exchange_order_id=row["exchange_order_id"])

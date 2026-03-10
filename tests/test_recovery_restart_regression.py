@@ -231,7 +231,7 @@ def test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocke
     assert state.unresolved_open_order_count == 1
 
 
-def test_submit_unknown_without_exchange_id_resolves_from_recent_fill_on_restart(isolated_db):
+def test_submit_unknown_ambiguous_remote_fill_on_restart_escalates(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
         record_order_if_missing(
@@ -258,13 +258,15 @@ def test_submit_unknown_without_exchange_id_resolves_from_recent_fill_on_restart
         conn.close()
 
     assert row is not None
-    assert row["status"] == "FILLED"
-    assert row["exchange_order_id"] == "ex-submit-unknown-fill"
-    assert float(row["qty_filled"]) == pytest.approx(1.0)
-    assert evaluate_startup_safety_gate() is None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    gate_reason = evaluate_startup_safety_gate()
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
 
 
-def test_submit_unknown_recent_fill_restart_path_applies_fill_and_clears_unresolved_state(isolated_db):
+def test_submit_unknown_recent_fill_restart_path_escalates_instead_of_silent_resolution(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
         record_order_if_missing(
@@ -295,15 +297,17 @@ def test_submit_unknown_recent_fill_restart_path_applies_fill_and_clears_unresol
 
     state = runtime_state.snapshot()
     assert row is not None
-    assert row["status"] == "FILLED"
-    assert row["exchange_order_id"] == "ex-submit-unknown-fill"
-    assert row["last_error"] is None
-    assert fill_count == 1
-    assert evaluate_startup_safety_gate() is None
-    assert state.unresolved_open_order_count == 0
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert fill_count == 0
+    gate_reason = evaluate_startup_safety_gate()
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
+    assert state.unresolved_open_order_count == 1
 
 
-def test_submit_unknown_without_exchange_id_resolves_from_recent_order_on_restart(isolated_db):
+def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
         record_order_if_missing(
@@ -330,12 +334,14 @@ def test_submit_unknown_without_exchange_id_resolves_from_recent_order_on_restar
         conn.close()
 
     assert row is not None
-    assert row["status"] == "CANCELED"
-    assert row["exchange_order_id"] == "ex-submit-unknown-order"
-    assert evaluate_startup_safety_gate() is None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    gate_reason = evaluate_startup_safety_gate()
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
 
 
-def test_submit_unknown_recent_order_restart_path_avoids_manual_recovery_and_clears_gate(isolated_db):
+def test_submit_unknown_recent_order_restart_path_escalates_to_manual_recovery(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
         record_order_if_missing(
@@ -363,11 +369,13 @@ def test_submit_unknown_recent_order_restart_path_avoids_manual_recovery_and_cle
 
     state = runtime_state.snapshot()
     assert row is not None
-    assert row["status"] == "CANCELED"
-    assert row["exchange_order_id"] == "ex-submit-unknown-order"
-    assert row["last_error"] is None
-    assert evaluate_startup_safety_gate() is None
-    assert state.unresolved_open_order_count == 0
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    gate_reason = evaluate_startup_safety_gate()
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
+    assert state.unresolved_open_order_count == 1
 
 
 def test_ambiguous_submit_persists_across_restart_until_reconcile_runs(isolated_db):
@@ -397,8 +405,9 @@ def test_ambiguous_submit_persists_across_restart_until_reconcile_runs(isolated_
 
     startup_blocker_after_reconcile = evaluate_startup_safety_gate()
     state_after = runtime_state.snapshot()
-    assert startup_blocker_after_reconcile is None
-    assert state_after.unresolved_open_order_count == 0
+    assert startup_blocker_after_reconcile is not None
+    assert "recovery_required_orders=1" in startup_blocker_after_reconcile
+    assert state_after.unresolved_open_order_count == 1
 
 
 
