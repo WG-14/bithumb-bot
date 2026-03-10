@@ -19,3 +19,6 @@ data/
 *.egg-info/
 .pytest-order.txt
 tmp/*.db
+
+.venv-linux/
+.venv-linux-313/

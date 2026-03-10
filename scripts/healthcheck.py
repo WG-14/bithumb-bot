@@ -5,6 +5,7 @@ import os
 import time
 
 from bithumb_bot.notifier import notify
+from bithumb_bot.run_lock import read_run_lock_status
 from bithumb_bot.runtime_state import refresh_open_order_health, snapshot
 
 
@@ -16,6 +17,9 @@ def main() -> int:
     unresolved_age_threshold_sec = float(os.getenv("HEALTH_MAX_UNRESOLVED_ORDER_AGE_SEC", "900"))
 
     refresh_open_order_health()
+    lock_status = read_run_lock_status()
+    print(f"[HEALTHCHECK] RUN_LOCK {lock_status.to_human_text()}")
+
     state = snapshot()
     health = {
         "last_candle_age_sec": state.last_candle_age_sec,

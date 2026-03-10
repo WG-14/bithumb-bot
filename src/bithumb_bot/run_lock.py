@@ -38,6 +38,31 @@ class _LockFileState:
         )
 
 
+@dataclass(frozen=True)
+class RunLockStatus:
+    lock_path: Path
+    owner_pid: int | None
+    age_seconds: float | None
+    is_stale_candidate: bool
+
+    @property
+    def owner_state_text(self) -> str:
+        if self.owner_pid is None:
+            return "stale candidate" if self.is_stale_candidate else "unknown owner"
+        if _pid_is_running(self.owner_pid):
+            return "live owner"
+        return "stale candidate" if self.is_stale_candidate else "dead owner"
+
+    def to_human_text(self) -> str:
+        owner_text = str(self.owner_pid) if self.owner_pid is not None else "unknown"
+        age_text = f"{self.age_seconds:.1f}s" if self.age_seconds is not None else "unknown"
+        stale_text = "yes" if self.is_stale_candidate else "no"
+        return (
+            f"path={self.lock_path} owner_pid={owner_text} age={age_text} "
+            f"stale_candidate={stale_text} ({self.owner_state_text})"
+        )
+
+
 def _default_lock_path() -> Path:
     return Path(tempfile.gettempdir()) / "bithumb-bot-run.lock"
 
@@ -74,6 +99,31 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
         age_seconds = None
 
     return _LockFileState(pid=pid, age_seconds=age_seconds, owner_text=owner_text)
+
+
+def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
+    path = lock_path or _default_lock_path()
+
+    if not path.exists():
+        return RunLockStatus(
+            lock_path=path,
+            owner_pid=None,
+            age_seconds=None,
+            is_stale_candidate=False,
+        )
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        state = _read_lock_file_state(path, fd)
+    finally:
+        os.close(fd)
+
+    return RunLockStatus(
+        lock_path=path,
+        owner_pid=state.pid,
+        age_seconds=state.age_seconds,
+        is_stale_candidate=state.is_stale_candidate,
+    )
 
 
 @contextmanager
