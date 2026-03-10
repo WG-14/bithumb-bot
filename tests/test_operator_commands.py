@@ -762,10 +762,36 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     out = capsys.readouterr().out
 
     assert "[RISK-SNAPSHOT]" in out
-    assert "unresolved_open_order_count=4 recovery_required_count=2" in out
-    assert "halt_state=blocked:1,unresolved:1,reason_code:PERIODIC_RECONCILE_FAILED" in out
-    assert "reconcile_state=status:error,reason_code:RECONCILE_TIMEOUT,last_error:timeout" in out
+    assert "unresolved_open_order_count=4 recovery_required_count=2 submit_unknown_count=0" in out
+    assert "current_halt_reason=code=PERIODIC_RECONCILE_FAILED reason=periodic reconcile failed" in out
+    assert "reconcile_latest=epoch_sec=1000.0 status=error reason_code=RECONCILE_TIMEOUT" in out
 
+
+
+
+def test_recovery_report_includes_submit_unknown_count(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="su_1", created_ts=now_ms - 10_000)
+
+    report = _load_recovery_report()
+
+    assert int(report["submit_unknown_count"]) == 1
+
+
+def test_resume_refusal_prints_explicit_blocking_reasons_header(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="needs_recovery", created_ts=now_ms)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+
+    with pytest.raises(SystemExit):
+        cmd_resume(force=False)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused:" in out
+    assert "blocking_reasons:" in out
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
 
 def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     _set_tmp_db(tmp_path)
@@ -811,6 +837,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "recommended_command",
         "recovery_required_count",
         "recovery_required_summary",
+        "submit_unknown_count",
         "resume_blocked_reason",
         "resume_allowed",
         "risk_level",

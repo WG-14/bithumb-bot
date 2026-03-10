@@ -346,25 +346,42 @@ def cmd_run(short_n: int, long_n: int):
 def cmd_health() -> None:
     refresh_open_order_health()
     health = get_health_status()
+    submit_unknown_count = 0
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS submit_unknown_count FROM orders WHERE status='SUBMIT_UNKNOWN'"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is not None:
+        submit_unknown_count = int(row["submit_unknown_count"] or 0)
+
+    current_halt_reason = "none"
+    if health["halt_reason_code"] or health["last_disable_reason"]:
+        current_halt_reason = (
+            f"code={health['halt_reason_code'] or '-'} "
+            f"reason={health['last_disable_reason'] or '-'}"
+        )
+
+    reconcile_latest = "none"
+    if health["last_reconcile_status"]:
+        reconcile_latest = (
+            f"epoch_sec={health['last_reconcile_epoch_sec'] if health['last_reconcile_epoch_sec'] is not None else '-'} "
+            f"status={health['last_reconcile_status']} "
+            f"reason_code={health['last_reconcile_reason_code'] or '-'}"
+        )
+
     print("[HEALTH]")
     print("  [RISK-SNAPSHOT]")
     print(
         "    "
         f"unresolved_open_order_count={health['unresolved_open_order_count']} "
-        f"recovery_required_count={health['recovery_required_count']}"
+        f"recovery_required_count={health['recovery_required_count']} "
+        f"submit_unknown_count={submit_unknown_count}"
     )
-    print(
-        "    "
-        f"halt_state=blocked:{1 if bool(health['halt_new_orders_blocked']) else 0},"
-        f"unresolved:{1 if bool(health['halt_state_unresolved']) else 0},"
-        f"reason_code:{health['halt_reason_code'] or '-'}"
-    )
-    print(
-        "    "
-        f"reconcile_state=status:{health['last_reconcile_status'] or '-'},"
-        f"reason_code:{health['last_reconcile_reason_code'] or '-'},"
-        f"last_error:{health['last_reconcile_error'] or '-'}"
-    )
+    print(f"    current_halt_reason={current_halt_reason}")
+    print(f"    reconcile_latest={reconcile_latest}")
     print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")
@@ -652,6 +669,9 @@ def _load_recovery_report(
         recovery_required_row = conn.execute(
             "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
         ).fetchone()
+        submit_unknown_row = conn.execute(
+            "SELECT COUNT(*) AS submit_unknown_count FROM orders WHERE status='SUBMIT_UNKNOWN'"
+        ).fetchone()
         oldest_rows = conn.execute(
             f"""
             SELECT client_order_id, status, exchange_order_id, created_ts, last_error
@@ -692,6 +712,7 @@ def _load_recovery_report(
 
     unresolved_count = int(unresolved_row["unresolved_count"] if unresolved_row else 0)
     recovery_required_count = int(recovery_required_row["recovery_required_count"] if recovery_required_row else 0)
+    submit_unknown_count = int(submit_unknown_row["submit_unknown_count"] if submit_unknown_row else 0)
 
     oldest_created_ts = unresolved_row["oldest_created_ts"] if unresolved_row else None
     oldest_age_sec = None
@@ -733,6 +754,7 @@ def _load_recovery_report(
             f"reason_code={health_row['last_reconcile_reason_code'] or '-'}",
         ]
         if health_row["last_reconcile_epoch_sec"] is not None:
+            pieces.append(f"epoch_sec={float(health_row['last_reconcile_epoch_sec']):.3f}")
             pieces.append(f"age_sec={max(0.0, time.time() - float(health_row['last_reconcile_epoch_sec'])):.1f}")
         if health_row["last_reconcile_error"]:
             pieces.append(f"error={health_row['last_reconcile_error']}")
@@ -814,6 +836,7 @@ def _load_recovery_report(
     return {
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
+        "submit_unknown_count": submit_unknown_count,
         "oldest_unresolved_age_sec": oldest_age_sec,
         "oldest_orders": oldest_orders,
         "last_reconcile_summary": last_reconcile_summary,
@@ -848,6 +871,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P1] order_recovery_status")
     print(f"    unresolved_count={report['unresolved_count']}")
     print(f"    recovery_required_count={report['recovery_required_count']}")
+    print(f"    submit_unknown_count={report['submit_unknown_count']}")
     print("  [P2] resume_eligibility")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
@@ -919,6 +943,7 @@ def cmd_resume(force: bool = False) -> None:
 
     if (not eligible) and (not force):
         print("[RESUME] refused:")
+        print("  blocking_reasons:")
         for blocker in resume_blocks:
             print(
                 "  - "
