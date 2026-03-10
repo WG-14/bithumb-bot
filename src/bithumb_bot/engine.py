@@ -16,9 +16,9 @@ from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import safety_event
-from .reason_codes import CANCEL_FAILURE, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
+from .reason_codes import CANCEL_FAILURE, POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
 from . import runtime_state
-from .risk import evaluate_daily_loss_breach
+from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
 from .oms import collect_risky_order_state
 
 
@@ -663,6 +663,18 @@ def run_loop(short_n: int, long_n: int) -> None:
                             _halt_trading(
                                 _halt_reason("DAILY_LOSS_LIMIT", f"{reason}; {suffix}"),
                                 unresolved=not canceled_ok,
+                            )
+                            continue
+
+                        blocked, reason = evaluate_position_loss_breach(
+                            conn,
+                            qty=float(portfolio["asset_qty"]),
+                            price=float(last_close),
+                        )
+                        if blocked:
+                            _halt_trading(
+                                _halt_reason(POSITION_LOSS_LIMIT, reason),
+                                unresolved=False,
                             )
                             continue
                 finally:

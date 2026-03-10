@@ -184,6 +184,10 @@ def _prepare_run_loop(monkeypatch, *, open_order_created_ts: int | None = None) 
         "bithumb_bot.engine.evaluate_daily_loss_breach",
         lambda *_args, **_kwargs: (False, "ok"),
     )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_position_loss_breach",
+        lambda *_args, **_kwargs: (False, "ok"),
+    )
 
     ticks = iter([10.0, 11.0])
     monkeypatch.setattr("bithumb_bot.engine.time.time", lambda: next(ticks, 11.0))
@@ -590,3 +594,60 @@ def test_health_status_contains_runtime_flags():
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
+
+
+def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_position_loss_breach",
+        lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.retry_at_epoch_sec == float("inf")
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "POSITION_LOSS_LIMIT"
+    assert state.last_disable_reason is not None
+    assert "position loss threshold breached" in state.last_disable_reason
+
+
+def test_run_loop_position_loss_breach_blocks_new_orders(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_position_loss_breach",
+        lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
+    )
+
+    called = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+
+    run_loop(5, 20)
+
+    assert called["n"] == 0
+
+
+def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_position_loss_breach",
+        lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
+    )
+
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
+    run_loop(5, 20)
+
+    assert any("event=trading_halted" in n and "reason_code=POSITION_LOSS_LIMIT" in n for n in notifications)

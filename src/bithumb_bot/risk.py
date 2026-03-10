@@ -109,6 +109,57 @@ def evaluate_daily_loss_breach(
     return _daily_loss_exceeded(conn, ts_ms, cash, qty, price)
 
 
+
+
+def _latest_position_entry_price(conn: sqlite3.Connection) -> float | None:
+    row = conn.execute(
+        """
+        SELECT price
+        FROM trades
+        WHERE side='BUY'
+        ORDER BY ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    v = row["price"] if hasattr(row, "keys") else row[0]
+    if v is None:
+        return None
+    price = float(v)
+    if not price > 0:
+        return None
+    return price
+
+
+def evaluate_position_loss_breach(
+    conn: sqlite3.Connection,
+    *,
+    qty: float,
+    price: float,
+) -> tuple[bool, str]:
+    if settings.MAX_POSITION_LOSS_PCT <= 0:
+        return False, "ok"
+    if float(qty) <= POSITION_EPSILON:
+        return False, "ok"
+    if float(price) <= 0:
+        return False, "ok"
+
+    entry_price = _latest_position_entry_price(conn)
+    if entry_price is None:
+        return False, "ok"
+
+    loss_pct = max(0.0, ((entry_price - float(price)) / entry_price) * 100.0)
+    threshold_pct = float(settings.MAX_POSITION_LOSS_PCT)
+    if loss_pct >= threshold_pct:
+        return (
+            True,
+            "position loss threshold breached "
+            f"({loss_pct:.2f}%/{threshold_pct:.2f}%, entry={entry_price:,.0f}, mark={float(price):,.0f})",
+        )
+
+    return False, "ok"
+
 def evaluate_order_submission_halt(
     conn: sqlite3.Connection,
     *,
@@ -126,6 +177,14 @@ def evaluate_order_submission_halt(
         conn,
         ts_ms=ts_ms,
         cash=cash,
+        qty=qty,
+        price=price,
+    )
+    if blocked:
+        return True, reason
+
+    blocked, reason = evaluate_position_loss_breach(
+        conn,
         qty=qty,
         price=price,
     )
