@@ -214,6 +214,7 @@ def record_submit_attempt(
     timeout_flag: bool,
     exchange_order_id_obtained: bool,
     order_status: str,
+    submit_attempt_id: str,
     conn: sqlite3.Connection,
 ) -> None:
     _record_order_event(
@@ -226,6 +227,7 @@ def record_submit_attempt(
         price=price,
         symbol=symbol,
         side=side,
+        submit_attempt_id=submit_attempt_id,
         submit_ts=submit_ts,
         payload_fingerprint=payload_fingerprint,
         broker_response_summary=broker_response_summary,

@@ -253,6 +253,40 @@ def _block_new_submission_for_unresolved_risk(
     )
 
 
+def _record_submit_attempt_result(
+    *,
+    conn,
+    client_order_id: str,
+    submit_attempt_id: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    ts: int,
+    payload_hash: str,
+    order_status: str,
+    broker_response_summary: str,
+    exception_class: str | None,
+    timeout_flag: bool,
+    exchange_order_id_obtained: bool,
+) -> None:
+    record_submit_attempt(
+        conn=conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        price=None,
+        submit_ts=ts,
+        payload_fingerprint=payload_hash,
+        broker_response_summary=broker_response_summary,
+        exception_class=exception_class,
+        timeout_flag=timeout_flag,
+        exchange_order_id_obtained=exchange_order_id_obtained,
+        order_status=order_status,
+    )
+
+
 def _submit_via_standard_path(
     *,
     conn,
@@ -294,40 +328,40 @@ def _submit_via_standard_path(
     except BrokerTemporaryError as e:
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
         _mark_submit_unknown(conn=conn, client_order_id=client_order_id, side=side, reason=str(err))
-        record_submit_attempt(
+        _record_submit_attempt_result(
             conn=conn,
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
             symbol=symbol,
             side=side,
             qty=qty,
-            price=None,
-            submit_ts=ts,
-            payload_fingerprint=payload_hash,
-            broker_response_summary=None,
+            ts=ts,
+            payload_hash=payload_hash,
+            order_status="SUBMIT_UNKNOWN",
+            broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
             exception_class=type(e).__name__,
             timeout_flag=True,
             exchange_order_id_obtained=False,
-            order_status="SUBMIT_UNKNOWN",
         )
         conn.commit()
         return None
     except Exception as e:
         reason = f"submit failed: {type(e).__name__}: {e}"
         _mark_submit_failed(conn=conn, client_order_id=client_order_id, side=side, reason=reason)
-        record_submit_attempt(
+        _record_submit_attempt_result(
             conn=conn,
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
             symbol=symbol,
             side=side,
             qty=qty,
-            price=None,
-            submit_ts=ts,
-            payload_fingerprint=payload_hash,
-            broker_response_summary=None,
+            ts=ts,
+            payload_hash=payload_hash,
+            order_status="FAILED",
+            broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
             exception_class=type(e).__name__,
             timeout_flag=False,
             exchange_order_id_obtained=False,
-            order_status="FAILED",
         )
         conn.commit()
         return None
@@ -343,49 +377,48 @@ def _submit_via_standard_path(
                 status=order.status,
             )
         )
-    set_status(client_order_id, order.status, conn=conn)
-
     if not order.exchange_order_id:
-        reason = "submit acknowledged without exchange_order_id; manual recovery required"
-        _mark_recovery_required(
+        reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
+        _mark_submit_unknown(
             conn=conn,
             client_order_id=client_order_id,
             side=side,
-            from_status=order.status,
             reason=reason,
         )
-        record_submit_attempt(
+        _record_submit_attempt_result(
             conn=conn,
             client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
             symbol=symbol,
             side=side,
             qty=qty,
-            price=None,
-            submit_ts=ts,
-            payload_fingerprint=payload_hash,
-            broker_response_summary=f"status={order.status};exchange_order_id=-",
+            ts=ts,
+            payload_hash=payload_hash,
+            order_status="SUBMIT_UNKNOWN",
+            broker_response_summary=f"broker_status={order.status};exchange_order_id=-",
             exception_class=None,
-            timeout_flag=False,
+            timeout_flag=True,
             exchange_order_id_obtained=False,
-            order_status="RECOVERY_REQUIRED",
         )
         conn.commit()
         return None
 
-    record_submit_attempt(
+    set_status(client_order_id, order.status, conn=conn)
+
+    _record_submit_attempt_result(
         conn=conn,
         client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
         symbol=symbol,
         side=side,
         qty=qty,
-        price=None,
-        submit_ts=ts,
-        payload_fingerprint=payload_hash,
-        broker_response_summary=f"status={order.status};exchange_order_id={order.exchange_order_id}",
+        ts=ts,
+        payload_hash=payload_hash,
+        order_status=order.status,
+        broker_response_summary=f"broker_status={order.status};exchange_order_id={order.exchange_order_id}",
         exception_class=None,
         timeout_flag=False,
         exchange_order_id_obtained=True,
-        order_status=order.status,
     )
     conn.commit()
     return order
