@@ -220,6 +220,45 @@ def test_submit_unknown_without_exchange_id_resolves_from_recent_fill_on_restart
     assert evaluate_startup_safety_gate() is None
 
 
+def test_submit_unknown_recent_fill_restart_path_applies_fill_and_clears_unresolved_state(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentFillBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) FROM fills WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    state = runtime_state.snapshot()
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex-submit-unknown-fill"
+    assert row["last_error"] is None
+    assert fill_count == 1
+    assert evaluate_startup_safety_gate() is None
+    assert state.unresolved_open_order_count == 0
+
+
 def test_submit_unknown_without_exchange_id_resolves_from_recent_order_on_restart(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
@@ -250,6 +289,41 @@ def test_submit_unknown_without_exchange_id_resolves_from_recent_order_on_restar
     assert row["status"] == "CANCELED"
     assert row["exchange_order_id"] == "ex-submit-unknown-order"
     assert evaluate_startup_safety_gate() is None
+
+
+def test_submit_unknown_recent_order_restart_path_avoids_manual_recovery_and_clears_gate(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentOrderBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    state = runtime_state.snapshot()
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert row["exchange_order_id"] == "ex-submit-unknown-order"
+    assert row["last_error"] is None
+    assert evaluate_startup_safety_gate() is None
+    assert state.unresolved_open_order_count == 0
 
 
 

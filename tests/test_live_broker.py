@@ -1010,6 +1010,37 @@ def test_reconcile_submit_unknown_without_exchange_id_resolves_from_recent_fill(
     assert fill is not None
 
 
+def test_reconcile_submit_unknown_recent_fill_path_sets_filled_without_recovery_required(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_recent_fill_transition.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db(str(tmp_path / "submit_unknown_recent_fill_transition.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('ambiguous_missing_exid',NULL,'SUBMIT_UNKNOWN','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentFillBroker())
+
+    conn = ensure_db(str(tmp_path / "submit_unknown_recent_fill_transition.sqlite"))
+    row = conn.execute(
+        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='ambiguous_missing_exid'"
+    ).fetchone()
+    fill = conn.execute(
+        "SELECT fill_id FROM fills WHERE client_order_id='ambiguous_missing_exid'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex_submit_unknown_fill"
+    assert row["last_error"] is None
+    assert fill is not None
+
+
 def test_reconcile_submit_unknown_without_exchange_id_resolves_from_recent_order(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_recent_order.sqlite"))
     conn = ensure_db(str(tmp_path / "submit_unknown_recent_order.sqlite"))
@@ -1033,6 +1064,32 @@ def test_reconcile_submit_unknown_without_exchange_id_resolves_from_recent_order
     assert row is not None
     assert row["status"] == "CANCELED"
     assert row["exchange_order_id"] == "ex_submit_unknown_order"
+
+
+def test_reconcile_submit_unknown_recent_order_path_does_not_fallback_to_recovery_required(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_recent_order_no_recovery.sqlite"))
+    conn = ensure_db(str(tmp_path / "submit_unknown_recent_order_no_recovery.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('ambiguous_missing_exid',NULL,'SUBMIT_UNKNOWN','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentOrderBroker())
+
+    conn = ensure_db(str(tmp_path / "submit_unknown_recent_order_no_recovery.sqlite"))
+    row = conn.execute(
+        "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='ambiguous_missing_exid'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert row["exchange_order_id"] == "ex_submit_unknown_order"
+    assert row["last_error"] is None
 
 
 def test_reconcile_recovers_known_local_order_from_recent_activity(tmp_path):

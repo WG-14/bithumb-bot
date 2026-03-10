@@ -204,6 +204,7 @@ def test_resume_force_refuses_when_last_reconcile_failed(tmp_path, capsys):
     assert "[RESUME] refused: force override denied" in out
     assert "code=LAST_RECONCILE_FAILED" in out
     assert "overridable=0" in out
+    assert "reason_code=PERIODIC_RECONCILE_FAILED" in out
     assert exc.value.code == 1
 
 
@@ -220,7 +221,27 @@ def test_resume_force_refuses_when_startup_safety_gate_blocked(tmp_path, capsys)
     assert "[RESUME] refused: force override denied" in out
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "overridable=0" in out
+    assert "recovery_required_orders=1" in out
     assert exc.value.code == 1
+
+
+def test_resume_force_rejects_startup_blocker_before_clearing_manual_pause(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="still_open_on_startup", created_ts=now_ms)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=True)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused: force override denied" in out
+    assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
+    assert "unresolved_open_orders=1" in out
+    assert "manual operator pause" not in out
+    assert exc.value.code == 1
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
 
 
 def test_resume_force_refuses_when_halt_state_unresolved(tmp_path, capsys):
@@ -240,6 +261,27 @@ def test_resume_force_refuses_when_halt_state_unresolved(tmp_path, capsys):
     assert "[RESUME] refused: force override denied" in out
     assert "code=HALT_STATE_UNRESOLVED" in out
     assert "overridable=0" in out
+    assert exc.value.code == 1
+
+
+def test_resume_force_rejects_initial_reconcile_failure_with_operator_readable_reason(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="initial reconcile failed (RuntimeError): broker timeout",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=True)
+
+    out = capsys.readouterr().out
+    assert "[RESUME] refused: force override denied" in out
+    assert "code=HALT_STATE_UNRESOLVED" in out
+    assert "INITIAL_RECONCILE_FAILED" in out
+    assert "broker timeout" in out
     assert exc.value.code == 1
 
 
