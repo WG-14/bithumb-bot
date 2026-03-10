@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import logging
 import os
+import socket
 import tempfile
 import time
 from typing import Iterator
@@ -26,6 +28,8 @@ STALE_LOCK_MAX_AGE_SECONDS = 60 * 10
 @dataclass
 class _LockFileState:
     pid: int | None
+    hostname: str | None
+    created_at: str | None
     age_seconds: float | None
     owner_text: str | None
 
@@ -42,6 +46,8 @@ class _LockFileState:
 class RunLockStatus:
     lock_path: Path
     owner_pid: int | None
+    owner_hostname: str | None
+    created_at: str | None
     age_seconds: float | None
     is_stale_candidate: bool
 
@@ -55,10 +61,13 @@ class RunLockStatus:
 
     def to_human_text(self) -> str:
         owner_text = str(self.owner_pid) if self.owner_pid is not None else "unknown"
+        host_text = self.owner_hostname or "unknown"
+        created_text = self.created_at or "unknown"
         age_text = f"{self.age_seconds:.1f}s" if self.age_seconds is not None else "unknown"
         stale_text = "yes" if self.is_stale_candidate else "no"
         return (
-            f"path={self.lock_path} owner_pid={owner_text} age={age_text} "
+            f"path={self.lock_path} owner_pid={owner_text} host={host_text} "
+            f"created_at={created_text} age={age_text} "
             f"stale_candidate={stale_text} ({self.owner_state_text})"
         )
 
@@ -79,8 +88,39 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
+def _parse_lock_owner_text(raw: str) -> tuple[int | None, str | None, str | None]:
+    value = raw.strip()
+    if not value:
+        return None, None, None
+
+    # Backward-compatible legacy format: "<pid>".
+    try:
+        return int(value), None, None
+    except ValueError:
+        pass
+
+    fields: dict[str, str] = {}
+    for token in value.split():
+        if "=" not in token:
+            continue
+        key, field_value = token.split("=", 1)
+        fields[key] = field_value
+
+    pid: int | None = None
+    pid_raw = fields.get("pid")
+    if pid_raw:
+        try:
+            pid = int(pid_raw)
+        except ValueError:
+            pid = None
+
+    return pid, fields.get("host"), fields.get("created_at")
+
+
 def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     pid: int | None = None
+    hostname: str | None = None
+    created_at: str | None = None
     age_seconds: float | None = None
     owner_text: str | None = None
 
@@ -88,8 +128,8 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
         raw = os.pread(fd, 256, 0).decode("utf-8", errors="ignore").strip()
         if raw:
             owner_text = raw
-            pid = int(raw)
-    except (ValueError, OSError):
+            pid, hostname, created_at = _parse_lock_owner_text(raw)
+    except OSError:
         pid = None
 
     try:
@@ -98,7 +138,13 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     except OSError:
         age_seconds = None
 
-    return _LockFileState(pid=pid, age_seconds=age_seconds, owner_text=owner_text)
+    return _LockFileState(
+        pid=pid,
+        hostname=hostname,
+        created_at=created_at,
+        age_seconds=age_seconds,
+        owner_text=owner_text,
+    )
 
 
 def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
@@ -108,6 +154,8 @@ def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
         return RunLockStatus(
             lock_path=path,
             owner_pid=None,
+            owner_hostname=None,
+            created_at=None,
             age_seconds=None,
             is_stale_candidate=False,
         )
@@ -121,6 +169,8 @@ def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
     return RunLockStatus(
         lock_path=path,
         owner_pid=state.pid,
+        owner_hostname=state.hostname,
+        created_at=state.created_at,
         age_seconds=state.age_seconds,
         is_stale_candidate=state.is_stale_candidate,
     )
@@ -142,28 +192,39 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
         except BlockingIOError as exc:
             state = _read_lock_file_state(path, fd)
             owner_pid = state.pid if state.pid is not None else "unknown"
+            owner_host = state.hostname or "unknown"
+            owner_created_at = state.created_at or "unknown"
+            owner_age = f"{state.age_seconds:.0f}s" if state.age_seconds is not None else "unknown"
             stale_hint = ""
             if state.is_stale_candidate:
                 stale_hint = (
                     "; stale lock candidate detected "
-                    f"(owner={state.owner_text or 'unknown'}, age={state.age_seconds:.0f}s). "
+                    f"(owner={state.owner_text or 'unknown'}, age={owner_age}). "
                     "Auto-reclaim is only allowed when lock acquisition succeeds"
                 )
             raise RunLockError(
-                "another bot run loop is already running "
-                f"(lock: {path}, owner_pid={owner_pid}){stale_hint}"
+                "another bot run loop is already running. "
+                "If this looks stale, wait for current run to exit or inspect lock owner details: "
+                f"(lock: {path}, owner_pid={owner_pid}, owner_host={owner_host}, "
+                f"owner_created_at={owner_created_at}, lock_age={owner_age}){stale_hint}"
             ) from exc
 
         if previous_state.is_stale_candidate:
             LOGGER.warning(
-                "reclaiming stale run lock file at %s (pid=%s age=%.0fs)",
+                "reclaiming stale run lock file at %s (pid=%s host=%s created_at=%s age=%.0fs)",
                 path,
                 previous_state.pid,
+                previous_state.hostname,
+                previous_state.created_at,
                 previous_state.age_seconds,
             )
 
         os.ftruncate(fd, 0)
-        os.write(fd, str(os.getpid()).encode("utf-8"))
+        owner_record = (
+            f"pid={os.getpid()} host={socket.gethostname()} "
+            f"created_at={datetime.now(timezone.utc).isoformat()}"
+        )
+        os.write(fd, owner_record.encode("utf-8"))
         os.fsync(fd)
         yield
     finally:
