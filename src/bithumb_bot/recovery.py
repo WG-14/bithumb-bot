@@ -25,6 +25,100 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 
 
+def _extract_submit_attempt_id(*, client_order_id: str, submit_attempt_id: str | None) -> str:
+    if submit_attempt_id:
+        return str(submit_attempt_id)
+    parts = str(client_order_id).split("_")
+    if not parts:
+        return ""
+    tail = parts[-1]
+    if tail.startswith("attempt"):
+        return tail
+    return ""
+
+
+def _load_submit_attempt_context(conn, *, row) -> dict[str, str | float | bool]:
+    client_order_id = str(row["client_order_id"])
+    submit_attempt_id = _extract_submit_attempt_id(
+        client_order_id=client_order_id,
+        submit_attempt_id=(str(row["submit_attempt_id"]) if "submit_attempt_id" in row.keys() and row["submit_attempt_id"] else None),
+    )
+    context: dict[str, str | float | bool] = {
+        "submit_attempt_id": submit_attempt_id,
+        "timeout_submit_unknown": False,
+        "metadata_present": False,
+        "preflight_side": str(row["side"]),
+        "preflight_qty": float(row["qty_req"]),
+    }
+    if not submit_attempt_id:
+        return context
+
+    event_rows = conn.execute(
+        """
+        SELECT event_type, side, qty, order_status, timeout_flag
+        FROM order_events
+        WHERE client_order_id=? AND submit_attempt_id=?
+        ORDER BY id DESC
+        """,
+        (client_order_id, submit_attempt_id),
+    ).fetchall()
+
+    context["metadata_present"] = len(event_rows) > 0
+    for ev in event_rows:
+        ev_type = str(ev["event_type"] or "")
+        ev_side = str(ev["side"] or "")
+        ev_qty = ev["qty"]
+        if ev_type == "submit_attempt_preflight":
+            if ev_side:
+                context["preflight_side"] = ev_side
+            if ev_qty is not None:
+                context["preflight_qty"] = float(ev_qty)
+        if ev_type == "submit_attempt_recorded" and str(ev["order_status"] or "") == "SUBMIT_UNKNOWN":
+            context["timeout_submit_unknown"] = bool(ev["timeout_flag"])
+            break
+
+    return context
+
+
+def _strong_submit_unknown_correlation(
+    *,
+    local_row,
+    submit_attempt_context: dict[str, str | float | bool],
+    remote_client_order_id: str | None,
+    remote_exchange_order_id: str | None,
+    remote_side: str | None,
+    remote_qty: float | None,
+) -> bool:
+    local_client_order_id = str(local_row["client_order_id"])
+    local_exchange_order_id = str(local_row["exchange_order_id"] or "")
+    if _strong_order_correlation(
+        local_client_order_id=local_client_order_id,
+        local_exchange_order_id=(local_exchange_order_id or None),
+        remote_client_order_id=remote_client_order_id,
+        remote_exchange_order_id=remote_exchange_order_id,
+    ):
+        return True
+
+    if local_exchange_order_id:
+        return False
+
+    if not bool(submit_attempt_context.get("timeout_submit_unknown")):
+        return False
+
+    if str(remote_client_order_id or "") != local_client_order_id:
+        return False
+
+    local_side = str(submit_attempt_context.get("preflight_side") or local_row["side"])
+    if remote_side and remote_side != local_side:
+        return False
+
+    local_qty = float(submit_attempt_context.get("preflight_qty") or local_row["qty_req"])
+    if remote_qty is not None and abs(float(remote_qty) - local_qty) > 1e-12:
+        return False
+
+    return True
+
+
 def _strong_order_correlation(*, local_client_order_id: str, local_exchange_order_id: str | None, remote_client_order_id: str | None, remote_exchange_order_id: str | None) -> bool:
     local_client = str(local_client_order_id or "")
     local_exchange = str(local_exchange_order_id or "")
@@ -376,6 +470,7 @@ def _try_resolve_submit_unknown_from_recent_activity(
     client_order_id = str(row["client_order_id"])
     side = str(row["side"])
     local_exchange_order_id = str(row["exchange_order_id"] or "")
+    submit_attempt_context = _load_submit_attempt_context(conn, row=row)
 
     matched_exchange_order_id: str | None = None
     matched_order: BrokerOrder | None = None
@@ -383,11 +478,13 @@ def _try_resolve_submit_unknown_from_recent_activity(
     for remote in recent_orders:
         remote_client_order_id = str(remote.client_order_id or "")
         remote_exchange_order_id = str(remote.exchange_order_id or "")
-        if not _strong_order_correlation(
-            local_client_order_id=client_order_id,
-            local_exchange_order_id=local_exchange_order_id or None,
+        if not _strong_submit_unknown_correlation(
+            local_row=row,
+            submit_attempt_context=submit_attempt_context,
             remote_client_order_id=remote_client_order_id or None,
             remote_exchange_order_id=remote_exchange_order_id or None,
+            remote_side=remote.side,
+            remote_qty=remote.qty_req,
         ):
             continue
         matched_order = remote
@@ -399,11 +496,13 @@ def _try_resolve_submit_unknown_from_recent_activity(
     for fill in recent_fills:
         remote_client_order_id = str(fill.client_order_id or "")
         remote_exchange_order_id = str(fill.exchange_order_id or "")
-        if not _strong_order_correlation(
-            local_client_order_id=client_order_id,
-            local_exchange_order_id=local_exchange_order_id or None,
+        if not _strong_submit_unknown_correlation(
+            local_row=row,
+            submit_attempt_context=submit_attempt_context,
             remote_client_order_id=remote_client_order_id or None,
             remote_exchange_order_id=remote_exchange_order_id or None,
+            remote_side=side,
+            remote_qty=fill.qty,
         ):
             continue
         matched_fills.append(fill)
@@ -491,7 +590,7 @@ def reconcile_with_broker(broker: Broker) -> None:
 
         placeholders = ",".join("?" for _ in LOCAL_RECONCILE_STATUSES)
         local_open = conn.execute(
-            f"SELECT client_order_id, exchange_order_id, side, qty_req, status FROM orders WHERE status IN ({placeholders})",
+            f"SELECT client_order_id, submit_attempt_id, exchange_order_id, side, qty_req, status FROM orders WHERE status IN ({placeholders})",
             LOCAL_RECONCILE_STATUSES,
         ).fetchall()
         recent_orders = broker.get_recent_orders(limit=100)
@@ -511,7 +610,18 @@ def reconcile_with_broker(broker: Broker) -> None:
                         if reason_code == REASON_RECONCILE_OK:
                             reason_code = REASON_RECENT_FILL_APPLIED
                     continue
-                reason = "submit_unknown without strong recent correlation; manual recovery required"
+                submit_attempt_context = _load_submit_attempt_context(conn, row=row)
+                reason_detail = "no matching recent order/fill"
+                if not bool(submit_attempt_context.get("submit_attempt_id")):
+                    reason_detail = "missing submit_attempt_id metadata"
+                elif not bool(submit_attempt_context.get("metadata_present")):
+                    reason_detail = "no submit-attempt events persisted"
+                elif not bool(submit_attempt_context.get("timeout_submit_unknown")):
+                    reason_detail = "submit-attempt metadata does not confirm timeout ambiguity"
+                reason = (
+                    "submit_unknown unresolved; "
+                    f"{reason_detail}; manual recovery required"
+                )
                 _mark_recovery_required_with_reason(
                     conn,
                     client_order_id=oid,

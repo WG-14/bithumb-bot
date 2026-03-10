@@ -920,6 +920,18 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                 f"last_error={item['last_error']}"
             )
 
+    recovery_required_orders = report.get("recovery_required_summary") or []
+    if recovery_required_orders:
+        print(f"  recovery_required_orders(top {len(recovery_required_orders)}):")
+        for item in recovery_required_orders:
+            print(
+                "    - "
+                f"client_order_id={item['client_order_id']} "
+                f"exchange_order_id={item['exchange_order_id']} "
+                f"age_sec={float(item['age_sec']):.1f} "
+                f"reason={item['last_error']}"
+            )
+
 def _last_reconcile_failed(state) -> bool:
     status = str(getattr(state, "last_reconcile_status", "") or "").upper()
     return status in {"FAILED", "ERROR"}

@@ -101,6 +101,68 @@ class _SubmitUnknownRecentOrderBroker(_NoopBroker):
         ]
 
 
+
+
+class _SubmitUnknownStrongCorrelationBroker(_NoopBroker):
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-strong",
+                side="BUY",
+                status="CANCELED",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=250,
+                updated_ts=260,
+            )
+        ]
+
+
+class _SubmitUnknownWeakMetadataCorrelationBroker(_NoopBroker):
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-weak",
+                side="BUY",
+                status="CANCELED",
+                price=100.0,
+                qty_req=0.5,
+                qty_filled=0.0,
+                created_ts=250,
+                updated_ts=260,
+            )
+        ]
+
+
+def _insert_submit_timeout_attempt_metadata(*, conn, client_order_id: str, submit_attempt_id: str, qty: float = 1.0) -> None:
+    conn.execute(
+        """
+        UPDATE orders
+        SET submit_attempt_id=?
+        WHERE client_order_id=?
+        """,
+        (submit_attempt_id, client_order_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, qty, side, submit_attempt_id, timeout_flag
+        ) VALUES (?, 'submit_attempt_preflight', 101, 'PENDING_SUBMIT', ?, 'BUY', ?, 0)
+        """,
+        (client_order_id, float(qty), submit_attempt_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id, event_type, event_ts, order_status, qty, side, submit_attempt_id, timeout_flag
+        ) VALUES (?, 'submit_attempt_recorded', 102, 'SUBMIT_UNKNOWN', ?, 'BUY', ?, 1)
+        """,
+        (client_order_id, float(qty), submit_attempt_id),
+    )
+
 class _CancelRaceBroker(_NoopBroker):
     def __init__(self) -> None:
         self.remote_status = "NEW"
@@ -460,6 +522,127 @@ def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated
     assert reason is None
     assert state.unresolved_open_order_count == 0
 
+
+
+
+def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownStrongCorrelationBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert row["exchange_order_id"] == "ex-submit-unknown-strong"
+    assert gate_reason is None
+
+
+def test_submit_unknown_timeout_metadata_weak_correlation_stays_recovery_required(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownWeakMetadataCorrelationBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
+
+
+def test_restarted_ambiguous_order_blocks_new_submit_until_resolved(isolated_db, monkeypatch):
+    _patch_single_tick_run_loop(monkeypatch)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_NoopBroker())
+
+    live_execute_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_execute_calls.__setitem__("n", live_execute_calls["n"] + 1),
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    run_loop(5, 20)
+
+    reason = evaluate_startup_safety_gate()
+    state = runtime_state.snapshot()
+
+    assert reason is not None
+    assert "recovery_required_orders=1" in reason
+    assert state.trading_enabled is False
+    assert live_execute_calls["n"] == 0
 
 def test_submit_success_then_crash_restart_blocks_new_submit_attempt(isolated_db, monkeypatch):
     _patch_single_tick_run_loop(monkeypatch)

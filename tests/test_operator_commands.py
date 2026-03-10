@@ -720,9 +720,11 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "overridable=0" in out
     assert "oldest_unresolved_orders(top 5):" in out
+    assert "recovery_required_orders(top 3):" in out
     assert "client_order_id=open_0" in out
     assert "client_order_id=open_4" in out
     assert "client_order_id=open_5" not in out
+    assert "reason=timeout while polling exchange status endpoint due to transi..." in out
     assert (
         "last_error=timeout while polling exchange status endpoint due to transi..."
         in out
