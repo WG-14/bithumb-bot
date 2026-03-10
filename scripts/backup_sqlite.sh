@@ -6,6 +6,8 @@ BACKUP_DIR="${BACKUP_DIR:-backups}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-30}"
 
+VERIFY_RESTORE="${BACKUP_VERIFY_RESTORE:-0}"
+
 mkdir -p "$BACKUP_DIR"
 
 if [[ ! -f "$DB_PATH" ]]; then
@@ -35,6 +37,11 @@ if (( ${#backups[@]} > RETENTION_COUNT )); then
   for old_file in "${backups[@]:RETENTION_COUNT}"; do
     rm -f "$old_file"
   done
+fi
+
+
+if [[ "$VERIFY_RESTORE" == "1" ]]; then
+  python3 tools/verify_sqlite_restore.py "$backup_path"
 fi
 
 echo "[BACKUP] created $backup_path"
