@@ -31,6 +31,19 @@ POSITION_EPSILON = 1e-12
 VALID_ORDER_SIDES = {"BUY", "SELL"}
 UNSET_EVENT_FIELD = "-"
 
+SUBMISSION_REASON_FAILED_BEFORE_SEND = "failed_before_send"
+SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
+SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
+SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
+SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
+
+
+def _classify_temporary_submit_error(exc: Exception) -> tuple[str, bool]:
+    detail = str(exc).lower()
+    if "timeout" in detail or "timed out" in detail:
+        return SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT, True
+    return SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR, False
+
 
 def _submit_attempt_id() -> str:
     return new_client_order_id("attempt")
@@ -275,6 +288,7 @@ def _record_submit_attempt_result(
     payload_hash: str,
     order_status: str,
     broker_response_summary: str,
+    submission_reason_code: str,
     exception_class: str | None,
     timeout_flag: bool,
     exchange_order_id_obtained: bool,
@@ -290,6 +304,7 @@ def _record_submit_attempt_result(
         submit_ts=ts,
         payload_fingerprint=payload_hash,
         broker_response_summary=broker_response_summary,
+        submission_reason_code=submission_reason_code,
         exception_class=exception_class,
         timeout_flag=timeout_flag,
         exchange_order_id_obtained=exchange_order_id_obtained,
@@ -319,6 +334,7 @@ def _record_submit_attempt_preflight(
         submit_ts=ts,
         payload_fingerprint=payload_hash,
         broker_response_summary="submit_dispatched",
+        submission_reason_code="submit_dispatched_preflight",
         exception_class=None,
         timeout_flag=False,
         exchange_order_id_obtained=False,
@@ -388,6 +404,7 @@ def _submit_via_standard_path(
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
     except BrokerTemporaryError as e:
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
+        submission_reason_code, timeout_flag = _classify_temporary_submit_error(e)
         _mark_submit_unknown(
             conn=conn,
             client_order_id=client_order_id,
@@ -406,8 +423,9 @@ def _submit_via_standard_path(
             payload_hash=payload_hash,
             order_status="SUBMIT_UNKNOWN",
             broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
+            submission_reason_code=submission_reason_code,
             exception_class=type(e).__name__,
-            timeout_flag=True,
+            timeout_flag=timeout_flag,
             exchange_order_id_obtained=False,
         )
         conn.commit()
@@ -432,6 +450,7 @@ def _submit_via_standard_path(
             payload_hash=payload_hash,
             order_status="FAILED",
             broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
+            submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
             exception_class=type(e).__name__,
             timeout_flag=False,
             exchange_order_id_obtained=False,
@@ -472,8 +491,9 @@ def _submit_via_standard_path(
             payload_hash=payload_hash,
             order_status="SUBMIT_UNKNOWN",
             broker_response_summary=f"broker_status={order.status};exchange_order_id=-",
+            submission_reason_code=SUBMISSION_REASON_AMBIGUOUS_RESPONSE,
             exception_class=None,
-            timeout_flag=True,
+            timeout_flag=False,
             exchange_order_id_obtained=False,
         )
         conn.commit()
@@ -492,6 +512,7 @@ def _submit_via_standard_path(
         payload_hash=payload_hash,
         order_status=order.status,
         broker_response_summary=f"broker_status={order.status};exchange_order_id={order.exchange_order_id}",
+        submission_reason_code=SUBMISSION_REASON_CONFIRMED_SUCCESS,
         exception_class=None,
         timeout_flag=False,
         exchange_order_id_obtained=True,
