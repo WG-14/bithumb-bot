@@ -149,6 +149,7 @@ uv run python bot.py resume
   - `bithumb-bot-healthcheck.timer` (1분 주기)
   - `bithumb-bot-backup.timer` (6시간 주기)
 - 운영 절차 문서: `docs/RUNBOOK.md`
+- 제한적 무인 운용 체크리스트(요약): `docs/LIMITED_UNATTENDED_CHECKLIST.md`
 - 백업 스크립트: `scripts/backup_sqlite.sh`
 
 빠른 확인:

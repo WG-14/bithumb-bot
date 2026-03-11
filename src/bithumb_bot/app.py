@@ -1902,21 +1902,57 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     sub.add_parser("audit")
     sub.add_parser("check")
-    sub.add_parser("health")
+    sub.add_parser(
+        "health",
+        help="show health summary (staleness/errors/trading state/recovery)",
+        description="Show health summary for limited unattended operation checks.",
+    )
     sub.add_parser("audit-ledger")
-    sub.add_parser("cancel-open-orders")
-    sub.add_parser("broker-diagnose")
-    sub.add_parser("pause")
-    flatten = sub.add_parser("flatten-position")
+    sub.add_parser(
+        "cancel-open-orders",
+        help="cancel all remote open orders in live mode",
+        description="Cancel all remote open orders (live mode only).",
+    )
+    sub.add_parser(
+        "broker-diagnose",
+        help="read-only live broker/API diagnostics",
+        description="Run read-only live broker diagnostics (no order create/cancel).",
+    )
+    sub.add_parser(
+        "pause",
+        help="persistently pause new trading",
+        description="Persistently disable trading until explicit resume.",
+    )
+    flatten = sub.add_parser(
+        "flatten-position",
+        help="emergency flatten open position",
+        description="Flatten current position for emergency exposure reduction.",
+    )
     flatten.add_argument("--dry-run", action="store_true")
 
-    resume = sub.add_parser("resume")
+    resume = sub.add_parser(
+        "resume",
+        help="resume trading if safety checks pass",
+        description="Resume trading with safety gates; use --force only as a last resort.",
+    )
     resume.add_argument("--force", action="store_true")
 
-    sub.add_parser("reconcile")
-    recovery_report = sub.add_parser("recovery-report")
+    sub.add_parser(
+        "reconcile",
+        help="reconcile local/exchange order state",
+        description="Run order-state reconciliation with the broker.",
+    )
+    recovery_report = sub.add_parser(
+        "recovery-report",
+        help="show unresolved/recovery-required order report",
+        description="Show unresolved/recovery-required orders and resume blockers.",
+    )
     recovery_report.add_argument("--json", action="store_true")
-    sub.add_parser("restart-checklist")
+    sub.add_parser(
+        "restart-checklist",
+        help="print restart safety checklist before resume",
+        description="Print restart safety checklist for operator restart verification.",
+    )
     recover_order = sub.add_parser("recover-order")
     recover_order.add_argument("--client-order-id", required=True)
     recover_order.add_argument("--exchange-order-id", required=True)
