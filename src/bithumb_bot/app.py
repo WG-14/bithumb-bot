@@ -956,10 +956,12 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
 def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_orders: list[object]) -> list[dict[str, str | float | int]]:
     side = str(local_order["side"])
     qty_req = float(local_order["qty_req"])
+    local_price_raw = local_order.get("price")
+    local_price = float(local_price_raw) if local_price_raw is not None else None
     created_ts = int(local_order["created_ts"])
     submit_ts = int(local_order.get("submit_evidence_attempted_ts") or created_ts)
 
-    ranked: list[tuple[int, dict[str, str | float | int]]] = []
+    ranked: list[tuple[int, dict[str, str | float | int | str]]] = []
     for remote in recent_orders:
         exchange_order_id = str(getattr(remote, "exchange_order_id", "") or "")
         if not exchange_order_id:
@@ -967,39 +969,76 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
 
         remote_side = str(getattr(remote, "side", "") or "")
         remote_qty_req = float(getattr(remote, "qty_req", 0.0) or 0.0)
+        remote_price_raw = getattr(remote, "price", None)
+        remote_price = float(remote_price_raw) if remote_price_raw is not None else None
+        remote_status = str(getattr(remote, "status", "") or "-")
         remote_created_ts = int(getattr(remote, "created_ts", 0) or 0)
         remote_updated_ts = int(getattr(remote, "updated_ts", 0) or 0)
 
         score = 0
         reasons: list[str] = []
         if str(getattr(remote, "client_order_id", "") or "") == str(local_order["client_order_id"]):
-            score += 3
+            score += 4
             reasons.append("same client_order_id")
         if remote_side == side:
-            score += 2
+            score += 3
             reasons.append("same side")
+        else:
+            reasons.append("side mismatch")
 
         qty_gap = abs(remote_qty_req - qty_req)
-        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.02)
-        if qty_gap <= qty_tolerance:
+        qty_gap_pct = (qty_gap / max(qty_req, 1e-12)) * 100.0
+        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.03)
+        if qty_gap <= max(1e-12, max(qty_req, remote_qty_req) * 0.01):
+            score += 3
+            reasons.append("very close qty")
+        elif qty_gap <= qty_tolerance:
             score += 2
             reasons.append("close qty")
 
         ts_gap_sec = abs(remote_created_ts - submit_ts) / 1000 if remote_created_ts > 0 else float("inf")
-        if ts_gap_sec <= 120:
-            score += 2
+        if ts_gap_sec <= 90:
+            score += 3
             reasons.append("close submit timestamp")
+        elif ts_gap_sec <= 300:
+            score += 2
+            reasons.append("near submit timestamp")
         elif ts_gap_sec <= 600:
             score += 1
             reasons.append("recent timestamp")
 
-        if score < 2:
+        price_gap_pct: float | None = None
+        strong_price_match = False
+        if local_price is not None and remote_price is not None and local_price > 0:
+            price_gap_pct = abs(remote_price - local_price) / local_price * 100.0
+            if price_gap_pct <= 0.2:
+                score += 2
+                strong_price_match = True
+                reasons.append("very close price")
+            elif price_gap_pct <= 1.0:
+                score += 1
+                reasons.append("close price")
+            else:
+                score -= 2
+                reasons.append("price mismatch")
+
+        if remote_status in {"PARTIAL", "FILLED", "NEW"}:
+            score += 1
+            reasons.append(f"status={remote_status}")
+
+        if score < 4:
             continue
 
         side_match = remote_side == side
         qty_match = qty_gap <= qty_tolerance
-        high_confidence = score >= 6 and side_match and qty_match and ts_gap_sec <= 600
-        likely_fill_match = float(getattr(remote, "qty_filled", 0.0) or 0.0) > 1e-12 or str(getattr(remote, "status", "") or "") in {"PARTIAL", "FILLED"}
+        high_confidence = (
+            score >= 8
+            and side_match
+            and qty_match
+            and ts_gap_sec <= 300
+            and (local_price is None or remote_price is None or strong_price_match)
+        )
+        likely_fill_match = float(getattr(remote, "qty_filled", 0.0) or 0.0) > 1e-12 or remote_status in {"PARTIAL", "FILLED"}
 
         ranked.append(
             (
@@ -1009,10 +1048,14 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
                     "side": remote_side or "-",
                     "qty": remote_qty_req,
                     "filled_qty": float(getattr(remote, "qty_filled", 0.0) or 0.0),
-                    "status": str(getattr(remote, "status", "") or "-"),
+                    "status": remote_status,
+                    "price": remote_price,
                     "created_ts": remote_created_ts,
                     "updated_ts": remote_updated_ts,
                     "score": score,
+                    "qty_gap_pct": qty_gap_pct,
+                    "time_gap_sec": ts_gap_sec,
+                    "price_gap_pct": price_gap_pct,
                     "match_reason": " + ".join(reasons),
                     "high_confidence": 1 if high_confidence else 0,
                     "likely_fill_match": 1 if likely_fill_match else 0,
@@ -1126,7 +1169,7 @@ def _load_recovery_report(
         ).fetchone()
         oldest_rows = conn.execute(
             f"""
-            SELECT client_order_id, submit_attempt_id, status, exchange_order_id, side, qty_req, qty_filled, created_ts, updated_ts, last_error
+            SELECT client_order_id, submit_attempt_id, status, exchange_order_id, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
             FROM orders
             WHERE status IN ({placeholders})
             ORDER BY created_ts ASC
@@ -1192,6 +1235,7 @@ def _load_recovery_report(
             "status": str(row["status"]),
             "exchange_order_id": str(row["exchange_order_id"] or "-"),
             "side": str(row["side"] or "-"),
+            "price": (float(row["price"]) if row["price"] is not None else None),
             "qty_req": float(row["qty_req"] or 0.0),
             "qty_filled": float(row["qty_filled"] or 0.0),
             "created_ts": int(row["created_ts"]),
@@ -1519,6 +1563,10 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                     f"status={candidate['status']} "
                     f"created_ts={candidate['created_ts']} "
                     f"updated_ts={candidate['updated_ts']} "
+                    f"score={int(candidate['score'])} "
+                    f"qty_gap_pct={float(candidate['qty_gap_pct']):.3f} "
+                    f"time_gap_sec={float(candidate['time_gap_sec']):.1f} "
+                    f"price_gap_pct={("-" if candidate['price_gap_pct'] is None else f'{float(candidate["price_gap_pct"]):.3f}')} "
                     f"reason={candidate['match_reason']}"
                 )
         print(f"      next_action={item['next_action_hint']}")
