@@ -857,6 +857,7 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
     side = str(local_order["side"])
     qty_req = float(local_order["qty_req"])
     created_ts = int(local_order["created_ts"])
+    submit_ts = int(local_order.get("submit_evidence_attempted_ts") or created_ts)
 
     ranked: list[tuple[int, dict[str, str | float | int]]] = []
     for remote in recent_orders:
@@ -871,23 +872,34 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
 
         score = 0
         reasons: list[str] = []
+        if str(getattr(remote, "client_order_id", "") or "") == str(local_order["client_order_id"]):
+            score += 3
+            reasons.append("same client_order_id")
         if remote_side == side:
             score += 2
             reasons.append("same side")
 
         qty_gap = abs(remote_qty_req - qty_req)
-        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.05)
+        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.02)
         if qty_gap <= qty_tolerance:
             score += 2
             reasons.append("close qty")
 
-        ts_gap_sec = abs(remote_created_ts - created_ts) / 1000 if remote_created_ts > 0 else float("inf")
-        if ts_gap_sec <= 600:
+        ts_gap_sec = abs(remote_created_ts - submit_ts) / 1000 if remote_created_ts > 0 else float("inf")
+        if ts_gap_sec <= 120:
+            score += 2
+            reasons.append("close submit timestamp")
+        elif ts_gap_sec <= 600:
             score += 1
             reasons.append("recent timestamp")
 
         if score < 2:
             continue
+
+        side_match = remote_side == side
+        qty_match = qty_gap <= qty_tolerance
+        high_confidence = score >= 6 and side_match and qty_match and ts_gap_sec <= 600
+        likely_fill_match = float(getattr(remote, "qty_filled", 0.0) or 0.0) > 1e-12 or str(getattr(remote, "status", "") or "") in {"PARTIAL", "FILLED"}
 
         ranked.append(
             (
@@ -902,6 +914,8 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
                     "updated_ts": remote_updated_ts,
                     "score": score,
                     "match_reason": " + ".join(reasons),
+                    "high_confidence": 1 if high_confidence else 0,
+                    "likely_fill_match": 1 if likely_fill_match else 0,
                 },
             )
         )
@@ -910,6 +924,85 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
     return [item[1] for item in ranked]
 
 
+
+
+def _load_submission_evidence(conn, *, client_order_id: str, submit_attempt_id: str | None) -> dict[str, str | int | bool | None]:
+    event = None
+    if submit_attempt_id:
+        event = conn.execute(
+            """
+            SELECT submit_ts, event_ts, order_status, submission_reason_code,
+                   timeout_flag, exchange_order_id_obtained, exception_class
+            FROM order_events
+            WHERE client_order_id=?
+              AND submit_attempt_id=?
+              AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (client_order_id, submit_attempt_id),
+        ).fetchone()
+
+    if event is None:
+        event = conn.execute(
+            """
+            SELECT submit_ts, event_ts, order_status, submission_reason_code,
+                   timeout_flag, exchange_order_id_obtained, exception_class
+            FROM order_events
+            WHERE client_order_id=?
+              AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (client_order_id,),
+        ).fetchone()
+
+    intent = conn.execute(
+        """
+        SELECT intent_ts, event_ts
+        FROM order_events
+        WHERE client_order_id=?
+          AND event_type='intent_created'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (client_order_id,),
+    ).fetchone()
+
+    attempted_locally = bool(event is not None or intent is not None)
+    attempted_ts = None
+    if event is not None:
+        attempted_ts = int(event["submit_ts"] if event["submit_ts"] is not None else event["event_ts"])
+    elif intent is not None:
+        attempted_ts = int(intent["intent_ts"] if intent["intent_ts"] is not None else intent["event_ts"])
+
+    request_likely_sent = "unknown"
+    if event is not None:
+        timeout_flag = bool(event["timeout_flag"]) if event["timeout_flag"] is not None else False
+        exchange_id_obtained = bool(event["exchange_order_id_obtained"]) if event["exchange_order_id_obtained"] is not None else False
+        if timeout_flag or exchange_id_obtained:
+            request_likely_sent = "yes"
+        elif str(event["order_status"] or "").strip() in {"NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN"}:
+            request_likely_sent = "yes"
+
+    attempted_desc = "local intent evidence unavailable"
+    if event is not None:
+        attempted_desc = (
+            f"submit_attempt_recorded status={event['order_status'] or '-'} "
+            f"reason_code={event['submission_reason_code'] or '-'} "
+            f"timeout={1 if bool(event['timeout_flag']) else 0} "
+            f"exchange_order_id_obtained={1 if bool(event['exchange_order_id_obtained']) else 0}"
+        )
+    elif intent is not None:
+        attempted_desc = "intent_created recorded but no submit_attempt_recorded evidence"
+
+    return {
+        "submit_attempt_id": submit_attempt_id,
+        "attempted_locally": attempted_locally,
+        "attempted_ts": attempted_ts,
+        "attempted_desc": attempted_desc,
+        "request_likely_sent": request_likely_sent,
+    }
 def _load_recovery_report(
     *,
     oldest_limit: int = 5,
@@ -933,7 +1026,7 @@ def _load_recovery_report(
         ).fetchone()
         oldest_rows = conn.execute(
             f"""
-            SELECT client_order_id, status, exchange_order_id, side, qty_req, qty_filled, created_ts, updated_ts, last_error
+            SELECT client_order_id, submit_attempt_id, status, exchange_order_id, side, qty_req, qty_filled, created_ts, updated_ts, last_error
             FROM orders
             WHERE status IN ({placeholders})
             ORDER BY created_ts ASC
@@ -967,6 +1060,14 @@ def _load_recovery_report(
             """
         ).fetchone()
         recent_order_lifecycle = load_recent_order_lifecycle(conn, limit=oldest_limit)
+        submission_evidence_by_order_id: dict[str, dict[str, str | int | bool | None]] = {}
+        for row in oldest_rows:
+            submit_attempt_id = str(row["submit_attempt_id"] or "").strip()
+            submission_evidence_by_order_id[str(row["client_order_id"])] = _load_submission_evidence(
+                conn,
+                client_order_id=str(row["client_order_id"]),
+                submit_attempt_id=(submit_attempt_id or None),
+            )
     finally:
         conn.close()
 
@@ -985,6 +1086,7 @@ def _load_recovery_report(
     candidate_local_orders: list[dict[str, str | float]] = []
     for row in oldest_rows:
         last_error = str(row["last_error"] or "").strip()
+        evidence = submission_evidence_by_order_id.get(str(row["client_order_id"]), {})
         local_order = {
             "client_order_id": str(row["client_order_id"]),
             "status": str(row["status"]),
@@ -996,6 +1098,10 @@ def _load_recovery_report(
             "updated_ts": int(row["updated_ts"]),
             "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
             "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+            "submit_evidence_attempted_locally": bool(evidence["attempted_locally"]),
+            "submit_evidence_attempted_ts": int(evidence["attempted_ts"] or row["created_ts"]),
+            "submit_evidence_attempted_desc": str(evidence["attempted_desc"]),
+            "submit_evidence_request_likely_sent": str(evidence["request_likely_sent"]),
         }
         oldest_orders.append(
             {
@@ -1110,19 +1216,20 @@ def _load_recovery_report(
     candidate_report: list[dict[str, object]] = []
     for local_order in candidate_local_orders:
         candidates = _build_recovery_candidates(local_order=local_order, recent_orders=recent_orders_snapshot)
-        plausible_candidates = [c for c in candidates if int(c["score"]) >= 4]
+        plausible_candidates = [c for c in candidates if int(c.get("high_confidence") or 0) == 1]
+        likely_candidate = plausible_candidates[0] if len(plausible_candidates) == 1 else None
         if not candidates:
             outcome = "no_candidate"
-            next_action = "No exchange candidate found. Run reconcile, verify exchange history manually, then recover-order once exchange_order_id is confirmed."
+            next_action = "No likely broker match found. Keep order unresolved, run reconcile, and verify exchange history manually before recover-order."
         elif len(plausible_candidates) > 1:
             outcome = "multiple_plausible_candidates"
-            next_action = "Multiple plausible exchange orders found; automatic recovery is unsafe. Operator review is required before recover-order."
+            next_action = "Multiple high-confidence broker matches detected. Keep unresolved and perform manual broker/order-event review before recover-order."
         elif len(plausible_candidates) == 1:
             outcome = "single_plausible_candidate"
-            next_action = "Single plausible candidate found. Validate it, then run recover-order with this exchange_order_id."
+            next_action = "Exactly one high-confidence broker match found. Operator should validate and run recover-order with the suggested exchange_order_id."
         else:
             outcome = "weak_candidates_only"
-            next_action = "Only weak candidates found. Reconcile and verify order/fill history before manual recover-order."
+            next_action = "Only weak broker candidates found. Keep unresolved and verify order/fill history before manual recover-order."
 
         candidate_report.append(
             {
@@ -1131,8 +1238,20 @@ def _load_recovery_report(
                 "local_side": local_order["side"],
                 "local_qty": local_order["qty_req"],
                 "local_created_ts": local_order["created_ts"],
+                "attempted_locally": bool(local_order["submit_evidence_attempted_locally"]),
+                "attempted_ts": int(local_order["submit_evidence_attempted_ts"]),
+                "attempted_summary": str(local_order["submit_evidence_attempted_desc"]),
+                "request_likely_sent": str(local_order["submit_evidence_request_likely_sent"]),
                 "candidate_outcome": outcome,
                 "plausible_candidate_count": len(plausible_candidates),
+                "likely_broker_match": bool(likely_candidate is not None),
+                "likely_broker_exchange_order_id": (
+                    str(likely_candidate["exchange_order_id"]) if likely_candidate is not None else None
+                ),
+                "likely_broker_match_kind": (
+                    "order_or_fill" if likely_candidate is not None and int(likely_candidate.get("likely_fill_match") or 0) == 1
+                    else ("order" if likely_candidate is not None else "none")
+                ),
                 "candidates": candidates[:5],
                 "next_action_hint": next_action,
             }
@@ -1265,6 +1384,19 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
             f"local_order_id={item['client_order_id']} "
             f"local_status={item['local_status']} "
             f"candidate_outcome={item['candidate_outcome']}"
+        )
+        print(
+            "      "
+            f"attempted_locally={1 if bool(item.get('attempted_locally')) else 0} "
+            f"attempted_ts={item.get('attempted_ts')} "
+            f"request_likely_sent={item.get('request_likely_sent')}"
+        )
+        print(f"      attempted_summary={item.get('attempted_summary')}")
+        print(
+            "      "
+            f"likely_broker_match={1 if bool(item.get('likely_broker_match')) else 0} "
+            f"likely_broker_exchange_order_id={item.get('likely_broker_exchange_order_id') or '-'} "
+            f"likely_broker_match_kind={item.get('likely_broker_match_kind') or 'none'}"
         )
         candidates = item.get("candidates") or []
         if not candidates:

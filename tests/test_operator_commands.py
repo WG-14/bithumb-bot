@@ -880,7 +880,7 @@ def test_recovery_report_candidate_no_match(tmp_path, monkeypatch):
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoveryReportCandidateBroker(
             [
-                BrokerOrder("remote_x", "ex_x", "SELL", "NEW", None, 0.5, 0.0, now_ms - 100_000, now_ms - 90_000),
+                BrokerOrder("remote_x", "ex_x", "SELL", "NEW", None, 5.0, 0.0, now_ms - 1_000_000, now_ms - 900_000),
             ]
         ),
     )
@@ -891,6 +891,8 @@ def test_recovery_report_candidate_no_match(tmp_path, monkeypatch):
 
     entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_none"]
     assert len(entries) == 1
+    assert entries[0]["attempted_locally"] is False
+    assert entries[0]["request_likely_sent"] == "unknown"
     assert entries[0]["candidate_outcome"] == "no_candidate"
     assert entries[0]["candidates"] == []
 
@@ -899,6 +901,16 @@ def test_recovery_report_candidate_single_plausible(tmp_path, monkeypatch):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
     _insert_order(status="SUBMIT_UNKNOWN", client_order_id="rr_one", created_ts=now_ms - 30_000)
+    _insert_order_event(
+        client_order_id="rr_one",
+        event_type="submit_attempt_recorded",
+        event_ts=now_ms - 29_000,
+        submit_attempt_id="attempt_one",
+        submit_ts=now_ms - 29_000,
+        timeout_flag=1,
+        exchange_order_id_obtained=0,
+        order_status="SUBMIT_UNKNOWN",
+    )
 
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
@@ -919,6 +931,10 @@ def test_recovery_report_candidate_single_plausible(tmp_path, monkeypatch):
     entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_one"]
     assert len(entries) == 1
     assert entries[0]["candidate_outcome"] == "single_plausible_candidate"
+    assert entries[0]["likely_broker_match"] is True
+    assert entries[0]["likely_broker_exchange_order_id"] == "ex_match"
+    assert entries[0]["attempted_locally"] is True
+    assert entries[0]["request_likely_sent"] == "yes"
     assert int(entries[0]["plausible_candidate_count"]) == 1
     assert entries[0]["candidates"][0]["exchange_order_id"] == "ex_match"
 
@@ -934,8 +950,8 @@ def test_recovery_report_candidate_multiple_plausible(tmp_path, monkeypatch):
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoveryReportCandidateBroker(
             [
-                BrokerOrder("remote_1", "ex_m1", "BUY", "NEW", None, 0.0103, 0.0, now_ms - 42_000, now_ms - 20_000),
-                BrokerOrder("remote_2", "ex_m2", "BUY", "PARTIAL", None, 0.0098, 0.005, now_ms - 41_000, now_ms - 19_000),
+                BrokerOrder("rr_many", "ex_m1", "BUY", "NEW", None, 0.0101, 0.0, now_ms - 42_000, now_ms - 20_000),
+                BrokerOrder("rr_many", "ex_m2", "BUY", "PARTIAL", None, 0.0099, 0.005, now_ms - 41_000, now_ms - 19_000),
             ]
         ),
     )
@@ -947,6 +963,7 @@ def test_recovery_report_candidate_multiple_plausible(tmp_path, monkeypatch):
     entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_many"]
     assert len(entries) == 1
     assert entries[0]["candidate_outcome"] == "multiple_plausible_candidates"
+    assert entries[0]["likely_broker_match"] is False
     assert int(entries[0]["plausible_candidate_count"]) == 2
 
 
