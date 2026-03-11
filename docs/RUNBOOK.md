@@ -159,6 +159,12 @@ uv run python bot.py resume
 uv run python bot.py resume --force
 ```
 
+리스크 사유(`KILL_SWITCH`, `DAILY_LOSS_LIMIT`, `POSITION_LOSS_LIMIT`)로 HALT된 경우 추가 규칙:
+
+- 포지션/오픈오더 등 노출(exposure)이 남아 있으면 `resume`은 거부된다.
+- 자동 청산은 수행되지 않으므로, 운영자가 먼저 노출을 수동으로 해소(포지션 평탄화/미체결 정리)해야 한다.
+- 해소 후 `recovery-report`와 `health`를 다시 확인하고 `resume`을 실행한다.
+
 ## 6) 크래시 후 재개 전 필수 확인
 
 크래시/강제 재시작 이후에는 아래를 모두 확인하기 전 재개하지 않는다.

@@ -475,6 +475,55 @@ def test_resume_refuses_when_kill_switch_halt_has_open_position(tmp_path, capsys
     assert "HALT_RISK_OPEN_POSITION" in state.resume_gate_reason
 
 
+
+
+def test_resume_allows_risk_halt_when_exposure_is_flat(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="KILL_SWITCH=ON",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
+
+    cmd_resume(force=False)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.resume_gate_blocked is False
+    assert state.resume_gate_reason is None
+
+
+def test_resume_non_risk_halt_with_open_exposure_message_is_unchanged(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio(id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked) VALUES (1, 1000000.0, 0.25, 900000.0, 100000.0, 0.25, 0.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="manual operator pause",
+        reason_code="MANUAL_PAUSE",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    out = capsys.readouterr().out
+    assert "code=HALT_RISK_OPEN_POSITION" in out
+    assert "risk halt resume rejected until exposure is flattened/resolved first" not in out
+    assert exc.value.code == 1
+
+
 def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(
     tmp_path, capsys
 ):

@@ -54,6 +54,12 @@ LIVE_UNRESOLVED_ORDER_STATUSES = (
     "RECOVERY_REQUIRED",
 )
 
+RISK_EXPOSURE_HALT_REASON_CODES = {
+    "KILL_SWITCH",
+    "DAILY_LOSS_LIMIT",
+    POSITION_LOSS_LIMIT,
+}
+
 
 def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
     conn = ensure_db()
@@ -283,20 +289,29 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             )
         )
 
-    if state.halt_new_orders_blocked and (state.halt_position_present or state.halt_open_orders_present):
-        reasons.append(
-            _resume_blocker(
-                code="HALT_RISK_OPEN_POSITION",
-                detail=(
-                    "halt blocked with open exposure: "
-                    f"position_present={1 if state.halt_position_present else 0} "
-                    f"open_orders_present={1 if state.halt_open_orders_present else 0} "
-                    f"reason_code={state.halt_reason_code or '-'} "
-                    f"reason={state.last_disable_reason or '-'}"
-                ),
-                overridable=False,
+    if state.halt_new_orders_blocked:
+        open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+        is_risk_exposure_halt = (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
+        if open_orders_present or position_present:
+            detail = (
+                "halt blocked with open exposure: "
+                f"position_present={1 if position_present else 0} "
+                f"open_orders_present={1 if open_orders_present else 0} "
+                f"reason_code={state.halt_reason_code or '-'} "
+                f"reason={state.last_disable_reason or '-'}"
             )
-        )
+            if is_risk_exposure_halt:
+                detail = (
+                    "risk halt resume rejected until exposure is flattened/resolved first; "
+                    + detail
+                )
+            reasons.append(
+                _resume_blocker(
+                    code="HALT_RISK_OPEN_POSITION",
+                    detail=detail,
+                    overridable=False,
+                )
+            )
 
     if settings.MODE == "live" and state.last_reconcile_metadata:
         try:
