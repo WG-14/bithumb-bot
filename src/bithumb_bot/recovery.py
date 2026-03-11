@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+import time
 
 from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, record_order_if_missing
-from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status
+from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
 from .notifier import format_event, notify
 from .observability import safety_event
@@ -567,9 +568,7 @@ def _try_resolve_submit_unknown_from_recent_activity(
     local_exchange_order_id = str(row["exchange_order_id"] or "")
     submit_attempt_context = _load_submit_attempt_context(conn, row=row)
 
-    matched_exchange_order_id: str | None = None
-    matched_order: BrokerOrder | None = None
-
+    candidate_orders: dict[str, BrokerOrder] = {}
     for remote in recent_orders:
         remote_client_order_id = str(remote.client_order_id or "")
         remote_exchange_order_id = str(remote.exchange_order_id or "")
@@ -582,15 +581,45 @@ def _try_resolve_submit_unknown_from_recent_activity(
             remote_qty=remote.qty_req,
         ):
             continue
-        matched_order = remote
-        if remote_exchange_order_id:
-            matched_exchange_order_id = remote_exchange_order_id
-        break
+
+        status_allowed, _ = validate_status_transition(from_status="SUBMIT_UNKNOWN", to_status=remote.status)
+        if not status_allowed:
+            continue
+        if not remote_exchange_order_id:
+            continue
+        candidate_orders[remote_exchange_order_id] = remote
+
+    if len(candidate_orders) != 1:
+        outcome = "ambiguous" if len(candidate_orders) > 1 else "insufficient_evidence"
+        _record_submit_unknown_autolink_event(
+            conn,
+            client_order_id=client_order_id,
+            side=side,
+            submit_attempt_context=submit_attempt_context,
+            outcome=outcome,
+            candidate_count=len(candidate_orders),
+            exchange_order_id=None,
+        )
+        return False, False
+
+    matched_exchange_order_id = next(iter(candidate_orders.keys()))
+    matched_order = candidate_orders[matched_exchange_order_id]
+    _record_submit_unknown_autolink_event(
+        conn,
+        client_order_id=client_order_id,
+        side=side,
+        submit_attempt_context=submit_attempt_context,
+        outcome="success",
+        candidate_count=1,
+        exchange_order_id=matched_exchange_order_id,
+    )
 
     matched_fills: list[BrokerFill] = []
     for fill in recent_fills:
         remote_client_order_id = str(fill.client_order_id or "")
         remote_exchange_order_id = str(fill.exchange_order_id or "")
+        if remote_exchange_order_id and remote_exchange_order_id != matched_exchange_order_id:
+            continue
         if not _strong_submit_unknown_correlation(
             local_row=row,
             submit_attempt_context=submit_attempt_context,
@@ -603,9 +632,6 @@ def _try_resolve_submit_unknown_from_recent_activity(
         matched_fills.append(fill)
         if matched_exchange_order_id is None and remote_exchange_order_id:
             matched_exchange_order_id = remote_exchange_order_id
-
-    if matched_order is None and not matched_fills:
-        return False, False
 
     if matched_exchange_order_id:
         set_exchange_order_id(client_order_id, matched_exchange_order_id, conn=conn)
@@ -666,6 +692,52 @@ def _try_resolve_submit_unknown_from_recent_activity(
         )
 
     return True, applied_fill
+
+
+def _record_submit_unknown_autolink_event(
+    conn,
+    *,
+    client_order_id: str,
+    side: str,
+    submit_attempt_context: dict[str, str | float | bool],
+    outcome: str,
+    candidate_count: int,
+    exchange_order_id: str | None,
+) -> None:
+    submit_attempt_id = str(submit_attempt_context.get("submit_attempt_id") or "")
+    event_message = format_event(
+        "reconcile_submit_unknown_autolink",
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        side=side,
+        outcome=outcome,
+        candidate_count=max(0, int(candidate_count)),
+        submit_attempt_id=submit_attempt_id or None,
+        timeout_submit_unknown=1 if bool(submit_attempt_context.get("timeout_submit_unknown")) else 0,
+    )
+    notify(event_message)
+    conn.execute(
+        """
+        INSERT INTO order_events(
+            client_order_id,
+            event_type,
+            event_ts,
+            order_status,
+            exchange_order_id,
+            message,
+            side,
+            submit_attempt_id
+        ) VALUES (?, 'reconcile_submit_unknown_autolink', ?, 'SUBMIT_UNKNOWN', ?, ?, ?, ?)
+        """,
+        (
+            client_order_id,
+            int(time.time() * 1000),
+            exchange_order_id,
+            event_message,
+            side,
+            submit_attempt_id or None,
+        ),
+    )
 
 
 def reconcile_with_broker(broker: Broker) -> None:

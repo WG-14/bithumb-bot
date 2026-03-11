@@ -136,6 +136,72 @@ class _SubmitUnknownWeakMetadataCorrelationBroker(_NoopBroker):
             )
         ]
 
+class _SubmitUnknownMultipleStrongCandidatesBroker(_NoopBroker):
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-candidate-1",
+                side="BUY",
+                status="CANCELED",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=250,
+                updated_ts=260,
+            ),
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-candidate-2",
+                side="BUY",
+                status="FAILED",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=251,
+                updated_ts=261,
+            ),
+        ]
+
+
+class _SubmitUnknownIncompatibleCorrelationBroker(_NoopBroker):
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-bad-status",
+                side="BUY",
+                status="PENDING_SUBMIT",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=250,
+                updated_ts=260,
+            ),
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-bad-side",
+                side="SELL",
+                status="CANCELED",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=251,
+                updated_ts=261,
+            ),
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id="ex-submit-unknown-bad-qty",
+                side="BUY",
+                status="CANCELED",
+                price=100.0,
+                qty_req=2.0,
+                qty_filled=0.0,
+                created_ts=252,
+                updated_ts=262,
+            ),
+        ]
+
 
 def _insert_submit_timeout_attempt_metadata(*, conn, client_order_id: str, submit_attempt_id: str, qty: float = 1.0) -> None:
     conn.execute(
@@ -554,6 +620,15 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
         row = conn.execute(
             "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
         ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
     finally:
         conn.close()
 
@@ -562,6 +637,8 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
     assert row is not None
     assert row["status"] == "CANCELED"
     assert row["exchange_order_id"] == "ex-submit-unknown-strong"
+    assert autolink is not None
+    assert "outcome=success" in str(autolink["message"])
     assert gate_reason is None
 
 
@@ -605,6 +682,153 @@ def test_submit_unknown_timeout_metadata_weak_correlation_stays_recovery_require
     assert "manual recovery required" in str(row["last_error"])
     assert gate_reason is not None
     assert "recovery_required_orders=1" in gate_reason
+
+
+def test_submit_unknown_timeout_metadata_multiple_strong_candidates_stays_recovery_required(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownMultipleStrongCandidatesBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert autolink is not None
+    assert "outcome=ambiguous" in str(autolink["message"])
+
+
+def test_submit_unknown_timeout_metadata_no_candidate_records_insufficient_evidence(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_NoopBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert autolink is not None
+    assert "outcome=insufficient_evidence" in str(autolink["message"])
+
+
+def test_submit_unknown_timeout_metadata_incompatible_status_qty_side_rejected(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownIncompatibleCorrelationBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] is None
+    assert "manual recovery required" in str(row["last_error"])
+    assert autolink is not None
+    assert "outcome=insufficient_evidence" in str(autolink["message"])
 
 
 def test_restarted_ambiguous_order_blocks_new_submit_until_resolved(isolated_db, monkeypatch):
