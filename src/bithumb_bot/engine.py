@@ -20,6 +20,7 @@ from .reason_codes import CANCEL_FAILURE, POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
 from .oms import collect_risky_order_state
+from .flatten import flatten_btc_position
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
@@ -751,6 +752,17 @@ def run_loop(short_n: int, long_n: int) -> None:
                     canceled_ok = _attempt_open_order_cancellation(
                         broker, trigger="kill-switch"
                     )
+                    flatten_outcome: dict[str, object] | None = None
+                    flatten_failed = False
+                    if settings.KILL_SWITCH_LIQUIDATE:
+                        flatten_outcome = flatten_btc_position(
+                            broker=broker,
+                            dry_run=bool(settings.LIVE_DRY_RUN),
+                            trigger="kill-switch",
+                        )
+                        flatten_status = str(flatten_outcome.get("status") or "")
+                        flatten_failed = flatten_status == "failed"
+
                     open_orders_present, position_present = _get_exposure_snapshot(int(now * 1000))
                     risk_open = open_orders_present or position_present
                     cancel_status = (
@@ -759,13 +771,17 @@ def run_loop(short_n: int, long_n: int) -> None:
                         else "emergency cancellation failed"
                     )
                     reason_detail = f"KILL_SWITCH=ON; {cancel_status}"
+                    if flatten_outcome is not None:
+                        reason_detail += f"; flatten_status={str(flatten_outcome.get('status') or '-') }"
+                        if flatten_failed:
+                            reason_detail += f"; flatten_error={str(flatten_outcome.get('error') or '-') }"
                     if risk_open:
                         reason_detail += (
                             "; risk_open_exposure_remains"
                             f"(open_orders={1 if open_orders_present else 0},"
                             f"position={1 if position_present else 0})"
                         )
-                    if not canceled_ok:
+                    if (not canceled_ok) or flatten_failed:
                         _halt_trading(
                             _halt_reason("KILL_SWITCH", reason_detail),
                             unresolved=True,

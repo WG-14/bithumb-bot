@@ -23,10 +23,10 @@ from .recovery import (
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
-from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
 from .broker.order_rules import get_effective_order_rules
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
+from .flatten import flatten_btc_position
 
 import httpx
 
@@ -1686,93 +1686,30 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
 
     from .broker.bithumb import BithumbBroker
 
-    conn = ensure_db()
-    try:
-        init_portfolio(conn)
-        row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-    finally:
-        conn.close()
+    broker = BithumbBroker()
+    summary = flatten_btc_position(broker=broker, dry_run=dry_run, trigger="operator")
+    status = str(summary.get("status") or "")
+    qty = float(summary.get("qty") or 0.0)
 
-    qty = float(row["asset_qty"] if row is not None else 0.0)
-    if qty <= 1e-12:
-        summary = {"status": "no_position", "qty": qty, "dry_run": int(bool(dry_run))}
-        runtime_state.record_flatten_position_result(status="no_position", summary=summary)
+    if status == "no_position":
         print("[FLATTEN-POSITION] no position to flatten (BTC qty=0)")
         return
 
-    broker = BithumbBroker()
     print(f"[FLATTEN-POSITION] target=BTC side=SELL qty={qty:.8f} dry_run={1 if dry_run else 0}")
-    runtime_state.record_flatten_position_result(
-        status="started",
-        summary={"qty": qty, "dry_run": int(bool(dry_run)), "side": "SELL", "symbol": settings.PAIR},
-    )
-    notify(
-        safety_event(
-            "flatten_position_started",
-            reason_code=EMERGENCY_FLATTEN_STARTED,
-            side="SELL",
-            symbol=settings.PAIR,
-            qty=qty,
-            dry_run=1 if dry_run else 0,
-        )
-    )
-
-    if dry_run:
-        runtime_state.record_flatten_position_result(
-            status="dry_run",
-            summary={"qty": qty, "dry_run": 1, "side": "SELL", "symbol": settings.PAIR},
-        )
+    if status == "dry_run":
         print("[FLATTEN-POSITION] dry-run: submit skipped")
         return
 
-    client_order_id = f"flatten_{int(time.time() * 1000)}"
-    try:
-        order = broker.place_order(client_order_id=client_order_id, side="SELL", qty=qty, price=None)
-    except Exception as e:
-        err = f"{type(e).__name__}: {e}"
-        runtime_state.record_flatten_position_result(
-            status="failed",
-            summary={"qty": qty, "side": "SELL", "symbol": settings.PAIR, "error": err},
-        )
-        notify(
-            safety_event(
-                "flatten_position_failed",
-                reason_code=EMERGENCY_FLATTEN_FAILED,
-                side="SELL",
-                symbol=settings.PAIR,
-                qty=qty,
-                error=err,
-            )
-        )
+    if status == "failed":
+        err = str(summary.get("error") or "unknown flatten failure")
         print(f"[FLATTEN-POSITION] failed: {err}")
         raise SystemExit(1)
 
-    runtime_state.record_flatten_position_result(
-        status="submitted",
-        summary={
-            "qty": qty,
-            "side": "SELL",
-            "symbol": settings.PAIR,
-            "client_order_id": client_order_id,
-            "exchange_order_id": str(order.exchange_order_id or "-"),
-            "order_status": str(order.status or "-"),
-        },
-    )
-    notify(
-        safety_event(
-            "flatten_position_submitted",
-            reason_code=EMERGENCY_FLATTEN_SUCCEEDED,
-            side="SELL",
-            symbol=settings.PAIR,
-            qty=qty,
-            client_order_id=client_order_id,
-            exchange_order_id=str(order.exchange_order_id or "-"),
-            status=str(order.status or "-"),
-        )
-    )
     print(
         "[FLATTEN-POSITION] submitted "
-        f"client_order_id={client_order_id} exchange_order_id={str(order.exchange_order_id or '-') } status={str(order.status or '-')}"
+        f"client_order_id={str(summary.get('client_order_id') or '-')} "
+        f"exchange_order_id={str(summary.get('exchange_order_id') or '-')} "
+        f"status={str(summary.get('order_status') or '-')}"
     )
 
 

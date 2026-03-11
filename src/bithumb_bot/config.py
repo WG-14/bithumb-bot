@@ -102,11 +102,6 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append("MAX_DAILY_LOSS_KRW must be > 0")
     if cfg.MAX_DAILY_ORDER_COUNT <= 0:
         issues.append("MAX_DAILY_ORDER_COUNT must be > 0")
-    if cfg.KILL_SWITCH_LIQUIDATE:
-        issues.append(
-            "KILL_SWITCH_LIQUIDATE=true is not supported yet; keep KILL_SWITCH_LIQUIDATE=false"
-        )
-
     spread_limit_bps = float(cfg.MAX_ORDERBOOK_SPREAD_BPS)
     if not math.isfinite(spread_limit_bps) or spread_limit_bps <= 0:
         issues.append(

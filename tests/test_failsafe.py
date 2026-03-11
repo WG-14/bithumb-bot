@@ -88,11 +88,10 @@ def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None
         conn.commit()
     finally:
         conn.close()
-
-
 class _LoopConn:
-    def __init__(self, *, open_order_created_ts: int | None = None):
+    def __init__(self, *, open_order_created_ts: int | None = None, asset_qty: float = 0.0):
         self.open_order_created_ts = open_order_created_ts
+        self.asset_qty = float(asset_qty)
         self.marked_recovery_required = 0
 
     def execute(self, query, params=None):
@@ -110,7 +109,7 @@ class _LoopConn:
             return _Rows({"open_order_count": 0 if self.open_order_created_ts is None else 1})
 
         if "FROM portfolio" in q:
-            return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
+            return _Rows({"cash_krw": 100000.0, "asset_qty": self.asset_qty})
 
         if "SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'" in q:
             return _Rows({"cnt": 0})
@@ -204,7 +203,7 @@ class _DummyBroker:
         return None
 
 
-def _prepare_run_loop(monkeypatch, open_order_created_ts=None):
+def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float = 0.0):
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
@@ -243,8 +242,10 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None):
         },
     )
 
-    loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts)
+    loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts, asset_qty=asset_qty)
     monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: loop_conn)
+    monkeypatch.setattr("bithumb_bot.flatten.ensure_db", lambda: loop_conn)
+    monkeypatch.setattr("bithumb_bot.flatten.init_portfolio", lambda _conn: None)
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _DummyBroker())
     monkeypatch.setattr(
         "bithumb_bot.engine.evaluate_daily_loss_breach",
@@ -518,6 +519,62 @@ def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(mon
     assert state.halt_state_unresolved is True
     assert state.last_disable_reason is not None
     assert "risk_open_exposure_remains" in state.last_disable_reason
+
+
+def test_run_loop_kill_switch_liquidate_with_open_position_triggers_flatten(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.05)
+    object.__setattr__(settings, "KILL_SWITCH", True)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.last_flatten_position_status == "dry_run"
+    assert state.last_flatten_position_summary is not None
+    assert '"trigger": "kill-switch"' in state.last_flatten_position_summary
+    assert "flatten_status=dry_run" in str(state.last_disable_reason)
+
+
+def test_run_loop_kill_switch_liquidate_with_no_position_enters_safe_halt(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.0)
+    object.__setattr__(settings, "KILL_SWITCH", True)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_state_unresolved is False
+    assert state.last_flatten_position_status == "no_position"
+    assert "flatten_status=no_position" in str(state.last_disable_reason)
+
+
+def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.02)
+    object.__setattr__(settings, "KILL_SWITCH", True)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_state_unresolved is True
+    assert state.last_flatten_position_status == "failed"
+    assert state.last_flatten_position_summary is not None
+    assert "place_order" in state.last_flatten_position_summary
+    assert "flatten_status=failed" in str(state.last_disable_reason)
 
 
 def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):

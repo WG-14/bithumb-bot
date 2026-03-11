@@ -166,7 +166,9 @@ def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: py
 
     validate_live_mode_preflight(settings)
 
-def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
+def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
@@ -174,14 +176,15 @@ def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
-    with pytest.raises(LiveModeValidationError) as exc:
-        validate_live_mode_preflight(settings)
-
-    assert (
-        "KILL_SWITCH_LIQUIDATE=true is not supported yet; keep KILL_SWITCH_LIQUIDATE=false"
-        in str(exc.value)
-    )
+    validate_live_mode_preflight(settings)
 
 def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_PATH", "data/live.sqlite")
