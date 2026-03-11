@@ -433,6 +433,9 @@ def cmd_health() -> None:
     if health["startup_gate_reason"]:
         halt_reason_for_summary = "STARTUP_SAFETY_GATE"
         recommended_commands = "uv run python bot.py reconcile | uv run python bot.py recovery-report"
+    elif bool(health.get("emergency_flatten_blocked")):
+        halt_reason_for_summary = "EMERGENCY_FLATTEN_UNRESOLVED"
+        recommended_commands = "uv run python bot.py flatten-position | uv run python bot.py recovery-report"
     elif health["recovery_required_count"] > 0:
         recommended_commands = (
             "uv run python bot.py recover-order --client-order-id <id>"
@@ -444,6 +447,7 @@ def cmd_health() -> None:
     has_critical_state = bool(
         health["startup_gate_reason"]
         or health["halt_new_orders_blocked"]
+        or bool(health.get("emergency_flatten_blocked"))
         or health["recovery_required_count"] > 0
     )
 
@@ -518,6 +522,8 @@ def cmd_health() -> None:
     print(f"  last_cancel_open_orders_trigger={health['last_cancel_open_orders_trigger']}")
     print(f"  last_cancel_open_orders_status={health['last_cancel_open_orders_status']}")
     print(f"  last_cancel_open_orders_summary={health['last_cancel_open_orders_summary']}")
+    print(f"  emergency_flatten_blocked={health.get('emergency_flatten_blocked')}")
+    print(f"  emergency_flatten_block_reason={health.get('emergency_flatten_block_reason')}")
     print(f"  startup_gate_reason={health['startup_gate_reason']}")
 
 
@@ -1414,6 +1420,8 @@ def _load_recovery_report(
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
         "trading_enabled": bool(state.trading_enabled),
+        "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
+        "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
         "resume_allowed": bool(resume_allowed),
         "can_resume": can_resume,
         "resume_blockers": blocker_codes,
@@ -1458,6 +1466,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    active_blocker_summary={report['active_blocker_summary']}")
     print(f"    risk_level={report['risk_level']}")
     print(f"    primary_blocker_code={report['primary_blocker_code']}")
+    print(f"    emergency_flatten_blocked={1 if bool(report.get('emergency_flatten_blocked')) else 0}")
+    print(f"    emergency_flatten_block_reason={report.get('emergency_flatten_block_reason') or 'none'}")
     for blocker in blockers:
         print(
             "    - "

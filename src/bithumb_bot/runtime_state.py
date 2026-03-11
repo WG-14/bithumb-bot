@@ -52,6 +52,8 @@ class RuntimeState:
     last_flatten_position_epoch_sec: float | None = None
     last_flatten_position_status: str | None = None
     last_flatten_position_summary: str | None = None
+    emergency_flatten_blocked: bool = False
+    emergency_flatten_block_reason: str | None = None
     startup_gate_reason: str | None = None
     resume_gate_blocked: bool = False
     resume_gate_reason: str | None = None
@@ -96,6 +98,8 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_flatten_position_epoch_sec = persisted.last_flatten_position_epoch_sec
     _STATE.last_flatten_position_status = persisted.last_flatten_position_status
     _STATE.last_flatten_position_summary = persisted.last_flatten_position_summary
+    _STATE.emergency_flatten_blocked = persisted.emergency_flatten_blocked
+    _STATE.emergency_flatten_block_reason = persisted.emergency_flatten_block_reason
     _STATE.startup_gate_reason = persisted.startup_gate_reason
     _STATE.resume_gate_blocked = persisted.resume_gate_blocked
     _STATE.resume_gate_reason = persisted.resume_gate_reason
@@ -143,12 +147,14 @@ def _persist_state(state: RuntimeState) -> None:
                     last_flatten_position_epoch_sec,
                     last_flatten_position_status,
                     last_flatten_position_summary,
+                    emergency_flatten_blocked,
+                    emergency_flatten_block_reason,
                     startup_gate_reason,
                     resume_gate_blocked,
                     resume_gate_reason,
                     updated_ts
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                     trading_enabled=excluded.trading_enabled,
                     halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -180,6 +186,8 @@ def _persist_state(state: RuntimeState) -> None:
                     last_flatten_position_epoch_sec=excluded.last_flatten_position_epoch_sec,
                     last_flatten_position_status=excluded.last_flatten_position_status,
                     last_flatten_position_summary=excluded.last_flatten_position_summary,
+                    emergency_flatten_blocked=excluded.emergency_flatten_blocked,
+                    emergency_flatten_block_reason=excluded.emergency_flatten_block_reason,
                     startup_gate_reason=excluded.startup_gate_reason,
                     resume_gate_blocked=excluded.resume_gate_blocked,
                     resume_gate_reason=excluded.resume_gate_reason,
@@ -216,6 +224,8 @@ def _persist_state(state: RuntimeState) -> None:
                     state.last_flatten_position_epoch_sec,
                     _clip(state.last_flatten_position_status),
                     _clip(state.last_flatten_position_summary, max_len=1000),
+                    1 if state.emergency_flatten_blocked else 0,
+                    _clip(state.emergency_flatten_block_reason),
                     _clip(state.startup_gate_reason),
                     1 if state.resume_gate_blocked else 0,
                     _clip(state.resume_gate_reason),
@@ -264,6 +274,8 @@ def _read_persisted_state() -> RuntimeState | None:
                 last_flatten_position_epoch_sec,
                 last_flatten_position_status,
                 last_flatten_position_summary,
+                emergency_flatten_blocked,
+                emergency_flatten_block_reason,
                 startup_gate_reason,
                 resume_gate_blocked,
                 resume_gate_reason
@@ -360,6 +372,12 @@ def _read_persisted_state() -> RuntimeState | None:
         last_flatten_position_summary=(
             str(row["last_flatten_position_summary"])
             if row["last_flatten_position_summary"] is not None
+            else None
+        ),
+        emergency_flatten_blocked=bool(int(row["emergency_flatten_blocked"])),
+        emergency_flatten_block_reason=(
+            str(row["emergency_flatten_block_reason"])
+            if row["emergency_flatten_block_reason"] is not None
             else None
         ),
         startup_gate_reason=(
@@ -492,7 +510,24 @@ def record_flatten_position_result(
         _STATE.last_flatten_position_epoch_sec = float(ts)
         _STATE.last_flatten_position_status = _clip(status)
         _STATE.last_flatten_position_summary = _clip(payload, max_len=1000)
+        if str(status) in {"failed", "started"}:
+            _STATE.emergency_flatten_blocked = True
+            _STATE.emergency_flatten_block_reason = _clip(
+                "emergency flatten unresolved: "
+                f"status={status} summary={payload or '-'}"
+            )
+        elif str(status) in {"submitted", "no_position"}:
+            _STATE.emergency_flatten_blocked = False
+            _STATE.emergency_flatten_block_reason = None
         _persist_state(_STATE)
+
+
+def get_emergency_flatten_blocker() -> str | None:
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        if not _STATE.emergency_flatten_blocked:
+            return None
+        return _STATE.emergency_flatten_block_reason or "emergency flatten unresolved"
 
 
 def set_startup_gate_reason(reason: str | None) -> None:

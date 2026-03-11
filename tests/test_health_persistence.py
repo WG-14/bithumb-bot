@@ -512,3 +512,39 @@ def test_resume_gate_fields_roundtrip_in_health_persistence(tmp_path):
     cleared = runtime_state.snapshot()
     assert cleared.resume_gate_blocked is False
     assert cleared.resume_gate_reason is None
+
+
+def test_emergency_flatten_failure_persists_across_restart(tmp_path):
+    db_path = _set_tmp_db(tmp_path)
+
+    runtime_state.record_flatten_position_result(
+        status="failed",
+        summary={"status": "failed", "error": "submit boom", "trigger": "daily-loss-halt"},
+        now_epoch_sec=123.0,
+    )
+
+    env = dict(os.environ)
+    env["DB_PATH"] = str(db_path)
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from bithumb_bot import runtime_state; "
+                "s = runtime_state.snapshot(); "
+                "print(int(s.emergency_flatten_blocked)); "
+                "print(s.emergency_flatten_block_reason or '-')"
+            ),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    assert lines[0] == "1"
+    assert "emergency flatten unresolved" in lines[1]
+    assert "submit boom" in lines[1]

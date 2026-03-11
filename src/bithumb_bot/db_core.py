@@ -151,6 +151,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_flatten_position_epoch_sec REAL,
             last_flatten_position_status TEXT,
             last_flatten_position_summary TEXT,
+            emergency_flatten_blocked INTEGER NOT NULL DEFAULT 0,
+            emergency_flatten_block_reason TEXT,
             startup_gate_reason TEXT,
             resume_gate_blocked INTEGER NOT NULL DEFAULT 0,
             resume_gate_reason TEXT,
@@ -304,6 +306,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "last_flatten_position_summary",
         "last_flatten_position_summary TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "emergency_flatten_blocked",
+        "emergency_flatten_blocked INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "emergency_flatten_block_reason",
+        "emergency_flatten_block_reason TEXT",
     )
     _ensure_column(
         conn,

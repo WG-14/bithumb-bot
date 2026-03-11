@@ -148,6 +148,8 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "last_cancel_open_orders_trigger": state.last_cancel_open_orders_trigger,
         "last_cancel_open_orders_status": state.last_cancel_open_orders_status,
         "last_cancel_open_orders_summary": state.last_cancel_open_orders_summary,
+        "emergency_flatten_blocked": state.emergency_flatten_blocked,
+        "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
         "startup_gate_reason": state.startup_gate_reason,
         "resume_gate_blocked": state.resume_gate_blocked,
         "resume_gate_reason": state.resume_gate_reason,
@@ -211,6 +213,10 @@ def evaluate_startup_safety_gate() -> str | None:
         }
 
     reasons: list[str] = []
+    flatten_block_reason = runtime_state.get_emergency_flatten_blocker()
+    if flatten_block_reason:
+        reasons.append(f"emergency_flatten_unresolved={flatten_block_reason}")
+
     if status_counts["pending_submit"] > 0:
         reasons.append(f"pending_submit_orders={status_counts['pending_submit']}")
     if status_counts["submit_unknown"] > 0:
@@ -272,14 +278,27 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 overridable=False,
             )
         )
-        if state.last_reconcile_status == "ok":
-            reasons.append(
-                _resume_blocker(
-                    code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
-                    detail="latest reconcile reported ok but startup safety gate still blocks resume",
-                    overridable=False,
-                )
+
+    if state.emergency_flatten_blocked:
+        reasons.append(
+            _resume_blocker(
+                code="EMERGENCY_FLATTEN_UNRESOLVED",
+                detail=(
+                    state.emergency_flatten_block_reason
+                    or f"last_flatten_status={state.last_flatten_position_status or '-'}"
+                ),
+                overridable=False,
             )
+        )
+
+    if startup_gate_reason and state.last_reconcile_status == "ok":
+        reasons.append(
+            _resume_blocker(
+                code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+                detail="latest reconcile reported ok but startup safety gate still blocks resume",
+                overridable=False,
+            )
+        )
 
     if state.halt_state_unresolved:
         reasons.append(

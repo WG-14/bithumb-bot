@@ -1538,6 +1538,8 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "resume_allowed",
         "risk_level",
         "trading_enabled",
+        "emergency_flatten_blocked",
+        "emergency_flatten_block_reason",
         "recovery_candidates",
         "unprocessed_remote_open_orders",
         "unresolved_count",
@@ -2211,3 +2213,44 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
     assert "submit boom" in state.last_flatten_position_summary
+
+
+def test_resume_blocked_when_emergency_flatten_unresolved(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    runtime_state.record_flatten_position_result(
+        status="failed",
+        summary={"status": "failed", "error": "submit boom", "trigger": "position-loss-halt"},
+    )
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
+    monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", lambda broker: None)
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    assert exc.value.code == 1
+    report = _load_recovery_report()
+    assert report["can_resume"] is False
+    assert "EMERGENCY_FLATTEN_UNRESOLVED" in report["resume_blockers"]
+
+
+def test_health_and_recovery_report_expose_emergency_flatten_blocker(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    runtime_state.record_flatten_position_result(
+        status="failed",
+        summary={"status": "failed", "error": "submit boom", "trigger": "kill-switch"},
+    )
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "emergency_flatten_blocked=True" in health_out
+    assert "emergency_flatten_block_reason=emergency flatten unresolved" in health_out
+    assert "blockers=STARTUP_SAFETY_GATE_BLOCKED, EMERGENCY_FLATTEN_UNRESOLVED" in health_out
+
+    cmd_recovery_report(as_json=False)
+    report_out = capsys.readouterr().out
+    assert "emergency_flatten_blocked=1" in report_out
+    assert "emergency_flatten_block_reason=emergency flatten unresolved" in report_out
+    assert "EMERGENCY_FLATTEN_UNRESOLVED" in report_out
