@@ -8,6 +8,7 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.app import (
     _load_recovery_report,
+    cmd_broker_diagnose,
     cmd_health,
     cmd_pause,
     cmd_reconcile,
@@ -675,6 +676,142 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
     assert state.last_cancel_open_orders_epoch_sec is not None
     assert state.last_cancel_open_orders_summary is not None
     assert '"failed_count": 1' in state.last_cancel_open_orders_summary
+
+
+def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1200000.0, 10000.0, 0.12, 0.01)
+
+        def get_open_orders(self):
+            return [
+                BrokerOrder("a", "ex1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1),
+                BrokerOrder("b", "ex2", "SELL", "PARTIAL", 110.0, 0.1, 0.05, 1, 1),
+            ]
+
+        def get_recent_orders(self, *, limit: int = 100):
+            return [
+                BrokerOrder("", "ex3", "BUY", "FILLED", 120.0, 0.2, 0.2, 1, 2),
+                BrokerOrder("", "ex4", "SELL", "CANCELED", 121.0, 0.2, 0.0, 1, 2),
+            ][:limit]
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "max_qty_decimals": 8,
+                    },
+                )(),
+                "source": {"min_qty": "auto", "qty_step": "auto"},
+            },
+        )(),
+    )
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    assert "[BROKER-DIAGNOSE]" in out
+    assert "connectivity=ok" in out
+    assert "open_orders=count=2" in out
+    assert "recent_orders=supported=1 count=2 statuses=CANCELED:1, FILLED:1" in out
+    assert "overall_status=OK" in out
+
+
+def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    class _DiagPartialBroker:
+        def get_balance(self):
+            return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
+
+        def get_open_orders(self):
+            raise RuntimeError("open orders timeout")
+
+        def get_recent_orders(self, *, limit: int = 100):
+            return []
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagPartialBroker())
+    monkeypatch.setattr("bithumb_bot.app.get_effective_order_rules", lambda _pair: (_ for _ in ()).throw(RuntimeError("rules api down")))
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    assert "overall_status=PARTIAL" in out
+    assert "warnings:" in out
+    assert "order rules lookup failed" in out
+    assert "open order snapshot failed" in out
+
+
+def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    place_calls = {"n": 0}
+
+    class _NoTradeBroker:
+        def place_order(self, **_kwargs):
+            place_calls["n"] += 1
+            raise AssertionError("place_order must not be called")
+
+        def get_balance(self):
+            return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
+
+        def get_open_orders(self):
+            return []
+
+        def get_recent_orders(self, *, limit: int = 100):
+            raise NotImplementedError
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoTradeBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "max_qty_decimals": 8,
+                    },
+                )(),
+                "source": {"min_qty": "auto"},
+            },
+        )(),
+    )
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert place_calls["n"] == 0
 
 
 def test_recovery_report_summarizes_unresolved_and_recovery_required(tmp_path):

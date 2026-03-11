@@ -23,6 +23,7 @@ from .recovery import (
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
+from .broker.order_rules import get_effective_order_rules
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 
@@ -700,6 +701,87 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
     for msg in summary["error_messages"]:
         print(f"  - {msg}")
+
+
+def cmd_broker_diagnose() -> None:
+    if settings.MODE != "live":
+        print(f"[BROKER-DIAGNOSE] failed: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    from .broker.bithumb import BithumbBroker
+
+    broker = BithumbBroker()
+    critical_failures: list[str] = []
+    warnings: list[str] = []
+
+    balance_summary = "unavailable"
+    try:
+        bal = broker.get_balance()
+        balance_summary = (
+            f"cash_available={bal.cash_available:,.0f} cash_locked={bal.cash_locked:,.0f} "
+            f"asset_available={bal.asset_available:.8f} asset_locked={bal.asset_locked:.8f}"
+        )
+    except Exception as e:
+        critical_failures.append(f"balance lookup failed ({type(e).__name__}: {e})")
+
+    rules_summary = "unavailable"
+    try:
+        rr = get_effective_order_rules(PAIR)
+        rules = rr.rules
+        source = rr.source or {}
+        rules_summary = (
+            f"min_qty={rules.min_qty} qty_step={rules.qty_step} "
+            f"min_notional_krw={rules.min_notional_krw} max_qty_decimals={rules.max_qty_decimals} "
+            f"source={source or {'all': 'cache'}}"
+        )
+    except Exception as e:
+        warnings.append(f"order rules lookup failed ({type(e).__name__}: {e})")
+
+    open_orders_summary = "unavailable"
+    try:
+        open_orders = broker.get_open_orders()
+        open_orders_summary = f"count={len(open_orders)}"
+    except Exception as e:
+        warnings.append(f"open order snapshot failed ({type(e).__name__}: {e})")
+
+    recent_summary = "unavailable"
+    try:
+        recent_orders = broker.get_recent_orders(limit=20)
+        status_counts: dict[str, int] = {}
+        for order in recent_orders:
+            status = str(getattr(order, "status", "UNKNOWN") or "UNKNOWN").upper()
+            status_counts[status] = status_counts.get(status, 0) + 1
+        status_tokens = ", ".join(
+            f"{status}:{count}" for status, count in sorted(status_counts.items())
+        )
+        recent_summary = f"supported=1 count={len(recent_orders)} statuses={status_tokens or 'none'}"
+    except NotImplementedError:
+        recent_summary = "supported=0"
+    except Exception as e:
+        warnings.append(f"recent order snapshot failed ({type(e).__name__}: {e})")
+
+    has_partial_failure = bool(warnings)
+    overall_status = "FAILED" if critical_failures else ("PARTIAL" if has_partial_failure else "OK")
+
+    print("[BROKER-DIAGNOSE]")
+    print(f"  pair={PAIR}")
+    print(f"  connectivity={'ok' if not critical_failures else 'failed'}")
+    print(f"  balances={balance_summary}")
+    print(f"  market_rules={rules_summary}")
+    print(f"  open_orders={open_orders_summary}")
+    print(f"  recent_orders={recent_summary}")
+    if warnings:
+        print("  warnings:")
+        for warning in warnings:
+            print(f"    - {warning}")
+    if critical_failures:
+        print("  failures:")
+        for failure in critical_failures:
+            print(f"    - {failure}")
+    print(f"  overall_status={overall_status}")
+
+    if critical_failures:
+        raise SystemExit(1)
 
 
 def _last_reconcile_failed(state) -> bool:
@@ -1439,6 +1521,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health")
     sub.add_parser("audit-ledger")
     sub.add_parser("cancel-open-orders")
+    sub.add_parser("broker-diagnose")
     sub.add_parser("pause")
 
     resume = sub.add_parser("resume")
@@ -1494,6 +1577,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_audit_ledger()
     elif args.cmd == "cancel-open-orders":
         cmd_cancel_open_orders()
+    elif args.cmd == "broker-diagnose":
+        cmd_broker_diagnose()
     elif args.cmd == "pause":
         cmd_pause()
     elif args.cmd == "resume":

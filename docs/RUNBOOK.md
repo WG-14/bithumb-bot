@@ -78,6 +78,34 @@ sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
 - timer가 정상 등록/실행되는지 확인.
 - `backups/` 파일 생성 여부 확인.
 
+## 4-1) 브로커 읽기 전용 진단 (`broker-diagnose`)
+
+실주문 전/장애 조사 시 **주문 없이** 거래소 연동 상태를 빠르게 점검한다.
+
+```bash
+uv run python bot.py broker-diagnose
+```
+
+출력 요약 항목:
+
+- `connectivity`: 브로커/API 기본 연결 및 잔고 조회 성공 여부
+- `balances`: 가용/잠금 현금·자산
+- `market_rules`: 최소 수량/스텝/최소 주문금액/소수점 자릿수
+- `open_orders`: 원격 미체결 주문 개수
+- `recent_orders`: 최근 주문 조회 지원 여부 및 상태별 요약
+- `overall_status`: `OK` / `PARTIAL` / `FAILED`
+
+운영 가이드:
+
+- `OK`: 라이브 전 점검 통과(다음 단계 진행 가능)
+- `PARTIAL`: 일부 조회 실패(네트워크/API 상태 확인 후 재시도 권장)
+- `FAILED`: 핵심 조회 실패(비정상). 원인 해소 전 재개/실주문 금지
+
+주의:
+
+- `MODE=live`에서만 동작한다. 그 외 모드에서는 실패로 종료한다.
+- 이 명령은 주문 생성/취소를 호출하지 않는 읽기 전용 진단이다.
+
 ## 5) 비상 정지 / 일시중지 / 복구 체크리스트
 
 ### A. 즉시 리스크 차단 (Emergency stop)
