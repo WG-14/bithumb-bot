@@ -1,4 +1,4 @@
-from .config import settings
+from .config import LiveModeValidationError, settings, validate_live_mode_preflight
 from .risk import evaluate_buy_guardrails
 from .broker.paper import paper_execute
 from .strategy.sma import compute_signal
@@ -764,76 +764,115 @@ def cmd_broker_diagnose() -> None:
     from .broker.bithumb import BithumbBroker
 
     broker = BithumbBroker()
-    critical_failures: list[str] = []
-    warnings: list[str] = []
+    checks: list[dict[str, str | bool]] = []
 
-    balance_summary = "unavailable"
+    def add_check(name: str, status: str, detail: str, *, critical: bool) -> None:
+        checks.append({"name": name, "status": status, "detail": detail, "critical": critical})
+
     try:
-        bal = broker.get_balance()
-        balance_summary = (
-            f"cash_available={bal.cash_available:,.0f} cash_locked={bal.cash_locked:,.0f} "
-            f"asset_available={bal.asset_available:.8f} asset_locked={bal.asset_locked:.8f}"
-        )
-    except Exception as e:
-        critical_failures.append(f"balance lookup failed ({type(e).__name__}: {e})")
+        validate_live_mode_preflight(settings)
+        add_check("config/env loaded", "PASS", "live preflight validation passed", critical=True)
+    except LiveModeValidationError as e:
+        add_check("config/env loaded", "FAIL", str(e), critical=True)
 
-    rules_summary = "unavailable"
+    balance = None
+    try:
+        balance = broker.get_balance()
+        add_check("broker authentication", "PASS", "private API reachable", critical=True)
+    except Exception as e:
+        detail = f"private API failed ({type(e).__name__}: {e})"
+        add_check("broker authentication", "FAIL", detail, critical=True)
+        add_check("balance query", "FAIL", detail, critical=True)
+
+    if balance is not None:
+        balance_summary = (
+            f"cash_available={balance.cash_available:,.0f} cash_locked={balance.cash_locked:,.0f} "
+            f"asset_available={balance.asset_available:.8f} asset_locked={balance.asset_locked:.8f}"
+        )
+        add_check("balance query", "PASS", balance_summary, critical=True)
+
+    try:
+        open_orders = broker.get_open_orders()
+        add_check("open order query", "PASS", f"count={len(open_orders)}", critical=False)
+    except Exception as e:
+        add_check(
+            "open order query",
+            "WARN",
+            f"snapshot failed ({type(e).__name__}: {e})",
+            critical=False,
+        )
+
     try:
         rr = get_effective_order_rules(PAIR)
         rules = rr.rules
         source = rr.source or {}
-        rules_summary = (
-            f"min_qty={rules.min_qty} qty_step={rules.qty_step} "
-            f"min_notional_krw={rules.min_notional_krw} max_qty_decimals={rules.max_qty_decimals} "
-            f"source={source or {'all': 'cache'}}"
+        add_check(
+            "symbol/order rule query",
+            "PASS",
+            (
+                f"min_qty={rules.min_qty} qty_step={rules.qty_step} "
+                f"min_notional_krw={rules.min_notional_krw} max_qty_decimals={rules.max_qty_decimals} "
+                f"source={source or {'all': 'cache'}}"
+            ),
+            critical=False,
         )
     except Exception as e:
-        warnings.append(f"order rules lookup failed ({type(e).__name__}: {e})")
-
-    open_orders_summary = "unavailable"
-    try:
-        open_orders = broker.get_open_orders()
-        open_orders_summary = f"count={len(open_orders)}"
-    except Exception as e:
-        warnings.append(f"open order snapshot failed ({type(e).__name__}: {e})")
-
-    recent_summary = "unavailable"
-    try:
-        recent_orders = broker.get_recent_orders(limit=20)
-        status_counts: dict[str, int] = {}
-        for order in recent_orders:
-            status = str(getattr(order, "status", "UNKNOWN") or "UNKNOWN").upper()
-            status_counts[status] = status_counts.get(status, 0) + 1
-        status_tokens = ", ".join(
-            f"{status}:{count}" for status, count in sorted(status_counts.items())
+        add_check(
+            "symbol/order rule query",
+            "WARN",
+            f"lookup failed ({type(e).__name__}: {e})",
+            critical=False,
         )
-        recent_summary = f"supported=1 count={len(recent_orders)} statuses={status_tokens or 'none'}"
-    except NotImplementedError:
-        recent_summary = "supported=0"
+
+    notifier_enabled = os.getenv("NOTIFIER_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+    has_notifier_target = any(
+        [
+            os.getenv("NOTIFIER_WEBHOOK_URL", "").strip(),
+            os.getenv("SLACK_WEBHOOK_URL", "").strip(),
+            os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            and os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+        ]
+    )
+    if not notifier_enabled:
+        add_check("notifier configured", "WARN", "NOTIFIER_ENABLED=false", critical=False)
+    elif has_notifier_target:
+        add_check("notifier configured", "PASS", "delivery target detected", critical=False)
+    else:
+        add_check("notifier configured", "WARN", "no webhook/chat target configured", critical=False)
+
+    try:
+        conn = ensure_db()
+        try:
+            conn.execute("SAVEPOINT live_readiness_probe")
+            conn.execute(
+                "INSERT OR REPLACE INTO daily_risk(day_kst, start_equity) VALUES ('__live_readiness_probe__', 0.0)"
+            )
+            conn.execute("ROLLBACK TO live_readiness_probe")
+            conn.execute("RELEASE live_readiness_probe")
+            add_check("DB writable", "PASS", f"path={settings.DB_PATH}", critical=True)
+        finally:
+            conn.close()
     except Exception as e:
-        warnings.append(f"recent order snapshot failed ({type(e).__name__}: {e})")
+        add_check("DB writable", "FAIL", f"db write probe failed ({type(e).__name__}: {e})", critical=True)
 
-    has_partial_failure = bool(warnings)
-    overall_status = "FAILED" if critical_failures else ("PARTIAL" if has_partial_failure else "OK")
+    fail_count = sum(1 for check in checks if check["status"] == "FAIL")
+    warn_count = sum(1 for check in checks if check["status"] == "WARN")
+    pass_count = sum(1 for check in checks if check["status"] == "PASS")
+    overall_status = "FAIL" if fail_count else ("WARN" if warn_count else "PASS")
 
-    print("[BROKER-DIAGNOSE]")
+    print("[BROKER-READINESS]")
     print(f"  pair={PAIR}")
-    print(f"  connectivity={'ok' if not critical_failures else 'failed'}")
-    print(f"  balances={balance_summary}")
-    print(f"  market_rules={rules_summary}")
-    print(f"  open_orders={open_orders_summary}")
-    print(f"  recent_orders={recent_summary}")
-    if warnings:
-        print("  warnings:")
-        for warning in warnings:
-            print(f"    - {warning}")
-    if critical_failures:
-        print("  failures:")
-        for failure in critical_failures:
-            print(f"    - {failure}")
-    print(f"  overall_status={overall_status}")
+    print(f"  summary: pass={pass_count} warn={warn_count} fail={fail_count} overall={overall_status}")
+    for check in checks:
+        print(f"  - [{check['status']}] {check['name']}: {check['detail']}")
 
-    if critical_failures:
+    if fail_count:
         raise SystemExit(1)
 
 

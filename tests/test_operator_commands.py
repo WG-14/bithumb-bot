@@ -681,7 +681,16 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
 def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
+    original_max_order = settings.MAX_ORDER_KRW
+    original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
+    original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
+    original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
 
     class _DiagBroker:
         def get_balance(self):
@@ -725,19 +734,35 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     out = capsys.readouterr().out
-    assert "[BROKER-DIAGNOSE]" in out
-    assert "connectivity=ok" in out
-    assert "open_orders=count=2" in out
-    assert "recent_orders=supported=1 count=2 statuses=CANCELED:1, FILLED:1" in out
-    assert "overall_status=OK" in out
+    assert "[BROKER-READINESS]" in out
+    assert "overall=PASS" in out
+    assert "[PASS] config/env loaded" in out
+    assert "[PASS] broker authentication" in out
+    assert "[PASS] balance query" in out
+    assert "[PASS] open order query: count=2" in out
+    assert "[PASS] symbol/order rule query" in out
+    assert "[PASS] DB writable" in out
 
 
 def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
+    original_max_order = settings.MAX_ORDER_KRW
+    original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
+    original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
+    original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
 
     class _DiagPartialBroker:
         def get_balance(self):
@@ -756,18 +781,93 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     out = capsys.readouterr().out
-    assert "overall_status=PARTIAL" in out
-    assert "warnings:" in out
-    assert "order rules lookup failed" in out
-    assert "open order snapshot failed" in out
+    assert "overall=WARN" in out
+    assert "[WARN] symbol/order rule query" in out
+    assert "[WARN] open order query" in out
+
+
+def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    original_max_order = settings.MAX_ORDER_KRW
+    original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
+    original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_api_key = settings.BITHUMB_API_KEY
+    original_api_secret = settings.BITHUMB_API_SECRET
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "")
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
+
+        def get_open_orders(self):
+            return []
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "max_qty_decimals": 8,
+                    },
+                )(),
+                "source": {"min_qty": "auto"},
+            },
+        )(),
+    )
+
+    try:
+        with pytest.raises(SystemExit):
+            cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "BITHUMB_API_KEY", original_api_key)
+        object.__setattr__(settings, "BITHUMB_API_SECRET", original_api_secret)
+
+    out = capsys.readouterr().out
+    assert "overall=FAIL" in out
+    assert "[FAIL] config/env loaded" in out
 
 
 def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
+    original_max_order = settings.MAX_ORDER_KRW
+    original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
+    original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
+    original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
     place_calls = {"n": 0}
 
     class _NoTradeBroker:
@@ -810,6 +910,10 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     assert place_calls["n"] == 0
 
