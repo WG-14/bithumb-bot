@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -104,6 +105,27 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     if cfg.KILL_SWITCH_LIQUIDATE:
         issues.append(
             "KILL_SWITCH_LIQUIDATE=true is not supported yet; keep KILL_SWITCH_LIQUIDATE=false"
+        )
+
+    spread_limit_bps = float(cfg.MAX_ORDERBOOK_SPREAD_BPS)
+    if not math.isfinite(spread_limit_bps) or spread_limit_bps <= 0:
+        issues.append(
+            "MAX_ORDERBOOK_SPREAD_BPS must be a finite value > 0 when MODE=live "
+            "(spread guard cannot be disabled)"
+        )
+
+    market_slippage_bps = float(cfg.MAX_MARKET_SLIPPAGE_BPS)
+    if not math.isfinite(market_slippage_bps) or market_slippage_bps <= 0:
+        issues.append(
+            "MAX_MARKET_SLIPPAGE_BPS must be a finite value > 0 when MODE=live "
+            "(market slippage guard cannot be disabled)"
+        )
+
+    live_protection_slippage_bps = float(cfg.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS)
+    if not math.isfinite(live_protection_slippage_bps) or live_protection_slippage_bps <= 0:
+        issues.append(
+            "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS must be a finite value > 0 when MODE=live "
+            "(live price protection cannot be disabled)"
         )
 
     if not cfg.LIVE_DRY_RUN:

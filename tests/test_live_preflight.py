@@ -23,6 +23,9 @@ def _restore_settings():
         "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
         "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
         "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
+        "MAX_ORDERBOOK_SPREAD_BPS": settings.MAX_ORDERBOOK_SPREAD_BPS,
+        "MAX_MARKET_SLIPPAGE_BPS": settings.MAX_MARKET_SLIPPAGE_BPS,
+        "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -115,11 +118,53 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     validate_live_mode_preflight(settings)
 
 
 
+
+
+def test_live_preflight_requires_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS must be a finite value > 0" in str(exc.value)
+
+
+def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+
+    validate_live_mode_preflight(settings)
 
 def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
     object.__setattr__(settings, "MODE", "live")
@@ -153,6 +198,9 @@ def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.M
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     validate_live_mode_preflight(settings)
 
@@ -200,6 +248,9 @@ def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     validate_live_mode_preflight(settings)
 
@@ -240,6 +291,9 @@ def test_live_preflight_accepts_notifier_configuration(monkeypatch: pytest.Monke
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     validate_live_mode_preflight(settings)
 
@@ -301,6 +355,9 @@ def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: p
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
     order_rules._cached_rules.clear()
 
     monkeypatch.setattr(
