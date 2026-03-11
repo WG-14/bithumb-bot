@@ -108,6 +108,60 @@ def test_balance_parses_available_and_locked(monkeypatch):
     assert bal.asset_locked == 0.02
 
 
+def test_place_order_market_buy_routes_to_market_endpoint(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    call: dict[str, object] = {}
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"status": "0000", "data": {"order_id": "mkt-1"}}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-1", side="BUY", qty=0.1234, price=None)
+
+    assert order.exchange_order_id == "mkt-1"
+    assert call["endpoint"] == "/trade/market_buy"
+    assert call["retry_safe"] is False
+    assert call["payload"] == {
+        "order_currency": "BTC",
+        "payment_currency": "KRW",
+        "units": "0.1234000000000000",
+    }
+
+
+def test_place_order_limit_sell_still_uses_trade_place(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    call: dict[str, object] = {}
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"status": "0000", "data": {"order_id": "lmt-1"}}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.5, price=150000000)
+
+    assert order.exchange_order_id == "lmt-1"
+    assert call["endpoint"] == "/trade/place"
+    assert call["retry_safe"] is False
+    assert call["payload"] == {
+        "order_currency": "BTC",
+        "payment_currency": "KRW",
+        "units": "0.5000000000000000",
+        "type": "sell",
+        "price": "150000000",
+    }
+
+
 def test_recent_orders_includes_filled_history_not_in_open_orders(monkeypatch):
     _configure_live()
     broker = BithumbBroker()

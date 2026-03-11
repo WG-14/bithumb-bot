@@ -87,16 +87,25 @@ class BithumbBroker:
             return BrokerOrder(client_order_id, f"dry_{client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
         order_currency, payment_currency = self._pair()
-        payload = {
-            "order_currency": order_currency,
-            "payment_currency": payment_currency,
-            "units": f"{qty:.16f}",
-            "type": side.lower(),
-        }
-        if price is not None:
-            payload["price"] = str(price)
+        side_lower = side.lower()
+        if price is None:
+            endpoint = "/trade/market_buy" if side_lower == "buy" else "/trade/market_sell"
+            payload = {
+                "order_currency": order_currency,
+                "payment_currency": payment_currency,
+                "units": f"{qty:.16f}",
+            }
+        else:
+            endpoint = "/trade/place"
+            payload = {
+                "order_currency": order_currency,
+                "payment_currency": payment_currency,
+                "units": f"{qty:.16f}",
+                "type": side_lower,
+                "price": str(price),
+            }
 
-        data = self._post_private("/trade/place", payload, retry_safe=False)
+        data = self._post_private(endpoint, payload, retry_safe=False)
         exchange_order_id = str(data["data"]["order_id"])
         return BrokerOrder(client_order_id, exchange_order_id, side, "NEW", price, qty, 0.0, now, now)
 
