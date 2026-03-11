@@ -341,6 +341,14 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
     )
     latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
     operator_action_required = bool(halt_state.halt_operator_action_required)
+    open_order_count = _count_open_orders()
+    position_summary = _position_summary()
+    recommended_commands = _recommended_operator_commands(
+        reason_code=reason.code,
+        startup_gate=False,
+        recovery_required=False,
+        unresolved_count=int(halt_state.unresolved_open_order_count),
+    )
     operator_next_action = _format_operator_next_action(
         reason_code=reason.code,
         unresolved=unresolved,
@@ -373,6 +381,16 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
             auto_liquidate_positions=int(halt_state.halt_policy_auto_liquidate_positions),
             halt_position_present=int(halt_state.halt_position_present),
             halt_open_orders_present=int(halt_state.halt_open_orders_present),
+            open_order_count=open_order_count,
+            position_summary=position_summary,
+            operator_recommended_commands=" | ".join(recommended_commands),
+            operator_compact_summary=_operator_compact_summary(
+                halt_reason=reason.code,
+                unresolved_order_count=int(halt_state.unresolved_open_order_count),
+                open_order_count=open_order_count,
+                position_summary=position_summary,
+                recommended_commands=recommended_commands,
+            ),
         )
     )
 
@@ -414,6 +432,78 @@ def _latest_order_identifiers() -> tuple[str | None, str | None]:
         return row['client_order_id'], row['exchange_order_id']
     finally:
         conn.close()
+
+
+def _count_open_orders() -> int:
+    conn = ensure_db()
+    try:
+        placeholders = ",".join("?" for _ in LIVE_UNRESOLVED_ORDER_STATUSES)
+        row = conn.execute(
+            f"SELECT COUNT(*) AS open_order_count FROM orders WHERE status IN ({placeholders})",
+            LIVE_UNRESOLVED_ORDER_STATUSES,
+        ).fetchone()
+        return int(row["open_order_count"] or 0) if row is not None else 0
+    finally:
+        conn.close()
+
+
+def _position_summary() -> str:
+    conn = ensure_db()
+    try:
+        row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+    finally:
+        conn.close()
+
+    qty = float(row["asset_qty"] or 0.0) if row is not None else 0.0
+    if abs(qty) <= 1e-12:
+        return "flat"
+    return f"long_qty={qty:.8f}"
+
+
+def _recommended_operator_commands(
+    *,
+    reason_code: str,
+    startup_gate: bool,
+    recovery_required: bool,
+    unresolved_count: int,
+) -> list[str]:
+    if startup_gate:
+        return [
+            "uv run python bot.py reconcile",
+            "uv run python bot.py recovery-report",
+        ]
+    if recovery_required:
+        return [
+            "uv run python bot.py recover-order --client-order-id <id>",
+            "uv run python bot.py recovery-report",
+        ]
+    if reason_code == "KILL_SWITCH":
+        return [
+            "uv run python bot.py recovery-report",
+            "uv run python bot.py resume",
+        ]
+    if unresolved_count > 0:
+        return ["uv run python bot.py recovery-report"]
+    return ["uv run python bot.py resume"]
+
+
+def _operator_compact_summary(
+    *,
+    halt_reason: str,
+    unresolved_order_count: int,
+    open_order_count: int,
+    position_summary: str,
+    recommended_commands: list[str],
+) -> str:
+    return (
+        f"halt_reason={halt_reason} "
+        f"unresolved_order_count={unresolved_order_count} "
+        f"open_order_count={open_order_count} "
+        f"position={position_summary} "
+        f"next={' | '.join(recommended_commands)}"
+    )
+
+
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
     from .recovery import cancel_open_orders_with_broker
 
@@ -532,6 +622,14 @@ def run_loop(short_n: int, long_n: int) -> None:
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
             latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
+            startup_open_order_count = _count_open_orders()
+            startup_position_summary = _position_summary()
+            startup_commands = _recommended_operator_commands(
+                reason_code="STARTUP_SAFETY_GATE",
+                startup_gate=True,
+                recovery_required=(state.recovery_required_count > 0),
+                unresolved_count=int(state.unresolved_open_order_count),
+            )
             notify(
                 safety_event(
                     "startup_gate_blocked",
@@ -544,6 +642,16 @@ def run_loop(short_n: int, long_n: int) -> None:
                     latest_exchange_order_id=latest_exchange_order_id,
                     operator_action_required=1,
                     operator_next_action="operator must reconcile unresolved orders before startup",
+                    open_order_count=startup_open_order_count,
+                    position_summary=startup_position_summary,
+                    operator_recommended_commands=" | ".join(startup_commands),
+                    operator_compact_summary=_operator_compact_summary(
+                        halt_reason="STARTUP_SAFETY_GATE",
+                        unresolved_order_count=int(state.unresolved_open_order_count),
+                        open_order_count=startup_open_order_count,
+                        position_summary=startup_position_summary,
+                        recommended_commands=startup_commands,
+                    ),
                     state_to="HALTED",
                 )
             )
@@ -744,6 +852,22 @@ def run_loop(short_n: int, long_n: int) -> None:
                                     reason=reason,
                                     operator_next_action="inspect stale order(s), run reconcile, then recovery-report",
                                     operator_hint_command="uv run python bot.py reconcile && uv run python bot.py recovery-report",
+                                    open_order_count=_count_open_orders(),
+                                    position_summary=_position_summary(),
+                                    operator_recommended_commands=(
+                                        "uv run python bot.py reconcile"
+                                        " | uv run python bot.py recover-order --client-order-id <id>"
+                                    ),
+                                    operator_compact_summary=_operator_compact_summary(
+                                        halt_reason="STALE_OPEN_ORDER",
+                                        unresolved_order_count=runtime_state.snapshot().unresolved_open_order_count,
+                                        open_order_count=_count_open_orders(),
+                                        position_summary=_position_summary(),
+                                        recommended_commands=[
+                                            "uv run python bot.py reconcile",
+                                            "uv run python bot.py recover-order --client-order-id <id>",
+                                        ],
+                                    ),
                                 )
                             )
                             canceled_ok = _attempt_open_order_cancellation(

@@ -363,11 +363,52 @@ def cmd_health() -> None:
         submit_unknown_count = int(row["submit_unknown_count"] or 0)
 
     current_halt_reason = "none"
+    halt_reason_for_summary = "none"
     if health["halt_reason_code"] or health["last_disable_reason"]:
+        halt_reason_for_summary = str(health["halt_reason_code"] or "-")
         current_halt_reason = (
             f"code={health['halt_reason_code'] or '-'} "
             f"reason={health['last_disable_reason'] or '-'}"
         )
+
+    open_order_count = 0
+    position_summary = "flat"
+    portfolio_conn = ensure_db()
+    try:
+        open_order_row = portfolio_conn.execute(
+            """
+            SELECT COUNT(*) AS open_order_count
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            """
+        ).fetchone()
+        if open_order_row is not None:
+            open_order_count = int(open_order_row["open_order_count"] or 0)
+        portfolio_row = portfolio_conn.execute(
+            "SELECT asset_qty FROM portfolio WHERE id=1"
+        ).fetchone()
+        if portfolio_row is not None and abs(float(portfolio_row["asset_qty"] or 0.0)) > 1e-12:
+            position_summary = f"long_qty={float(portfolio_row['asset_qty']):.8f}"
+    finally:
+        portfolio_conn.close()
+
+    recommended_commands = "uv run python bot.py recovery-report"
+    if health["startup_gate_reason"]:
+        halt_reason_for_summary = "STARTUP_SAFETY_GATE"
+        recommended_commands = "uv run python bot.py reconcile | uv run python bot.py recovery-report"
+    elif health["recovery_required_count"] > 0:
+        recommended_commands = (
+            "uv run python bot.py recover-order --client-order-id <id>"
+            " | uv run python bot.py recovery-report"
+        )
+    elif halt_reason_for_summary == "KILL_SWITCH":
+        recommended_commands = "uv run python bot.py recovery-report | uv run python bot.py resume"
+
+    has_critical_state = bool(
+        health["startup_gate_reason"]
+        or health["halt_new_orders_blocked"]
+        or health["recovery_required_count"] > 0
+    )
 
     reconcile_latest = "none"
     if health["last_reconcile_status"]:
@@ -387,6 +428,16 @@ def cmd_health() -> None:
     )
     print(f"    current_halt_reason={current_halt_reason}")
     print(f"    reconcile_latest={reconcile_latest}")
+    if has_critical_state:
+        print("  [CRITICAL-OPERATOR-SUMMARY]")
+        print(
+            "    "
+            f"halt_reason={halt_reason_for_summary} "
+            f"unresolved_order_count={health['unresolved_open_order_count']} "
+            f"open_order_count={open_order_count} "
+            f"position={position_summary}"
+        )
+        print(f"    next_commands={recommended_commands}")
     print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")

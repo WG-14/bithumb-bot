@@ -69,6 +69,8 @@ class _LoopConn:
             if self.open_order_created_ts is None:
                 return _Rows({"open_count": 0, "oldest_created_ts": None})
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
+        if "COUNT(*) AS open_order_count" in q:
+            return _Rows({"open_order_count": 0 if self.open_order_created_ts is None else 1})
         if "FROM portfolio" in q:
             return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
         if "SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'" in q:
@@ -356,7 +358,11 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert called["n"] == 0
     assert any("event=startup_gate_blocked" in n and "reason_code=STARTUP_BLOCKED" in n and "timestamp=" in n for n in notifications)
     assert any("operator_action_required=1" in n for n in notifications if "event=startup_gate_blocked" in n)
-    assert any("operator_next_action=operator must reconcile unresolved orders before startup" in n for n in notifications if "event=startup_gate_blocked" in n)
+    startup = [n for n in notifications if "event=startup_gate_blocked" in n]
+    assert any("operator_next_action=operator must reconcile unresolved orders before startup" in n for n in startup)
+    assert any("operator_compact_summary=halt_reason=STARTUP_SAFETY_GATE" in n for n in startup)
+    assert any("open_order_count=" in n for n in startup)
+    assert any("position_summary=" in n for n in startup)
     assert any("reason_code=STARTUP_SAFETY_GATE" in n for n in notifications)
     halted = [n for n in notifications if "event=trading_halted" in n and "alert_kind=halt" in n]
     assert halted
@@ -426,9 +432,17 @@ def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(mon
     monkeypatch.setattr("bithumb_bot.engine._attempt_open_order_cancellation", _cancel)
     monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
 
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.engine.notify", lambda msg: notifications.append(msg))
+
     run_loop(5, 20)
 
     assert cancel_calls["n"] == 1
+    halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=KILL_SWITCH" in n]
+    assert halted
+    assert any("operator_compact_summary=halt_reason=KILL_SWITCH" in n for n in halted)
+    assert any("open_order_count=" in n for n in halted)
+    assert any("position_summary=" in n for n in halted)
     state = runtime_state.snapshot()
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is True
@@ -534,6 +548,8 @@ def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monk
     assert any("symbol=" in n for n in marked)
     assert any("latest_client_order_id=" in n for n in marked)
     assert any("operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n for n in marked)
+    assert any("operator_compact_summary=halt_reason=STALE_OPEN_ORDER" in n for n in marked)
+    assert any("operator_recommended_commands=uv run python bot.py reconcile | uv run python bot.py recover-order --client-order-id <id>" in n for n in marked)
     assert any("event=trading_halted" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
 
 

@@ -96,6 +96,29 @@ def test_format_event_includes_operator_hint_fields():
     )
 
 
+
+
+def test_format_event_includes_operator_compact_summary_fields():
+    message = notifier.format_event(
+        "startup_gate_blocked",
+        reason_code="STARTUP_BLOCKED",
+        unresolved_order_count=2,
+        open_order_count=3,
+        position_summary="long_qty=0.01000000",
+        operator_compact_summary=(
+            "halt_reason=STARTUP_SAFETY_GATE unresolved_order_count=2 "
+            "open_order_count=3 position=long_qty=0.01000000 "
+            "next=uv run python bot.py reconcile | uv run python bot.py recovery-report"
+        ),
+        operator_recommended_commands="uv run python bot.py reconcile | uv run python bot.py recovery-report",
+    )
+
+    assert "event=startup_gate_blocked" in message
+    assert "open_order_count=3" in message
+    assert "position_summary=long_qty=0.01000000" in message
+    assert "operator_compact_summary=halt_reason=STARTUP_SAFETY_GATE" in message
+    assert "operator_recommended_commands=uv run python bot.py reconcile | uv run python bot.py recovery-report" in message
+
 def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytest.MonkeyPatch):
     calls = []
 

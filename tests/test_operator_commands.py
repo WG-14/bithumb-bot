@@ -968,6 +968,11 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "unresolved_open_order_count=4 recovery_required_count=2 submit_unknown_count=0" in out
     assert "current_halt_reason=code=PERIODIC_RECONCILE_FAILED reason=periodic reconcile failed" in out
     assert "reconcile_latest=epoch_sec=1000.0 status=error reason_code=RECONCILE_TIMEOUT" in out
+    assert "[CRITICAL-OPERATOR-SUMMARY]" in out
+    assert "halt_reason=PERIODIC_RECONCILE_FAILED unresolved_order_count=4" in out
+    assert "open_order_count=0" in out
+    assert "position=flat" in out
+    assert "next_commands=uv run python bot.py recover-order --client-order-id <id> | uv run python bot.py recovery-report" in out
 
 
 
