@@ -136,7 +136,38 @@ class BithumbBroker:
             return BrokerOrder(client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
 
         order_currency, payment_currency = self._pair()
-        data = self._post_private(
+        open_data = self._post_private(
+            "/info/orders",
+            {
+                "count": "100",
+                "order_id": str(exid),
+                "order_currency": order_currency,
+                "payment_currency": payment_currency,
+            },
+            retry_safe=True,
+        )
+        open_rows = open_data.get("data") or []
+        for row in open_rows:
+            if str(row.get("order_id")) != str(exid):
+                continue
+            qty_req = float(row.get("units") or 0.0)
+            qty_remain = float(row.get("units_remaining") or 0.0)
+            qty_filled = max(0.0, qty_req - qty_remain)
+            return BrokerOrder(
+                client_order_id,
+                str(exid),
+                str(row.get("type", "BUY")).upper(),
+                "PARTIAL" if qty_filled > 0 else "NEW",
+                float(row.get("price")) if row.get("price") else None,
+                qty_req,
+                qty_filled,
+                now,
+                now,
+            )
+
+        # Fallback for non-open orders. /info/order_detail provides fill/remaining quantities,
+        # but status inference is constrained to terminal states for restart safety.
+        detail_data = self._post_private(
             "/info/order_detail",
             {
                 "order_id": str(exid),
@@ -145,15 +176,35 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
-        rows = data.get("data") or []
-        if not rows:
-            raise BrokerRejectError(f"order not found for exchange_order_id={exid}")
-        row = rows[0]
+        detail_rows = detail_data.get("data") or []
+        if not detail_rows:
+            raise BrokerRejectError(f"order lookup ambiguous for exchange_order_id={exid}: not open and no detail rows")
+
+        row = detail_rows[0]
         qty_req = float(row.get("units") or 0.0)
         qty_remain = float(row.get("units_remaining") or 0.0)
         qty_filled = max(0.0, qty_req - qty_remain)
-        status = "FILLED" if qty_filled >= qty_req and qty_req > 0 else ("PARTIAL" if qty_filled > 0 else "NEW")
-        return BrokerOrder(client_order_id, str(exid), str(row.get("type", "BUY")).upper(), status, float(row.get("price")) if row.get("price") else None, qty_req, qty_filled, now, now)
+
+        if qty_req > 0 and qty_filled >= qty_req:
+            status = "FILLED"
+        elif qty_req > 0:
+            status = "CANCELED"
+        else:
+            raise BrokerRejectError(
+                f"order lookup ambiguous for exchange_order_id={exid}: non-open detail row missing quantity"
+            )
+
+        return BrokerOrder(
+            client_order_id,
+            str(exid),
+            str(row.get("type", "BUY")).upper(),
+            status,
+            float(row.get("price")) if row.get("price") else None,
+            qty_req,
+            qty_filled,
+            now,
+            now,
+        )
 
     def get_open_orders(self) -> list[BrokerOrder]:
         if self.dry_run:

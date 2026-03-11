@@ -270,3 +270,130 @@ def test_open_order_lookup_still_uses_open_orders_endpoint(monkeypatch):
     assert calls == ["/info/orders"]
     assert len(open_orders) == 1
     assert open_orders[0].exchange_order_id == "open-1"
+
+
+def test_get_order_uses_open_orders_as_primary_status_source(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    calls: list[str] = []
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        calls.append(endpoint)
+        if endpoint == "/info/orders":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "open-1",
+                        "type": "buy",
+                        "price": "150000000",
+                        "units": "0.0200",
+                        "units_remaining": "0.0050",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.get_order(client_order_id="cid-1", exchange_order_id="open-1")
+
+    assert calls == ["/info/orders"]
+    assert order.status == "PARTIAL"
+    assert order.qty_req == pytest.approx(0.02)
+    assert order.qty_filled == pytest.approx(0.015)
+
+
+def test_get_order_maps_non_open_partial_to_canceled(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    calls: list[str] = []
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        calls.append(endpoint)
+        if endpoint == "/info/orders":
+            return {"status": "0000", "data": []}
+        if endpoint == "/info/order_detail":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "closed-1",
+                        "type": "sell",
+                        "price": "151000000",
+                        "units": "0.1000",
+                        "units_remaining": "0.0400",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.get_order(client_order_id="cid-2", exchange_order_id="closed-1")
+
+    assert calls == ["/info/orders", "/info/order_detail"]
+    assert order.status == "CANCELED"
+    assert order.qty_req == pytest.approx(0.1)
+    assert order.qty_filled == pytest.approx(0.06)
+
+
+def test_get_order_maps_non_open_filled_to_filled(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        if endpoint == "/info/orders":
+            return {"status": "0000", "data": []}
+        if endpoint == "/info/order_detail":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "filled-1",
+                        "type": "buy",
+                        "price": "149000000",
+                        "units": "0.0500",
+                        "units_remaining": "0.0000",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.get_order(client_order_id="cid-3", exchange_order_id="filled-1")
+
+    assert order.status == "FILLED"
+    assert order.qty_req == pytest.approx(0.05)
+    assert order.qty_filled == pytest.approx(0.05)
+
+
+def test_get_order_rejects_ambiguous_closed_lookup(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        if endpoint == "/info/orders":
+            return {"status": "0000", "data": []}
+        if endpoint == "/info/order_detail":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "ambig-1",
+                        "type": "buy",
+                        "price": "149000000",
+                        "units": "0",
+                        "units_remaining": "0",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    with pytest.raises(BrokerRejectError, match="ambiguous"):
+        broker.get_order(client_order_id="cid-4", exchange_order_id="ambig-1")
