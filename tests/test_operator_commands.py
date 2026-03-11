@@ -21,12 +21,16 @@ from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 
+import os
+import pytest
 
-def _set_tmp_db(tmp_path):
-    db_path = tmp_path / "operator.sqlite"
-    object.__setattr__(settings, "DB_PATH", str(db_path))
-    object.__setattr__(settings, "MODE", "paper")
-    return db_path
+def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
+    db_path = str(tmp_path / "operator.sqlite")
+    if monkeypatch is not None:
+        monkeypatch.setenv("DB_PATH", db_path)
+    else:
+        os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
 
 
 def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:

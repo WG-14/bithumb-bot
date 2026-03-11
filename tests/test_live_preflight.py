@@ -9,6 +9,7 @@ from bithumb_bot.config import LiveModeValidationError, settings, validate_live_
 def _restore_settings():
     old_values = {
         "MODE": settings.MODE,
+        "DB_PATH": settings.DB_PATH,
         "MAX_ORDER_KRW": settings.MAX_ORDER_KRW,
         "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
         "MAX_DAILY_ORDER_COUNT": settings.MAX_DAILY_ORDER_COUNT,
@@ -33,6 +34,7 @@ def test_live_preflight_skips_paper_mode() -> None:
 
 def test_live_preflight_requires_live_risk_limits() -> None:
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
@@ -49,6 +51,7 @@ def test_live_preflight_requires_live_risk_limits() -> None:
 
 def test_live_preflight_requires_credentials_when_not_dry_run() -> None:
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -68,6 +71,7 @@ def test_live_preflight_requires_credentials_when_not_dry_run() -> None:
 
 def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -82,13 +86,57 @@ def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
         in str(exc.value)
     )
 
-def test_live_preflight_allows_dry_run_without_credentials() -> None:
+def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
+
+    validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_requires_explicit_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DB_PATH", raising=False)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/bithumb_1m.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "DB_PATH must be explicitly set when MODE=live" in str(exc.value)
+
+
+def test_live_preflight_rejects_default_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/bithumb_1m.sqlite")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/bithumb_1m.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "DB_PATH must not point to the default paper/shared DB path" in str(exc.value)
+
+
+def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live_trading.sqlite")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live_trading.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
 
     validate_live_mode_preflight(settings)

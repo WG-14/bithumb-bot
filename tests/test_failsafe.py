@@ -1,41 +1,74 @@
 from __future__ import annotations
 
-import httpx
-
-from bithumb_bot import runtime_state
-from bithumb_bot.engine import get_health_status
-from bithumb_bot.marketdata import _get_with_retry
-from bithumb_bot.db_core import ensure_db
-
-from bithumb_bot.config import settings
-from bithumb_bot.broker.base import BrokerRejectError
-from bithumb_bot.engine import run_loop
-
-import pytest
+import os
 from pathlib import Path
 
+import httpx
+import pytest
+
+from bithumb_bot import runtime_state
+from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot import runtime_state
+from bithumb_bot.engine import get_health_status, run_loop
+from bithumb_bot.marketdata import _get_with_retry
+
 
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path):
-    original_db_path = settings.DB_PATH
-    original_mode = settings.MODE
-    db_path = tmp_path / "failsafe.sqlite"
-    object.__setattr__(settings, "DB_PATH", str(db_path))
+    old_settings = {
+        "DB_PATH": settings.DB_PATH,
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "MAX_ORDER_KRW": settings.MAX_ORDER_KRW,
+        "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
+        "MAX_DAILY_ORDER_COUNT": settings.MAX_DAILY_ORDER_COUNT,
+        "MAX_OPEN_ORDER_AGE_SEC": settings.MAX_OPEN_ORDER_AGE_SEC,
+        "KILL_SWITCH": settings.KILL_SWITCH,
+        "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
+        "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
+        "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+    }
+    old_env_db_path = os.environ.get("DB_PATH")
+
+    db_path = str(tmp_path / "failsafe.sqlite")
+    os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "KILL_SWITCH", False)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", False)
+
     ensure_db().close()
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
     runtime_state.set_startup_gate_reason(None)
-    yield
-    object.__setattr__(settings, "DB_PATH", original_db_path)
-    object.__setattr__(settings, "MODE", original_mode)
 
-def _set_tmp_db(tmp_path):
-    db_path = tmp_path / "failsafe.sqlite"
-    object.__setattr__(settings, "DB_PATH", str(db_path))
+    yield
+
+    for key, value in old_settings.items():
+        object.__setattr__(settings, key, value)
+
+    if old_env_db_path is None:
+        os.environ.pop("DB_PATH", None)
+    else:
+        os.environ["DB_PATH"] = old_env_db_path
+
+    runtime_state.enable_trading()
+    runtime_state.set_error_count(0)
+    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.set_startup_gate_reason(None)
+
+
+def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
+    db_path = str(tmp_path / "live_loop.sqlite")
+    if monkeypatch is not None:
+        monkeypatch.setenv("DB_PATH", db_path)
+    else:
+        os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
+    ensure_db().close()
     return db_path
 
 
@@ -56,6 +89,7 @@ def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None
     finally:
         conn.close()
 
+
 class _LoopConn:
     def __init__(self, *, open_order_created_ts: int | None = None):
         self.open_order_created_ts = open_order_created_ts
@@ -63,22 +97,30 @@ class _LoopConn:
 
     def execute(self, query, params=None):
         q = " ".join(str(query).split())
+
         if "FROM candles" in q:
             return _Rows({"ts": int(10_000_000_000_000), "close": 100.0})
+
         if "COUNT(*) AS open_count" in q:
             if self.open_order_created_ts is None:
                 return _Rows({"open_count": 0, "oldest_created_ts": None})
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
+
         if "COUNT(*) AS open_order_count" in q:
             return _Rows({"open_order_count": 0 if self.open_order_created_ts is None else 1})
+
         if "FROM portfolio" in q:
             return _Rows({"cash_krw": 100000.0, "asset_qty": 0.0})
+
         if "SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'" in q:
             return _Rows({"cnt": 0})
+
         if "SELECT COUNT(*) AS cnt FROM orders WHERE status='RECOVERY_REQUIRED'" in q:
             return _Rows({"cnt": 0})
+
         if "status='SUBMIT_UNKNOWN'" in q and "exchange_order_id" in q:
             return _Rows({"cnt": 0})
+
         if "client_order_id LIKE 'remote_%'" in q:
             return _Rows({"cnt": 0})
 
@@ -89,8 +131,6 @@ class _LoopConn:
             and "AS stale_new_partial_count" in q
             and "FROM orders" in q
         ):
-            # open_order_created_ts 기반 시나리오는 기존 failsafe 테스트 의도를 유지하기 위해
-            # startup safety gate 쿼리에서는 깨끗한 상태로 취급한다.
             if self.open_order_created_ts is not None:
                 return _Rows(
                     {
@@ -101,8 +141,6 @@ class _LoopConn:
                     }
                 )
 
-            # tmp DB에 실제로 넣은 주문(RECOVERY_REQUIRED / NEW 등)은
-            # 실제 sqlite DB에서 읽어 startup gate 테스트가 계속 유효하도록 한다.
             real_conn = ensure_db()
             try:
                 row = real_conn.execute(query, params or ()).fetchone()
@@ -127,16 +165,19 @@ class _LoopConn:
                     "stale_new_partial_count": row["stale_new_partial_count"] or 0,
                 }
             )
+
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0
                 return _Rows(None, rowcount=0)
             self.marked_recovery_required = 1
             return _Rows(None, rowcount=1)
+
         if "SELECT client_order_id, exchange_order_id" in q and "WHERE status IN" in q:
             if self.open_order_created_ts is None:
                 return _Rows(None)
             return _Rows({"client_order_id": "open_1", "exchange_order_id": "ex-open-1"})
+
         raise AssertionError(f"unexpected query: {query}")
 
     def commit(self):
@@ -155,33 +196,48 @@ class _Rows:
         return self._row
 
 
-def _prepare_run_loop(monkeypatch, *, open_order_created_ts: int | None = None) -> _LoopConn:
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "KILL_SWITCH", False)
-    object.__setattr__(settings, "INTERVAL", "1m")
-    object.__setattr__(settings, "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", 30)
-    object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 900)
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 20)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+class _DummyBroker:
+    def get_open_orders(self):
+        return []
 
+    def cancel_order(self, *args, **kwargs):
+        return None
+
+
+def _prepare_run_loop(monkeypatch, open_order_created_ts=None):
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
+    runtime_state.set_startup_gate_reason(None)
+
+    monkeypatch.setenv("DB_PATH", settings.DB_PATH)
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "KILL_SWITCH", False)
+    object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", False)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "")
 
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
-    monkeypatch.setattr("bithumb_bot.engine.compute_signal", lambda conn, s, l: {
-        "ts": 1000,
-        "last_close": 100.0,
-        "curr_s": 1.0,
-        "curr_l": 0.5,
-        "signal": "BUY",
-    })
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "BUY",
+        },
+    )
+
     loop_conn = _LoopConn(open_order_created_ts=open_order_created_ts)
     monkeypatch.setattr("bithumb_bot.engine.ensure_db", lambda: loop_conn)
-    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: object())
+    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _DummyBroker())
     monkeypatch.setattr(
         "bithumb_bot.engine.evaluate_daily_loss_breach",
         lambda *_args, **_kwargs: (False, "ok"),
@@ -266,8 +322,14 @@ def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):
     halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=POST_TRADE_RECONCILE_FAILED" in n]
     assert halted
     assert any("symbol=" in n for n in halted)
-    assert any("operator_next_action=run reconcile, validate order state, then run recovery-report before resume" in n for n in halted)
-    assert any("operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n for n in halted)
+    assert any(
+        "operator_next_action=run reconcile, validate order state, then run recovery-report before resume" in n
+        for n in halted
+    )
+    assert any(
+        "operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n
+        for n in halted
+    )
 
 
 def test_run_loop_periodically_reconciles_when_open_order_exists(monkeypatch):
@@ -326,8 +388,6 @@ def test_run_loop_unresolved_open_order_blocks_new_trading(monkeypatch):
     assert state.halt_new_orders_blocked is False
 
 
-
-
 def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
     _insert_order(status="RECOVERY_REQUIRED", client_order_id="startup_block", created_ts=1)
@@ -356,7 +416,10 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert state.halt_new_orders_blocked is True
     assert state.halt_state_unresolved is True
     assert called["n"] == 0
-    assert any("event=startup_gate_blocked" in n and "reason_code=STARTUP_BLOCKED" in n and "timestamp=" in n for n in notifications)
+    assert any(
+        "event=startup_gate_blocked" in n and "reason_code=STARTUP_BLOCKED" in n and "timestamp=" in n
+        for n in notifications
+    )
     assert any("operator_action_required=1" in n for n in notifications if "event=startup_gate_blocked" in n)
     startup = [n for n in notifications if "event=startup_gate_blocked" in n]
     assert any("operator_next_action=operator must reconcile unresolved orders before startup" in n for n in startup)
@@ -371,8 +434,6 @@ def test_run_loop_startup_recovery_gate_halts_when_unresolved_state_exists(monke
     assert any("unresolved_order_count=" in n for n in halted)
     assert any("position_may_remain=" in n for n in halted)
     assert any("operator_next_action=" in n for n in halted)
-
-
 
 
 def test_run_loop_startup_safety_gate_halts_when_unresolved_open_order_exists(monkeypatch, tmp_path):
@@ -390,6 +451,7 @@ def test_run_loop_startup_safety_gate_halts_when_unresolved_open_order_exists(mo
     assert state.trading_enabled is False
     assert health["startup_gate_reason"] is not None
     assert "unresolved_open_orders=1" in str(health["startup_gate_reason"])
+
 
 def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_path):
     _set_tmp_db(tmp_path)
@@ -410,9 +472,6 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
     assert state.trading_enabled is True
     assert state.retry_at_epoch_sec is None
     assert called["n"] == 1
-
-
-
 
 
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):
@@ -526,8 +585,10 @@ def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
     halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=DAILY_LOSS_LIMIT" in n]
     assert halted
     assert any("symbol=" in n for n in halted)
-    assert any("operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n for n in halted)
-
+    assert any(
+        "operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n
+        for n in halted
+    )
 
 
 def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monkeypatch):
@@ -547,9 +608,16 @@ def test_run_loop_stale_open_order_emits_recovery_and_cancel_failure_alerts(monk
     assert marked
     assert any("symbol=" in n for n in marked)
     assert any("latest_client_order_id=" in n for n in marked)
-    assert any("operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n for n in marked)
+    assert any(
+        "operator_hint_command=uv run python bot.py reconcile && uv run python bot.py recovery-report" in n
+        for n in marked
+    )
     assert any("operator_compact_summary=halt_reason=STALE_OPEN_ORDER" in n for n in marked)
-    assert any("operator_recommended_commands=uv run python bot.py reconcile | uv run python bot.py recover-order --client-order-id <id>" in n for n in marked)
+    assert any(
+        "operator_recommended_commands=uv run python bot.py reconcile | uv run python bot.py recover-order --client-order-id <id>"
+        in n
+        for n in marked
+    )
     assert any("event=trading_halted" in n and "reason_code=STALE_OPEN_ORDER" in n for n in notifications)
 
 
@@ -570,7 +638,11 @@ def test_attempt_open_order_cancellation_failure_emits_reason_code(monkeypatch):
 
     assert ok is False
     assert any("event=cancel_open_orders_failed" in n for n in notifications)
-    assert any("reason_code=CANCEL_FAILURE" in n and "cancel_detail_code=CANCEL_OPEN_ORDERS_ERROR" in n for n in notifications)
+    assert any(
+        "reason_code=CANCEL_FAILURE" in n and "cancel_detail_code=CANCEL_OPEN_ORDERS_ERROR" in n
+        for n in notifications
+    )
+
 
 class _DummyClient:
     def __init__(self, responses):
@@ -626,6 +698,7 @@ def test_health_status_contains_runtime_flags():
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
+    runtime_state.set_startup_gate_reason(None)
 
 
 def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
@@ -685,4 +758,7 @@ def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
     halted = [n for n in notifications if "event=trading_halted" in n and "reason_code=POSITION_LOSS_LIMIT" in n]
     assert halted
     assert any("symbol=" in n for n in halted)
-    assert any("operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n for n in halted)
+    assert any(
+        "operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n
+        for n in halted
+    )

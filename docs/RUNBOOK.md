@@ -246,5 +246,6 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_ORDER_KRW > 0`
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
+- `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
 - `KILL_SWITCH_LIQUIDATE=true`는 현재 미지원(설정 시 기동 실패)
