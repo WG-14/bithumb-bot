@@ -605,7 +605,7 @@ def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
 
 
 def test_run_loop_daily_loss_breach_attempts_open_order_cancel(monkeypatch):
-    _prepare_run_loop(monkeypatch)
+    _prepare_run_loop(monkeypatch, asset_qty=0.02)
 
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr(
@@ -614,6 +614,7 @@ def test_run_loop_daily_loss_breach_attempts_open_order_cancel(monkeypatch):
     )
 
     cancel_calls = {"n": 0}
+    flatten_calls = {"n": 0}
 
     def _cancel(_broker, trigger: str):
         cancel_calls["n"] += 1
@@ -621,11 +622,19 @@ def test_run_loop_daily_loss_breach_attempts_open_order_cancel(monkeypatch):
         return True
 
     monkeypatch.setattr("bithumb_bot.engine._attempt_open_order_cancellation", _cancel)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.flatten_btc_position",
+        lambda *_args, **_kwargs: (
+            flatten_calls.__setitem__("n", flatten_calls["n"] + 1)
+            or {"status": "dry_run", "qty": 0.02}
+        ),
+    )
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
 
     run_loop(5, 20)
 
     assert cancel_calls["n"] == 1
+    assert flatten_calls["n"] == 1
 
 
 def test_run_loop_daily_loss_breach_has_no_auto_resume(monkeypatch):
@@ -767,12 +776,21 @@ def test_health_status_contains_runtime_flags():
 
 
 def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
-    _prepare_run_loop(monkeypatch)
+    _prepare_run_loop(monkeypatch, asset_qty=0.03)
 
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr(
         "bithumb_bot.engine.evaluate_position_loss_breach",
         lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
+    )
+
+    flatten_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.flatten_btc_position",
+        lambda *_args, **_kwargs: (
+            flatten_calls.__setitem__("n", flatten_calls["n"] + 1)
+            or {"status": "dry_run", "qty": 0.03}
+        ),
     )
 
     run_loop(5, 20)
@@ -784,6 +802,46 @@ def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
     assert state.halt_reason_code == "POSITION_LOSS_LIMIT"
     assert state.last_disable_reason is not None
     assert "position loss threshold breached" in state.last_disable_reason
+    assert "flatten_status=dry_run" in state.last_disable_reason
+    assert flatten_calls["n"] == 1
+
+
+def test_run_loop_daily_loss_breach_with_no_position_records_no_position_flatten(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.0)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_daily_loss_breach",
+        lambda *_args, **_kwargs: (True, "daily loss limit exceeded (60,000/50,000 KRW)"),
+    )
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "DAILY_LOSS_LIMIT"
+    assert state.halt_state_unresolved is False
+    assert "flatten_status=no_position" in str(state.last_disable_reason)
+
+
+def test_run_loop_position_loss_breach_flatten_failure_marks_unresolved(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.03)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.evaluate_position_loss_breach",
+        lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
+    )
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.halt_reason_code == "POSITION_LOSS_LIMIT"
+    assert state.halt_state_unresolved is True
+    assert "flatten_status=failed" in str(state.last_disable_reason)
 
 
 def test_run_loop_position_loss_breach_blocks_new_orders(monkeypatch):

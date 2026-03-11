@@ -583,6 +583,36 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     return True
 
 
+def _attempt_risk_breach_flatten(
+    broker: BithumbBroker,
+    *,
+    reason_code: str,
+    reason_detail: str,
+    cancel_trigger: str,
+    flatten_trigger: str,
+) -> tuple[HaltReason, bool, bool]:
+    canceled_ok = _attempt_open_order_cancellation(broker, trigger=cancel_trigger)
+    flatten_outcome = flatten_btc_position(
+        broker=broker,
+        dry_run=bool(settings.LIVE_DRY_RUN),
+        trigger=flatten_trigger,
+    )
+    flatten_status = str(flatten_outcome.get("status") or "-")
+    detail_parts = [
+        reason_detail,
+        (
+            "emergency cancellation attempted"
+            if canceled_ok
+            else "emergency cancellation failed"
+        ),
+        f"flatten_status={flatten_status}",
+    ]
+    flatten_failed = flatten_status == "failed"
+    if flatten_failed:
+        detail_parts.append(f"flatten_error={str(flatten_outcome.get('error') or '-')}")
+    return _halt_reason(reason_code, "; ".join(detail_parts)), canceled_ok, flatten_failed
+
+
 def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import reconcile_with_broker
 
@@ -808,17 +838,16 @@ def run_loop(short_n: int, long_n: int) -> None:
                             price=float(last_close),
                         )
                         if blocked:
-                            canceled_ok = _attempt_open_order_cancellation(
-                                broker, trigger="daily-loss-halt"
-                            )
-                            suffix = (
-                                "emergency cancellation attempted"
-                                if canceled_ok
-                                else "emergency cancellation failed"
+                            halt_reason, canceled_ok, flatten_failed = _attempt_risk_breach_flatten(
+                                broker,
+                                reason_code="DAILY_LOSS_LIMIT",
+                                reason_detail=reason,
+                                cancel_trigger="daily-loss-halt",
+                                flatten_trigger="daily-loss-halt",
                             )
                             _halt_trading(
-                                _halt_reason("DAILY_LOSS_LIMIT", f"{reason}; {suffix}"),
-                                unresolved=not canceled_ok,
+                                halt_reason,
+                                unresolved=(not canceled_ok) or flatten_failed,
                             )
                             continue
 
@@ -828,9 +857,16 @@ def run_loop(short_n: int, long_n: int) -> None:
                             price=float(last_close),
                         )
                         if blocked:
+                            halt_reason, canceled_ok, flatten_failed = _attempt_risk_breach_flatten(
+                                broker,
+                                reason_code=POSITION_LOSS_LIMIT,
+                                reason_detail=reason,
+                                cancel_trigger="position-loss-halt",
+                                flatten_trigger="position-loss-halt",
+                            )
                             _halt_trading(
-                                _halt_reason(POSITION_LOSS_LIMIT, reason),
-                                unresolved=False,
+                                halt_reason,
+                                unresolved=(not canceled_ok) or flatten_failed,
                             )
                             continue
                 finally:
