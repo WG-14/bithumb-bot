@@ -1,6 +1,25 @@
-# RUNBOOK (24/7 운영 초안)
+# RUNBOOK (Bithumb BTC 소액 실운영: 제한적 무인 운용)
 
-## 0) 1,000,000 KRW 소액 계정 보수 프로필 (권장)
+> 범위 고정: **Bithumb / BTC 마켓만 / 현재 구현된 단일 전략만 / 제한적 무인 운용(주간 수시 점검 전제)**.
+> 
+> 이 문서는 **완전 24/7 자율운용** 가이드가 아니다. 운영자가 하루 중 여러 차례 상태를 확인하는 운용 모델을 기준으로 한다.
+
+## 0) 운용 모드 구분 (반드시 먼저 확인)
+
+아래 4가지를 혼동하지 않는다.
+
+- [ ] **paper**: 시뮬레이션 운용. 실거래소 자금/주문 영향 없음.
+- [ ] **live + dry-run**: 라이브 경로 점검 모드. 거래소 조회는 가능하지만 실주문은 금지 (`LIVE_DRY_RUN=true`).
+- [ ] **live + armed**: 실주문 허용 모드 (`LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true`).
+- [ ] **live + not-armed**: `LIVE_DRY_RUN=false`라도 `LIVE_REAL_ORDER_ARMED!=true`면 fail-fast로 기동 실패해야 정상.
+
+운영 시작 전 선언:
+
+- [ ] 오늘 세션 목적은 `paper` / `live dry-run` / `live armed` 중 하나로 명확히 선택했다.
+- [ ] BTC 외 심볼/다중자산 운용은 하지 않는다.
+- [ ] 단일 전략 외 커스텀 실험 코드는 라이브에 올리지 않는다.
+
+## 1) 1,000,000 KRW 소액 계정 보수 프로필 (권장)
 
 실거래 초기값은 아래처럼 보수적으로 시작한다.
 
@@ -13,7 +32,7 @@
 
 > 핵심 원칙: **주문 크기보다 생존이 우선**. 초반 1~2주는 수익보다 안정성 검증에 집중.
 
-## 1) 배포 구성
+## 2) 배포 구성
 
 - `deploy/systemd/bithumb-bot.service`: 메인 트레이딩 루프 (`Restart=always`).
 - `deploy/systemd/bithumb-bot-healthcheck.timer`: 1분마다 상태 점검.
@@ -21,7 +40,7 @@
 - `scripts/healthcheck.py`: stale candle / 오류 횟수 / trading disabled 감지.
 - `scripts/backup_sqlite.sh`: sqlite `.backup` 기반 스냅샷 + 보관 정책.
 
-## 2) 설치 및 활성화
+## 3) 설치 및 활성화
 
 ```bash
 sudo mkdir -p /etc/bithumb-bot
@@ -39,21 +58,48 @@ sudo systemctl enable --now bithumb-bot-healthcheck.timer
 sudo systemctl enable --now bithumb-bot-backup.timer
 ```
 
-## 3) 라이브 시작 체크리스트 (Startup)
+## 4) 프리라이브(안전진입) 체크리스트
 
-### A. 환경/리스크 값 확인
+아래는 **실주문 진입 전**에만 수행하는 체크리스트다. 하나라도 실패하면 live armed로 넘어가지 않는다.
 
-1. `MODE=live` 여부 확인 (paper/live 혼동 금지)
-2. 다음 값이 의도대로 설정되었는지 재확인
+### A. 환경/권한/리스크 설정 확인
+
+1. `MODE`가 의도한 모드인지 확인 (`paper`/`live` 혼동 금지)
+2. `MODE=live`라면 다음 값이 의도대로 설정되었는지 재확인
    - `MAX_ORDER_KRW=30000`
    - `MAX_DAILY_LOSS_KRW=20000`
    - `MAX_DAILY_ORDER_COUNT=6`
-3. 실주문 전에는 `LIVE_DRY_RUN=true`
-4. `KILL_SWITCH=false` 확인 (비상 시에만 true)
-5. `KILL_SWITCH_LIQUIDATE=false` 확인 (청산 모드 미구현; true면 기동 실패)
-6. API 키는 `LIVE_DRY_RUN=false` 전환 직전에만 주입
+3. `MODE=live` 기본 진입은 `LIVE_DRY_RUN=true`로 시작
+4. 실주문 전환 직전에만 `LIVE_DRY_RUN=false` + `LIVE_REAL_ORDER_ARMED=true` 동시 설정
+5. `KILL_SWITCH=false` 확인 (비상 시에만 true)
+6. `KILL_SWITCH_LIQUIDATE=false` 확인 (청산 모드 미구현; true면 기동 실패)
+7. API 키 권한 확인
+   - 조회 + 주문(현물) 권한이 있는지 확인
+   - 출금 권한은 비활성화 권장
+   - API 키는 `/etc/bithumb-bot/bithumb-bot.env`에만 저장하고 직전 주입 원칙 유지
+8. DB 분리 확인
+   - `paper`와 `live`는 서로 다른 `DB_PATH` 사용
+   - `MODE=live`에서 기본 DB 경로 사용 금지 규칙 준수
 
-### B. 기동 전/직후 점검
+### B. 프리라이브 명령 순서 (고정)
+
+아래 순서를 **그대로** 실행한다.
+
+```bash
+uv run python bot.py broker-diagnose
+uv run python bot.py health
+uv run python bot.py recovery-report
+uv run python bot.py reconcile
+uv run python bot.py recovery-report
+```
+
+판정:
+
+- `broker-diagnose`가 `overall_status=OK`가 아니면 실주문 금지
+- `health`에서 stale/error 이상이 있으면 원인 해소 전 진행 금지
+- `recovery-report`에서 unresolved/recovery-required가 남아 있으면 `reconcile` 후 재확인
+
+### C. 서비스 기동/로그 확인
 
 ```bash
 sudo systemctl restart bithumb-bot.service
@@ -68,7 +114,7 @@ uv run python bot.py recovery-report
 - `health`에서 `last_candle_age_sec`, `error_count`, `trading_enabled` 확인.
 - `recovery-report`에서 unresolved/recovery-required 건수와 오래된 미해결 주문 요약(top 5) 확인.
 
-## 4) 기본 점검
+## 5) 기본 점검 (일상 운용)
 
 ```bash
 sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
@@ -78,7 +124,7 @@ sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
 - timer가 정상 등록/실행되는지 확인.
 - `backups/` 파일 생성 여부 확인.
 
-## 4-1) 브로커 읽기 전용 진단 (`broker-diagnose`)
+## 5-1) 브로커 읽기 전용 진단 (`broker-diagnose`)
 
 실주문 전/장애 조사 시 **주문 없이** 거래소 연동 상태를 빠르게 점검한다.
 
@@ -106,7 +152,38 @@ uv run python bot.py broker-diagnose
 - `MODE=live`에서만 동작한다. 그 외 모드에서는 실패로 종료한다.
 - 이 명령은 주문 생성/취소를 호출하지 않는 읽기 전용 진단이다.
 
-## 5) 비상 정지 / 일시중지 / 복구 체크리스트
+## 6) 운영자 즉시 제어 체크리스트 (pause/resume/cancel)
+
+문제 징후(오류 급증, 체결/잔고 불일치 의심, 네트워크 불안정) 시 아래 3개 명령을 우선 사용한다.
+
+### A. 즉시 일시중지
+
+```bash
+uv run python bot.py pause
+```
+
+- 신규 주문 차단이 최우선.
+- pause 직후 `health` + `recovery-report` + 최근 로그를 본다.
+
+### B. 오픈 주문 정리
+
+```bash
+uv run python bot.py cancel-open-orders
+```
+
+- live 모드 원격 미체결 주문을 정리한다.
+- 실행 후 `reconcile` + `recovery-report`로 정합성 재확인.
+
+### C. 재개
+
+```bash
+uv run python bot.py resume
+```
+
+- blocker가 남아 있으면 재개하지 않는다.
+- `resume --force`는 마지막 수단으로만 사용한다.
+
+## 7) 비상 정지 / 일시중지 / 복구 체크리스트
 
 ### A. 즉시 리스크 차단 (Emergency stop)
 
@@ -176,7 +253,21 @@ uv run python bot.py resume --force
   force_resume_allowed=0
 ```
 
-## 6) 크래시 후 재개 전 필수 확인
+## 8) tiny-size 실주문 스모크 테스트 (armed-live 직후 1회)
+
+실주문 전환 직후에는 아래를 1회 수행해 주문-체결-기록 루프를 소액으로 검증한다.
+
+1. 주문 한도를 일시적으로 가장 작은 안전 값으로 유지 (`MAX_ORDER_KRW` 최소)
+2. `MODE=live`, `LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true` 확인
+3. 1회 주문/체결 발생을 모니터링 (주문 과다 유도 금지)
+4. 즉시 다음 확인
+   - `uv run python bot.py health`
+   - `uv run python bot.py recovery-report`
+   - `uv run python bot.py reconcile`
+5. `orders/fills/trades`에 1회 사이클이 정상 기록되면 스모크 통과
+6. 이상 징후 시 `pause` -> `cancel-open-orders` -> 원인 분석 후 재진입
+
+## 9) 크래시/재시작 후 재정합 검증 (restart-and-reconcile)
 
 크래시/강제 재시작 이후에는 아래를 모두 확인하기 전 재개하지 않는다.
 
@@ -189,7 +280,7 @@ uv run python bot.py resume --force
 5. `uv run python bot.py health`에서 stale/error 이상 없음 확인
 6. `uv run python bot.py resume`로 재개 후 30~60분 모니터링
 
-## 7) 장애 대응 절차 (유형별)
+## 10) 장애 대응 절차 (유형별)
 
 ### A. 재시작/프로세스 크래시
 
@@ -227,7 +318,7 @@ uv run python bot.py resume --force
 3. healthcheck 알림 빈도가 높으면 임계치(`HEALTH_MAX_ERROR_COUNT`) 조정.
 4. 복구 후 10~15분간 주문/체결/캔들 흐름 점검.
 
-## 8) 알림 설정
+## 11) 알림 설정
 
 하나 이상 설정하면 webhook 알림 사용, 미설정 시 콘솔 출력만 수행.
 
@@ -241,7 +332,7 @@ uv run python bot.py resume --force
 - `NOTIFIER_TIMEOUT_SEC=5`
 - 비밀키/URL은 `/etc/bithumb-bot/bithumb-bot.env`에만 저장하고 로그에 출력 금지.
 
-## 9) 백업 정책
+## 12) 백업 정책
 
 - 기본 경로: `backups/`
 - 기본 보관: 7일, 최대 30개
@@ -256,7 +347,7 @@ uv run python bot.py resume --force
 sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_120000.sqlite"
 ```
 
-## 10) Live 모드 사전 점검 (fail-fast)
+## 13) Live 모드 사전 점검 (fail-fast)
 
 `MODE=live`로 시작하면 런타임 시작 전에 아래 항목을 강제 검증한다. 하나라도 누락되면 즉시 종료된다.
 
