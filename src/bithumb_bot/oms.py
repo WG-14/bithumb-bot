@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import uuid
 from typing import Any
@@ -474,6 +475,20 @@ def record_status_transition(
             conn.close()
 
 
+def _compute_fill_slippage_bps(*, side: str, reference_price: float, fill_price: float) -> float | None:
+    if not math.isfinite(float(reference_price)) or float(reference_price) <= 0:
+        return None
+    if not math.isfinite(float(fill_price)):
+        return None
+    if side == "BUY":
+        delta = float(fill_price) - float(reference_price)
+    elif side == "SELL":
+        delta = float(reference_price) - float(fill_price)
+    else:
+        return None
+    return (delta / float(reference_price)) * 10_000.0
+
+
 def add_fill(
     *,
     client_order_id: str,
@@ -487,9 +502,60 @@ def add_fill(
     own_conn = conn is None
     conn = conn or ensure_db()
     try:
+        order_row = conn.execute(
+            "SELECT side FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        side = str(order_row["side"]) if order_row and order_row["side"] else ""
+
+        submit_row = conn.execute(
+            """
+            SELECT price
+            FROM order_events
+            WHERE client_order_id=?
+              AND event_type='submit_attempt_recorded'
+              AND price IS NOT NULL
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (client_order_id,),
+        ).fetchone()
+        if submit_row is None:
+            submit_row = conn.execute(
+                """
+                SELECT price
+                FROM order_events
+                WHERE client_order_id=?
+                  AND event_type='submit_attempt_preflight'
+                  AND price IS NOT NULL
+                ORDER BY event_ts DESC, id DESC
+                LIMIT 1
+                """,
+                (client_order_id,),
+            ).fetchone()
+
+        reference_price = float(submit_row["price"]) if submit_row and submit_row["price"] is not None else None
+        slippage_bps = (
+            _compute_fill_slippage_bps(side=side, reference_price=reference_price, fill_price=float(price))
+            if reference_price is not None
+            else None
+        )
+
         conn.execute(
-            "INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee) VALUES (?, ?, ?, ?, ?, ?)",
-            (client_order_id, fill_id, int(fill_ts), float(price), float(qty), float(fee)),
+            """
+            INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee, reference_price, slippage_bps)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                client_order_id,
+                fill_id,
+                int(fill_ts),
+                float(price),
+                float(qty),
+                float(fee),
+                (float(reference_price) if reference_price is not None else None),
+                (float(slippage_bps) if slippage_bps is not None else None),
+            ),
         )
         updated_ts = int(time.time() * 1000)
         conn.execute(
@@ -504,7 +570,11 @@ def add_fill(
             fill_id=fill_id,
             qty=qty,
             price=price,
-            message=(f"fee={float(fee)}" if fee else None),
+            message=(
+                f"fee={float(fee)};reference_price={reference_price};slippage_bps={slippage_bps}"
+                if fee or reference_price is not None or slippage_bps is not None
+                else None
+            ),
         )
         if own_conn:
             conn.commit()

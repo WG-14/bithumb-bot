@@ -612,6 +612,29 @@ def cmd_audit_ledger() -> None:
     print("[AUDIT-LEDGER] OK")
 
 
+
+def _execution_quality_summary(conn: sqlite3.Connection, *, start_day: str) -> dict[str, float | int | None]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS fill_count,
+            SUM(CASE WHEN reference_price IS NOT NULL AND slippage_bps IS NOT NULL THEN 1 ELSE 0 END) AS measured_count,
+            AVG(slippage_bps) AS avg_slippage_bps,
+            MAX(slippage_bps) AS worst_slippage_bps,
+            MIN(slippage_bps) AS best_slippage_bps
+        FROM fills
+        WHERE strftime('%Y-%m-%d', fill_ts/1000, 'unixepoch', '+9 hours') >= ?
+        """,
+        (start_day,),
+    ).fetchone()
+    return {
+        "fill_count": int(row["fill_count"] if row else 0),
+        "measured_count": int(row["measured_count"] if row and row["measured_count"] is not None else 0),
+        "avg_slippage_bps": (float(row["avg_slippage_bps"]) if row and row["avg_slippage_bps"] is not None else None),
+        "worst_slippage_bps": (float(row["worst_slippage_bps"]) if row and row["worst_slippage_bps"] is not None else None),
+        "best_slippage_bps": (float(row["best_slippage_bps"]) if row and row["best_slippage_bps"] is not None else None),
+    }
+
 def cmd_report(days: int) -> None:
     conn = ensure_db()
     try:
@@ -690,6 +713,7 @@ def cmd_report(days: int) -> None:
         missing_rate = 1.0 - (candle_count / expected_bars) if expected_bars > 0 else 0.0
 
         replay = _ledger_replay(conn)
+        exec_quality = _execution_quality_summary(conn, start_day=start_day.isoformat())
         dup_orders = int(
             conn.execute(
                 "SELECT COALESCE(SUM(cnt-1),0) FROM (SELECT client_order_id, COUNT(*) cnt FROM orders GROUP BY client_order_id HAVING COUNT(*)>1)"
@@ -719,6 +743,17 @@ def cmd_report(days: int) -> None:
     print(f"  fee_total={float(replay['fee_total']):,.2f}")
     print(f"  ledger_consistent={replay['consistent']}")
     print(f"  duplicate_orders={dup_orders}, duplicate_fills={int(replay['dup_fill_count'])}")
+    print("[EXECUTION-QUALITY]")
+    print(f"  fills={int(exec_quality['fill_count'])} measured={int(exec_quality['measured_count'])}")
+    if exec_quality['avg_slippage_bps'] is None:
+        print("  avg_slippage_bps=NA worst_slippage_bps=NA best_slippage_bps=NA")
+    else:
+        print(
+            "  "
+            f"avg_slippage_bps={float(exec_quality['avg_slippage_bps']):.3f} "
+            f"worst_slippage_bps={float(exec_quality['worst_slippage_bps']):.3f} "
+            f"best_slippage_bps={float(exec_quality['best_slippage_bps']):.3f}"
+        )
     print("[GATE]")
     print(f"  data_missing_rate<=5%: {'PASS' if gate_missing else 'FAIL'}")
     print(f"  duplicate_orders/fills==0: {'PASS' if gate_dup else 'FAIL'}")

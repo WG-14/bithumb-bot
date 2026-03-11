@@ -342,12 +342,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             price REAL NOT NULL,
             qty REAL NOT NULL,
             fee REAL NOT NULL DEFAULT 0,
+            reference_price REAL,
+            slippage_bps REAL,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
     )
 
     _ensure_column(conn, "fills", "fill_id", "fill_id TEXT")
+    _ensure_column(conn, "fills", "reference_price", "reference_price REAL")
+    _ensure_column(conn, "fills", "slippage_bps", "slippage_bps REAL")
 
     conn.execute(
         """

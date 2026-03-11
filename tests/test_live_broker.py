@@ -802,7 +802,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_attempt["symbol"] == settings.PAIR
     assert submit_attempt["side"] == "BUY"
     assert float(submit_attempt["qty"]) > 0
-    assert submit_attempt["price"] is None
+    assert submit_attempt["price"] is None or float(submit_attempt["price"]) > 0
     assert int(submit_attempt["submit_ts"]) == 1000
     assert submit_attempt["payload_fingerprint"]
     assert "exchange_order_id=ex1" in str(submit_attempt["broker_response_summary"])
@@ -813,7 +813,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight["symbol"] == settings.PAIR
     assert preflight["side"] == "BUY"
     assert float(preflight["qty"]) > 0
-    assert preflight["price"] is None
+    assert preflight["price"] is None or float(preflight["price"]) > 0
     assert int(preflight["submit_ts"]) == 1000
     assert preflight["order_status"] == "PENDING_SUBMIT"
     expected_fp = payload_fingerprint(
@@ -823,7 +823,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
             "symbol": settings.PAIR,
             "side": "BUY",
             "qty": float(submit_attempt["qty"]),
-            "price": None,
+            "price": (float(preflight["price"]) if preflight["price"] is not None else None),
             "submit_ts": 1000,
         }
     )
@@ -883,7 +883,7 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert submit_attempt["symbol"] == settings.PAIR
     assert submit_attempt["side"] == "BUY"
     assert float(submit_attempt["qty"]) > 0
-    assert submit_attempt["price"] is None
+    assert submit_attempt["price"] is None or float(submit_attempt["price"]) > 0
     assert int(submit_attempt["submit_ts"]) == 1000
     assert submit_attempt["payload_fingerprint"]
     assert "submit_exception=BrokerTemporaryError" in str(submit_attempt["broker_response_summary"])
@@ -1563,6 +1563,6 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path):
         assert attempt["symbol"] == settings.PAIR
         assert attempt["side"] == "BUY"
         assert float(attempt["qty"]) > 0
-        assert attempt["price"] is None
+        assert attempt["price"] is None or float(attempt["price"]) > 0
         assert int(attempt["submit_ts"]) == ts
         assert attempt["payload_fingerprint"]

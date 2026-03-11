@@ -331,6 +331,7 @@ def _record_submit_attempt_result(
     qty: float,
     ts: int,
     payload_hash: str,
+    reference_price: float | None,
     order_status: str,
     broker_response_summary: str,
     submission_reason_code: str,
@@ -345,7 +346,7 @@ def _record_submit_attempt_result(
         symbol=symbol,
         side=side,
         qty=qty,
-        price=None,
+        price=reference_price,
         submit_ts=ts,
         payload_fingerprint=payload_hash,
         broker_response_summary=broker_response_summary,
@@ -367,6 +368,7 @@ def _record_submit_attempt_preflight(
     qty: float,
     ts: int,
     payload_hash: str,
+    reference_price: float | None,
 ) -> None:
     record_submit_attempt(
         conn=conn,
@@ -375,7 +377,7 @@ def _record_submit_attempt_preflight(
         symbol=symbol,
         side=side,
         qty=qty,
-        price=None,
+        price=reference_price,
         submit_ts=ts,
         payload_fingerprint=payload_hash,
         broker_response_summary="submit_dispatched",
@@ -397,6 +399,7 @@ def _submit_via_standard_path(
     side: str,
     qty: float,
     ts: int,
+    reference_price: float | None,
 ):
     symbol = settings.PAIR
     payload = {
@@ -405,7 +408,7 @@ def _submit_via_standard_path(
         "symbol": symbol,
         "side": side,
         "qty": float(qty),
-        "price": None,
+        "price": reference_price,
         "submit_ts": int(ts),
     }
     payload_hash = payload_fingerprint(payload)
@@ -430,6 +433,7 @@ def _submit_via_standard_path(
         qty=qty,
         ts=ts,
         payload_hash=payload_hash,
+        reference_price=reference_price,
     )
     notify(
         safety_event(
@@ -466,6 +470,7 @@ def _submit_via_standard_path(
             qty=qty,
             ts=ts,
             payload_hash=payload_hash,
+            reference_price=reference_price,
             order_status="SUBMIT_UNKNOWN",
             broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
             submission_reason_code=submission_reason_code,
@@ -493,6 +498,7 @@ def _submit_via_standard_path(
             qty=qty,
             ts=ts,
             payload_hash=payload_hash,
+            reference_price=reference_price,
             order_status="FAILED",
             broker_response_summary=f"submit_exception={type(e).__name__};error={e}",
             submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
@@ -534,6 +540,7 @@ def _submit_via_standard_path(
             qty=qty,
             ts=ts,
             payload_hash=payload_hash,
+            reference_price=reference_price,
             order_status="SUBMIT_UNKNOWN",
             broker_response_summary=f"broker_status={order.status};exchange_order_id=-",
             submission_reason_code=SUBMISSION_REASON_AMBIGUOUS_RESPONSE,
@@ -555,6 +562,7 @@ def _submit_via_standard_path(
         qty=qty,
         ts=ts,
         payload_hash=payload_hash,
+        reference_price=reference_price,
         order_status=order.status,
         broker_response_summary=f"broker_status={order.status};exchange_order_id={order.exchange_order_id}",
         submission_reason_code=SUBMISSION_REASON_CONFIRMED_SUCCESS,
@@ -627,6 +635,14 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         submit_attempt_id = _submit_attempt_id()
         client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
 
+        reference_price: float | None = None
+        try:
+            bid, ask = fetch_orderbook_top(settings.PAIR)
+            if math.isfinite(float(bid)) and math.isfinite(float(ask)) and float(bid) > 0 and float(ask) > 0:
+                reference_price = (float(bid) + float(ask)) / 2.0
+        except Exception:
+            reference_price = None
+
         blocked, reason = evaluate_order_submission_halt(
             conn,
             ts_ms=int(ts),
@@ -688,6 +704,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             side=side,
             qty=normalized_qty,
             ts=ts,
+            reference_price=reference_price,
         )
         if order is None:
             return None
