@@ -798,6 +798,9 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] config/env loaded" in out
     assert "[PASS] broker authentication" in out
     assert "[PASS] balance query" in out
+    assert "[PASS] live execution mode: MODE=live LIVE_DRY_RUN=True armed=False" in out
+    assert "[PASS] order submit routing: price=None => market_buy/market_sell, price set => trade/place limit" in out
+    assert "[PASS] order lookup path: get_order checks /info/orders first, then /info/order_detail fallback" in out
     assert "[PASS] open order query: count=2" in out
     assert "[PASS] symbol/order rule query" in out
     assert "[PASS] DB writable" in out
@@ -841,6 +844,7 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "overall=WARN" in out
+    assert "[PASS] live execution mode: MODE=live LIVE_DRY_RUN=True armed=False" in out
     assert "[WARN] symbol/order rule query" in out
     assert "[WARN] open order query" in out
 

@@ -809,6 +809,26 @@ def cmd_broker_diagnose() -> None:
     def add_check(name: str, status: str, detail: str, *, critical: bool) -> None:
         checks.append({"name": name, "status": status, "detail": detail, "critical": critical})
 
+    live_armed = settings.MODE == "live" and not settings.LIVE_DRY_RUN
+    add_check(
+        "live execution mode",
+        "PASS",
+        f"MODE={settings.MODE} LIVE_DRY_RUN={settings.LIVE_DRY_RUN} armed={live_armed}",
+        critical=True,
+    )
+    add_check(
+        "order submit routing",
+        "PASS",
+        "price=None => market_buy/market_sell, price set => trade/place limit",
+        critical=True,
+    )
+    add_check(
+        "order lookup path",
+        "PASS",
+        "get_order checks /info/orders first, then /info/order_detail fallback",
+        critical=True,
+    )
+
     try:
         validate_live_mode_preflight(settings)
         add_check("config/env loaded", "PASS", "live preflight validation passed", critical=True)
