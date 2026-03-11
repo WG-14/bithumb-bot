@@ -165,6 +165,17 @@ uv run python bot.py resume --force
 - 자동 청산은 수행되지 않으므로, 운영자가 먼저 노출을 수동으로 해소(포지션 평탄화/미체결 정리)해야 한다.
 - 해소 후 `recovery-report`와 `health`를 다시 확인하고 `resume`을 실행한다.
 
+
+예시 (`uv run python bot.py recovery-report`):
+
+```text
+[P2] resume_eligibility
+  resume_allowed=0
+  can_resume=false
+  blockers=STARTUP_SAFETY_GATE_BLOCKED, HALT_RISK_OPEN_POSITION
+  force_resume_allowed=0
+```
+
 ## 6) 크래시 후 재개 전 필수 확인
 
 크래시/강제 재시작 이후에는 아래를 모두 확인하기 전 재개하지 않는다.

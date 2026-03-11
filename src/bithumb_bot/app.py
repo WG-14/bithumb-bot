@@ -414,6 +414,9 @@ def cmd_health() -> None:
         state_label = "paused"
 
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
+    resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
+    can_resume_label = "true" if bool(resume_allowed) else "false"
+    blockers_label = ", ".join(resume_blocker_codes) if resume_blocker_codes else "none"
     unsafe_reasons: list[str] = []
     if not bool(resume_allowed):
         for blocker in resume_blockers[:3]:
@@ -471,6 +474,8 @@ def cmd_health() -> None:
     else:
         print(f"    broker_open_order_count={remote_open_order_count}")
     print(f"    position={position_summary}")
+    print(f"    can_resume={can_resume_label}")
+    print(f"    blockers={blockers_label}")
     print(f"    resume_safety={resume_safety}")
 
     print("  [RISK-SNAPSHOT]")
@@ -1243,6 +1248,8 @@ def _load_recovery_report(
         {"code": b.code, "detail": b.detail, "overridable": bool(b.overridable)}
         for b in blockers
     ]
+    can_resume = bool(resume_allowed)
+    blocker_codes = [str(b["code"]) for b in blocker_list]
     non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
     primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
     blocker_summary = (
@@ -1343,6 +1350,8 @@ def _load_recovery_report(
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
         "trading_enabled": bool(state.trading_enabled),
         "resume_allowed": bool(resume_allowed),
+        "can_resume": can_resume,
+        "resume_blockers": blocker_codes,
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
         "blockers": blocker_list,
         "blocker_summary": blocker_summary,
@@ -1375,6 +1384,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    submit_unknown_count={report['submit_unknown_count']}")
     print("  [P2] resume_eligibility")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
+    print(f"    can_resume={'true' if bool(report['can_resume']) else 'false'}")
+    resume_blockers = report.get("resume_blockers") or []
+    print(f"    blockers={', '.join(str(b) for b in resume_blockers) if resume_blockers else 'none'}")
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
     print(f"    blocker_summary={report['blocker_summary']}")

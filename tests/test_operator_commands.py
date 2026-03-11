@@ -1169,6 +1169,8 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     )
     assert "[P7] unprocessed_remote_open_orders" in out
     assert "resume_allowed=0" in out
+    assert "can_resume=false" in out
+    assert "blockers=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "force_resume_allowed=0" in out
     assert "blocker_summary=total=" in out
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
@@ -1279,6 +1281,8 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "[RISK-SNAPSHOT]" in out
     assert "[HALT-RECOVERY-STATUS]" in out
     assert "state=halted trading_enabled=0 halt_new_orders_blocked=1" in out
+    assert "can_resume=false" in out
+    assert "blockers=none" in out
     assert "resume_safety=unsafe" in out
     assert "unresolved_open_order_count=4 recovery_required_count=2 submit_unknown_count=0" in out
     assert "current_halt_reason=code=PERIODIC_RECONCILE_FAILED reason=periodic reconcile failed" in out
@@ -1327,6 +1331,8 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     assert "[HALT-RECOVERY-STATUS]" in out
     assert "state=paused trading_enabled=0 halt_new_orders_blocked=0" in out
     assert "reason=code=- reason=manual operator pause" in out
+    assert "can_resume=true" in out
+    assert "blockers=none" in out
     assert "resume_safety=safe" in out
 
 
@@ -1342,6 +1348,8 @@ def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_pat
 
     assert "state=paused" in out
     assert "unresolved_open_order_count=1" in out
+    assert "can_resume=false" in out
+    assert "blockers=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "resume_safety=unsafe (STARTUP_SAFETY_GATE_BLOCKED)" in out
 
 
@@ -1405,6 +1413,8 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "blocker_summary",
         "blockers",
         "force_resume_allowed",
+        "can_resume",
+        "resume_blockers",
         "last_reconcile_summary",
         "oldest_orders",
         "oldest_unresolved_age_sec",
@@ -1470,6 +1480,8 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["last_reconcile_summary"] != "none"
     assert "status=" in payload["last_reconcile_summary"]
     assert payload["resume_allowed"] is False
+    assert payload["can_resume"] is False
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in payload["resume_blockers"]
     assert payload["force_resume_allowed"] is False
     assert isinstance(payload["blockers"], list)
     assert payload["blockers"]
@@ -1489,6 +1501,72 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["recommended_next_action"]
     assert payload["resume_blocked_reason"]
     assert payload["recommended_command"]
+
+
+def test_recovery_report_can_resume_clean_state(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
+
+
+def test_recovery_report_can_resume_false_for_unresolved_recovery_state(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="resume_blocked_rr", created_ts=now_ms)
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is False
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
+
+
+def test_recovery_report_can_resume_false_for_risk_halt_with_non_flat_position(tmp_path):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.25, 1000000.0, 0.0, 0.25, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="kill switch engaged",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is False
+    assert "HALT_RISK_OPEN_POSITION" in report["resume_blockers"]
+
+
+def test_recovery_report_can_resume_true_again_after_risk_halt_is_flat(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="kill switch engaged",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
+    runtime_state.enable_trading()
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
