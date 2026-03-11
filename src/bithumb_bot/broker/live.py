@@ -102,6 +102,45 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
     return normalized
 
 
+def _validate_live_price_protection(*, side: str, bid: float, ask: float) -> None:
+    max_slippage_bps = max(0.0, float(settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS))
+    if max_slippage_bps <= 0:
+        return
+
+    if not math.isfinite(float(bid)) or not math.isfinite(float(ask)) or bid <= 0 or ask <= 0 or bid > ask:
+        raise ValueError(f"invalid orderbook top: bid={bid} ask={ask}")
+
+    max_ref_age_sec = int(settings.LIVE_PRICE_REFERENCE_MAX_AGE_SEC)
+    if max_ref_age_sec > 0:
+        ref_age_sec = runtime_state.snapshot().last_candle_age_sec
+        if ref_age_sec is None:
+            raise ValueError("reference price unavailable: last candle age unknown")
+        if float(ref_age_sec) > max_ref_age_sec:
+            raise ValueError(
+                f"reference price stale: age_sec={float(ref_age_sec):.1f} > limit={max_ref_age_sec}"
+            )
+
+    reference_price = (float(bid) + float(ask)) / 2.0
+    expected_exec_price = float(ask) if side == "BUY" else float(bid)
+    allowed_slippage_abs = reference_price * (max_slippage_bps / 10_000.0)
+
+    if side == "BUY" and expected_exec_price - reference_price > allowed_slippage_abs:
+        raise ValueError(
+            "price protection blocked BUY: "
+            f"expected={expected_exec_price:.8f} reference={reference_price:.8f} "
+            f"slippage_bps={_as_bps(expected_exec_price - reference_price, reference_price):.2f} "
+            f"limit_bps={max_slippage_bps:.2f}"
+        )
+
+    if side == "SELL" and reference_price - expected_exec_price > allowed_slippage_abs:
+        raise ValueError(
+            "price protection blocked SELL: "
+            f"expected={expected_exec_price:.8f} reference={reference_price:.8f} "
+            f"slippage_bps={_as_bps(reference_price - expected_exec_price, reference_price):.2f} "
+            f"limit_bps={max_slippage_bps:.2f}"
+        )
+
+
 def validate_pretrade(
     *,
     broker: Broker,
@@ -142,12 +181,18 @@ def validate_pretrade(
 
     spread_limit_bps = float(settings.MAX_ORDERBOOK_SPREAD_BPS)
     slip_limit_bps = float(settings.MAX_MARKET_SLIPPAGE_BPS)
-    if spread_limit_bps <= 0 and slip_limit_bps <= 0:
+    protection_limit_bps = max(0.0, float(settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS))
+    if spread_limit_bps <= 0 and slip_limit_bps <= 0 and protection_limit_bps <= 0:
         return
 
-    bid, ask = fetch_orderbook_top(settings.PAIR)
+    try:
+        bid, ask = fetch_orderbook_top(settings.PAIR)
+    except Exception as exc:
+        raise ValueError(f"reference price unavailable: {type(exc).__name__}: {exc}") from exc
     if not math.isfinite(float(bid)) or not math.isfinite(float(ask)) or bid <= 0 or ask <= 0 or bid > ask:
         raise ValueError(f"invalid orderbook top: bid={bid} ask={ask}")
+
+    _validate_live_price_protection(side=side, bid=float(bid), ask=float(ask))
 
     mid = (float(bid) + float(ask)) / 2.0
     spread_bps = _as_bps(float(ask) - float(bid), mid)

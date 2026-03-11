@@ -7,7 +7,7 @@ import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
-from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order
+from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order, validate_pretrade
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
@@ -357,6 +357,8 @@ def _reset_pretrade_guards():
         "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
         "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
         "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
+        "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
+        "LIVE_PRICE_REFERENCE_MAX_AGE_SEC": settings.LIVE_PRICE_REFERENCE_MAX_AGE_SEC,
     }
 
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
@@ -369,6 +371,8 @@ def _reset_pretrade_guards():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 0)
 
     yield
 
@@ -385,6 +389,81 @@ def test_bithumb_broker_dry_run(monkeypatch):
     order = broker.place_order(client_order_id="a", side="BUY", qty=0.1, price=None)
 
     assert order.exchange_order_id.startswith("dry_")
+
+
+def test_validate_pretrade_price_protection_buy_within_threshold() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
+
+    validate_pretrade(
+        broker=_FakeBroker(),
+        side="BUY",
+        qty=0.001,
+        market_price=100.5,
+    )
+
+
+def test_validate_pretrade_price_protection_buy_beyond_threshold() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 40.0)
+
+    with pytest.raises(ValueError, match="price protection blocked BUY"):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="BUY",
+            qty=0.001,
+            market_price=100.5,
+        )
+
+
+def test_validate_pretrade_price_protection_sell_within_threshold() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
+
+    validate_pretrade(
+        broker=_FakeBroker(),
+        side="SELL",
+        qty=0.001,
+        market_price=100.5,
+    )
+
+
+def test_validate_pretrade_price_protection_sell_beyond_threshold() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 40.0)
+
+    with pytest.raises(ValueError, match="price protection blocked SELL"):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="SELL",
+            qty=0.001,
+            market_price=100.5,
+        )
+
+
+def test_validate_pretrade_price_protection_blocks_missing_reference_price(monkeypatch) -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (_ for _ in ()).throw(RuntimeError("no data")))
+
+    with pytest.raises(ValueError, match="reference price unavailable"):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="BUY",
+            qty=0.001,
+            market_price=100.5,
+        )
+
+
+def test_validate_pretrade_price_protection_blocks_stale_reference() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
+    object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 5)
+    runtime_state.set_last_candle_age_sec(30.0)
+
+    with pytest.raises(ValueError, match="reference price stale"):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="BUY",
+            qty=0.001,
+            market_price=100.5,
+        )
+
+    runtime_state.set_last_candle_age_sec(None)
 
 
 def test_live_retry_after_cancel_uses_new_attempt_row_and_client_order_id(monkeypatch, tmp_path):
