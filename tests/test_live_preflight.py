@@ -14,6 +14,7 @@ def _restore_settings():
         "MAX_DAILY_LOSS_KRW": settings.MAX_DAILY_LOSS_KRW,
         "MAX_DAILY_ORDER_COUNT": settings.MAX_DAILY_ORDER_COUNT,
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
@@ -65,6 +66,45 @@ def test_live_preflight_requires_credentials_when_not_dry_run() -> None:
     msg = str(exc.value)
     assert "BITHUMB_API_KEY is required when LIVE_DRY_RUN=false" in msg
     assert "BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false" in msg
+
+
+def test_live_preflight_requires_explicit_arming_for_real_live_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "LIVE_REAL_ORDER_ARMED=true is required" in str(exc.value)
+
+
+def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    validate_live_mode_preflight(settings)
 
 
 

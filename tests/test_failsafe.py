@@ -205,6 +205,7 @@ class _DummyBroker:
 
 
 def _prepare_run_loop(monkeypatch, open_order_created_ts=None):
+    monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)

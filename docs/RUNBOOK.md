@@ -248,8 +248,15 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
+- `LIVE_DRY_RUN=false`인 경우 `LIVE_REAL_ORDER_ARMED=true`를 명시해야 실주문 허용
 - notifier는 반드시 활성/설정되어야 함(`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`)
 - `KILL_SWITCH_LIQUIDATE=true`는 현재 미지원(설정 시 기동 실패)
+
+실주문 전환 절차(arming):
+
+1. `LIVE_DRY_RUN=true` 상태로 로그/알림/복구 동작을 먼저 검증
+2. 실주문 시작 직전에 `LIVE_DRY_RUN=false` + `LIVE_REAL_ORDER_ARMED=true`를 함께 설정
+3. `LIVE_REAL_ORDER_ARMED=true`가 없으면 live preflight에서 즉시 종료(fail-fast)
 
 
 Live 최소 예시(알림 포함):

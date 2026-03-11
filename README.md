@@ -49,6 +49,15 @@ uv run python bot.py run --short 7 --long 30
 - `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, 기본값 `data/bithumb_1m.sqlite`(paper와 공유될 수 있는 경로)는 사용할 수 없습니다.
 - `MODE=live`에서는 notifier가 반드시 활성/설정되어 있어야 합니다 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`). 미설정 시 기동이 실패합니다.
 - `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.
+- 실주문(`LIVE_DRY_RUN=false`)은 `LIVE_REAL_ORDER_ARMED=true`를 명시적으로 설정한 경우에만 허용됩니다.
+
+### 실주문 arming 방법
+
+1. 먼저 `LIVE_DRY_RUN=true`로 충분히 검증합니다.
+2. 실주문 직전에만 아래 값을 함께 설정합니다.
+   - `LIVE_DRY_RUN=false`
+   - `LIVE_REAL_ORDER_ARMED=true`
+3. 둘 중 하나라도 누락되면 기동 시 fail-fast로 즉시 종료됩니다.
 
 예시(최소 live + notifier):
 

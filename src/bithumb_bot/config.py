@@ -65,6 +65,7 @@ class Settings:
     BITHUMB_API_KEY: str = os.getenv("BITHUMB_API_KEY", "")
     BITHUMB_API_SECRET: str = os.getenv("BITHUMB_API_SECRET", "")
     LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
+    LIVE_REAL_ORDER_ARMED: bool = parse_bool_env("LIVE_REAL_ORDER_ARMED", "false")
     OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC: int = int(
         os.getenv("OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", "30")
     )
@@ -106,6 +107,11 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         )
 
     if not cfg.LIVE_DRY_RUN:
+        if not cfg.LIVE_REAL_ORDER_ARMED:
+            issues.append(
+                "LIVE_REAL_ORDER_ARMED=true is required to place real live orders "
+                "(MODE=live and LIVE_DRY_RUN=false)"
+            )
         if not cfg.BITHUMB_API_KEY.strip():
             issues.append("BITHUMB_API_KEY is required when LIVE_DRY_RUN=false")
         if not cfg.BITHUMB_API_SECRET.strip():

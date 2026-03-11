@@ -88,6 +88,7 @@ class _CancelThenLateFillBroker(_NoopBroker):
 
 
 def _patch_single_tick_live_loop(monkeypatch) -> None:
+    monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "KILL_SWITCH", False)
     object.__setattr__(settings, "INTERVAL", "1m")
