@@ -217,6 +217,29 @@ class _SubmitUnknownRecoveredByRecentFillBroker:
         )
 
 
+class _RecoveryReportCandidateBroker:
+    def __init__(self, recent_orders: list[BrokerOrder]):
+        self._recent_orders = recent_orders
+
+    def get_recent_orders(self, *, limit: int = 100):
+        return self._recent_orders[:limit]
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        raise NotImplementedError
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
+        return []
+
+    def get_open_orders(self):
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100):
+        return []
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(0.0, 0.0, 0.0, 0.0)
+
+
 def test_pause_disables_trading_via_persistent_runtime_state(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -709,6 +732,87 @@ def test_recovery_report_shows_defaults_when_empty(tmp_path):
     assert int(report["unprocessed_remote_open_orders"]) == 0
 
 
+def test_recovery_report_candidate_no_match(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="rr_none", created_ts=now_ms - 20_000)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoveryReportCandidateBroker(
+            [
+                BrokerOrder("remote_x", "ex_x", "SELL", "NEW", None, 0.5, 0.0, now_ms - 100_000, now_ms - 90_000),
+            ]
+        ),
+    )
+    try:
+        report = _load_recovery_report()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_none"]
+    assert len(entries) == 1
+    assert entries[0]["candidate_outcome"] == "no_candidate"
+    assert entries[0]["candidates"] == []
+
+
+def test_recovery_report_candidate_single_plausible(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="rr_one", created_ts=now_ms - 30_000)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoveryReportCandidateBroker(
+            [
+                BrokerOrder("remote_1", "ex_match", "BUY", "PARTIAL", None, 0.01, 0.003, now_ms - 32_000, now_ms - 10_000),
+                BrokerOrder("remote_2", "ex_weak", "BUY", "NEW", None, 0.02, 0.0, now_ms - 3_600_000, now_ms - 3_500_000),
+            ]
+        ),
+    )
+    try:
+        report = _load_recovery_report()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_one"]
+    assert len(entries) == 1
+    assert entries[0]["candidate_outcome"] == "single_plausible_candidate"
+    assert int(entries[0]["plausible_candidate_count"]) == 1
+    assert entries[0]["candidates"][0]["exchange_order_id"] == "ex_match"
+
+
+def test_recovery_report_candidate_multiple_plausible(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="rr_many", created_ts=now_ms - 40_000)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.BithumbBroker",
+        lambda: _RecoveryReportCandidateBroker(
+            [
+                BrokerOrder("remote_1", "ex_m1", "BUY", "NEW", None, 0.0103, 0.0, now_ms - 42_000, now_ms - 20_000),
+                BrokerOrder("remote_2", "ex_m2", "BUY", "PARTIAL", None, 0.0098, 0.005, now_ms - 41_000, now_ms - 19_000),
+            ]
+        ),
+    )
+    try:
+        report = _load_recovery_report()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    entries = [e for e in report["recovery_candidates"] if e["client_order_id"] == "rr_many"]
+    assert len(entries) == 1
+    assert entries[0]["candidate_outcome"] == "multiple_plausible_candidates"
+    assert int(entries[0]["plausible_candidate_count"]) == 2
+
+
 def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -920,6 +1024,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     payload = json.loads(out)
 
     assert set(payload.keys()) == {
+        "broker_recent_orders_snapshot_error",
         "balance_split_mismatch_summary",
         "active_blocker_summary",
         "blocker_summary",
@@ -942,6 +1047,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "resume_allowed",
         "risk_level",
         "trading_enabled",
+        "recovery_candidates",
         "unprocessed_remote_open_orders",
         "unresolved_count",
         "unresolved_summary",

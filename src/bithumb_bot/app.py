@@ -656,6 +656,74 @@ def _last_reconcile_failed(state) -> bool:
     return status in {"FAILED", "ERROR"}
 
 
+def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[object], str | None]:
+    if settings.MODE != "live":
+        return [], "broker snapshot unavailable in non-live mode"
+    try:
+        from .broker.bithumb import BithumbBroker
+
+        return BithumbBroker().get_recent_orders(limit=limit), None
+    except Exception as e:
+        return [], f"failed to load recent broker orders: {type(e).__name__}: {e}"
+
+
+def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_orders: list[object]) -> list[dict[str, str | float | int]]:
+    side = str(local_order["side"])
+    qty_req = float(local_order["qty_req"])
+    created_ts = int(local_order["created_ts"])
+
+    ranked: list[tuple[int, dict[str, str | float | int]]] = []
+    for remote in recent_orders:
+        exchange_order_id = str(getattr(remote, "exchange_order_id", "") or "")
+        if not exchange_order_id:
+            continue
+
+        remote_side = str(getattr(remote, "side", "") or "")
+        remote_qty_req = float(getattr(remote, "qty_req", 0.0) or 0.0)
+        remote_created_ts = int(getattr(remote, "created_ts", 0) or 0)
+        remote_updated_ts = int(getattr(remote, "updated_ts", 0) or 0)
+
+        score = 0
+        reasons: list[str] = []
+        if remote_side == side:
+            score += 2
+            reasons.append("same side")
+
+        qty_gap = abs(remote_qty_req - qty_req)
+        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.05)
+        if qty_gap <= qty_tolerance:
+            score += 2
+            reasons.append("close qty")
+
+        ts_gap_sec = abs(remote_created_ts - created_ts) / 1000 if remote_created_ts > 0 else float("inf")
+        if ts_gap_sec <= 600:
+            score += 1
+            reasons.append("recent timestamp")
+
+        if score < 2:
+            continue
+
+        ranked.append(
+            (
+                score,
+                {
+                    "exchange_order_id": exchange_order_id,
+                    "side": remote_side or "-",
+                    "qty": remote_qty_req,
+                    "filled_qty": float(getattr(remote, "qty_filled", 0.0) or 0.0),
+                    "status": str(getattr(remote, "status", "") or "-"),
+                    "created_ts": remote_created_ts,
+                    "updated_ts": remote_updated_ts,
+                    "score": score,
+                    "match_reason": " + ".join(reasons),
+                },
+            )
+        )
+
+    ranked.sort(key=lambda item: (-item[0], -int(item[1]["updated_ts"]), -int(item[1]["created_ts"])))
+    return [item[1] for item in ranked]
+
+
 def _load_recovery_report(
     *,
     oldest_limit: int = 5,
@@ -679,7 +747,7 @@ def _load_recovery_report(
         ).fetchone()
         oldest_rows = conn.execute(
             f"""
-            SELECT client_order_id, status, exchange_order_id, created_ts, last_error
+            SELECT client_order_id, status, exchange_order_id, side, qty_req, qty_filled, created_ts, updated_ts, last_error
             FROM orders
             WHERE status IN ({placeholders})
             ORDER BY created_ts ASC
@@ -728,17 +796,31 @@ def _load_recovery_report(
     now_ms = time.time() * 1000
 
     oldest_orders: list[dict[str, str | float]] = []
+    candidate_local_orders: list[dict[str, str | float]] = []
     for row in oldest_rows:
         last_error = str(row["last_error"] or "").strip()
+        local_order = {
+            "client_order_id": str(row["client_order_id"]),
+            "status": str(row["status"]),
+            "exchange_order_id": str(row["exchange_order_id"] or "-"),
+            "side": str(row["side"] or "-"),
+            "qty_req": float(row["qty_req"] or 0.0),
+            "qty_filled": float(row["qty_filled"] or 0.0),
+            "created_ts": int(row["created_ts"]),
+            "updated_ts": int(row["updated_ts"]),
+            "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
+            "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+        }
         oldest_orders.append(
             {
-                "client_order_id": str(row["client_order_id"]),
-                "status": str(row["status"]),
-                "exchange_order_id": str(row["exchange_order_id"] or "-"),
-                "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
-                "last_error": (last_error[:60] + "...") if len(last_error) > 60 else (last_error or "-"),
+                "client_order_id": str(local_order["client_order_id"]),
+                "status": str(local_order["status"]),
+                "exchange_order_id": str(local_order["exchange_order_id"]),
+                "age_sec": float(local_order["age_sec"]),
+                "last_error": str(local_order["last_error"]),
             }
         )
+        candidate_local_orders.append(local_order)
 
     recovery_required_orders: list[dict[str, str | float]] = []
     for row in recovery_required_rows:
@@ -838,6 +920,37 @@ def _load_recovery_report(
         risk_level = "medium"
 
     state = runtime_state.snapshot()
+    recent_orders_snapshot, broker_snapshot_error = _safe_recent_broker_orders_snapshot(limit=100)
+    candidate_report: list[dict[str, object]] = []
+    for local_order in candidate_local_orders:
+        candidates = _build_recovery_candidates(local_order=local_order, recent_orders=recent_orders_snapshot)
+        plausible_candidates = [c for c in candidates if int(c["score"]) >= 4]
+        if not candidates:
+            outcome = "no_candidate"
+            next_action = "No exchange candidate found. Run reconcile, verify exchange history manually, then recover-order once exchange_order_id is confirmed."
+        elif len(plausible_candidates) > 1:
+            outcome = "multiple_plausible_candidates"
+            next_action = "Multiple plausible exchange orders found; automatic recovery is unsafe. Operator review is required before recover-order."
+        elif len(plausible_candidates) == 1:
+            outcome = "single_plausible_candidate"
+            next_action = "Single plausible candidate found. Validate it, then run recover-order with this exchange_order_id."
+        else:
+            outcome = "weak_candidates_only"
+            next_action = "Only weak candidates found. Reconcile and verify order/fill history before manual recover-order."
+
+        candidate_report.append(
+            {
+                "client_order_id": local_order["client_order_id"],
+                "local_status": local_order["status"],
+                "local_side": local_order["side"],
+                "local_qty": local_order["qty_req"],
+                "local_created_ts": local_order["created_ts"],
+                "candidate_outcome": outcome,
+                "plausible_candidate_count": len(plausible_candidates),
+                "candidates": candidates[:5],
+                "next_action_hint": next_action,
+            }
+        )
 
     return {
         "unresolved_count": unresolved_count,
@@ -865,6 +978,8 @@ def _load_recovery_report(
         "resume_blocked_reason": resume_blocked_reason,
         "recommended_command": recommended_command,
         "recent_order_lifecycle": recent_order_lifecycle,
+        "recovery_candidates": candidate_report,
+        "broker_recent_orders_snapshot_error": broker_snapshot_error,
     }
 
 
@@ -952,6 +1067,36 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                 f"age_sec={float(item['age_sec']):.1f} "
                 f"reason={item['last_error']}"
             )
+
+    print("  [P9] recovery_candidates")
+    broker_snapshot_error = str(report.get("broker_recent_orders_snapshot_error") or "")
+    if broker_snapshot_error:
+        print(f"    broker_snapshot={broker_snapshot_error}")
+    recovery_candidates = report.get("recovery_candidates") or []
+    for item in recovery_candidates:
+        print(
+            "    - "
+            f"local_order_id={item['client_order_id']} "
+            f"local_status={item['local_status']} "
+            f"candidate_outcome={item['candidate_outcome']}"
+        )
+        candidates = item.get("candidates") or []
+        if not candidates:
+            print("      candidate_exchange_orders=none")
+        else:
+            for candidate in candidates:
+                print(
+                    "      * "
+                    f"exchange_order_id={candidate['exchange_order_id']} "
+                    f"side={candidate['side']} "
+                    f"qty={float(candidate['qty']):.8f} "
+                    f"filled_qty={float(candidate['filled_qty']):.8f} "
+                    f"status={candidate['status']} "
+                    f"created_ts={candidate['created_ts']} "
+                    f"updated_ts={candidate['updated_ts']} "
+                    f"reason={candidate['match_reason']}"
+                )
+        print(f"      next_action={item['next_action_hint']}")
 
 
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
