@@ -248,4 +248,15 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
+- notifier는 반드시 활성/설정되어야 함(`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`)
 - `KILL_SWITCH_LIQUIDATE=true`는 현재 미지원(설정 시 기동 실패)
+
+
+Live 최소 예시(알림 포함):
+
+```bash
+MODE=live DB_PATH=data/live.sqlite LIVE_DRY_RUN=true \
+MAX_ORDER_KRW=100000 MAX_DAILY_LOSS_KRW=50000 MAX_DAILY_ORDER_COUNT=10 \
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+uv run python bot.py run
+```

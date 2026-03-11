@@ -88,6 +88,7 @@ def test_live_preflight_rejects_kill_switch_liquidate_mode() -> None:
 
 def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
@@ -132,11 +133,63 @@ def test_live_preflight_rejects_default_db_path_for_live_mode(monkeypatch: pytes
 
 def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_PATH", "data/live_trading.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "DB_PATH", "data/live_trading.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_requires_notifier_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("NOTIFIER_ENABLED", "false")
+    monkeypatch.delenv("NOTIFIER_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "notifier must be enabled and configured" in str(exc.value)
+
+
+def test_live_preflight_accepts_notifier_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("NOTIFIER_ENABLED", "true")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/abc")
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_paper_mode_notifier_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOTIFIER_ENABLED", "false")
+    monkeypatch.delenv("NOTIFIER_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
 
     validate_live_mode_preflight(settings)

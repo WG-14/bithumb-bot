@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .notifier import is_configured as notifier_is_configured
+
 
 DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
 
@@ -108,6 +110,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             issues.append("BITHUMB_API_KEY is required when LIVE_DRY_RUN=false")
         if not cfg.BITHUMB_API_SECRET.strip():
             issues.append("BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false")
+
+    if not notifier_is_configured():
+        issues.append(
+            "notifier must be enabled and configured with at least one delivery target "
+            "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
+        )
 
     if issues:
         raise LiveModeValidationError(

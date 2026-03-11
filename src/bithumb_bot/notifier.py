@@ -35,6 +35,19 @@ def _is_enabled() -> bool:
     return value in {"1", "true", "yes", "on", "y"}
 
 
+def is_configured() -> bool:
+    if not _is_enabled():
+        return False
+    return any(
+        [
+            os.getenv("NOTIFIER_WEBHOOK_URL", "").strip(),
+            os.getenv("SLACK_WEBHOOK_URL", "").strip(),
+            os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            and os.getenv("TELEGRAM_CHAT_ID", "").strip(),
+        ]
+    )
+
+
 def _timeout_sec() -> float:
     raw = os.getenv("NOTIFIER_TIMEOUT_SEC", "5")
     try:

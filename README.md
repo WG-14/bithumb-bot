@@ -47,7 +47,17 @@ uv run python bot.py run --short 7 --long 30
 
 - `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
 - `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, 기본값 `data/bithumb_1m.sqlite`(paper와 공유될 수 있는 경로)는 사용할 수 없습니다.
+- `MODE=live`에서는 notifier가 반드시 활성/설정되어 있어야 합니다 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`). 미설정 시 기동이 실패합니다.
 - `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.
+
+예시(최소 live + notifier):
+
+```bash
+MODE=live DB_PATH=data/live.sqlite LIVE_DRY_RUN=true \
+MAX_ORDER_KRW=100000 MAX_DAILY_LOSS_KRW=50000 MAX_DAILY_ORDER_COUNT=10 \
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+uv run python bot.py run
+```
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.
 
