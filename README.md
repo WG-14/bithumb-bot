@@ -59,13 +59,33 @@ uv run python bot.py run --short 7 --long 30
    - `LIVE_REAL_ORDER_ARMED=true`
 3. 둘 중 하나라도 누락되면 기동 시 fail-fast로 즉시 종료됩니다.
 
-예시(최소 live + notifier):
+예시(보수적 소액 계정 live dry-run + notifier):
 
 ```bash
-MODE=live DB_PATH=data/live.sqlite LIVE_DRY_RUN=true \
-MAX_ORDER_KRW=100000 MAX_DAILY_LOSS_KRW=50000 MAX_DAILY_ORDER_COUNT=10 \
+MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
+MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 uv run python bot.py run
+```
+
+실주문 전환(운영자 명시 승인 후에만):
+
+```bash
+MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
+MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
+uv run python bot.py run
+```
+
+paper/live DB 분리 예시:
+
+```bash
+# paper 검증
+MODE=paper DB_PATH=data/paper.small.safe.sqlite uv run python bot.py run
+
+# live 검증/운영
+MODE=live DB_PATH=data/live.small.safe.sqlite uv run python bot.py run
 ```
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.

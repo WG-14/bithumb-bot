@@ -276,11 +276,25 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 3. `LIVE_REAL_ORDER_ARMED=true`가 없으면 live preflight에서 즉시 종료(fail-fast)
 
 
-Live 최소 예시(알림 포함):
+Live 보수 preset 예시(소액 계정 + 알림 포함):
 
 ```bash
-MODE=live DB_PATH=data/live.sqlite LIVE_DRY_RUN=true \
-MAX_ORDER_KRW=100000 MAX_DAILY_LOSS_KRW=50000 MAX_DAILY_ORDER_COUNT=10 \
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+# 1) paper에서 먼저 검증 (DB 분리)
+MODE=paper DB_PATH=data/paper.small.safe.sqlite \
+NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
+uv run python bot.py run
+
+# 2) live dry-run (실주문 API 미호출)
+MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
+NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
+uv run python bot.py run
+
+# 3) 실주문 arming (운영자 명시 승인 후 직전에만)
+MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
+NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
+MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
+BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
 uv run python bot.py run
 ```
