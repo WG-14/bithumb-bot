@@ -134,6 +134,32 @@ def test_place_order_market_buy_routes_to_market_endpoint(monkeypatch):
     }
 
 
+def test_place_order_market_sell_routes_to_market_endpoint(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    call: dict[str, object] = {}
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"status": "0000", "data": {"order_id": "mkt-2"}}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.4321, price=None)
+
+    assert order.exchange_order_id == "mkt-2"
+    assert call["endpoint"] == "/trade/market_sell"
+    assert call["retry_safe"] is False
+    assert call["payload"] == {
+        "order_currency": "BTC",
+        "payment_currency": "KRW",
+        "units": "0.4321000000000000",
+    }
+
+
 def test_place_order_limit_sell_still_uses_trade_place(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -159,6 +185,34 @@ def test_place_order_limit_sell_still_uses_trade_place(monkeypatch):
         "units": "0.5000000000000000",
         "type": "sell",
         "price": "150000000",
+    }
+
+
+def test_place_order_limit_buy_still_uses_trade_place(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    call: dict[str, object] = {}
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"status": "0000", "data": {"order_id": "lmt-2"}}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-3", side="BUY", qty=0.4, price=149500000)
+
+    assert order.exchange_order_id == "lmt-2"
+    assert call["endpoint"] == "/trade/place"
+    assert call["retry_safe"] is False
+    assert call["payload"] == {
+        "order_currency": "BTC",
+        "payment_currency": "KRW",
+        "units": "0.4000000000000000",
+        "type": "buy",
+        "price": "149500000",
     }
 
 
@@ -305,6 +359,64 @@ def test_get_order_uses_open_orders_as_primary_status_source(monkeypatch):
     assert order.qty_filled == pytest.approx(0.015)
 
 
+def test_get_order_maps_open_order_without_fills_to_new(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        if endpoint == "/info/orders":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "open-new-1",
+                        "type": "buy",
+                        "price": "150000000",
+                        "units": "0.0200",
+                        "units_remaining": "0.0200",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.get_order(client_order_id="cid-new-1", exchange_order_id="open-new-1")
+
+    assert order.status == "NEW"
+    assert order.qty_req == pytest.approx(0.02)
+    assert order.qty_filled == pytest.approx(0.0)
+
+
+def test_get_order_maps_open_order_with_partial_fills_to_partial(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        if endpoint == "/info/orders":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "open-partial-1",
+                        "type": "sell",
+                        "price": "151000000",
+                        "units": "0.1000",
+                        "units_remaining": "0.0300",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.get_order(client_order_id="cid-partial-1", exchange_order_id="open-partial-1")
+
+    assert order.status == "PARTIAL"
+    assert order.qty_req == pytest.approx(0.1)
+    assert order.qty_filled == pytest.approx(0.07)
+
+
 def test_get_order_maps_non_open_partial_to_canceled(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -397,3 +509,30 @@ def test_get_order_rejects_ambiguous_closed_lookup(monkeypatch):
 
     with pytest.raises(BrokerRejectError, match="ambiguous"):
         broker.get_order(client_order_id="cid-4", exchange_order_id="ambig-1")
+
+
+def test_get_order_rejects_incomplete_closed_lookup_missing_quantity_fields(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        if endpoint == "/info/orders":
+            return {"status": "0000", "data": []}
+        if endpoint == "/info/order_detail":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "ambig-2",
+                        "type": "sell",
+                        "price": "149000000",
+                        # Broker occasionally omits quantity fields for stale/invalid lookups.
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    with pytest.raises(BrokerRejectError, match="ambiguous"):
+        broker.get_order(client_order_id="cid-5", exchange_order_id="ambig-2")
