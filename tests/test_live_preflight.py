@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.config import LiveModeValidationError, settings, validate_live_mode_preflight
+from bithumb_bot.broker import order_rules
 
 
 @pytest.fixture(autouse=True)
@@ -18,10 +19,17 @@ def _restore_settings():
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+        "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
+        "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
+        "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
+        "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
     }
+    old_cache = dict(order_rules._cached_rules)
     yield
     for key, value in old_values.items():
         object.__setattr__(settings, key, value)
+    order_rules._cached_rules.clear()
+    order_rules._cached_rules.update(old_cache)
 
 
 def test_live_preflight_skips_paper_mode() -> None:
@@ -103,6 +111,10 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
     validate_live_mode_preflight(settings)
 
@@ -137,6 +149,10 @@ def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.M
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
     validate_live_mode_preflight(settings)
 
@@ -180,6 +196,10 @@ def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
     validate_live_mode_preflight(settings)
 
@@ -216,6 +236,10 @@ def test_live_preflight_accepts_notifier_configuration(monkeypatch: pytest.Monke
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
     validate_live_mode_preflight(settings)
 
@@ -231,5 +255,63 @@ def test_live_preflight_paper_mode_notifier_unchanged(monkeypatch: pytest.Monkey
     object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
+
+    validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_fails_when_order_rule_sync_fails_and_manual_rules_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
+    order_rules._cached_rules.clear()
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "min_qty must be > 0" in msg
+    assert "qty_step must be > 0" in msg
+    assert "min_notional_krw must be > 0" in msg
+    assert "max_qty_decimals must be > 0" in msg
+
+
+def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    order_rules._cached_rules.clear()
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.OrderRules(
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5000.0,
+            max_qty_decimals=4,
+        ),
+    )
 
     validate_live_mode_preflight(settings)

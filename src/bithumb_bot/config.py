@@ -123,6 +123,14 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
         )
 
+    from .broker.order_rules import get_effective_order_rules, required_rule_issues
+
+    try:
+        resolved_rules = get_effective_order_rules(cfg.PAIR).rules
+        issues.extend(required_rule_issues(resolved_rules))
+    except Exception as exc:
+        issues.append(f"failed to resolve order rules: {type(exc).__name__}: {exc}")
+
     if issues:
         raise LiveModeValidationError(
             "live mode preflight validation failed: " + "; ".join(issues)

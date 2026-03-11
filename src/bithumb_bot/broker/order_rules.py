@@ -29,6 +29,19 @@ class RuleResolution:
     source: dict[str, str]
 
 
+def required_rule_issues(rules: OrderRules) -> list[str]:
+    issues: list[str] = []
+    if not math.isfinite(float(rules.min_qty)) or float(rules.min_qty) <= 0:
+        issues.append(f"min_qty must be > 0 (got {rules.min_qty})")
+    if not math.isfinite(float(rules.qty_step)) or float(rules.qty_step) <= 0:
+        issues.append(f"qty_step must be > 0 (got {rules.qty_step})")
+    if not math.isfinite(float(rules.min_notional_krw)) or float(rules.min_notional_krw) <= 0:
+        issues.append(f"min_notional_krw must be > 0 (got {rules.min_notional_krw})")
+    if int(rules.max_qty_decimals) <= 0:
+        issues.append(f"max_qty_decimals must be > 0 (got {rules.max_qty_decimals})")
+    return issues
+
+
 def _manual_rules() -> OrderRules:
     return OrderRules(
         min_qty=float(settings.LIVE_MIN_ORDER_QTY),
