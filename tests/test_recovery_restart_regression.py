@@ -14,16 +14,21 @@ import bithumb_bot.recovery as recovery_module
 
 
 @pytest.fixture
-def isolated_db(tmp_path):
+def isolated_db(tmp_path, monkeypatch):
     old_db_path = settings.DB_PATH
     old_mode = settings.MODE
     db_path = tmp_path / "restart_regression.sqlite"
+
+    monkeypatch.setenv("DB_PATH", str(db_path))
     object.__setattr__(settings, "DB_PATH", str(db_path))
+
     ensure_db().close()
     runtime_state.enable_trading()
     runtime_state.set_startup_gate_reason(None)
     runtime_state.record_reconcile_result(success=True, reason_code=None, metadata=None, now_epoch_sec=0.0)
+
     yield db_path
+
     object.__setattr__(settings, "DB_PATH", old_db_path)
     object.__setattr__(settings, "MODE", old_mode)
 
@@ -1051,6 +1056,13 @@ def _patch_single_tick_run_loop(monkeypatch) -> None:
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)

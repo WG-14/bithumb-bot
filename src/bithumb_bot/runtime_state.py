@@ -49,6 +49,9 @@ class RuntimeState:
     last_cancel_open_orders_trigger: str | None = None
     last_cancel_open_orders_status: str | None = None
     last_cancel_open_orders_summary: str | None = None
+    last_flatten_position_epoch_sec: float | None = None
+    last_flatten_position_status: str | None = None
+    last_flatten_position_summary: str | None = None
     startup_gate_reason: str | None = None
     resume_gate_blocked: bool = False
     resume_gate_reason: str | None = None
@@ -90,6 +93,9 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_cancel_open_orders_trigger = persisted.last_cancel_open_orders_trigger
     _STATE.last_cancel_open_orders_status = persisted.last_cancel_open_orders_status
     _STATE.last_cancel_open_orders_summary = persisted.last_cancel_open_orders_summary
+    _STATE.last_flatten_position_epoch_sec = persisted.last_flatten_position_epoch_sec
+    _STATE.last_flatten_position_status = persisted.last_flatten_position_status
+    _STATE.last_flatten_position_summary = persisted.last_flatten_position_summary
     _STATE.startup_gate_reason = persisted.startup_gate_reason
     _STATE.resume_gate_blocked = persisted.resume_gate_blocked
     _STATE.resume_gate_reason = persisted.resume_gate_reason
@@ -134,12 +140,15 @@ def _persist_state(state: RuntimeState) -> None:
                     last_cancel_open_orders_trigger,
                     last_cancel_open_orders_status,
                     last_cancel_open_orders_summary,
+                    last_flatten_position_epoch_sec,
+                    last_flatten_position_status,
+                    last_flatten_position_summary,
                     startup_gate_reason,
                     resume_gate_blocked,
                     resume_gate_reason,
                     updated_ts
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                     trading_enabled=excluded.trading_enabled,
                     halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -168,6 +177,9 @@ def _persist_state(state: RuntimeState) -> None:
                     last_cancel_open_orders_trigger=excluded.last_cancel_open_orders_trigger,
                     last_cancel_open_orders_status=excluded.last_cancel_open_orders_status,
                     last_cancel_open_orders_summary=excluded.last_cancel_open_orders_summary,
+                    last_flatten_position_epoch_sec=excluded.last_flatten_position_epoch_sec,
+                    last_flatten_position_status=excluded.last_flatten_position_status,
+                    last_flatten_position_summary=excluded.last_flatten_position_summary,
                     startup_gate_reason=excluded.startup_gate_reason,
                     resume_gate_blocked=excluded.resume_gate_blocked,
                     resume_gate_reason=excluded.resume_gate_reason,
@@ -201,6 +213,9 @@ def _persist_state(state: RuntimeState) -> None:
                     _clip(state.last_cancel_open_orders_trigger),
                     _clip(state.last_cancel_open_orders_status),
                     _clip(state.last_cancel_open_orders_summary, max_len=1000),
+                    state.last_flatten_position_epoch_sec,
+                    _clip(state.last_flatten_position_status),
+                    _clip(state.last_flatten_position_summary, max_len=1000),
                     _clip(state.startup_gate_reason),
                     1 if state.resume_gate_blocked else 0,
                     _clip(state.resume_gate_reason),
@@ -246,6 +261,9 @@ def _read_persisted_state() -> RuntimeState | None:
                 last_cancel_open_orders_trigger,
                 last_cancel_open_orders_status,
                 last_cancel_open_orders_summary,
+                last_flatten_position_epoch_sec,
+                last_flatten_position_status,
+                last_flatten_position_summary,
                 startup_gate_reason,
                 resume_gate_blocked,
                 resume_gate_reason
@@ -327,6 +345,21 @@ def _read_persisted_state() -> RuntimeState | None:
         last_cancel_open_orders_summary=(
             str(row["last_cancel_open_orders_summary"])
             if row["last_cancel_open_orders_summary"] is not None
+            else None
+        ),
+        last_flatten_position_epoch_sec=(
+            float(row["last_flatten_position_epoch_sec"])
+            if row["last_flatten_position_epoch_sec"] is not None
+            else None
+        ),
+        last_flatten_position_status=(
+            str(row["last_flatten_position_status"])
+            if row["last_flatten_position_status"] is not None
+            else None
+        ),
+        last_flatten_position_summary=(
+            str(row["last_flatten_position_summary"])
+            if row["last_flatten_position_summary"] is not None
             else None
         ),
         startup_gate_reason=(
@@ -435,6 +468,30 @@ def record_cancel_open_orders_result(
         _STATE.last_cancel_open_orders_trigger = _clip(trigger)
         _STATE.last_cancel_open_orders_status = _clip(status)
         _STATE.last_cancel_open_orders_summary = _clip(payload, max_len=1000)
+        _persist_state(_STATE)
+
+
+def record_flatten_position_result(
+    *,
+    status: str,
+    summary: dict[str, int | float | str | bool | None] | None = None,
+    now_epoch_sec: float | None = None,
+) -> None:
+    ts = now_epoch_sec
+    if ts is None:
+        import time
+
+        ts = time.time()
+
+    payload = None
+    if summary is not None:
+        payload = json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        _STATE.last_flatten_position_epoch_sec = float(ts)
+        _STATE.last_flatten_position_status = _clip(status)
+        _STATE.last_flatten_position_summary = _clip(payload, max_len=1000)
         _persist_state(_STATE)
 
 

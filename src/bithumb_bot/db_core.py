@@ -148,6 +148,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_cancel_open_orders_trigger TEXT,
             last_cancel_open_orders_status TEXT,
             last_cancel_open_orders_summary TEXT,
+            last_flatten_position_epoch_sec REAL,
+            last_flatten_position_status TEXT,
+            last_flatten_position_summary TEXT,
             startup_gate_reason TEXT,
             resume_gate_blocked INTEGER NOT NULL DEFAULT 0,
             resume_gate_reason TEXT,
@@ -283,6 +286,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "last_cancel_open_orders_summary",
         "last_cancel_open_orders_summary TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_flatten_position_epoch_sec",
+        "last_flatten_position_epoch_sec REAL",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_flatten_position_status",
+        "last_flatten_position_status TEXT",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_flatten_position_summary",
+        "last_flatten_position_summary TEXT",
     )
     _ensure_column(
         conn,

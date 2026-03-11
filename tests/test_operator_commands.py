@@ -11,6 +11,7 @@ from bithumb_bot.app import (
     cmd_broker_diagnose,
     cmd_health,
     cmd_pause,
+    cmd_flatten_position,
     cmd_reconcile,
     cmd_recover_order,
     cmd_recovery_report,
@@ -738,11 +739,25 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
     original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
     original_live_dry_run = settings.LIVE_DRY_RUN
+    original_max_market_slippage_bps = settings.MAX_MARKET_SLIPPAGE_BPS
+    original_live_price_protection_max_slippage_bps = settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS
+    original_live_min_order_qty = settings.LIVE_MIN_ORDER_QTY
+    original_live_order_qty_step = settings.LIVE_ORDER_QTY_STEP
+    original_min_order_notional_krw = settings.MIN_ORDER_NOTIONAL_KRW
+    original_live_order_max_qty_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
 
     class _DiagBroker:
@@ -791,6 +806,12 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
+        object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", original_live_min_order_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_live_order_qty_step)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", original_min_order_notional_krw)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_live_order_max_qty_decimals)
 
     out = capsys.readouterr().out
     assert "[BROKER-READINESS]" in out
@@ -813,11 +834,25 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
     original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
     original_live_dry_run = settings.LIVE_DRY_RUN
+    original_max_market_slippage_bps = settings.MAX_MARKET_SLIPPAGE_BPS
+    original_live_price_protection_max_slippage_bps = settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS
+    original_live_min_order_qty = settings.LIVE_MIN_ORDER_QTY
+    original_live_order_qty_step = settings.LIVE_ORDER_QTY_STEP
+    original_min_order_notional_krw = settings.MIN_ORDER_NOTIONAL_KRW
+    original_live_order_max_qty_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
 
     class _DiagPartialBroker:
@@ -841,6 +876,12 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
+        object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", original_live_min_order_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_live_order_qty_step)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", original_min_order_notional_krw)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_live_order_max_qty_decimals)
 
     out = capsys.readouterr().out
     assert "overall=WARN" in out
@@ -919,11 +960,25 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
     original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
     original_max_daily_count = settings.MAX_DAILY_ORDER_COUNT
     original_live_dry_run = settings.LIVE_DRY_RUN
+    original_max_market_slippage_bps = settings.MAX_MARKET_SLIPPAGE_BPS
+    original_live_price_protection_max_slippage_bps = settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS
+    original_live_min_order_qty = settings.LIVE_MIN_ORDER_QTY
+    original_live_order_qty_step = settings.LIVE_ORDER_QTY_STEP
+    original_min_order_notional_krw = settings.MIN_ORDER_NOTIONAL_KRW
+    original_live_order_max_qty_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "MAX_ORDER_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 10000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
     place_calls = {"n": 0}
 
@@ -971,6 +1026,12 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
+        object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", original_live_min_order_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_live_order_qty_step)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", original_min_order_notional_krw)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_live_order_max_qty_decimals)
 
     assert place_calls["n"] == 0
 
@@ -2007,3 +2068,105 @@ def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
     assert "PASS    halt state" in out
     assert "PASS    last reconcile" in out
     assert "safe_to_resume=1" in out
+
+
+class _FlattenBrokerSuccess:
+    def __init__(self):
+        self.calls: list[dict[str, str | float | None]] = []
+
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        self.calls.append({"client_order_id": client_order_id, "side": side, "qty": qty, "price": price})
+
+        class _Order:
+            exchange_order_id = "ex-flat-1"
+            status = "NEW"
+
+        return _Order()
+
+
+def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+
+    cmd_flatten_position(dry_run=False)
+    out = capsys.readouterr().out
+
+    assert "no position to flatten" in out
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "no_position"
+    assert state.last_flatten_position_summary is not None
+    assert '"status": "no_position"' in state.last_flatten_position_summary
+
+
+def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.12345678, 1000000.0, 0.0, 0.12345678, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _FlattenBrokerSuccess()
+
+    class _BrokerFactory:
+        def __call__(self):
+            return broker
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+
+    cmd_flatten_position(dry_run=False)
+    out = capsys.readouterr().out
+
+    assert "submitted" in out
+    assert len(broker.calls) == 1
+    assert broker.calls[0]["side"] == "SELL"
+    assert abs(float(broker.calls[0]["qty"]) - 0.12345678) < 1e-12
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "submitted"
+
+
+def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.01, 1000000.0, 0.0, 0.01, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _FailBroker:
+        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+            raise RuntimeError("submit boom")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _FailBroker())
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "failed" in out
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "failed"
+    assert state.last_flatten_position_summary is not None
+    assert "submit boom" in state.last_flatten_position_summary

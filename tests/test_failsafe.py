@@ -223,6 +223,13 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None):
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
 
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
     monkeypatch.setattr(
