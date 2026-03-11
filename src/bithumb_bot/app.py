@@ -373,6 +373,7 @@ def cmd_health() -> None:
         )
 
     open_order_count = 0
+    remote_open_order_count: int | None = None
     position_summary = "flat"
     portfolio_conn = ensure_db()
     try:
@@ -392,6 +393,37 @@ def cmd_health() -> None:
             position_summary = f"long_qty={float(portfolio_row['asset_qty']):.8f}"
     finally:
         portfolio_conn.close()
+
+    reconcile_metadata_raw = health.get("last_reconcile_metadata")
+    if reconcile_metadata_raw:
+        try:
+            reconcile_metadata = json.loads(str(reconcile_metadata_raw))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            reconcile_metadata = {}
+        raw_remote_open_count = reconcile_metadata.get("remote_open_order_found")
+        if raw_remote_open_count is not None:
+            try:
+                remote_open_order_count = max(0, int(raw_remote_open_count))
+            except (TypeError, ValueError):
+                remote_open_order_count = None
+
+    state_label = "running"
+    if bool(health["halt_new_orders_blocked"]):
+        state_label = "halted"
+    elif not bool(health["trading_enabled"]):
+        state_label = "paused"
+
+    resume_allowed, resume_blockers = evaluate_resume_eligibility()
+    unsafe_reasons: list[str] = []
+    if not bool(resume_allowed):
+        for blocker in resume_blockers[:3]:
+            unsafe_reasons.append(str(blocker.code))
+        if not unsafe_reasons:
+            unsafe_reasons.append("RESUME_BLOCKED")
+    if unsafe_reasons:
+        resume_safety = f"unsafe ({', '.join(unsafe_reasons)})"
+    else:
+        resume_safety = "safe"
 
     recommended_commands = "uv run python bot.py recovery-report"
     if health["startup_gate_reason"]:
@@ -420,6 +452,27 @@ def cmd_health() -> None:
         )
 
     print("[HEALTH]")
+    print("  [HALT-RECOVERY-STATUS]")
+    print(
+        "    "
+        f"state={state_label} "
+        f"trading_enabled={1 if bool(health['trading_enabled']) else 0} "
+        f"halt_new_orders_blocked={1 if bool(health['halt_new_orders_blocked']) else 0}"
+    )
+    print(f"    reason={current_halt_reason}")
+    print(
+        "    "
+        f"unresolved_open_order_count={health['unresolved_open_order_count']} "
+        f"open_order_count={open_order_count} "
+        f"recovery_required_count={health['recovery_required_count']}"
+    )
+    if remote_open_order_count is None:
+        print("    broker_open_order_count=unknown")
+    else:
+        print(f"    broker_open_order_count={remote_open_order_count}")
+    print(f"    position={position_summary}")
+    print(f"    resume_safety={resume_safety}")
+
     print("  [RISK-SNAPSHOT]")
     print(
         "    "

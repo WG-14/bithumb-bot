@@ -171,6 +171,36 @@ def test_enter_halt_tracks_position_and_open_order_visibility(tmp_path):
     assert state.halt_operator_action_required is True
 
 
+def test_halt_state_persists_across_restart_boundary(tmp_path):
+    db_path = _set_tmp_db(tmp_path)
+
+    runtime_state.enable_trading()
+    runtime_state.enter_halt(
+        reason_code="PERIODIC_RECONCILE_FAILED",
+        reason="periodic reconcile failed",
+        unresolved=True,
+    )
+
+    env = dict(os.environ)
+    env["DB_PATH"] = str(db_path)
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    probe = (
+        "from bithumb_bot import runtime_state; "
+        "s = runtime_state.snapshot(); "
+        "print(int(s.halt_new_orders_blocked), s.halt_reason_code, int(s.halt_state_unresolved))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "1 PERIODIC_RECONCILE_FAILED 1"
+
+
 
 def test_kill_switch_risk_open_reason_persists_in_health_state(tmp_path):
     _set_tmp_db(tmp_path)

@@ -1097,11 +1097,15 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
             "startup_gate_reason": None,
         },
     )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (False, []))
 
     cmd_health()
     out = capsys.readouterr().out
 
     assert "[RISK-SNAPSHOT]" in out
+    assert "[HALT-RECOVERY-STATUS]" in out
+    assert "state=halted trading_enabled=0 halt_new_orders_blocked=1" in out
+    assert "resume_safety=unsafe" in out
     assert "unresolved_open_order_count=4 recovery_required_count=2 submit_unknown_count=0" in out
     assert "current_halt_reason=code=PERIODIC_RECONCILE_FAILED reason=periodic reconcile failed" in out
     assert "reconcile_latest=epoch_sec=1000.0 status=error reason_code=RECONCILE_TIMEOUT" in out
@@ -1110,6 +1114,61 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "open_order_count=0" in out
     assert "position=flat" in out
     assert "next_commands=uv run python bot.py recover-order --client-order-id <id> | uv run python bot.py recovery-report" in out
+
+
+def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": None,
+            "error_count": 0,
+            "trading_enabled": False,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": "manual operator pause",
+            "halt_new_orders_blocked": False,
+            "halt_reason_code": None,
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (True, []))
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "[HALT-RECOVERY-STATUS]" in out
+    assert "state=paused trading_enabled=0 halt_new_orders_blocked=0" in out
+    assert "reason=code=- reason=manual operator pause" in out
+    assert "resume_safety=safe" in out
+
+
+def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="unsafe_resume_1", created_ts=now_ms - 15_000)
+    runtime_state.refresh_open_order_health(now_epoch_sec=now_ms / 1000)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "state=paused" in out
+    assert "unresolved_open_order_count=1" in out
+    assert "resume_safety=unsafe (STARTUP_SAFETY_GATE_BLOCKED)" in out
 
 
 
