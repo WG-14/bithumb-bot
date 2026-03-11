@@ -159,26 +159,8 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
-        out: list[BrokerOrder] = []
         now = int(time.time() * 1000)
-        for row in data.get("data") or []:
-            qty_req = float(row.get("units") or 0.0)
-            qty_remain = float(row.get("units_remaining") or 0.0)
-            qty_filled = max(0.0, qty_req - qty_remain)
-            out.append(
-                BrokerOrder(
-                    client_order_id="",
-                    exchange_order_id=str(row.get("order_id")),
-                    side=str(row.get("type", "buy")).upper(),
-                    status="PARTIAL" if qty_filled > 0 else "NEW",
-                    price=float(row.get("price")) if row.get("price") else None,
-                    qty_req=qty_req,
-                    qty_filled=qty_filled,
-                    created_ts=now,
-                    updated_ts=now,
-                )
-            )
-        return out
+        return [self._broker_order_from_open_row(row, now_ts=now) for row in data.get("data") or []]
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         if self.dry_run:
@@ -234,9 +216,102 @@ class BithumbBroker:
 
 
     def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
-        # Bithumb private API does not expose a separate closed-order history endpoint
-        # for this bot, so reuse open-order snapshots conservatively.
-        return self.get_open_orders()[: max(0, int(limit))]
+        lim = max(0, int(limit))
+        if lim == 0:
+            return []
+
+        # Start from open orders so active exposure is always represented.
+        open_orders = self.get_open_orders()
+        by_exchange_id: dict[str, BrokerOrder] = {
+            str(order.exchange_order_id): order
+            for order in open_orders
+            if order.exchange_order_id
+        }
+
+        # Bithumb does not expose a dedicated closed-order history endpoint in this adapter.
+        # Best-effort: infer recently executed orders from transaction history.
+        # Safe fallback: if history lookup fails, return open-order snapshot only.
+        try:
+            tx_rows = self._post_private(
+                "/info/user_transactions",
+                {
+                    "order_currency": self._pair()[0],
+                    "payment_currency": self._pair()[1],
+                    "count": str(max(lim, 100)),
+                },
+                retry_safe=True,
+            ).get("data") or []
+        except (BrokerRejectError, BrokerTemporaryError):
+            return open_orders[:lim]
+
+        aggregated: dict[str, dict[str, float | int | str | None]] = {}
+        for row in tx_rows:
+            exchange_order_id = str(row.get("order_id") or "")
+            if not exchange_order_id:
+                continue
+            ts = int(float(row.get("transfer_date") or 0))
+            qty = float(row.get("units_traded") or 0.0)
+            price = float(row.get("price") or 0.0)
+            slot = aggregated.setdefault(
+                exchange_order_id,
+                {
+                    "exchange_order_id": exchange_order_id,
+                    "side": str(row.get("search") or row.get("type") or "").upper() or "UNKNOWN",
+                    "qty_filled": 0.0,
+                    "notional": 0.0,
+                    "created_ts": ts,
+                    "updated_ts": ts,
+                },
+            )
+            slot["qty_filled"] = float(slot["qty_filled"] or 0.0) + qty
+            slot["notional"] = float(slot["notional"] or 0.0) + (qty * price)
+            slot["created_ts"] = min(int(slot["created_ts"] or ts), ts)
+            slot["updated_ts"] = max(int(slot["updated_ts"] or ts), ts)
+
+        out: list[BrokerOrder] = list(open_orders)
+        for exchange_order_id, snapshot in aggregated.items():
+            if exchange_order_id in by_exchange_id:
+                continue
+            qty_filled = float(snapshot["qty_filled"] or 0.0)
+            avg_price = (
+                float(snapshot["notional"] or 0.0) / qty_filled
+                if qty_filled > 0
+                else None
+            )
+            out.append(
+                BrokerOrder(
+                    client_order_id="",
+                    exchange_order_id=exchange_order_id,
+                    side=str(snapshot["side"]),
+                    status="FILLED" if qty_filled > 0 else "UNKNOWN",
+                    price=avg_price,
+                    # Transaction history does not expose original requested quantity.
+                    # Use filled quantity as a conservative lower bound.
+                    qty_req=qty_filled,
+                    qty_filled=qty_filled,
+                    created_ts=int(snapshot["created_ts"] or 0),
+                    updated_ts=int(snapshot["updated_ts"] or 0),
+                )
+            )
+
+        out.sort(key=lambda order: int(order.updated_ts), reverse=True)
+        return out[:lim]
+
+    def _broker_order_from_open_row(self, row: dict, *, now_ts: int) -> BrokerOrder:
+        qty_req = float(row.get("units") or 0.0)
+        qty_remain = float(row.get("units_remaining") or 0.0)
+        qty_filled = max(0.0, qty_req - qty_remain)
+        return BrokerOrder(
+            client_order_id="",
+            exchange_order_id=str(row.get("order_id")),
+            side=str(row.get("type", "buy")).upper(),
+            status="PARTIAL" if qty_filled > 0 else "NEW",
+            price=float(row.get("price")) if row.get("price") else None,
+            qty_req=qty_req,
+            qty_filled=qty_filled,
+            created_ts=now_ts,
+            updated_ts=now_ts,
+        )
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         fills = self.get_fills(client_order_id=None, exchange_order_id=None)

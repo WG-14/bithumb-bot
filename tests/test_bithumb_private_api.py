@@ -106,3 +106,113 @@ def test_balance_parses_available_and_locked(monkeypatch):
     assert bal.cash_locked == 25.0
     assert bal.asset_available == 0.1
     assert bal.asset_locked == 0.02
+
+
+def test_recent_orders_includes_filled_history_not_in_open_orders(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    open_order_payload = {
+        "order_id": "open-1",
+        "type": "buy",
+        "price": "150000000",
+        "units": "0.0200",
+        "units_remaining": "0.0200",
+    }
+    tx_rows = [
+        {
+            "order_id": "filled-1",
+            "search": "sell",
+            "price": "151000000",
+            "units_traded": "0.0100",
+            "transfer_date": "1710000001000",
+        },
+        {
+            "order_id": "filled-1",
+            "search": "sell",
+            "price": "152000000",
+            "units_traded": "0.0050",
+            "transfer_date": "1710000002000",
+        },
+    ]
+
+    monkeypatch.setattr(
+        broker,
+        "get_open_orders",
+        lambda: [broker._broker_order_from_open_row(open_order_payload, now_ts=1710000000000)],
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {"status": "0000", "data": tx_rows},
+    )
+
+    recent = broker.get_recent_orders(limit=10)
+
+    by_id = {str(order.exchange_order_id): order for order in recent}
+    assert by_id["open-1"].status == "NEW"
+    assert by_id["filled-1"].status == "FILLED"
+    assert by_id["filled-1"].qty_filled == pytest.approx(0.015)
+    assert by_id["filled-1"].qty_req == pytest.approx(0.015)
+    assert by_id["filled-1"].side == "SELL"
+
+
+def test_recent_orders_falls_back_to_open_orders_when_history_unavailable(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    open_orders = [
+        broker._broker_order_from_open_row(
+            {
+                "order_id": "open-1",
+                "type": "buy",
+                "price": "150000000",
+                "units": "0.0200",
+                "units_remaining": "0.0100",
+            },
+            now_ts=1710000000000,
+        )
+    ]
+    monkeypatch.setattr(broker, "get_open_orders", lambda: open_orders)
+
+    def _raise_history(*_args, **_kwargs):
+        raise BrokerTemporaryError("history unavailable")
+
+    monkeypatch.setattr(broker, "_post_private", _raise_history)
+
+    recent = broker.get_recent_orders(limit=10)
+
+    assert recent == open_orders
+    assert recent[0].status == "PARTIAL"
+
+
+def test_open_order_lookup_still_uses_open_orders_endpoint(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    calls: list[str] = []
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        calls.append(endpoint)
+        if endpoint == "/info/orders":
+            return {
+                "status": "0000",
+                "data": [
+                    {
+                        "order_id": "open-1",
+                        "type": "buy",
+                        "price": "150000000",
+                        "units": "0.0200",
+                        "units_remaining": "0.0200",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    open_orders = broker.get_open_orders()
+
+    assert calls == ["/info/orders"]
+    assert len(open_orders) == 1
+    assert open_orders[0].exchange_order_id == "open-1"
