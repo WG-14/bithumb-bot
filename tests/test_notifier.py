@@ -5,6 +5,7 @@ import os
 import pytest
 
 from bithumb_bot import notifier
+from bithumb_bot.notifier import AlertSeverity
 from bithumb_bot.observability import safety_event
 
 
@@ -119,7 +120,7 @@ def test_format_event_includes_operator_compact_summary_fields():
     assert "operator_compact_summary=halt_reason=STARTUP_SAFETY_GATE" in message
     assert "operator_recommended_commands=uv run python bot.py reconcile | uv run python bot.py recovery-report" in message
 
-def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytest.MonkeyPatch):
+def test_notify_suppresses_identical_critical_duplicates_within_window(monkeypatch: pytest.MonkeyPatch):
     calls = []
 
     def fake_post(url: str, json: dict, timeout: float):
@@ -131,9 +132,27 @@ def test_notify_suppresses_identical_duplicates_within_window(monkeypatch: pytes
     monkeypatch.setattr(notifier, "_post_json", lambda url, payload: fake_post(url, payload, 5.0))
     monkeypatch.setattr(notifier.time, "monotonic", lambda: next(ticks))
 
-    notifier.notify("dupe")
-    notifier.notify("dupe")
-    notifier.notify("dupe")
+    notifier.notify("dupe", severity=AlertSeverity.CRITICAL)
+    notifier.notify("dupe", severity=AlertSeverity.CRITICAL)
+    notifier.notify("dupe", severity=AlertSeverity.CRITICAL)
+
+    assert len(calls) == 2
+
+
+def test_notify_does_not_suppress_identical_info_duplicates(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    def fake_post(url: str, json: dict, timeout: float):
+        calls.append((url, json, timeout))
+
+    ticks = iter([10.0, 11.0])
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/webhook")
+    monkeypatch.setenv("NOTIFIER_DEDUPE_WINDOW_SEC", "20")
+    monkeypatch.setattr(notifier, "_post_json", lambda url, payload: fake_post(url, payload, 5.0))
+    monkeypatch.setattr(notifier.time, "monotonic", lambda: next(ticks))
+
+    notifier.notify("dupe", severity=AlertSeverity.INFO)
+    notifier.notify("dupe", severity=AlertSeverity.INFO)
 
     assert len(calls) == 2
 
@@ -157,3 +176,19 @@ def test_safety_event_keeps_common_operator_fields_in_payload():
     assert "reason_code=SUBMIT_TIMEOUT" in message
     assert "state_from=PENDING_SUBMIT" in message
     assert "state_to=SUBMIT_UNKNOWN" in message
+
+
+def test_safety_event_infers_critical_severity_for_major_safety_states():
+    halt_msg = safety_event("trading_halted", reason_code="KILL_SWITCH", state_to="HALTED")
+    submit_unknown_msg = safety_event("order_submit_unknown", state_to="SUBMIT_UNKNOWN")
+    recovery_msg = safety_event("recovery_required_transition", state_to="RECOVERY_REQUIRED")
+
+    assert "severity=CRITICAL" in halt_msg
+    assert "severity=CRITICAL" in submit_unknown_msg
+    assert "severity=CRITICAL" in recovery_msg
+
+
+def test_safety_event_defaults_to_info_severity_for_noncritical_events():
+    msg = safety_event("order_submit_started", state_to="PENDING_SUBMIT", reason_code="-")
+
+    assert "severity=INFO" in msg

@@ -282,8 +282,12 @@ def test_critical_safety_event_payloads_include_common_fields():
         assert "submit_attempt_id=" in msg
         assert "exchange_order_id=" in msg
         assert "reason_code=" in msg
+        assert "severity=" in msg
 
     assert "state_to=PENDING_SUBMIT" in submit_msg
+    assert "severity=INFO" in submit_msg
     assert "state_to=HALTED" in halt_msg
+    assert "severity=CRITICAL" in halt_msg
     assert "state_from=SUBMIT_UNKNOWN" in recovery_msg
     assert "state_to=RECOVERY_REQUIRED" in recovery_msg
+    assert "severity=CRITICAL" in recovery_msg

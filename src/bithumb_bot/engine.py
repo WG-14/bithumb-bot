@@ -360,6 +360,7 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
         format_event(
             "trading_halted",
             status="HALTED",
+            severity="CRITICAL",
             alert_kind="halt",
             symbol=settings.PAIR,
             reason=reason.detail,

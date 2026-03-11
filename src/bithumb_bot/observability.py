@@ -4,7 +4,32 @@ import time
 from typing import Any
 
 from .config import settings
-from .notifier import format_event
+from .notifier import AlertSeverity, format_event
+
+
+
+
+_CRITICAL_EVENT_NAMES = {
+    "trading_halted",
+    "recovery_required_transition",
+    "order_submit_unknown",
+}
+
+
+def _infer_severity(*, event: str, reason_code: str | None, state_to: str | None, alert_kind: str | None) -> AlertSeverity:
+    reason = str(reason_code or "").strip().upper()
+    next_state = str(state_to or "").strip().upper()
+    kind = str(alert_kind or "").strip().lower()
+
+    if event in _CRITICAL_EVENT_NAMES:
+        return AlertSeverity.CRITICAL
+    if next_state in {"HALTED", "RECOVERY_REQUIRED", "SUBMIT_UNKNOWN"}:
+        return AlertSeverity.CRITICAL
+    if reason in {"KILL_SWITCH", "DAILY_LOSS_LIMIT", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}:
+        return AlertSeverity.CRITICAL
+    if kind in {"halt", "kill_switch", "risk_breach", "recovery_required"}:
+        return AlertSeverity.CRITICAL
+    return AlertSeverity.INFO
 
 
 def safety_event(
@@ -17,8 +42,21 @@ def safety_event(
     state_from: str | None = None,
     state_to: str | None = None,
     reason_code: str | None = None,
+    severity: str | AlertSeverity | None = None,
     **fields: Any,
 ) -> str:
+    alert_kind = fields.get("alert_kind")
+    effective_severity = (
+        severity
+        if severity is not None
+        else _infer_severity(
+            event=event,
+            reason_code=reason_code,
+            state_to=state_to,
+            alert_kind=(str(alert_kind) if alert_kind is not None else None),
+        )
+    )
+
     payload: dict[str, Any] = {
         "timestamp": int(time.time() * 1000),
         "symbol": symbol if symbol is not None else settings.PAIR,
@@ -28,6 +66,7 @@ def safety_event(
         "state_from": state_from,
         "state_to": state_to,
         "reason_code": reason_code,
+        "severity": str(effective_severity),
     }
     payload.update(fields)
     return format_event(event, **payload)

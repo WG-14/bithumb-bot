@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import os
+import re
 import time
+from enum import StrEnum
 from typing import Any
 
 
 _RECENT_MESSAGES: dict[str, float] = {}
+
+
+class AlertSeverity(StrEnum):
+    INFO = "INFO"
+    WARN = "WARN"
+    CRITICAL = "CRITICAL"
+
+
+_SEVERITY_RE = re.compile(r"(?:^|\s)severity=([A-Za-z_]+)(?:\s|$)")
+
+
+def _normalize_severity(value: str | AlertSeverity | None) -> AlertSeverity:
+    if value is None:
+        return AlertSeverity.INFO
+    text = str(value).strip().upper()
+    if text == AlertSeverity.WARN:
+        return AlertSeverity.WARN
+    if text == AlertSeverity.CRITICAL:
+        return AlertSeverity.CRITICAL
+    return AlertSeverity.INFO
 
 
 def _is_enabled() -> bool:
@@ -46,6 +68,13 @@ def _should_suppress_duplicate(msg: str, *, now: float) -> bool:
         return False
     return (now - previous) < window
 
+
+def _severity_from_message(msg: str) -> AlertSeverity:
+    match = _SEVERITY_RE.search(msg)
+    if not match:
+        return AlertSeverity.INFO
+    return _normalize_severity(match.group(1))
+
 def format_event(event: str, **fields: Any) -> str:
     parts = [f"event={event}"]
     for key, value in fields.items():
@@ -57,11 +86,15 @@ def format_event(event: str, **fields: Any) -> str:
         parts.append(f"{key}={text}")
     return " ".join(parts)
 
-def notify(msg: str) -> None:
+def notify(msg: str, *, severity: str | AlertSeverity | None = None) -> None:
     if not _is_enabled():
         return
 
-    if _should_suppress_duplicate(msg, now=time.monotonic()):
+    effective_severity = _normalize_severity(severity)
+    if severity is None:
+        effective_severity = _severity_from_message(msg)
+
+    if effective_severity == AlertSeverity.CRITICAL and _should_suppress_duplicate(msg, now=time.monotonic()):
         return
 
     delivered = False
