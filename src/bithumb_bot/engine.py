@@ -25,6 +25,8 @@ from .flatten import flatten_btc_position
 
 FAILSAFE_RETRY_DELAY_SEC = 180
 STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
+CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
+CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 
 
 @dataclass(frozen=True)
@@ -540,6 +542,71 @@ def _operator_compact_summary(
     )
 
 
+def _revalidate_cleanup_state_after_failure(
+    broker: BithumbBroker,
+    *,
+    trigger: str,
+    max_attempts: int = CLEANUP_REVALIDATION_MAX_ATTEMPTS,
+) -> tuple[bool, str]:
+    """Performs bounded broker-side revalidation after uncertain cleanup results."""
+    from .recovery import reconcile_with_broker
+
+    attempts = max(1, int(max_attempts))
+    last_open_orders_present: bool | None = None
+    last_position_present: bool | None = None
+    last_errors: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        try:
+            reconcile_with_broker(broker)
+        except Exception as exc:
+            last_errors.append(f"attempt={attempt} reconcile={type(exc).__name__}: {exc}")
+
+        open_orders_present: bool | None = None
+        position_present: bool | None = None
+
+        try:
+            open_orders_present = len(broker.get_open_orders()) > 0
+        except Exception as exc:
+            last_errors.append(f"attempt={attempt} open_orders={type(exc).__name__}: {exc}")
+
+        try:
+            balance = broker.get_balance()
+            position_present = (
+                float(balance.asset_available) + float(balance.asset_locked)
+            ) > CLEANUP_REVALIDATION_POSITION_EPS
+        except Exception as exc:
+            last_errors.append(f"attempt={attempt} balance={type(exc).__name__}: {exc}")
+
+        if open_orders_present is not None:
+            last_open_orders_present = open_orders_present
+        if position_present is not None:
+            last_position_present = position_present
+
+        if open_orders_present is False and position_present is False:
+            return True, (
+                f"cleanup_revalidation(trigger={trigger}) attempts={attempt}/{attempts} "
+                "broker_confirms_no_open_orders_and_no_position"
+            )
+
+    status_parts = [
+        f"cleanup_revalidation(trigger={trigger}) attempts={attempts}/{attempts}",
+        (
+            f"open_orders_present={1 if last_open_orders_present else 0}"
+            if last_open_orders_present is not None
+            else "open_orders_present=unknown"
+        ),
+        (
+            f"position_present={1 if last_position_present else 0}"
+            if last_position_present is not None
+            else "position_present=unknown"
+        ),
+    ]
+    if last_errors:
+        status_parts.append("errors=" + " | ".join(last_errors))
+    return False, "; ".join(status_parts)
+
+
 def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> bool:
     from .recovery import cancel_open_orders_with_broker
 
@@ -629,7 +696,18 @@ def _attempt_risk_breach_flatten(
     flatten_failed = flatten_status == "failed"
     if flatten_failed:
         detail_parts.append(f"flatten_error={str(flatten_outcome.get('error') or '-')}")
-    return _halt_reason(reason_code, "; ".join(detail_parts)), canceled_ok, flatten_failed
+
+    cleanup_uncertain = (not canceled_ok) or flatten_failed
+    unresolved = cleanup_uncertain
+    if cleanup_uncertain:
+        revalidated_safe, revalidation_detail = _revalidate_cleanup_state_after_failure(
+            broker,
+            trigger=flatten_trigger,
+        )
+        detail_parts.append(revalidation_detail)
+        unresolved = not revalidated_safe
+
+    return _halt_reason(reason_code, "; ".join(detail_parts)), canceled_ok, unresolved
 
 
 def run_loop(short_n: int, long_n: int) -> None:
@@ -830,11 +908,23 @@ def run_loop(short_n: int, long_n: int) -> None:
                             f"(open_orders={1 if open_orders_present else 0},"
                             f"position={1 if position_present else 0})"
                         )
-                    if (not canceled_ok) or flatten_failed:
-                        _halt_trading(
-                            _halt_reason("KILL_SWITCH", reason_detail),
-                            unresolved=True,
+                    cleanup_uncertain = (not canceled_ok) or flatten_failed
+                    if cleanup_uncertain:
+                        revalidated_safe, revalidation_detail = _revalidate_cleanup_state_after_failure(
+                            broker,
+                            trigger="kill-switch",
                         )
+                        reason_detail += f"; {revalidation_detail}"
+                        if revalidated_safe:
+                            _halt_trading(
+                                _halt_reason("KILL_SWITCH", reason_detail),
+                                unresolved=False,
+                            )
+                        else:
+                            _halt_trading(
+                                _halt_reason("KILL_SWITCH", reason_detail),
+                                unresolved=True,
+                            )
                     else:
                         _halt_trading(
                             _halt_reason("KILL_SWITCH", reason_detail),
@@ -857,7 +947,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                             price=float(last_close),
                         )
                         if blocked:
-                            halt_reason, canceled_ok, flatten_failed = _attempt_risk_breach_flatten(
+                            halt_reason, canceled_ok, cleanup_unresolved = _attempt_risk_breach_flatten(
                                 broker,
                                 reason_code="DAILY_LOSS_LIMIT",
                                 reason_detail=reason,
@@ -866,7 +956,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             _halt_trading(
                                 halt_reason,
-                                unresolved=(not canceled_ok) or flatten_failed,
+                                unresolved=cleanup_unresolved,
                             )
                             continue
 
@@ -876,7 +966,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                             price=float(last_close),
                         )
                         if blocked:
-                            halt_reason, canceled_ok, flatten_failed = _attempt_risk_breach_flatten(
+                            halt_reason, canceled_ok, cleanup_unresolved = _attempt_risk_breach_flatten(
                                 broker,
                                 reason_code=POSITION_LOSS_LIMIT,
                                 reason_detail=reason,
@@ -885,7 +975,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             _halt_trading(
                                 halt_reason,
-                                unresolved=(not canceled_ok) or flatten_failed,
+                                unresolved=cleanup_unresolved,
                             )
                             continue
                 finally:
@@ -960,20 +1050,27 @@ def run_loop(short_n: int, long_n: int) -> None:
                             canceled_ok = _attempt_open_order_cancellation(
                                 broker, trigger="stale-open-order-halt"
                             )
+                            halt_detail = (
+                                f"{reason}; marked={marked} recovery_required; "
+                                + (
+                                    "emergency cancellation attempted"
+                                    if canceled_ok
+                                    else "emergency cancellation failed"
+                                )
+                            )
                             if not canceled_ok:
+                                revalidated_safe, revalidation_detail = _revalidate_cleanup_state_after_failure(
+                                    broker,
+                                    trigger="stale-open-order-halt",
+                                )
+                                halt_detail += f"; {revalidation_detail}"
                                 _halt_trading(
-                                    _halt_reason(
-                                        "STALE_OPEN_ORDER",
-                                        f"{reason}; marked={marked} recovery_required; emergency cancellation failed",
-                                    ),
-                                    unresolved=True,
+                                    _halt_reason("STALE_OPEN_ORDER", halt_detail),
+                                    unresolved=not revalidated_safe,
                                 )
                             else:
                                 _halt_trading(
-                                    _halt_reason(
-                                        "STALE_OPEN_ORDER",
-                                        f"{reason}; marked={marked} recovery_required; emergency cancellation attempted",
-                                    ),
+                                    _halt_reason("STALE_OPEN_ORDER", halt_detail),
                                     unresolved=True,
                                 )
                             continue

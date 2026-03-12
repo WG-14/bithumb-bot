@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.broker.base import BrokerRejectError
+from bithumb_bot.broker.base import BrokerBalance, BrokerRejectError
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
@@ -716,6 +716,103 @@ def test_attempt_open_order_cancellation_failure_emits_reason_code(monkeypatch):
         "reason_code=CANCEL_FAILURE" in n and "cancel_detail_code=CANCEL_OPEN_ORDERS_ERROR" in n
         for n in notifications
     )
+
+
+class _CleanupRevalidateBroker:
+    def __init__(self, *, open_orders_seq, position_seq):
+        self._open_orders_seq = list(open_orders_seq)
+        self._position_seq = list(position_seq)
+        self.open_order_calls = 0
+        self.balance_calls = 0
+
+    def get_open_orders(self):
+        self.open_order_calls += 1
+        idx = min(self.open_order_calls - 1, len(self._open_orders_seq) - 1)
+        open_present = bool(self._open_orders_seq[idx])
+        return [object()] if open_present else []
+
+    def get_balance(self):
+        self.balance_calls += 1
+        idx = min(self.balance_calls - 1, len(self._position_seq) - 1)
+        position_present = bool(self._position_seq[idx])
+        return BrokerBalance(
+            cash_available=100_000.0,
+            cash_locked=0.0,
+            asset_available=0.01 if position_present else 0.0,
+            asset_locked=0.0,
+        )
+
+
+def test_cleanup_revalidation_recovers_safe_state_after_initial_uncertainty(monkeypatch):
+    from bithumb_bot.engine import _revalidate_cleanup_state_after_failure
+
+    broker = _CleanupRevalidateBroker(open_orders_seq=[True, False], position_seq=[True, False])
+
+    reconcile_calls = {"n": 0}
+
+    def _reconcile(_broker):
+        reconcile_calls["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", _reconcile, raising=False)
+
+    safe, detail = _revalidate_cleanup_state_after_failure(
+        broker,
+        trigger="unit-test",
+        max_attempts=2,
+    )
+
+    assert safe is True
+    assert "attempts=2/2" in detail
+    assert reconcile_calls["n"] == 2
+
+
+def test_cleanup_revalidation_ambiguous_state_remains_halted(monkeypatch):
+    from bithumb_bot.engine import _revalidate_cleanup_state_after_failure
+
+    class _AmbiguousBroker:
+        def get_open_orders(self):
+            raise RuntimeError("open orders unavailable")
+
+        def get_balance(self):
+            raise RuntimeError("balance unavailable")
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    safe, detail = _revalidate_cleanup_state_after_failure(
+        _AmbiguousBroker(),
+        trigger="unit-test",
+        max_attempts=2,
+    )
+
+    assert safe is False
+    assert "open_orders_present=unknown" in detail
+    assert "position_present=unknown" in detail
+    assert "errors=" in detail
+
+
+def test_cleanup_revalidation_is_bounded_by_max_attempts(monkeypatch):
+    from bithumb_bot.engine import _revalidate_cleanup_state_after_failure
+
+    broker = _CleanupRevalidateBroker(open_orders_seq=[True], position_seq=[True])
+
+    reconcile_calls = {"n": 0}
+
+    def _reconcile(_broker):
+        reconcile_calls["n"] += 1
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", _reconcile, raising=False)
+
+    safe, detail = _revalidate_cleanup_state_after_failure(
+        broker,
+        trigger="unit-test",
+        max_attempts=2,
+    )
+
+    assert safe is False
+    assert "attempts=2/2" in detail
+    assert reconcile_calls["n"] == 2
+    assert broker.open_order_calls == 2
+    assert broker.balance_calls == 2
 
 
 class _DummyClient:
