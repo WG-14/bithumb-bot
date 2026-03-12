@@ -34,6 +34,7 @@ def test_fill_slippage_bps_calculated_from_submit_reference_price(tmp_path) -> N
             submission_reason_code="confirmed_success",
             exception_class=None,
             timeout_flag=False,
+            submit_evidence=None,
             exchange_order_id_obtained=True,
             order_status="NEW",
         )
@@ -122,6 +123,7 @@ def test_report_prints_execution_quality_aggregate(tmp_path, monkeypatch, capsys
             submission_reason_code="confirmed_success",
             exception_class=None,
             timeout_flag=False,
+            submit_evidence=None,
             exchange_order_id_obtained=True,
             order_status="NEW",
         )

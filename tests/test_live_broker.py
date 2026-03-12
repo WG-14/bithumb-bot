@@ -776,7 +776,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     ).fetchone()
     submit_attempt = conn.execute(
         """
-        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, submit_evidence, exchange_order_id_obtained, order_status
         FROM order_events
         WHERE client_order_id=? AND event_type='submit_attempt_recorded'
         ORDER BY id DESC
@@ -786,7 +786,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     ).fetchone()
     preflight = conn.execute(
         """
-        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, order_status
+        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, submit_evidence, order_status
         FROM order_events
         WHERE client_order_id=? AND event_type='submit_attempt_preflight'
         ORDER BY id DESC
@@ -809,6 +809,18 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_attempt["exception_class"] is None
     assert submit_attempt["timeout_flag"] == 0
     assert submit_attempt["exchange_order_id_obtained"] == 1
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["symbol"] == settings.PAIR
+    assert submit_evidence["side"] == "BUY"
+    assert float(submit_evidence["intended_qty"]) > 0
+    assert submit_evidence["submit_path"] == "live_standard_market"
+    assert submit_evidence["submit_mode"] == settings.MODE
+    assert submit_evidence["request_ts"] is not None
+    assert submit_evidence["response_ts"] is not None
+    assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
+    preflight_evidence = json.loads(str(preflight["submit_evidence"]))
+    assert preflight_evidence["request_ts"] is None
+    assert preflight_evidence["response_ts"] is None
     assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
     assert preflight["symbol"] == settings.PAIR
     assert preflight["side"] == "BUY"
@@ -845,7 +857,7 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     row = conn.execute("SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1").fetchone()
     submit_attempt = conn.execute(
         """
-        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, submit_evidence, exchange_order_id_obtained, order_status
         FROM order_events
         WHERE client_order_id=? AND event_type='submit_attempt_recorded'
         ORDER BY id DESC
@@ -892,6 +904,11 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert submit_attempt["timeout_flag"] == 1
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert submit_attempt["order_status"] == "SUBMIT_UNKNOWN"
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["submit_path"] == "live_standard_market"
+    assert submit_evidence["error_class"] == "BrokerTemporaryError"
+    assert "timeout" in str(submit_evidence["error_summary"])
+    assert int(submit_evidence["response_ts"]) >= int(submit_evidence["request_ts"])
     assert preflight is not None
     assert preflight["submit_attempt_id"] == submit_attempt["submit_attempt_id"]
     assert preflight["order_status"] == "PENDING_SUBMIT"
@@ -1020,7 +1037,7 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
     ).fetchone()
     submit_attempt = conn.execute(
         """
-        SELECT submit_attempt_id, order_status, broker_response_summary, submission_reason_code, timeout_flag, exchange_order_id_obtained
+        SELECT submit_attempt_id, order_status, broker_response_summary, submission_reason_code, timeout_flag, submit_evidence, exchange_order_id_obtained
         FROM order_events
         WHERE client_order_id=? AND event_type='submit_attempt_recorded'
         ORDER BY id DESC
@@ -1040,8 +1057,47 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
     assert "exchange_order_id=-" in str(submit_attempt["broker_response_summary"])
     assert submit_attempt["submission_reason_code"] == "ambiguous_response"
     assert submit_attempt["timeout_flag"] == 0
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["error_summary"] == "missing exchange_order_id"
+    assert submit_evidence["submit_path"] == "live_standard_market"
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg for msg in notifications)
+
+
+def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_evidence_optional.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    def _raise_orderbook(_symbol: str) -> tuple[float, float]:
+        raise RuntimeError("orderbook offline")
+
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", _raise_orderbook)
+
+    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+    assert trade is not None
+
+    conn = ensure_db(str(tmp_path / "submit_evidence_optional.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert evidence["reference_price"] is None
+    assert evidence["top_of_book"]["error"].startswith("RuntimeError:")
 
 
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):

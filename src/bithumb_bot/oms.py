@@ -145,6 +145,7 @@ def _record_order_event(
     submission_reason_code: str | None = None,
     exception_class: str | None = None,
     timeout_flag: bool | None = None,
+    submit_evidence: str | None = None,
     exchange_order_id_obtained: bool | None = None,
 ) -> None:
     conn.execute(
@@ -170,8 +171,9 @@ def _record_order_event(
             submission_reason_code,
             exception_class,
             timeout_flag,
+            submit_evidence,
             exchange_order_id_obtained
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             client_order_id,
@@ -194,6 +196,7 @@ def _record_order_event(
             submission_reason_code,
             exception_class,
             (1 if timeout_flag else 0) if timeout_flag is not None else None,
+            (submit_evidence[:2000] if submit_evidence else None),
             (1 if exchange_order_id_obtained else 0) if exchange_order_id_obtained is not None else None,
         ),
     )
@@ -217,6 +220,7 @@ def record_submit_attempt(
     submission_reason_code: str,
     exception_class: str | None,
     timeout_flag: bool,
+    submit_evidence: str | None,
     exchange_order_id_obtained: bool,
     order_status: str,
     submit_attempt_id: str,
@@ -240,6 +244,7 @@ def record_submit_attempt(
         submission_reason_code=submission_reason_code,
         exception_class=exception_class,
         timeout_flag=timeout_flag,
+        submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
     )
 

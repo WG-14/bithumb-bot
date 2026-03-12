@@ -420,6 +420,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             submission_reason_code TEXT,
             exception_class TEXT,
             timeout_flag INTEGER,
+            submit_evidence TEXT,
             exchange_order_id_obtained INTEGER,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
@@ -437,6 +438,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "order_events", "submission_reason_code", "submission_reason_code TEXT")
     _ensure_column(conn, "order_events", "exception_class", "exception_class TEXT")
     _ensure_column(conn, "order_events", "timeout_flag", "timeout_flag INTEGER")
+    _ensure_column(conn, "order_events", "submit_evidence", "submit_evidence TEXT")
     _ensure_column(conn, "order_events", "exchange_order_id_obtained", "exchange_order_id_obtained INTEGER")
 
     conn.execute(

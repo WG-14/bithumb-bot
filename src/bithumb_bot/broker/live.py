@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 
@@ -337,6 +338,7 @@ def _record_submit_attempt_result(
     submission_reason_code: str,
     exception_class: str | None,
     timeout_flag: bool,
+    submit_evidence: str | None,
     exchange_order_id_obtained: bool,
 ) -> None:
     record_submit_attempt(
@@ -353,6 +355,7 @@ def _record_submit_attempt_result(
         submission_reason_code=submission_reason_code,
         exception_class=exception_class,
         timeout_flag=timeout_flag,
+        submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
         order_status=order_status,
     )
@@ -369,6 +372,7 @@ def _record_submit_attempt_preflight(
     ts: int,
     payload_hash: str,
     reference_price: float | None,
+    submit_evidence: str | None,
 ) -> None:
     record_submit_attempt(
         conn=conn,
@@ -384,10 +388,15 @@ def _record_submit_attempt_preflight(
         submission_reason_code="submit_dispatched_preflight",
         exception_class=None,
         timeout_flag=False,
+        submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
         order_status="PENDING_SUBMIT",
         event_type="submit_attempt_preflight",
     )
+
+
+def _encode_submit_evidence(*, payload: dict) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _submit_via_standard_path(
@@ -400,6 +409,7 @@ def _submit_via_standard_path(
     qty: float,
     ts: int,
     reference_price: float | None,
+    top_of_book_summary: dict[str, float | str] | None,
 ):
     symbol = settings.PAIR
     payload = {
@@ -412,6 +422,22 @@ def _submit_via_standard_path(
         "submit_ts": int(ts),
     }
     payload_hash = payload_fingerprint(payload)
+    submit_path = "live_standard_market"
+    preflight_evidence = _encode_submit_evidence(
+        payload={
+            "symbol": symbol,
+            "side": side,
+            "intended_qty": float(qty),
+            "reference_price": reference_price,
+            "top_of_book": top_of_book_summary,
+            "request_ts": None,
+            "response_ts": None,
+            "submit_path": submit_path,
+            "submit_mode": settings.MODE,
+            "error_class": None,
+            "error_summary": None,
+        }
+    )
 
     record_order_if_missing(
         conn,
@@ -434,6 +460,7 @@ def _submit_via_standard_path(
         ts=ts,
         payload_hash=payload_hash,
         reference_price=reference_price,
+        submit_evidence=preflight_evidence,
     )
     notify(
         safety_event(
@@ -450,10 +477,28 @@ def _submit_via_standard_path(
     conn.commit()
 
     try:
+        request_ts = int(time.time() * 1000)
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
+        response_ts = int(time.time() * 1000)
     except BrokerTemporaryError as e:
+        response_ts = int(time.time() * 1000)
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
         submission_reason_code, timeout_flag = _classify_temporary_submit_error(e)
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "intended_qty": float(qty),
+                "reference_price": reference_price,
+                "top_of_book": top_of_book_summary,
+                "request_ts": request_ts,
+                "response_ts": response_ts,
+                "submit_path": submit_path,
+                "submit_mode": settings.MODE,
+                "error_class": type(e).__name__,
+                "error_summary": str(e),
+            }
+        )
         _mark_submit_unknown(
             conn=conn,
             client_order_id=client_order_id,
@@ -476,12 +521,29 @@ def _submit_via_standard_path(
             submission_reason_code=submission_reason_code,
             exception_class=type(e).__name__,
             timeout_flag=timeout_flag,
+            submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
         )
         conn.commit()
         return None
     except Exception as e:
+        response_ts = int(time.time() * 1000)
         reason = f"submit failed: {type(e).__name__}: {e}"
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "intended_qty": float(qty),
+                "reference_price": reference_price,
+                "top_of_book": top_of_book_summary,
+                "request_ts": request_ts,
+                "response_ts": response_ts,
+                "submit_path": submit_path,
+                "submit_mode": settings.MODE,
+                "error_class": type(e).__name__,
+                "error_summary": str(e),
+            }
+        )
         _mark_submit_failed(
             conn=conn,
             client_order_id=client_order_id,
@@ -504,6 +566,7 @@ def _submit_via_standard_path(
             submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
             exception_class=type(e).__name__,
             timeout_flag=False,
+            submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
         )
         conn.commit()
@@ -524,6 +587,21 @@ def _submit_via_standard_path(
         )
     if not order.exchange_order_id:
         reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "intended_qty": float(qty),
+                "reference_price": reference_price,
+                "top_of_book": top_of_book_summary,
+                "request_ts": request_ts,
+                "response_ts": response_ts,
+                "submit_path": submit_path,
+                "submit_mode": settings.MODE,
+                "error_class": None,
+                "error_summary": "missing exchange_order_id",
+            }
+        )
         _mark_submit_unknown(
             conn=conn,
             client_order_id=client_order_id,
@@ -546,12 +624,29 @@ def _submit_via_standard_path(
             submission_reason_code=SUBMISSION_REASON_AMBIGUOUS_RESPONSE,
             exception_class=None,
             timeout_flag=False,
+            submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
         )
         conn.commit()
         return None
 
     set_status(client_order_id, order.status, conn=conn)
+
+    submit_evidence = _encode_submit_evidence(
+        payload={
+            "symbol": symbol,
+            "side": side,
+            "intended_qty": float(qty),
+            "reference_price": reference_price,
+            "top_of_book": top_of_book_summary,
+            "request_ts": request_ts,
+            "response_ts": response_ts,
+            "submit_path": submit_path,
+            "submit_mode": settings.MODE,
+            "error_class": None,
+            "error_summary": None,
+        }
+    )
 
     _record_submit_attempt_result(
         conn=conn,
@@ -568,6 +663,7 @@ def _submit_via_standard_path(
         submission_reason_code=SUBMISSION_REASON_CONFIRMED_SUCCESS,
         exception_class=None,
         timeout_flag=False,
+        submit_evidence=submit_evidence,
         exchange_order_id_obtained=True,
     )
     conn.commit()
@@ -636,12 +732,19 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
         client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
 
         reference_price: float | None = None
+        top_of_book_summary: dict[str, float | str] | None = None
         try:
             bid, ask = fetch_orderbook_top(settings.PAIR)
             if math.isfinite(float(bid)) and math.isfinite(float(ask)) and float(bid) > 0 and float(ask) > 0:
                 reference_price = (float(bid) + float(ask)) / 2.0
-        except Exception:
+                top_of_book_summary = {
+                    "bid": float(bid),
+                    "ask": float(ask),
+                    "spread": float(ask) - float(bid),
+                }
+        except Exception as exc:
             reference_price = None
+            top_of_book_summary = {"error": f"{type(exc).__name__}: {exc}"}
 
         blocked, reason = evaluate_order_submission_halt(
             conn,
@@ -705,6 +808,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             qty=normalized_qty,
             ts=ts,
             reference_price=reference_price,
+            top_of_book_summary=top_of_book_summary,
         )
         if order is None:
             return None
