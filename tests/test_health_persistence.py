@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import importlib
 from pathlib import Path
 
 from bithumb_bot import runtime_state
@@ -199,6 +200,123 @@ def test_halt_state_persists_across_restart_boundary(tmp_path):
 
     assert proc.returncode == 0
     assert proc.stdout.strip() == "1 PERIODIC_RECONCILE_FAILED 1"
+
+
+def test_unresolved_open_order_survives_restart_and_blocks_resume(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = 1_730_000_000_000
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, NULL, 'NEW', 'BUY', NULL, 0.01, 0.0, ?, ?, NULL)
+            """,
+            ("restart_open_order_blocker", now_ms, now_ms),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    rs = importlib.reload(runtime_state)
+    from bithumb_bot.engine import evaluate_resume_eligibility
+
+    eligible, blockers = evaluate_resume_eligibility()
+    state = rs.snapshot()
+
+    assert eligible is False
+    assert any(b.code == "STARTUP_SAFETY_GATE_BLOCKED" for b in blockers)
+    assert state.trading_enabled is False
+    assert state.resume_gate_blocked is True
+    assert "unresolved_open_orders=1" in str(state.resume_gate_reason)
+
+
+def test_submit_unknown_survives_restart_into_reconcile_and_startup_gate(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = 1_730_000_000_000
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, NULL, 'SUBMIT_UNKNOWN', 'BUY', 100.0, 1.0, 0.0, ?, ?, NULL)
+            """,
+            ("restart_submit_unknown_blocker", now_ms, now_ms),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rs = importlib.reload(runtime_state)
+    from bithumb_bot.engine import evaluate_startup_safety_gate
+
+    startup_reason_before = evaluate_startup_safety_gate()
+    assert startup_reason_before is not None
+    assert "submit_unknown_orders=1" in startup_reason_before
+
+    class _NoopBroker:
+        def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None):
+            raise RuntimeError("no direct order lookups expected")
+
+        def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
+            return []
+
+        def get_open_orders(self):
+            return []
+
+        def get_recent_orders(self, *, limit: int = 100):
+            return []
+
+        def get_recent_fills(self, *, limit: int = 100):
+            return []
+
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(1000.0, 0.0, 0.0, 0.0)
+
+    reconcile_with_broker(_NoopBroker())
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status FROM orders WHERE client_order_id='restart_submit_unknown_blocker'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    startup_reason_after = evaluate_startup_safety_gate()
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert startup_reason_after is not None
+    assert "recovery_required_orders=1" in startup_reason_after
+
+
+def test_unresolved_halt_persists_across_restart_and_resume_remains_blocked(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.enter_halt(
+        reason_code="INITIAL_RECONCILE_FAILED",
+        reason="initial reconcile failed (RuntimeError): boom",
+        unresolved=True,
+    )
+
+    rs = importlib.reload(runtime_state)
+    from bithumb_bot.engine import evaluate_resume_eligibility
+
+    eligible, blockers = evaluate_resume_eligibility()
+    state = rs.snapshot()
+
+    assert eligible is False
+    assert any(b.code == "HALT_STATE_UNRESOLVED" for b in blockers)
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_state_unresolved is True
+    assert state.resume_gate_blocked is True
+    assert "HALT_STATE_UNRESOLVED" in str(state.resume_gate_reason)
 
 
 
