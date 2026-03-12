@@ -620,24 +620,29 @@ def _halt_on_source_conflict(conflicts: list[str]) -> None:
     )
 
 
-def _try_resolve_submit_unknown_from_recent_activity(
-    conn,
+@dataclass(frozen=True)
+class _SubmitUnknownRecentActivityInterpretation:
+    outcome: str
+    candidate_count: int
+    matched_exchange_order_id: str | None
+    matched_order: BrokerOrder | None
+    matched_fills: tuple[BrokerFill, ...]
+    has_partial_fill_evidence: bool
+
+
+def _interpret_submit_unknown_recent_activity(
     *,
-    row,
+    local_row,
+    submit_attempt_context: dict[str, str | float | bool],
     recent_orders: list[BrokerOrder],
     recent_fills: list[BrokerFill],
-) -> tuple[bool, bool]:
-    client_order_id = str(row["client_order_id"])
-    side = str(row["side"])
-    local_exchange_order_id = str(row["exchange_order_id"] or "")
-    submit_attempt_context = _load_submit_attempt_context(conn, row=row)
-
+) -> _SubmitUnknownRecentActivityInterpretation:
     candidate_orders: dict[str, BrokerOrder] = {}
     for remote in recent_orders:
         remote_client_order_id = str(remote.client_order_id or "")
         remote_exchange_order_id = str(remote.exchange_order_id or "")
         if not _strong_submit_unknown_correlation(
-            local_row=row,
+            local_row=local_row,
             submit_attempt_context=submit_attempt_context,
             remote_client_order_id=remote_client_order_id or None,
             remote_exchange_order_id=remote_exchange_order_id or None,
@@ -653,21 +658,82 @@ def _try_resolve_submit_unknown_from_recent_activity(
             continue
         candidate_orders[remote_exchange_order_id] = remote
 
-    if len(candidate_orders) != 1:
-        outcome = "ambiguous" if len(candidate_orders) > 1 else "insufficient_evidence"
+    candidate_count = len(candidate_orders)
+    if candidate_count != 1:
+        return _SubmitUnknownRecentActivityInterpretation(
+            outcome=("ambiguous" if candidate_count > 1 else "insufficient_evidence"),
+            candidate_count=candidate_count,
+            matched_exchange_order_id=None,
+            matched_order=None,
+            matched_fills=(),
+            has_partial_fill_evidence=False,
+        )
+
+    matched_exchange_order_id = next(iter(candidate_orders.keys()))
+    matched_order = candidate_orders[matched_exchange_order_id]
+    matched_fills: list[BrokerFill] = []
+    for fill in recent_fills:
+        remote_client_order_id = str(fill.client_order_id or "")
+        remote_exchange_order_id = str(fill.exchange_order_id or "")
+        if remote_exchange_order_id and remote_exchange_order_id != matched_exchange_order_id:
+            continue
+        if not _strong_submit_unknown_correlation(
+            local_row=local_row,
+            submit_attempt_context=submit_attempt_context,
+            remote_client_order_id=remote_client_order_id or None,
+            remote_exchange_order_id=remote_exchange_order_id or None,
+            remote_side=str(local_row["side"]),
+            remote_qty=None,
+        ):
+            continue
+        matched_fills.append(fill)
+
+    total_fill_qty = sum(max(0.0, float(fill.qty)) for fill in matched_fills)
+    local_qty_req = max(0.0, float(local_row["qty_req"]))
+    has_partial_fill_evidence = bool(total_fill_qty > 1e-12 and local_qty_req > total_fill_qty + 1e-12)
+
+    return _SubmitUnknownRecentActivityInterpretation(
+        outcome="success",
+        candidate_count=1,
+        matched_exchange_order_id=matched_exchange_order_id,
+        matched_order=matched_order,
+        matched_fills=tuple(matched_fills),
+        has_partial_fill_evidence=has_partial_fill_evidence,
+    )
+
+
+def _try_resolve_submit_unknown_from_recent_activity(
+    conn,
+    *,
+    row,
+    recent_orders: list[BrokerOrder],
+    recent_fills: list[BrokerFill],
+) -> tuple[bool, bool]:
+    client_order_id = str(row["client_order_id"])
+    side = str(row["side"])
+    submit_attempt_context = _load_submit_attempt_context(conn, row=row)
+
+    interpretation = _interpret_submit_unknown_recent_activity(
+        local_row=row,
+        submit_attempt_context=submit_attempt_context,
+        recent_orders=recent_orders,
+        recent_fills=recent_fills,
+    )
+
+    if interpretation.outcome != "success":
         _record_submit_unknown_autolink_event(
             conn,
             client_order_id=client_order_id,
             side=side,
             submit_attempt_context=submit_attempt_context,
-            outcome=outcome,
-            candidate_count=len(candidate_orders),
+            outcome=interpretation.outcome,
+            candidate_count=interpretation.candidate_count,
             exchange_order_id=None,
         )
         return False, False
 
-    matched_exchange_order_id = next(iter(candidate_orders.keys()))
-    matched_order = candidate_orders[matched_exchange_order_id]
+    matched_exchange_order_id = interpretation.matched_exchange_order_id
+    matched_order = interpretation.matched_order
     _record_submit_unknown_autolink_event(
         conn,
         client_order_id=client_order_id,
@@ -677,25 +743,6 @@ def _try_resolve_submit_unknown_from_recent_activity(
         candidate_count=1,
         exchange_order_id=matched_exchange_order_id,
     )
-
-    matched_fills: list[BrokerFill] = []
-    for fill in recent_fills:
-        remote_client_order_id = str(fill.client_order_id or "")
-        remote_exchange_order_id = str(fill.exchange_order_id or "")
-        if remote_exchange_order_id and remote_exchange_order_id != matched_exchange_order_id:
-            continue
-        if not _strong_submit_unknown_correlation(
-            local_row=row,
-            submit_attempt_context=submit_attempt_context,
-            remote_client_order_id=remote_client_order_id or None,
-            remote_exchange_order_id=remote_exchange_order_id or None,
-            remote_side=side,
-            remote_qty=fill.qty,
-        ):
-            continue
-        matched_fills.append(fill)
-        if matched_exchange_order_id is None and remote_exchange_order_id:
-            matched_exchange_order_id = remote_exchange_order_id
 
     if matched_exchange_order_id:
         set_exchange_order_id(client_order_id, matched_exchange_order_id, conn=conn)
@@ -711,7 +758,7 @@ def _try_resolve_submit_unknown_from_recent_activity(
         )
 
     applied_fill = False
-    for fill in matched_fills:
+    for fill in interpretation.matched_fills:
         apply_fill_and_trade(
             conn,
             client_order_id=client_order_id,
@@ -756,7 +803,6 @@ def _try_resolve_submit_unknown_from_recent_activity(
         )
 
     return True, applied_fill
-
 
 def _record_submit_unknown_autolink_event(
     conn,
