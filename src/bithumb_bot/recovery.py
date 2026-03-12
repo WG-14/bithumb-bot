@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
+from enum import Enum
 
 from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
@@ -25,6 +27,68 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+
+
+class RecoveryDisposition(str, Enum):
+    AUTO_RECOVERABLE_CANDIDATE = "auto_recoverable_candidate"
+    MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
+    HARD_STOP = "hard_stop"
+
+
+class RecoveryProgressState(str, Enum):
+    EVALUATING = "evaluating"
+    CANDIDATE_IDENTIFIED = "candidate_identified"
+    MANUAL_INTERVENTION_REQUIRED = "manual_intervention_required"
+    HALTED = "halted"
+
+
+@dataclass(frozen=True)
+class RecoveryClassification:
+    disposition: RecoveryDisposition
+    progress_state: RecoveryProgressState
+    reason: str
+
+
+def classify_recovery_outcome(
+    *,
+    reason_code: str,
+    metadata: dict[str, int | str],
+    source_conflicts: list[str],
+) -> RecoveryClassification:
+    """Classifies reconcile outcomes into a conservative recovery state-machine skeleton."""
+    if source_conflicts or reason_code == REASON_SOURCE_CONFLICT_HALT:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.HARD_STOP,
+            progress_state=RecoveryProgressState.HALTED,
+            reason="reconcile source conflict requires hard stop",
+        )
+
+    if int(metadata.get("submit_unknown_unresolved", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
+            reason="submit_unknown unresolved with insufficient evidence",
+        )
+
+    if int(metadata.get("startup_gate_blocked", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
+            reason="startup gate remains blocked",
+        )
+
+    if int(metadata.get("recent_fill_applied", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.AUTO_RECOVERABLE_CANDIDATE,
+            progress_state=RecoveryProgressState.CANDIDATE_IDENTIFIED,
+            reason="recent fill evidence reconciled consistently",
+        )
+
+    return RecoveryClassification(
+        disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+        progress_state=RecoveryProgressState.EVALUATING,
+        reason="no deterministic auto-recovery evidence",
+    )
 
 
 def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int]]:
@@ -969,6 +1033,16 @@ def reconcile_with_broker(broker: Broker) -> None:
             _halt_on_source_conflict(source_conflicts)
         if metadata["startup_gate_blocked"] > 0:
             reason_code = REASON_STARTUP_GATE_BLOCKED
+
+        classification = classify_recovery_outcome(
+            reason_code=reason_code,
+            metadata=metadata,
+            source_conflicts=source_conflicts,
+        )
+        metadata["recovery_disposition"] = classification.disposition.value
+        metadata["recovery_progress_state"] = classification.progress_state.value
+        metadata["recovery_classification_reason"] = classification.reason
+
         _capture_broker_read_journal(metadata, broker)
         runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
         runtime_state.refresh_open_order_health()

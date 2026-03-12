@@ -9,7 +9,12 @@ from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
-from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot.recovery import (
+    RecoveryDisposition,
+    RecoveryProgressState,
+    classify_recovery_outcome,
+    reconcile_with_broker,
+)
 import bithumb_bot.recovery as recovery_module
 
 
@@ -233,6 +238,40 @@ def _insert_submit_timeout_attempt_metadata(*, conn, client_order_id: str, submi
         """,
         (client_order_id, float(qty), submit_attempt_id),
     )
+
+
+
+def test_recovery_classification_marks_recent_fill_as_auto_recoverable_candidate():
+    classification = classify_recovery_outcome(
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={"recent_fill_applied": 1, "submit_unknown_unresolved": 0},
+        source_conflicts=[],
+    )
+
+    assert classification.disposition == RecoveryDisposition.AUTO_RECOVERABLE_CANDIDATE
+    assert classification.progress_state == RecoveryProgressState.CANDIDATE_IDENTIFIED
+
+
+def test_recovery_classification_keeps_ambiguous_evidence_manual_recovery_required():
+    classification = classify_recovery_outcome(
+        reason_code="SUBMIT_UNKNOWN_UNRESOLVED",
+        metadata={"recent_fill_applied": 0, "submit_unknown_unresolved": 1},
+        source_conflicts=[],
+    )
+
+    assert classification.disposition == RecoveryDisposition.MANUAL_RECOVERY_REQUIRED
+    assert classification.progress_state == RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED
+
+
+def test_recovery_classification_source_conflict_remains_hard_stop():
+    classification = classify_recovery_outcome(
+        reason_code="SOURCE_CONFLICT_HALT",
+        metadata={"recent_fill_applied": 1, "submit_unknown_unresolved": 0},
+        source_conflicts=["exchange_order_id=abc conflicting status"],
+    )
+
+    assert classification.disposition == RecoveryDisposition.HARD_STOP
+    assert classification.progress_state == RecoveryProgressState.HALTED
 
 class _CancelRaceBroker(_NoopBroker):
     def __init__(self) -> None:
