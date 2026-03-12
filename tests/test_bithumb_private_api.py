@@ -536,3 +536,58 @@ def test_get_order_rejects_incomplete_closed_lookup_missing_quantity_fields(monk
 
     with pytest.raises(BrokerRejectError, match="ambiguous"):
         broker.get_order(client_order_id="cid-5", exchange_order_id="ambig-2")
+
+
+def test_read_journal_summary_masks_sensitive_balance_fields(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "status": "0000",
+            "data": {
+                "available_krw": "1000",
+                "in_use_krw": "25",
+                "api_nonce": "123",
+                "api_key": "secret",
+                "sign": "sig",
+            },
+        },
+    )
+
+    broker.get_balance()
+    summary = broker.get_read_journal_summary()
+
+    assert "/info/balance" in summary
+    assert "available_krw" in summary["/info/balance"]
+    assert "in_use_krw" in summary["/info/balance"]
+    assert "api_nonce" not in summary["/info/balance"]
+    assert "api_key" not in summary["/info/balance"]
+    assert "sign" not in summary["/info/balance"]
+
+
+def test_recent_orders_journal_summary_captures_sample_order_ids(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(broker, "get_open_orders", lambda: [])
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "status": "0000",
+            "data": [
+                {"order_id": "filled-1", "search": "buy", "price": "100", "units_traded": "0.1", "transfer_date": "1"},
+                {"order_id": "filled-2", "search": "sell", "price": "101", "units_traded": "0.2", "transfer_date": "2"},
+            ],
+        },
+    )
+
+    broker.get_recent_orders(limit=10)
+    summary = broker.get_read_journal_summary()
+
+    assert "/info/user_transactions(recent_orders)" in summary
+    assert "sample_order_ids" in summary["/info/user_transactions(recent_orders)"]
+    assert "filled-1" in summary["/info/user_transactions(recent_orders)"]

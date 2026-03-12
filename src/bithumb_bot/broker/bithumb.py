@@ -18,6 +18,44 @@ class BithumbBroker:
         self.api_secret = settings.BITHUMB_API_SECRET
         self.base_url = settings.BITHUMB_API_BASE
         self.dry_run = settings.LIVE_DRY_RUN
+        self._read_journal: dict[str, str] = {}
+
+    def _mask_sensitive(self, data: dict[str, object]) -> dict[str, object]:
+        redacted: dict[str, object] = {}
+        for key, value in data.items():
+            lowered = str(key).lower()
+            if any(token in lowered for token in ("secret", "sign", "nonce", "api", "authorization", "token", "key")):
+                continue
+            redacted[key] = value
+        return redacted
+
+    def _journal_read_summary(self, *, path: str, data: dict[str, object] | None) -> None:
+        payload = data or {}
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        row_count = len(rows) if isinstance(rows, list) else (1 if isinstance(rows, dict) else 0)
+
+        sample_order_ids: list[str] = []
+        if isinstance(rows, list):
+            for row in rows[:3]:
+                if not isinstance(row, dict):
+                    continue
+                order_id = row.get("order_id")
+                if order_id:
+                    sample_order_ids.append(str(order_id))
+
+        summary: dict[str, object] = {
+            "path": path,
+            "status": str(payload.get("status", "")) if isinstance(payload, dict) else "",
+            "row_count": row_count,
+        }
+        if sample_order_ids:
+            summary["sample_order_ids"] = sample_order_ids
+        if isinstance(rows, dict):
+            summary["keys"] = sorted(self._mask_sensitive(rows).keys())[:10]
+        self._read_journal[path] = str(summary)
+
+    def get_read_journal_summary(self) -> dict[str, str]:
+        return dict(self._read_journal)
 
     def _nonce(self) -> str:
         return str(int(time.time() * 1_000_000))
@@ -146,6 +184,7 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
+        self._journal_read_summary(path="/info/orders(get_order)", data=open_data)
         open_rows = open_data.get("data") or []
         for row in open_rows:
             if str(row.get("order_id")) != str(exid):
@@ -176,6 +215,7 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
+        self._journal_read_summary(path="/info/order_detail", data=detail_data)
         detail_rows = detail_data.get("data") or []
         if not detail_rows:
             raise BrokerRejectError(f"order lookup ambiguous for exchange_order_id={exid}: not open and no detail rows")
@@ -219,6 +259,7 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
+        self._journal_read_summary(path="/info/orders(open_orders)", data=data)
         now = int(time.time() * 1000)
         return [self._broker_order_from_open_row(row, now_ts=now) for row in data.get("data") or []]
 
@@ -234,6 +275,7 @@ class BithumbBroker:
         if exchange_order_id:
             payload["order_id"] = exchange_order_id
         data = self._post_private("/info/user_transactions", payload, retry_safe=True)
+        self._journal_read_summary(path="/info/user_transactions(fills)", data=data)
         fills: list[BrokerFill] = []
         for row in data.get("data") or []:
             tms = int(float(row.get("transfer_date", 0)))
@@ -261,6 +303,7 @@ class BithumbBroker:
             },
             retry_safe=True,
         )
+        self._journal_read_summary(path="/info/balance", data=data)
         d = data.get("data") or {}
         cash_available = float(d.get(f"available_{payment_currency.lower()}") or 0.0)
         asset_available = float(d.get(f"available_{order_currency.lower()}") or 0.0)
@@ -292,7 +335,7 @@ class BithumbBroker:
         # Best-effort: infer recently executed orders from transaction history.
         # Safe fallback: if history lookup fails, return open-order snapshot only.
         try:
-            tx_rows = self._post_private(
+            tx_payload = self._post_private(
                 "/info/user_transactions",
                 {
                     "order_currency": self._pair()[0],
@@ -300,7 +343,9 @@ class BithumbBroker:
                     "count": str(max(lim, 100)),
                 },
                 retry_safe=True,
-            ).get("data") or []
+            )
+            self._journal_read_summary(path="/info/user_transactions(recent_orders)", data=tx_payload)
+            tx_rows = tx_payload.get("data") or []
         except (BrokerRejectError, BrokerTemporaryError):
             return open_orders[:lim]
 

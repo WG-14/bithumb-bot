@@ -740,6 +740,22 @@ def _record_submit_unknown_autolink_event(
     )
 
 
+
+
+def _capture_broker_read_journal(metadata: dict[str, int | str], broker: Broker) -> None:
+    getter = getattr(broker, "get_read_journal_summary", None)
+    if not callable(getter):
+        return
+    try:
+        journal = getter()
+    except Exception:
+        return
+    if not isinstance(journal, dict):
+        return
+    compact = {str(k): str(v)[:200] for k, v in list(journal.items())[:8]}
+    if compact:
+        metadata["broker_read_journal"] = str(compact)[:500]
+
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
@@ -939,6 +955,7 @@ def reconcile_with_broker(broker: Broker) -> None:
         )
         conn.commit()
     except Exception as e:
+        _capture_broker_read_journal(metadata, broker)
         runtime_state.record_reconcile_result(
             success=False,
             error=f"{type(e).__name__}: {e}",
@@ -952,6 +969,7 @@ def reconcile_with_broker(broker: Broker) -> None:
             _halt_on_source_conflict(source_conflicts)
         if metadata["startup_gate_blocked"] > 0:
             reason_code = REASON_STARTUP_GATE_BLOCKED
+        _capture_broker_read_journal(metadata, broker)
         runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
         runtime_state.refresh_open_order_health()
     finally:

@@ -1622,3 +1622,41 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path):
         assert attempt["price"] is None or float(attempt["price"]) > 0
         assert int(attempt["submit_ts"]) == ts
         assert attempt["payload_fingerprint"]
+
+
+class _JournaledReconcileBroker:
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return []
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "NEW", None, 0.0, 0.0, 0, 0)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+    def get_read_journal_summary(self) -> dict[str, str]:
+        return {
+            "/info/balance": "{'path': '/info/balance', 'status': '0000', 'row_count': 1}",
+            "/info/orders(open_orders)": "{'path': '/info/orders(open_orders)', 'status': '0000', 'row_count': 0}",
+        }
+
+
+def test_reconcile_persists_broker_read_journal_metadata(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "reconcile_journal.sqlite"))
+
+    reconcile_with_broker(_JournaledReconcileBroker())
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_metadata is not None
+    payload = json.loads(state.last_reconcile_metadata)
+    assert "broker_read_journal" in payload
+    assert "/info/balance" in str(payload["broker_read_journal"])
