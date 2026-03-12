@@ -4,6 +4,13 @@
 > 
 > 이 문서는 **완전 24/7 자율운용** 가이드가 아니다. 운영자가 하루 중 여러 차례 상태를 확인하는 운용 모델을 기준으로 한다.
 
+## 운영 모델 한 줄 요약 (pilot reality)
+
+- 이 봇은 현재 **"제한적 무인 + 보수적 HALT"** 모델이다.
+- `systemd` 재시작은 자동이지만, 위험/미해결 상태가 감지되면 **자동 재개 대신 차단(HALT/Resume gate)** 이 우선된다.
+- 즉, "항상 자동 복구되는 24/7 자율 시스템"이 아니라 **운영자 재정합(reconcile) + 승인 재개(resume)** 를 전제로 한 pilot 단계다.
+- 거래소 응답 지연/누락 체결 같은 경계 사례는 환경마다 다를 수 있으므로, **live에서는 `recovery-report` 결과를 최종 판단 기준**으로 사용한다.
+
 ## 0) 운용 모드 구분 (반드시 먼저 확인)
 
 아래 4가지를 혼동하지 않는다.
@@ -279,6 +286,37 @@ uv run python bot.py resume --force
 4. live 모드면 거래소 오픈 주문/체결과 로컬 `orders/fills/trades` 샘플 대조
 5. `uv run python bot.py health`에서 stale/error 이상 없음 확인
 6. `uv run python bot.py resume`로 재개 후 30~60분 모니터링
+
+### 재시작/복구 표준 플로우 (운영자용 고정 절차)
+
+아래 순서를 기본값으로 사용한다.
+
+```bash
+# 0) (필요 시) 즉시 신규 주문 차단
+uv run python bot.py pause
+
+# 1) 상태 확인
+uv run python bot.py health
+uv run python bot.py recovery-report
+
+# 2) 정합성 복구
+uv run python bot.py reconcile
+uv run python bot.py recovery-report
+
+# 3) 미체결 노출이 남으면 정리 후 재검증
+uv run python bot.py cancel-open-orders
+uv run python bot.py reconcile
+uv run python bot.py recovery-report
+
+# 4) blocker 해소 시에만 재개
+uv run python bot.py resume
+```
+
+운영 규칙:
+
+- `resume`이 거부되면 먼저 blocker를 해소한다 (`resume --force` 상시 사용 금지).
+- 리스크 사유 HALT(`KILL_SWITCH`, `DAILY_LOSS_LIMIT`, `POSITION_LOSS_LIMIT`)에서는 노출(포지션/오픈오더) 정리 전 재개가 제한될 수 있다.
+- 강제 재개(`resume --force`)는 조사/승인 로그를 남긴 경우에만 예외적으로 사용한다.
 
 ## 10) 장애 대응 절차 (유형별)
 

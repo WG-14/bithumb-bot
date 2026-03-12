@@ -2,6 +2,8 @@
 
 짧은 운영용 체크리스트입니다. 범위는 **Bithumb BTC 단일 전략, 제한적 무인 운용(수시 수동 점검 전제)** 입니다.
 
+> 현재 운영 모델은 완전 24/7 자율운용이 아니라, **자동 재시작 + 보수적 HALT + 운영자 재정합/재개 승인**을 전제로 한 pilot 단계입니다.
+
 ## 1) 모드/상태 분리 (시작 전 1분)
 
 - [ ] 오늘 세션 모드 명시: `paper` / `live dry-run` / `live armed`
@@ -37,7 +39,7 @@ uv run python bot.py recovery-report
 - [ ] notifier 필수 설정 확인 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 Telegram 조합)
 - [ ] 알림 채널에 최근 health/recovery 알림이 정상 도착하는지 점검
 
-## 4) 운영 중 즉시 제어 (문제 발생 시)
+## 4) 운영 중 즉시 제어 (halt/recovery/resume)
 
 ```bash
 # 신규 거래 즉시 중단
@@ -57,6 +59,7 @@ uv run python bot.py recovery-report
 uv run python bot.py resume
 ```
 
+- `resume` 거부 시 먼저 `recovery-report` blocker를 해소
 - `resume --force`는 마지막 수단으로만 사용
 
 비상 노출 축소(필요 시):
@@ -66,12 +69,16 @@ uv run python bot.py flatten-position --dry-run
 uv run python bot.py flatten-position
 ```
 
-## 5) 재시작 후 검증 플로우 (restart verification)
+## 5) 재시작 후 검증 플로우 (restart/reconcile/recovery/resume)
 
 ```bash
 uv run python bot.py restart-checklist
 uv run python bot.py health
 uv run python bot.py recovery-report
+uv run python bot.py reconcile
+uv run python bot.py recovery-report
+# 필요 시
+uv run python bot.py cancel-open-orders
 uv run python bot.py reconcile
 uv run python bot.py recovery-report
 uv run python bot.py resume
@@ -80,7 +87,9 @@ uv run python bot.py resume
 판정:
 
 - `restart-checklist`의 `safe_to_resume=1` 확인
+- `recovery-report`에서 unresolved/recovery-required 잔여 여부를 최종 확인
 - 재개 후 30~60분은 수동 모니터링 유지
+- 거래소 API 응답 이상/부분 실패 시 `resume` 대신 pause 상태 유지 후 재검증
 
 ## 6) Kill switch 운용 메모
 
