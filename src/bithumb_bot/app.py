@@ -1364,6 +1364,50 @@ def _load_recovery_report(
         risk_level = "medium"
 
     state = runtime_state.snapshot()
+
+    def _next_action_for_blocker(code: str) -> str:
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            if recovery_required_count > 0:
+                return "uv run python bot.py recover-order --client-order-id <id>"
+            if submit_unknown_count > 0:
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report"
+        if code == "LAST_RECONCILE_FAILED":
+            return "uv run python bot.py reconcile"
+        if code == "HALT_RISK_OPEN_POSITION":
+            return "uv run python bot.py flatten-position"
+        if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
+            return "uv run python bot.py restart-checklist"
+        return recommended_command
+
+    blocker_summary_view: list[dict[str, str]] = []
+    for blocker in blocker_list[:3]:
+        code = str(blocker["code"])
+        evidence = str(blocker["detail"])
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            evidence = (
+                f"unresolved={unresolved_count} "
+                f"submit_unknown={submit_unknown_count} "
+                f"recovery_required={recovery_required_count}; "
+                f"{evidence}"
+            )
+        blocker_summary_view.append(
+            {
+                "blocker": code,
+                "evidence": evidence,
+                "recommended_next_action": _next_action_for_blocker(code),
+            }
+        )
+
+    if not blocker_summary_view:
+        blocker_summary_view.append(
+            {
+                "blocker": "none",
+                "evidence": "resume gates clear",
+                "recommended_next_action": "uv run python bot.py resume",
+            }
+        )
+
     recent_orders_snapshot, broker_snapshot_error = _safe_recent_broker_orders_snapshot(limit=100)
     candidate_report: list[dict[str, object]] = []
     for local_order in candidate_local_orders:
@@ -1429,6 +1473,7 @@ def _load_recovery_report(
         "blockers": blocker_list,
         "blocker_summary": blocker_summary,
         "active_blocker_summary": active_blocker_summary,
+        "blocker_summary_view": blocker_summary_view,
         "risk_level": risk_level,
         "primary_blocker_code": primary_blocker_code,
         "non_overridable_blockers": non_overridable_blockers,
@@ -1451,6 +1496,14 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         return
 
     print("[RECOVERY-REPORT]")
+    print("  [P0] blocker_summary_view")
+    for item in report.get("blocker_summary_view") or []:
+        print(
+            "    - "
+            f"blocker={item['blocker']} "
+            f"evidence={item['evidence']} "
+            f"recommended_next_action={item['recommended_next_action']}"
+        )
     print("  [P1] order_recovery_status")
     print(f"    unresolved_count={report['unresolved_count']}")
     print(f"    recovery_required_count={report['recovery_required_count']}")

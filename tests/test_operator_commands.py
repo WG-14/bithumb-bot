@@ -1251,6 +1251,9 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "[RECOVERY-REPORT]" in out
+    assert "[P0] blocker_summary_view" in out
+    assert "blocker=STARTUP_SAFETY_GATE_BLOCKED" in out
+    assert "recommended_next_action=uv run python bot.py recover-order --client-order-id <id>" in out
     assert "[P1] order_recovery_status" in out
     assert "unresolved_count=6" in out
     assert "recovery_required_count=3" in out
@@ -1517,6 +1520,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "balance_split_mismatch_summary",
         "active_blocker_summary",
         "blocker_summary",
+        "blocker_summary_view",
         "blockers",
         "force_resume_allowed",
         "can_resume",
@@ -1611,6 +1615,56 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["recommended_command"]
 
 
+
+
+def test_recovery_report_blocker_summary_view_for_submit_unknown(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="SUBMIT_UNKNOWN", client_order_id="summary_submit_unknown", created_ts=now_ms - 5_000)
+
+    report = _load_recovery_report()
+
+    view = report["blocker_summary_view"]
+    assert view
+    assert view[0]["blocker"] == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert "submit_unknown=1" in view[0]["evidence"]
+    assert view[0]["recommended_next_action"] == "uv run python bot.py reconcile"
+
+
+def test_recovery_report_blocker_summary_view_for_recovery_required(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="RECOVERY_REQUIRED", client_order_id="summary_recovery_required", created_ts=now_ms - 5_000)
+
+    report = _load_recovery_report()
+
+    view = report["blocker_summary_view"]
+    assert view
+    assert view[0]["blocker"] == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert "recovery_required=1" in view[0]["evidence"]
+    assert (
+        view[0]["recommended_next_action"]
+        == "uv run python bot.py recover-order --client-order-id <id>"
+    )
+
+
+def test_recovery_report_blocker_summary_view_for_persistent_halt(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="manual operator pause",
+        reason_code="MANUAL_PAUSE",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    report = _load_recovery_report()
+
+    view = report["blocker_summary_view"]
+    assert view
+    assert view[0]["blocker"] == "HALT_STATE_UNRESOLVED"
+    assert "halt unresolved:" in view[0]["evidence"]
+    assert view[0]["recommended_next_action"] == "uv run python bot.py restart-checklist"
 def test_recovery_report_can_resume_clean_state(tmp_path):
     _set_tmp_db(tmp_path)
 
