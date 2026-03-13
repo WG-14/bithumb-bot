@@ -1,15 +1,16 @@
 [Unit]
-Description=Bithumb bot trading loop
+Description=Bithumb bot trading loop (live)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/workspace/bithumb-bot
-EnvironmentFile=-/etc/bithumb-bot/bithumb-bot.env
-ExecStart=/usr/bin/env bash -lc 'uv run python bot.py run --short ${SMA_SHORT:-7} --long ${SMA_LONG:-30}'
+Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env
+ExecStart=/usr/bin/env bash -lc 'uv run python bot.py run --mode live --short ${SMA_SHORT:-7} --long ${SMA_LONG:-30}'
 Restart=always
 RestartSec=5
+SyslogIdentifier=bithumb-bot-live
 StandardOutput=journal
 StandardError=journal
 
