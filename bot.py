@@ -1,7 +1,5 @@
 import os
 import sys
-from pathlib import Path
-
 try:
     from dotenv import load_dotenv
 except ImportError:  # optional dependency for local convenience
@@ -37,18 +35,36 @@ def _strip_legacy_flags(argv: list[str]):
         i += 1
     return out
 
-def main():
-    # Local convenience: load .env automatically when present.
-    # In server/production, prefer injecting environment variables externally.
-    if load_dotenv and Path(".env").exists():
-        load_dotenv()
 
+def _resolve_explicit_env_file(mode: str | None) -> str | None:
+    explicit_env_file = os.getenv("BITHUMB_ENV_FILE")
+    if explicit_env_file:
+        return explicit_env_file
+
+    normalized_mode = (mode or os.getenv("MODE") or "").strip().lower()
+    if normalized_mode == "live":
+        return os.getenv("BITHUMB_ENV_FILE_LIVE")
+    if normalized_mode in {"paper", "test"}:
+        return os.getenv("BITHUMB_ENV_FILE_PAPER")
+    return None
+
+
+def _load_explicit_env_file(mode: str | None) -> None:
+    if not load_dotenv:
+        return
+    env_file = _resolve_explicit_env_file(mode)
+    if env_file:
+        load_dotenv(dotenv_path=env_file)
+
+def main():
     argv = sys.argv[:]
 
     # map a few legacy flags to env so main.py can read them if needed
     mode = _pop_flag_value(argv, "--mode")
     if mode:
         os.environ["MODE"] = mode
+
+    _load_explicit_env_file(mode)
 
     interval = _pop_flag_value(argv, "--interval")
     if interval:
