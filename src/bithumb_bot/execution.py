@@ -5,6 +5,7 @@ from typing import Any
 
 from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
+from .notifier import format_event, notify
 from .oms import add_fill, create_order, set_exchange_order_id, set_status
 
 
@@ -190,6 +191,17 @@ def apply_fill_and_trade(
             float(asset_after),
             note,
         ),
+    )
+    notify(
+        format_event(
+            "fill_applied",
+            pair=settings.PAIR,
+            side=side,
+            qty=float(qty),
+            price=float(price),
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+        )
     )
     return {
         "ts": int(fill_ts),

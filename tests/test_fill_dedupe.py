@@ -3,12 +3,16 @@ from __future__ import annotations
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+import bithumb_bot.execution as execution_module
 
 
-def test_apply_fill_dedupes_by_fill_id(tmp_path):
+def test_apply_fill_dedupes_by_fill_id_and_notifies_once(tmp_path, monkeypatch):
     db_path = tmp_path / "fill_dedupe.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
     object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr(execution_module, "notify", lambda msg: notifications.append(msg))
 
     conn = ensure_db(str(db_path))
     try:
@@ -57,3 +61,7 @@ def test_apply_fill_dedupes_by_fill_id(tmp_path):
     assert r2 is None
     assert fills == 1
     assert trades == 1
+    assert len(notifications) == 1
+    assert "event=fill_applied" in notifications[0]
+    assert "client_order_id=o1" in notifications[0]
+    assert "fill_id=fill-1" in notifications[0]
