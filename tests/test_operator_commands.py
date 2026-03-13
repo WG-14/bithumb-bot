@@ -2185,6 +2185,7 @@ def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     cmd_flatten_position(dry_run=False)
     out = capsys.readouterr().out
@@ -2200,6 +2201,7 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -2237,6 +2239,7 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
     try:
@@ -2267,6 +2270,61 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
     assert "submit boom" in state.last_flatten_position_summary
+
+
+def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+
+    from bithumb_bot.config import LiveModeValidationError
+
+    def _raise_preflight(_cfg):
+        raise LiveModeValidationError("preflight boom")
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", _raise_preflight)
+
+    class _BrokerFactory:
+        def __call__(self):
+            raise AssertionError("broker should not be constructed when preflight fails")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "failed: live mode preflight" not in out
+    assert "failed: preflight boom" in out
+
+
+def test_flatten_position_blocks_when_live_unarmed(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+
+    from bithumb_bot.config import LiveModeValidationError
+
+    def _armed_gate(_cfg):
+        raise LiveModeValidationError("LIVE_REAL_ORDER_ARMED=true is required")
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", _armed_gate)
+
+    class _BrokerFactory:
+        def __call__(self):
+            raise AssertionError("broker should not be constructed when live mode is unarmed")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "LIVE_REAL_ORDER_ARMED=true is required" in out
 
 
 def test_resume_blocked_when_emergency_flatten_unresolved(tmp_path, monkeypatch):
