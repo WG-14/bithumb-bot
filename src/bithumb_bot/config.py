@@ -8,6 +8,12 @@ from .notifier import is_configured as notifier_is_configured
 
 
 DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
+PAPER_ONLY_ENV_KEYS = (
+    "START_CASH_KRW",
+    "BUY_FRACTION",
+    "FEE_RATE",
+    "SLIPPAGE_BPS",
+)
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -95,6 +101,15 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 "DB_PATH must not point to the default paper/shared DB path "
                 f"({DEFAULT_DB_PATH}) when MODE=live"
             )
+
+    explicitly_set_paper_keys = [
+        key for key in PAPER_ONLY_ENV_KEYS if os.getenv(key) not in (None, "")
+    ]
+    if explicitly_set_paper_keys:
+        issues.append(
+            "paper/test-like config mixing is not allowed when MODE=live; "
+            "unset paper-only env keys: " + ", ".join(explicitly_set_paper_keys)
+        )
 
     if cfg.MAX_ORDER_KRW <= 0:
         issues.append("MAX_ORDER_KRW must be > 0")

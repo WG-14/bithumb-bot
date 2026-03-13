@@ -393,6 +393,7 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
+- live preflight는 paper/test 성격 혼합 설정을 차단한다(예: 기본/공유 DB 경로, live 보호값 비활성화(0 이하))
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
 - `LIVE_DRY_RUN=false`인 경우 `LIVE_REAL_ORDER_ARMED=true`를 명시해야 실주문 허용
 - notifier는 반드시 활성/설정되어야 함(`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`)

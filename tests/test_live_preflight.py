@@ -238,6 +238,42 @@ def test_live_preflight_rejects_default_db_path_for_live_mode(monkeypatch: pytes
     assert "DB_PATH must not point to the default paper/shared DB path" in str(exc.value)
 
 
+def test_live_preflight_rejects_normalized_default_db_path_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    aliased_default = "data/../data/bithumb_1m.sqlite"
+    monkeypatch.setenv("DB_PATH", aliased_default)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", aliased_default)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    assert "DB_PATH must not point to the default paper/shared DB path" in str(exc.value)
+
+
+def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live-prod.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live-prod.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+
+    validate_live_mode_preflight(settings)
+
+
 def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_PATH", "data/live_trading.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
@@ -257,6 +293,71 @@ def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest
 
     validate_live_mode_preflight(settings)
 
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        ("START_CASH_KRW", "1000000"),
+        ("BUY_FRACTION", "0.5"),
+        ("FEE_RATE", "0.0004"),
+        ("SLIPPAGE_BPS", "5"),
+    ],
+)
+def test_live_preflight_rejects_paper_only_env_keys_in_live(
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    env_value: str,
+) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    monkeypatch.setenv(env_key, env_value)
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+
+    with pytest.raises(LiveModeValidationError) as exc:
+        validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "paper/test-like config mixing is not allowed when MODE=live" in msg
+    assert env_key in msg
+
+
+def test_live_preflight_accepts_clean_live_env_without_paper_only_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    monkeypatch.delenv("START_CASH_KRW", raising=False)
+    monkeypatch.delenv("BUY_FRACTION", raising=False)
+    monkeypatch.delenv("FEE_RATE", raising=False)
+    monkeypatch.delenv("SLIPPAGE_BPS", raising=False)
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
+    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+
+    validate_live_mode_preflight(settings)
 
 def test_live_preflight_requires_notifier_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DB_PATH", "data/live.sqlite")
