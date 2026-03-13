@@ -3,8 +3,10 @@ from __future__ import annotations
 import time
 
 from . import runtime_state
+from .broker.live import normalize_order_qty, validate_order, validate_pretrade
 from .config import settings
 from .db_core import ensure_db, init_portfolio
+from .marketdata import fetch_orderbook_top
 from .notifier import notify
 from .observability import safety_event
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
@@ -65,7 +67,16 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
     try:
-        order = broker.place_order(client_order_id=client_order_id, side="SELL", qty=qty, price=None)
+        bid, ask = fetch_orderbook_top(settings.PAIR)
+        market_price = float(bid)
+        if market_price <= 0:
+            raise ValueError(f"invalid best bid for flatten: {bid}")
+
+        normalized_qty = normalize_order_qty(qty=qty, market_price=market_price)
+        validate_order(signal="SELL", side="SELL", qty=normalized_qty, market_price=market_price)
+        validate_pretrade(broker=broker, side="SELL", qty=normalized_qty, market_price=market_price)
+
+        order = broker.place_order(client_order_id=client_order_id, side="SELL", qty=normalized_qty, price=None)
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
         summary = {
@@ -92,7 +103,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
     summary = {
         "status": "submitted",
-        "qty": qty,
+        "qty": normalized_qty,
         "side": "SELL",
         "symbol": settings.PAIR,
         "client_order_id": client_order_id,

@@ -2170,6 +2170,7 @@ def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
 class _FlattenBrokerSuccess:
     def __init__(self):
         self.calls: list[dict[str, str | float | None]] = []
+        self.balance = BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
 
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
         self.calls.append({"client_order_id": client_order_id, "side": side, "qty": qty, "price": price})
@@ -2179,6 +2180,9 @@ class _FlattenBrokerSuccess:
             status = "NEW"
 
         return _Order()
+
+    def get_balance(self) -> BrokerBalance:
+        return self.balance
 
 
 def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
@@ -2201,6 +2205,10 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
+    prev_step = settings.LIVE_ORDER_QTY_STEP
+    prev_max_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.000001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     conn = ensure_db()
@@ -2223,16 +2231,22 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
             return broker
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
 
-    cmd_flatten_position(dry_run=False)
-    out = capsys.readouterr().out
+    try:
+        cmd_flatten_position(dry_run=False)
+        out = capsys.readouterr().out
 
-    assert "submitted" in out
-    assert len(broker.calls) == 1
-    assert broker.calls[0]["side"] == "SELL"
-    assert abs(float(broker.calls[0]["qty"]) - 0.12345678) < 1e-12
-    state = runtime_state.snapshot()
-    assert state.last_flatten_position_status == "submitted"
+        assert "submitted" in out
+        assert len(broker.calls) == 1
+        assert broker.calls[0]["side"] == "SELL"
+        assert abs(float(broker.calls[0]["qty"]) - 0.123456) < 1e-12
+        state = runtime_state.snapshot()
+        assert state.last_flatten_position_status == "submitted"
+    finally:
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", prev_step)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", prev_max_decimals)
 
 
 def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys):
@@ -2255,10 +2269,15 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
         conn.close()
 
     class _FailBroker:
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
+
         def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
             raise RuntimeError("submit boom")
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _FailBroker())
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
 
     with pytest.raises(SystemExit) as exc:
         cmd_flatten_position(dry_run=False)
@@ -2270,6 +2289,50 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
     assert "submit boom" in state.last_flatten_position_summary
+
+
+def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.015, 1000000.0, 0.0, 0.015, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _LowAssetBroker:
+        def __init__(self):
+            self.place_order_calls = 0
+
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+            self.place_order_calls += 1
+            raise AssertionError("place_order must not be called when pretrade fails")
+
+    broker = _LowAssetBroker()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "failed: ValueError: insufficient available asset" in out
+    assert broker.place_order_calls == 0
 
 
 def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path, capsys):

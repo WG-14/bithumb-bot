@@ -202,6 +202,17 @@ class _DummyBroker:
     def cancel_order(self, *args, **kwargs):
         return None
 
+class _FlattenFailBroker(_DummyBroker):
+    def get_balance(self):
+        return BrokerBalance(
+            cash_available=100_000.0,
+            cash_locked=0.0,
+            asset_available=1.0,
+            asset_locked=0.0,
+        )
+
+    def place_order(self, *args, **kwargs):
+        raise RuntimeError("place_order boom")
 
 def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float = 0.0):
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
@@ -565,6 +576,9 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
+    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _FlattenFailBroker())
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
 
     run_loop(5, 20)
 
@@ -573,9 +587,8 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
     assert state.halt_state_unresolved is True
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
-    assert "place_order" in state.last_flatten_position_summary
+    assert "place_order boom" in state.last_flatten_position_summary
     assert "flatten_status=failed" in str(state.last_disable_reason)
-
 
 def test_run_loop_daily_loss_breach_halts_persistently(monkeypatch):
     _prepare_run_loop(monkeypatch)
@@ -932,6 +945,9 @@ def test_run_loop_position_loss_breach_flatten_failure_marks_unresolved(monkeypa
         lambda *_args, **_kwargs: (True, "position loss threshold breached (8.00%/5.00%, entry=100, mark=92)"),
     )
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _FlattenFailBroker())
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
 
     run_loop(5, 20)
 
