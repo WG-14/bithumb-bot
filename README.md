@@ -47,7 +47,7 @@ uv run python bot.py run --short 7 --long 30
 
 - `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
 - `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, 기본값 `data/bithumb_1m.sqlite`(paper와 공유될 수 있는 경로)는 사용할 수 없습니다.
-- `MODE=live` preflight는 paper/test 성격의 혼합 설정을 거부합니다. 예: 기본/공유 DB 경로, live 보호값 비활성화(0 이하) 같은 설정은 기동 전에 fail-fast로 차단됩니다.
+- `MODE=live` preflight는 paper/test 성격의 혼합 설정을 거부합니다. 예: 기본/공유 DB 경로, paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`)가 설정된 경우, 또는 live 보호값(`MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`)이 유효한 값(> 0, 유한값)으로 설정되지 않은 경우 기동 전에 fail-fast로 차단됩니다.
 - `MODE=live`에서는 notifier가 반드시 활성/설정되어 있어야 합니다 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`). 미설정 시 기동이 실패합니다.
 - `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.
 - 실주문(`LIVE_DRY_RUN=false`)은 `LIVE_REAL_ORDER_ARMED=true`를 명시적으로 설정한 경우에만 허용됩니다.
@@ -99,13 +99,13 @@ MODE=live DB_PATH=data/live.small.safe.sqlite uv run python bot.py run
 - `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 즉시 HALT(무기한 중지, 자동 재개 없음))
 - `MAX_DAILY_ORDER_COUNT=6` (과매매 방지)
 - `KILL_SWITCH=false` (비상시에만 true)
-- `KILL_SWITCH_LIQUIDATE=false` (**청산 모드 미구현**. 반드시 false 유지; true면 live preflight 실패)
-- 일 손실 한도 초과 시 엔진은 신규 주문 전에 거래를 **영구 HALT**하고 오픈주문 취소만 1회 시도합니다(자동 재개/강제 청산 없음).
+- `KILL_SWITCH_LIQUIDATE=false` (평시 off. 필요 시 `true`로 설정하면 kill switch 동작 시 포지션 flatten을 추가로 시도합니다. live preflight 실패 사유는 아닙니다.)
+- 일 손실 한도 초과 시 엔진은 신규 주문 전에 거래를 **HALT**하고 오픈주문 취소 + 포지션 flatten을 시도한 뒤, 노출/미해결 상태가 남으면 운영자 복구/재개 승인을 요구합니다.
 - `LIVE_DRY_RUN=true`로 최소 반나절 이상 검증 후 `false` 전환
 
 ## 라이브 시작 전 체크리스트 (Startup)
 
-1. `.env` 또는 `/etc/bithumb-bot/bithumb-bot.env`에 라이브 안전값이 반영되었는지 확인
+1. `.env` 또는 `/etc/bithumb-bot/bithumb-bot.live.env`(메인 서비스 기준)에 라이브 안전값이 반영되었는지 확인
 2. `uv run python bot.py health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
 3. `uv run python bot.py recovery-report`에서 미해결 주문/복구 필요 건수와 오래된 미해결 주문 요약(top 5) 확인
 4. 처음 라이브 전환 시 `MODE=live`, `LIVE_DRY_RUN=true`로 기동 후 로그/알림 확인
@@ -152,6 +152,7 @@ uv run python bot.py resume
 - 운영 절차 문서: `docs/RUNBOOK.md`
 - 제한적 무인 운용 체크리스트(요약): `docs/LIMITED_UNATTENDED_CHECKLIST.md`
 - 백업 스크립트: `scripts/backup_sqlite.sh`
+- `bithumb-bot.service`는 `/etc/bithumb-bot/bithumb-bot.live.env`를 사용하고, `bithumb-bot-healthcheck.service` / `bithumb-bot-backup.service`는 `/etc/bithumb-bot/bithumb-bot.env`를 사용하므로 `DB_PATH`, notifier, 임계치가 서로 일치하는지 함께 점검합니다.
 
 빠른 확인:
 

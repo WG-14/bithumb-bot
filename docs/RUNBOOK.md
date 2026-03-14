@@ -33,9 +33,9 @@
 - `MAX_ORDER_KRW=30000` (계정의 약 3%)
 - `MAX_DAILY_LOSS_KRW=20000` (계정의 약 2% 손실 시 즉시 HALT(무기한 중지, 자동 재개 없음))
 - `MAX_DAILY_ORDER_COUNT=6` (과매매/오작동 노출 축소)
-- `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off, **청산 모드 미구현으로 true 금지**)
+- `KILL_SWITCH=false`, `KILL_SWITCH_LIQUIDATE=false` (평시 off; 필요 시에만 비상 정지/청산 절차에 따라 사용)
 - `LIVE_DRY_RUN=true`로 먼저 운영 경로를 검증하고, 확인 후 `false` 전환
-- 일 손실 한도 초과 시 엔진은 신규 주문 전 단계에서 거래를 **영구 HALT**하고 오픈주문 취소만 1회 시도한다(자동 재개/강제 청산 없음).
+- 일 손실 한도 초과 시 엔진은 신규 주문 전 단계에서 거래를 **HALT**하고 오픈주문 취소 + 포지션 평탄화(flatten)를 시도한 뒤, 노출/미해결 상태가 남으면 운영자 복구/재개 승인을 요구한다.
 
 > 핵심 원칙: **주문 크기보다 생존이 우선**. 초반 1~2주는 수익보다 안정성 검증에 집중.
 
@@ -51,7 +51,7 @@
 
 ```bash
 sudo mkdir -p /etc/bithumb-bot
-sudo cp .env.example /etc/bithumb-bot/bithumb-bot.env
+sudo cp .env.example /etc/bithumb-bot/bithumb-bot.live.env
 
 sudo cp deploy/systemd/bithumb-bot.service /etc/systemd/system/
 sudo cp deploy/systemd/bithumb-bot-healthcheck.service /etc/systemd/system/
@@ -65,6 +65,11 @@ sudo systemctl enable --now bithumb-bot-healthcheck.timer
 sudo systemctl enable --now bithumb-bot-backup.timer
 ```
 
+- 운영 전 반드시 3개 유닛의 env/DB 일관성을 점검한다.
+  - `bithumb-bot.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
+  - `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`: `EnvironmentFile=-/etc/bithumb-bot/bithumb-bot.env`
+  - 즉, 무인 운용 전 `DB_PATH`, notifier, 임계치가 두 env 파일에서 충돌하지 않는지 확인 필요.
+
 ## 4) 프리라이브(안전진입) 체크리스트
 
 아래는 **실주문 진입 전**에만 수행하는 체크리스트다. 하나라도 실패하면 live armed로 넘어가지 않는다.
@@ -73,18 +78,25 @@ sudo systemctl enable --now bithumb-bot-backup.timer
 
 1. `MODE`가 의도한 모드인지 확인 (`paper`/`live` 혼동 금지)
 2. `MODE=live`라면 다음 값이 의도대로 설정되었는지 재확인
-   - `MAX_ORDER_KRW=30000`
-   - `MAX_DAILY_LOSS_KRW=20000`
-   - `MAX_DAILY_ORDER_COUNT=6`
+   - `MAX_ORDER_KRW > 0`
+   - `MAX_DAILY_LOSS_KRW > 0`
+   - `MAX_DAILY_ORDER_COUNT > 0`
+   - `MAX_ORDERBOOK_SPREAD_BPS > 0` (유한값)
+   - `MAX_MARKET_SLIPPAGE_BPS > 0` (유한값)
+   - `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS > 0` (유한값)
 3. `MODE=live` 기본 진입은 `LIVE_DRY_RUN=true`로 시작
 4. 실주문 전환 직전에만 `LIVE_DRY_RUN=false` + `LIVE_REAL_ORDER_ARMED=true` 동시 설정
 5. `KILL_SWITCH=false` 확인 (비상 시에만 true)
-6. `KILL_SWITCH_LIQUIDATE=false` 확인 (청산 모드 미구현; true면 기동 실패)
-7. API 키 권한 확인
+6. `KILL_SWITCH_LIQUIDATE`는 필요 시 비상 flatten 시도용으로만 사용
+7. `.env.example` 복사본을 그대로 쓰지 말고 live 필수값을 명시적으로 덮어쓴다
+   - 기본/공유 DB 경로(`data/bithumb_1m.sqlite`) 금지
+   - paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`)는 live에서 unset
+8. API 키 권한 확인 (수동 점검)
    - 조회 + 주문(현물) 권한이 있는지 확인
    - 출금 권한은 비활성화 권장
-   - API 키는 `/etc/bithumb-bot/bithumb-bot.env`에만 저장하고 직전 주입 원칙 유지
-8. DB 분리 확인
+   - API 키는 env 파일에만 저장하고 직전 주입 원칙 유지
+   - IP whitelist(사용 시) 포함 권한 스코프는 코드가 자동 검증하지 않으므로 운영자가 직접 확인
+9. DB 분리 확인
    - `paper`와 `live`는 서로 다른 `DB_PATH` 사용
    - `MODE=live`에서 기본 DB 경로 사용 금지 규칙 준수
 
@@ -102,7 +114,7 @@ uv run python bot.py recovery-report
 
 판정:
 
-- `broker-diagnose`가 `overall_status=OK`가 아니면 실주문 금지
+- `broker-diagnose`가 `overall=PASS`가 아니면 실주문 금지 (`overall=WARN/FAIL` 모두 보류)
 - `health`에서 stale/error 이상이 있으면 원인 해소 전 진행 금지
 - `recovery-report`에서 unresolved/recovery-required가 남아 있으면 `reconcile` 후 재확인
 
@@ -141,18 +153,15 @@ uv run python bot.py broker-diagnose
 
 출력 요약 항목:
 
-- `connectivity`: 브로커/API 기본 연결 및 잔고 조회 성공 여부
-- `balances`: 가용/잠금 현금·자산
-- `market_rules`: 최소 수량/스텝/최소 주문금액/소수점 자릿수
-- `open_orders`: 원격 미체결 주문 개수
-- `recent_orders`: 최근 주문 조회 지원 여부 및 상태별 요약
-- `overall_status`: `OK` / `PARTIAL` / `FAILED`
+- 헤더: `[BROKER-READINESS]`, `pair=<PAIR>`
+- 요약: `summary: pass=<N> warn=<N> fail=<N> overall=PASS|WARN|FAIL`
+- 상세: `- [PASS|WARN|FAIL] <check name>: <detail>`
 
 운영 가이드:
 
-- `OK`: 라이브 전 점검 통과(다음 단계 진행 가능)
-- `PARTIAL`: 일부 조회 실패(네트워크/API 상태 확인 후 재시도 권장)
-- `FAILED`: 핵심 조회 실패(비정상). 원인 해소 전 재개/실주문 금지
+- `overall=PASS`: 라이브 전 점검 통과(다음 단계 진행 가능)
+- `overall=WARN`: 비치명 경고 존재(원인 확인 후 진행 여부 판단)
+- `overall=FAIL`: 핵심 조회 실패(비정상). 원인 해소 전 재개/실주문 금지
 
 주의:
 
@@ -246,8 +255,10 @@ uv run python bot.py resume --force
 리스크 사유(`KILL_SWITCH`, `DAILY_LOSS_LIMIT`, `POSITION_LOSS_LIMIT`)로 HALT된 경우 추가 규칙:
 
 - 포지션/오픈오더 등 노출(exposure)이 남아 있으면 `resume`은 거부된다.
-- 자동 청산은 수행되지 않으므로, 운영자가 먼저 노출을 수동으로 해소(포지션 평탄화/미체결 정리)해야 한다.
+- 엔진은 오픈주문 취소와 flatten을 시도하지만, 실패/미해결 시 운영자가 먼저 노출을 수동 해소해야 한다.
 - 해소 후 `recovery-report`와 `health`를 다시 확인하고 `resume`을 실행한다.
+
+`recover-order`는 `RECOVERY_REQUIRED` 상태 주문에만 적용되며, 완료 후에도 거래는 자동 재개되지 않는다.
 
 
 예시 (`uv run python bot.py recovery-report`):
@@ -315,6 +326,7 @@ uv run python bot.py resume
 운영 규칙:
 
 - `resume`이 거부되면 먼저 blocker를 해소한다 (`resume --force` 상시 사용 금지).
+- 재개 판정은 단순 `unresolved_count`가 아니라 `resume_blockers`(예: `STARTUP_SAFETY_GATE_BLOCKED`, `LAST_RECONCILE_FAILED`, `HALT_RISK_OPEN_POSITION`) 기반이다.
 - 리스크 사유 HALT(`KILL_SWITCH`, `DAILY_LOSS_LIMIT`, `POSITION_LOSS_LIMIT`)에서는 노출(포지션/오픈오더) 정리 전 재개가 제한될 수 있다.
 - 강제 재개(`resume --force`)는 조사/승인 로그를 남긴 경우에만 예외적으로 사용한다.
 
@@ -368,7 +380,7 @@ uv run python bot.py resume
 
 - `NOTIFIER_ENABLED=true`
 - `NOTIFIER_TIMEOUT_SEC=5`
-- 비밀키/URL은 `/etc/bithumb-bot/bithumb-bot.env`에만 저장하고 로그에 출력 금지.
+- 비밀키/URL은 env 파일에만 저장하고 로그에 출력 금지.
 
 ## 12) 백업 정책
 
@@ -378,11 +390,15 @@ uv run python bot.py resume
   - `BACKUP_DIR`
   - `BACKUP_RETENTION_DAYS`
   - `BACKUP_RETENTION_COUNT`
+  - `BACKUP_VERIFY_RESTORE=1` (백업 직후 `tools/verify_sqlite_restore.py`로 복구 읽기 검증)
 
 복구 예시:
 
 ```bash
 sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_120000.sqlite"
+
+# 백업 파일 복구 검증(권장)
+python3 tools/verify_sqlite_restore.py backups/bithumb_1m.sqlite.20260101_120000.sqlite
 ```
 
 ## 13) Live 모드 사전 점검 (fail-fast)
@@ -393,11 +409,12 @@ sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_1200
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
-- live preflight는 paper/test 성격 혼합 설정을 차단한다(예: 기본/공유 DB 경로, live 보호값 비활성화(0 이하))
+- live preflight는 paper/test 성격 혼합 설정을 차단한다(예: `START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`가 설정된 경우 거부)
+- `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`는 live에서 `>0` 유한값 필수
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
 - `LIVE_DRY_RUN=false`인 경우 `LIVE_REAL_ORDER_ARMED=true`를 명시해야 실주문 허용
 - notifier는 반드시 활성/설정되어야 함(`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`)
-- `KILL_SWITCH_LIQUIDATE=true`는 현재 미지원(설정 시 기동 실패)
+- `KILL_SWITCH_LIQUIDATE`는 live preflight 실패 사유가 아니며, kill switch 동작 시 flatten 시도 여부를 제어한다
 
 실주문 전환 절차(arming):
 
