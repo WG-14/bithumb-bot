@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Bithumb bot DB backup every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Unit=bithumb-bot-backup.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

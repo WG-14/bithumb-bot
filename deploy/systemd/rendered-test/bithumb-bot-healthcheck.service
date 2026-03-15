@@ -1,0 +1,9 @@
+[Unit]
+Description=Bithumb bot healthcheck
+After=bithumb-bot.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/c/dev/bithumb-bot
+Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env
+ExecStart=/usr/bin/env uv run python /mnt/c/dev/bithumb-bot/scripts/healthcheck.py

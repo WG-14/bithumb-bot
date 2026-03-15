@@ -4,6 +4,6 @@ After=bithumb-bot.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/workspace/bithumb-bot
-EnvironmentFile=-/etc/bithumb-bot/bithumb-bot.env
-ExecStart=/usr/bin/env bash -lc 'uv run python scripts/healthcheck.py'
+WorkingDirectory=@BITHUMB_BOT_ROOT@
+Environment=BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@
+ExecStart=/usr/bin/env uv run python @BITHUMB_BOT_ROOT@/scripts/healthcheck.py

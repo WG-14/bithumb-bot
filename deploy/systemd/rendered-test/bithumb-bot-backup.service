@@ -1,0 +1,8 @@
+[Unit]
+Description=Backup Bithumb bot SQLite database
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/c/dev/bithumb-bot
+Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env
+ExecStart=/usr/bin/env bash /mnt/c/dev/bithumb-bot/scripts/backup_sqlite.sh
