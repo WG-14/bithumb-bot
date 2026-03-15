@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .cli import main
+from .bootstrap import run_cli
 
 
 if __name__ == "__main__":
-    main()
+    run_cli()
