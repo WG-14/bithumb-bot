@@ -47,17 +47,24 @@
 - `scripts/healthcheck.py`: stale candle / 오류 횟수 / trading disabled 감지.
 - `scripts/backup_sqlite.sh`: sqlite `.backup` 기반 스냅샷 + 보관 정책.
 
+플랫폼 범위:
+
+- 운영 대상: Linux (예: Ubuntu, AWS EC2 Linux)
+- native Windows는 `run` lock(`fcntl`) 미지원으로 운영 대상 아님
+- Windows 사용자는 WSL2(Linux)에서 실행
+
 ## 3) 설치 및 활성화
 
 ```bash
 sudo mkdir -p /etc/bithumb-bot
 sudo cp .env.example /etc/bithumb-bot/bithumb-bot.live.env
 
-sudo cp deploy/systemd/bithumb-bot.service /etc/systemd/system/
-sudo cp deploy/systemd/bithumb-bot-healthcheck.service /etc/systemd/system/
-sudo cp deploy/systemd/bithumb-bot-healthcheck.timer /etc/systemd/system/
-sudo cp deploy/systemd/bithumb-bot-backup.service /etc/systemd/system/
-sudo cp deploy/systemd/bithumb-bot-backup.timer /etc/systemd/system/
+./deploy/systemd/render_units.sh /tmp/bithumb-systemd-units
+sudo cp /tmp/bithumb-systemd-units/bithumb-bot.service /etc/systemd/system/
+sudo cp /tmp/bithumb-systemd-units/bithumb-bot-healthcheck.service /etc/systemd/system/
+sudo cp /tmp/bithumb-systemd-units/bithumb-bot-healthcheck.timer /etc/systemd/system/
+sudo cp /tmp/bithumb-systemd-units/bithumb-bot-backup.service /etc/systemd/system/
+sudo cp /tmp/bithumb-systemd-units/bithumb-bot-backup.timer /etc/systemd/system/
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now bithumb-bot.service
@@ -67,8 +74,11 @@ sudo systemctl enable --now bithumb-bot-backup.timer
 
 - 운영 전 반드시 3개 유닛의 env/DB 일관성을 점검한다.
   - `bithumb-bot.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
-  - `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`: `EnvironmentFile=-/etc/bithumb-bot/bithumb-bot.env`
-  - 즉, 무인 운용 전 `DB_PATH`, notifier, 임계치가 두 env 파일에서 충돌하지 않는지 확인 필요.
+  - `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
+  - 세 유닛이 같은 env 파일을 보므로 `DB_PATH`, notifier, 임계치를 단일 파일 기준으로 관리.
+- healthcheck는 fail-fast 정책이다.
+  - `BITHUMB_ENV_FILE`이 비어 있거나 파일이 없으면 즉시 실패
+  - env 파일 내 `DB_PATH`가 비어 있어도 실패(기본 DB fallback 금지)
 
 ## 4) 프리라이브(안전진입) 체크리스트
 
@@ -105,11 +115,11 @@ sudo systemctl enable --now bithumb-bot-backup.timer
 아래 순서를 **그대로** 실행한다.
 
 ```bash
-uv run python bot.py broker-diagnose
-uv run python bot.py health
-uv run python bot.py recovery-report
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
+uv run bithumb-bot broker-diagnose
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
 ```
 
 판정:
@@ -125,8 +135,8 @@ sudo systemctl restart bithumb-bot.service
 sudo systemctl status bithumb-bot.service
 sudo journalctl -u bithumb-bot.service -n 100 --no-pager
 
-uv run python bot.py health
-uv run python bot.py recovery-report
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
 ```
 
 - 서비스가 `active (running)`인지 확인.
@@ -148,7 +158,7 @@ sudo systemctl list-timers | rg 'bithumb-bot-(healthcheck|backup)'
 실주문 전/장애 조사 시 **주문 없이** 거래소 연동 상태를 빠르게 점검한다.
 
 ```bash
-uv run python bot.py broker-diagnose
+uv run bithumb-bot broker-diagnose
 ```
 
 출력 요약 항목:
@@ -175,7 +185,7 @@ uv run python bot.py broker-diagnose
 ### A. 즉시 일시중지
 
 ```bash
-uv run python bot.py pause
+uv run bithumb-bot pause
 ```
 
 - 신규 주문 차단이 최우선.
@@ -184,7 +194,7 @@ uv run python bot.py pause
 ### B. 오픈 주문 정리
 
 ```bash
-uv run python bot.py cancel-open-orders
+uv run bithumb-bot cancel-open-orders
 ```
 
 - live 모드 원격 미체결 주문을 정리한다.
@@ -193,7 +203,7 @@ uv run python bot.py cancel-open-orders
 ### C. 재개
 
 ```bash
-uv run python bot.py resume
+uv run bithumb-bot resume
 ```
 
 - blocker가 남아 있으면 재개하지 않는다.
@@ -205,7 +215,7 @@ uv run python bot.py resume
 
 ```bash
 # 1) 신규 거래 즉시 중지
-uv run python bot.py pause
+uv run bithumb-bot pause
 
 # 2) (선택) 환경에서 kill switch 활성화 후 서비스 재시작
 # KILL_SWITCH=true
@@ -218,8 +228,8 @@ uv run python bot.py pause
 ### B. 상태 파악 (Pause 상태에서)
 
 ```bash
-uv run python bot.py health
-uv run python bot.py recovery-report
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
 sudo journalctl -u bithumb-bot.service -n 200 --no-pager
 ```
 
@@ -233,23 +243,23 @@ sudo journalctl -u bithumb-bot.service -n 200 --no-pager
 
 ```bash
 # live 모드에서 원격 미체결 일괄 취소
-uv run python bot.py cancel-open-orders
+uv run bithumb-bot cancel-open-orders
 
 # 거래소/로컬 원장 정합성 점검
-uv run python bot.py reconcile
+uv run bithumb-bot reconcile
 
 # 복구 상태 재확인
-uv run python bot.py recovery-report
+uv run bithumb-bot recovery-report
 ```
 
 ### D. 재개 (Recovery / Resume)
 
 ```bash
 # 보수적 재개 (이상 상태가 있으면 자동 거부)
-uv run python bot.py resume
+uv run bithumb-bot resume
 
 # 마지막 수단: 운영자 책임 하 강제 재개
-uv run python bot.py resume --force
+uv run bithumb-bot resume --force
 ```
 
 리스크 사유(`KILL_SWITCH`, `DAILY_LOSS_LIMIT`, `POSITION_LOSS_LIMIT`)로 HALT된 경우 추가 규칙:
@@ -261,7 +271,7 @@ uv run python bot.py resume --force
 `recover-order`는 `RECOVERY_REQUIRED` 상태 주문에만 적용되며, 완료 후에도 거래는 자동 재개되지 않는다.
 
 
-예시 (`uv run python bot.py recovery-report`):
+예시 (`uv run bithumb-bot recovery-report`):
 
 ```text
 [P2] resume_eligibility
@@ -279,9 +289,9 @@ uv run python bot.py resume --force
 2. `MODE=live`, `LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true` 확인
 3. 1회 주문/체결 발생을 모니터링 (주문 과다 유도 금지)
 4. 즉시 다음 확인
-   - `uv run python bot.py health`
-   - `uv run python bot.py recovery-report`
-   - `uv run python bot.py reconcile`
+   - `uv run bithumb-bot health`
+   - `uv run bithumb-bot recovery-report`
+   - `uv run bithumb-bot reconcile`
 5. `orders/fills/trades`에 1회 사이클이 정상 기록되면 스모크 통과
 6. 이상 징후 시 `pause` -> `cancel-open-orders` -> 원인 분석 후 재진입
 
@@ -290,13 +300,13 @@ uv run python bot.py resume --force
 크래시/강제 재시작 이후에는 아래를 모두 확인하기 전 재개하지 않는다.
 
 1. `journalctl`로 마지막 예외 원인이 해소되었는지 확인
-2. `uv run python bot.py recovery-report`에서 아래가 0인지 확인
+2. `uv run bithumb-bot recovery-report`에서 아래가 0인지 확인
    - `unresolved_orders`
    - `recovery_required_orders`
-3. `uv run python bot.py reconcile` 후 다시 `recovery-report` 실행
+3. `uv run bithumb-bot reconcile` 후 다시 `recovery-report` 실행
 4. live 모드면 거래소 오픈 주문/체결과 로컬 `orders/fills/trades` 샘플 대조
-5. `uv run python bot.py health`에서 stale/error 이상 없음 확인
-6. `uv run python bot.py resume`로 재개 후 30~60분 모니터링
+5. `uv run bithumb-bot health`에서 stale/error 이상 없음 확인
+6. `uv run bithumb-bot resume`로 재개 후 30~60분 모니터링
 
 ### 재시작/복구 표준 플로우 (운영자용 고정 절차)
 
@@ -304,23 +314,23 @@ uv run python bot.py resume --force
 
 ```bash
 # 0) (필요 시) 즉시 신규 주문 차단
-uv run python bot.py pause
+uv run bithumb-bot pause
 
 # 1) 상태 확인
-uv run python bot.py health
-uv run python bot.py recovery-report
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
 
 # 2) 정합성 복구
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
 
 # 3) 미체결 노출이 남으면 정리 후 재검증
-uv run python bot.py cancel-open-orders
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
+uv run bithumb-bot cancel-open-orders
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
 
 # 4) blocker 해소 시에만 재개
-uv run python bot.py resume
+uv run bithumb-bot resume
 ```
 
 운영 규칙:
@@ -341,22 +351,22 @@ uv run python bot.py resume
 
 ### B. 중복 주문 의심
 
-1. `uv run python bot.py orders --limit 100`로 최근 주문 상태 확인.
+1. `uv run bithumb-bot orders --limit 100`로 최근 주문 상태 확인.
 2. 동일 시점/동일 방향의 order가 중복인지 확인.
 3. live 모드면 거래소 체결 내역과 `fills` 비교.
-4. 필요시 봇 일시 중지: `uv run python bot.py pause`.
+4. 필요시 봇 일시 중지: `uv run bithumb-bot pause`.
 5. 수동 정리 후 재기동/재개.
 
 ### C. 잔고 불일치
 
-1. `uv run python bot.py audit` 실행.
-2. 불일치 시 `uv run python bot.py pnl --days 1` 및 `trades`/`fills` 대조.
+1. `uv run bithumb-bot audit` 실행.
+2. 불일치 시 `uv run bithumb-bot pnl --days 1` 및 `trades`/`fills` 대조.
 3. live 모드면 브로커 잔고 API 기준으로 reconcile 수행.
 4. 원인 확인 전 신규 주문 중단.
 
 ### D. 데이터 누락 (캔들 stale / sync 실패)
 
-1. `uv run python bot.py health` 확인 (`last_candle_age_sec`).
+1. `uv run bithumb-bot health` 확인 (`last_candle_age_sec`).
 2. `journalctl`에서 `sync failed`, `stale candle` 로그 확인.
 3. 네트워크/API 상태 확인 후 `sudo systemctl restart bithumb-bot.service`.
 4. 재발 시 `EVERY`, `INTERVAL`, rate limit 설정 완화.
@@ -430,18 +440,18 @@ Live 보수 preset 예시(소액 계정 + 알림 포함):
 MODE=paper DB_PATH=data/paper.small.safe.sqlite \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
-uv run python bot.py run
+uv run bithumb-bot run
 
 # 2) live dry-run (실주문 API 미호출)
 MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
-uv run python bot.py run
+uv run bithumb-bot run
 
 # 3) 실주문 arming (운영자 명시 승인 후 직전에만)
 MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
-uv run python bot.py run
+uv run bithumb-bot run
 ```

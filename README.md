@@ -6,23 +6,59 @@
 
 ```bash
 uv sync
-# 로컬 개발 시에만 .env를 사용하세요. 배포/서버에서는 환경변수를 외부에서 주입하는 것을 권장합니다.
-cp .env.example .env  # 없으면 생략 가능
 uv run pytest -q
+```
+
+## CLI/엔트리포인트 (canonical)
+
+- canonical CLI: `uv run bithumb-bot <command>`
+  - `pyproject.toml`의 `project.scripts`에 등록된 공식 엔트리포인트입니다.
+- 호환 엔트리포인트(동일 동작):
+  - `uv run python -m bithumb_bot <command>`
+  - `uv run python bot.py <command>`
+
+## env 로딩 규칙 (코드 기준)
+
+- 기본적으로 런타임은 `.env`를 **자동 로딩하지 않습니다**.
+- env 파일 로딩은 `BITHUMB_ENV_FILE*` 계열을 명시했을 때만 수행됩니다.
+  - `BITHUMB_ENV_FILE=/path/to/file.env` (최우선)
+  - `MODE=live`이면 `BITHUMB_ENV_FILE_LIVE`
+  - `MODE=paper`/`test`이면 `BITHUMB_ENV_FILE_PAPER`
+- healthcheck 스크립트는 fail-fast 정책으로 **명시적 env 파일이 없으면 실패**합니다.
+
+로컬에서 `.env`를 쓰려면 명시적으로 지정하세요.
+
+```bash
+BITHUMB_ENV_FILE=.env uv run bithumb-bot health
 ```
 
 ## 자주 쓰는 명령
 
 ```bash
-uv run python bot.py sync
-uv run python bot.py ticker
-uv run python bot.py candles --limit 5
-uv run python bot.py signal --short 7 --long 30
-uv run python bot.py explain --short 7 --long 30
-uv run python bot.py status
-uv run python bot.py trades --limit 20
-uv run python bot.py run --short 7 --long 30
+uv run bithumb-bot sync
+uv run bithumb-bot ticker
+uv run bithumb-bot candles --limit 5
+uv run bithumb-bot signal --short 7 --long 30
+uv run bithumb-bot explain --short 7 --long 30
+uv run bithumb-bot status
+uv run bithumb-bot trades --limit 20
+uv run bithumb-bot run --short 7 --long 30
 ```
+
+## 경로 해석 기준 (프로젝트 루트)
+
+- `DB_PATH`, `RUN_LOCK_PATH`가 상대경로이면 **프로젝트 루트 기준**으로 절대경로 변환됩니다.
+- 기본값:
+  - `DB_PATH=data/bithumb_1m.sqlite`
+  - `RUN_LOCK_PATH=data/locks/bithumb-bot-run-<mode>.lock`
+- 따라서 systemd/cron처럼 작업 디렉터리가 바뀔 수 있는 환경에서도, 상대경로 사용 시 기준은 프로젝트 루트로 고정됩니다.
+
+## run lock 동작
+
+- `run` 명령은 시작 시 run lock을 획득하며, 이미 다른 run loop가 실행 중이면 즉시 실패합니다.
+- lock 경로는 `RUN_LOCK_PATH`(미설정 시 mode별 기본 경로)입니다.
+- lock 충돌 시 현재 owner PID/host/생성시각/lock age 정보를 포함해 에러를 출력합니다.
+- native Windows에서는 `fcntl` 미지원으로 run lock이 동작하지 않으며, 에러 메시지대로 WSL/Linux에서 실행해야 합니다.
 
 ## 주요 환경 변수
 
@@ -66,7 +102,7 @@ uv run python bot.py run --short 7 --long 30
 MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
-uv run python bot.py run
+uv run bithumb-bot run
 ```
 
 실주문 전환(운영자 명시 승인 후에만):
@@ -76,17 +112,17 @@ MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
-uv run python bot.py run
+uv run bithumb-bot run
 ```
 
 paper/live DB 분리 예시:
 
 ```bash
 # paper 검증
-MODE=paper DB_PATH=data/paper.small.safe.sqlite uv run python bot.py run
+MODE=paper DB_PATH=data/paper.small.safe.sqlite uv run bithumb-bot run
 
 # live 검증/운영
-MODE=live DB_PATH=data/live.small.safe.sqlite uv run python bot.py run
+MODE=live DB_PATH=data/live.small.safe.sqlite uv run bithumb-bot run
 ```
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.
@@ -105,9 +141,9 @@ MODE=live DB_PATH=data/live.small.safe.sqlite uv run python bot.py run
 
 ## 라이브 시작 전 체크리스트 (Startup)
 
-1. `.env` 또는 `/etc/bithumb-bot/bithumb-bot.live.env`(메인 서비스 기준)에 라이브 안전값이 반영되었는지 확인
-2. `uv run python bot.py health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
-3. `uv run python bot.py recovery-report`에서 미해결 주문/복구 필요 건수와 오래된 미해결 주문 요약(top 5) 확인
+1. `BITHUMB_ENV_FILE`(또는 `BITHUMB_ENV_FILE_LIVE`)가 가리키는 env 파일에 라이브 안전값이 반영되었는지 확인
+2. `uv run bithumb-bot health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
+3. `uv run bithumb-bot recovery-report`에서 미해결 주문/복구 필요 건수와 오래된 미해결 주문 요약(top 5) 확인
 4. 처음 라이브 전환 시 `MODE=live`, `LIVE_DRY_RUN=true`로 기동 후 로그/알림 확인
 5. API 키를 활성화하기 전 `pause/resume/reconcile` 명령이 정상 동작하는지 점검
 6. 실주문 전환(`LIVE_DRY_RUN=false`) 직후 30~60분 수동 모니터링
@@ -116,20 +152,20 @@ MODE=live DB_PATH=data/live.small.safe.sqlite uv run python bot.py run
 
 ```bash
 # 즉시 신규 거래 중지
-uv run python bot.py pause
+uv run bithumb-bot pause
 
 # 상태 점검
-uv run python bot.py recovery-report
-uv run python bot.py health
+uv run bithumb-bot recovery-report
+uv run bithumb-bot health
 
 # (live) 원격 오픈 주문 일괄 취소
-uv run python bot.py cancel-open-orders
+uv run bithumb-bot cancel-open-orders
 
 # 정합성 점검
-uv run python bot.py reconcile
+uv run bithumb-bot reconcile
 
 # 보수적 재개(문제 있으면 자동 거부)
-uv run python bot.py resume
+uv run bithumb-bot resume
 ```
 
 - 긴급 시에는 `pause`를 먼저 실행하고, 원인 파악 전 `resume --force`는 피하세요.
@@ -138,10 +174,10 @@ uv run python bot.py resume
 ## 크래시 후 재개 전 필수 확인
 
 1. `journalctl -u bithumb-bot.service -n 200 --no-pager`로 마지막 예외/네트워크 오류 원인 확인
-2. `uv run python bot.py recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인 (0이 아니면 오래된 주문 요약 목록으로 우선 대응 대상 확인)
-3. `uv run python bot.py reconcile` 실행 후 다시 `recovery-report` 확인
+2. `uv run bithumb-bot recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인 (0이 아니면 오래된 주문 요약 목록으로 우선 대응 대상 확인)
+3. `uv run bithumb-bot reconcile` 실행 후 다시 `recovery-report` 확인
 4. live 모드면 거래소 오픈 주문/체결 내역과 로컬 `orders/fills`가 일치하는지 샘플 대조
-5. `uv run python bot.py health` 정상 확인 후 `uv run python bot.py resume`
+5. `uv run bithumb-bot health` 정상 확인 후 `uv run bithumb-bot resume`
 
 ## 24/7 운영(systemd + healthcheck + backup)
 
@@ -152,12 +188,20 @@ uv run python bot.py resume
 - 운영 절차 문서: `docs/RUNBOOK.md`
 - 제한적 무인 운용 체크리스트(요약): `docs/LIMITED_UNATTENDED_CHECKLIST.md`
 - 백업 스크립트: `scripts/backup_sqlite.sh`
-- `bithumb-bot.service`는 `/etc/bithumb-bot/bithumb-bot.live.env`를 사용하고, `bithumb-bot-healthcheck.service` / `bithumb-bot-backup.service`는 `/etc/bithumb-bot/bithumb-bot.env`를 사용하므로 `DB_PATH`, notifier, 임계치가 서로 일치하는지 함께 점검합니다.
+- 세 유닛(`bithumb-bot.service`, `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`) 모두 `BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@`를 사용하도록 템플릿이 작성되어 있습니다. 설치 시 `render_units.sh`로 실제 경로를 치환한 뒤 배포하세요.
 
 빠른 확인:
 
 ```bash
 sudo systemctl restart bithumb-bot.service
-uv run python bot.py health
+uv run bithumb-bot health
 ./scripts/backup_sqlite.sh
 ```
+
+## 실행 환경 지원 범위
+
+- 권장/지원: Linux (예: Ubuntu, AWS EC2 Linux)
+  - systemd 운영은 Linux에서만 전제합니다.
+- Windows:
+  - native Windows는 run lock(`fcntl`) 미지원으로 `run` 루프 운영 대상이 아닙니다.
+  - 개발/실행은 WSL2(Linux 사용자공간)에서 수행하세요.
