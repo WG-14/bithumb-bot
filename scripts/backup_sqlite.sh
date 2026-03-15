@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB_PATH="${DB_PATH:-data/bithumb_1m.sqlite}"
-BACKUP_DIR="${BACKUP_DIR:-backups}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+
+resolve_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "$PROJECT_ROOT/$path"
+  fi
+}
+
+DB_PATH="$(resolve_path "${DB_PATH:-data/bithumb_1m.sqlite}")"
+BACKUP_DIR="$(resolve_path "${BACKUP_DIR:-backups}")"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-30}"
 
@@ -41,7 +53,7 @@ fi
 
 
 if [[ "$VERIFY_RESTORE" == "1" ]]; then
-  python3 tools/verify_sqlite_restore.py "$backup_path"
+  python3 "$PROJECT_ROOT/tools/verify_sqlite_restore.py" "$backup_path"
 fi
 
 echo "[BACKUP] created $backup_path"
