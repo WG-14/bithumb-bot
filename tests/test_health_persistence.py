@@ -20,6 +20,15 @@ def _set_tmp_db(tmp_path: Path) -> Path:
     return db_path
 
 
+def _write_env_file(tmp_path: Path, *, db_path: Path | None) -> Path:
+    env_file = tmp_path / "healthcheck.env"
+    lines: list[str] = ["MODE=paper"]
+    if db_path is not None:
+        lines.append(f"DB_PATH={db_path}")
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_file
+
+
 def test_health_state_written_by_one_component_read_by_another(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -499,6 +508,7 @@ def test_reconcile_result_persisted_on_success_and_failure(tmp_path):
 
 def test_healthcheck_reports_disabled_state_from_persistent_store(tmp_path):
     db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
 
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
@@ -506,7 +516,7 @@ def test_healthcheck_reports_disabled_state_from_persistent_store(tmp_path):
     runtime_state.disable_trading_until(999.0, reason="recovery required")
 
     env = dict(os.environ)
-    env["DB_PATH"] = str(db_path)
+    env["BITHUMB_ENV_FILE"] = str(env_file)
     env["PYTHONPATH"] = str(Path.cwd() / "src")
     env["NOTIFIER_ENABLED"] = "false"
 
@@ -526,12 +536,13 @@ def test_healthcheck_reports_disabled_state_from_persistent_store(tmp_path):
 
 def test_healthcheck_reports_reconcile_failure(tmp_path):
     db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
 
     runtime_state.enable_trading()
     runtime_state.record_reconcile_result(success=False, error="reconcile blew up")
 
     env = dict(os.environ)
-    env["DB_PATH"] = str(db_path)
+    env["BITHUMB_ENV_FILE"] = str(env_file)
     env["PYTHONPATH"] = str(Path.cwd() / "src")
     env["NOTIFIER_ENABLED"] = "false"
 
@@ -549,6 +560,7 @@ def test_healthcheck_reports_reconcile_failure(tmp_path):
 
 def test_healthcheck_healthy_default_path(tmp_path):
     db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
 
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
@@ -556,7 +568,7 @@ def test_healthcheck_healthy_default_path(tmp_path):
     runtime_state.record_reconcile_result(success=True)
 
     env = dict(os.environ)
-    env["DB_PATH"] = str(db_path)
+    env["BITHUMB_ENV_FILE"] = str(env_file)
     env["RUN_LOCK_PATH"] = str(tmp_path / "locks" / "healthcheck.lock")
     env["PYTHONPATH"] = str(Path.cwd() / "src")
     env["NOTIFIER_ENABLED"] = "false"
@@ -572,6 +584,53 @@ def test_healthcheck_healthy_default_path(tmp_path):
     assert proc.returncode == 0
     assert env["RUN_LOCK_PATH"] in proc.stdout
     assert "[HEALTHCHECK] OK" in proc.stdout
+
+
+def test_healthcheck_fails_when_explicit_env_file_is_missing(tmp_path):
+    db_path = tmp_path / "data" / "bithumb_1m.sqlite"
+
+    env = dict(os.environ)
+    env.pop("BITHUMB_ENV_FILE", None)
+    env.pop("BITHUMB_ENV_FILE_LIVE", None)
+    env.pop("BITHUMB_ENV_FILE_PAPER", None)
+    env.pop("DB_PATH", None)
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    env["NOTIFIER_ENABLED"] = "false"
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/healthcheck.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "explicit env file is required" in proc.stdout
+    assert not db_path.exists()
+
+
+def test_healthcheck_fails_when_db_path_is_missing_or_empty(tmp_path):
+    env_file = _write_env_file(tmp_path, db_path=None)
+    db_path = tmp_path / "data" / "bithumb_1m.sqlite"
+
+    env = dict(os.environ)
+    env["BITHUMB_ENV_FILE"] = str(env_file)
+    env.pop("DB_PATH", None)
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    env["NOTIFIER_ENABLED"] = "false"
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/healthcheck.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "DB_PATH is missing or empty" in proc.stdout
+    assert not db_path.exists()
 
 
 def test_cancel_open_orders_result_is_persisted(tmp_path):

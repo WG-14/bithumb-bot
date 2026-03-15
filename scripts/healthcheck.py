@@ -5,13 +5,75 @@ import os
 import time
 from pathlib import Path
 
-from bithumb_bot.config import settings
-from bithumb_bot.notifier import notify
-from bithumb_bot.run_lock import read_run_lock_status
-from bithumb_bot.runtime_state import refresh_open_order_health, snapshot
+
+def _resolve_explicit_env_file() -> str | None:
+    explicit_env_file = os.getenv("BITHUMB_ENV_FILE")
+    if explicit_env_file:
+        return explicit_env_file
+
+    normalized_mode = (os.getenv("MODE") or "").strip().lower()
+    if normalized_mode == "live":
+        return os.getenv("BITHUMB_ENV_FILE_LIVE")
+    if normalized_mode in {"paper", "test"}:
+        return os.getenv("BITHUMB_ENV_FILE_PAPER")
+    return None
+
+
+def _load_env_file(env_file: Path) -> None:
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _validate_healthcheck_env() -> str | None:
+    env_file_value = _resolve_explicit_env_file()
+    if env_file_value is None or not env_file_value.strip():
+        return (
+            "healthcheck config error: explicit env file is required; "
+            "set BITHUMB_ENV_FILE (or BITHUMB_ENV_FILE_LIVE/BITHUMB_ENV_FILE_PAPER)"
+        )
+
+    env_file = Path(env_file_value).expanduser()
+    if not env_file.exists() or not env_file.is_file():
+        return f"healthcheck config error: env file not found: {env_file}"
+
+    _load_env_file(env_file)
+
+    db_path_env = os.getenv("DB_PATH")
+    if db_path_env is None or not db_path_env.strip():
+        return (
+            f"healthcheck config error: DB_PATH is missing or empty in env file {env_file}; "
+            "refusing to fall back to default DB"
+        )
+
+    return None
 
 
 def main() -> int:
+    env_error = _validate_healthcheck_env()
+    if env_error:
+        print(f"[HEALTHCHECK] FAIL {env_error}")
+        return 1
+
+    from bithumb_bot.config import settings
+    from bithumb_bot.notifier import notify
+    from bithumb_bot.run_lock import read_run_lock_status
+    from bithumb_bot.runtime_state import refresh_open_order_health, snapshot
+
     stale_threshold_sec = float(os.getenv("HEALTH_MAX_CANDLE_AGE_SEC", "180"))
     error_threshold = int(os.getenv("HEALTH_MAX_ERROR_COUNT", "3"))
 
