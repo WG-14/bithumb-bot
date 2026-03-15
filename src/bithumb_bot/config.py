@@ -16,6 +16,7 @@ PAPER_ONLY_ENV_KEYS = (
     "FEE_RATE",
     "SLIPPAGE_BPS",
 )
+ALLOWED_RUNTIME_MODES = ("paper", "live")
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -107,6 +108,20 @@ settings = Settings()
 
 class LiveModeValidationError(ValueError):
     pass
+
+
+class ModeValidationError(ValueError):
+    pass
+
+
+def validate_mode_or_raise(mode: str) -> None:
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode in ALLOWED_RUNTIME_MODES:
+        return
+    allowed = ", ".join(ALLOWED_RUNTIME_MODES)
+    raise ModeValidationError(
+        f"invalid MODE={mode!r}; allowed values: {allowed}"
+    )
 
 
 def validate_live_mode_preflight(cfg: Settings) -> None:

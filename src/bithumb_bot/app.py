@@ -1,4 +1,10 @@
-from .config import LiveModeValidationError, settings, validate_live_mode_preflight
+from .config import (
+    LiveModeValidationError,
+    ModeValidationError,
+    settings,
+    validate_live_mode_preflight,
+    validate_mode_or_raise,
+)
 from .risk import evaluate_buy_guardrails
 from .broker.paper import paper_execute
 from .strategy.sma import compute_signal
@@ -2030,6 +2036,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--long", type=int, default=SMA_LONG)
 
     args = p.parse_args(argv)
+
+    try:
+        validate_mode_or_raise(settings.MODE)
+    except ModeValidationError as e:
+        print(f"[MODE] {e}")
+        raise SystemExit(1) from e
 
     if args.cmd in (None, "ticker"):
         cmd_ticker()
