@@ -3,12 +3,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .config import settings
+from .config import resolve_db_path, settings
 from .sqlite_resilience import configure_connection
 
 
 def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
-    path = db_path or settings.DB_PATH
+    path = resolve_db_path(db_path or settings.DB_PATH)
 
     try:
         p = Path(path)

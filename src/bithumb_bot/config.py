@@ -3,11 +3,13 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from .notifier import is_configured as notifier_is_configured
 
 
 DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
@@ -19,6 +21,13 @@ PAPER_ONLY_ENV_KEYS = (
 def parse_bool_env(key: str, default: str = "false") -> bool:
     v = os.getenv(key, default)
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def resolve_db_path(path: str) -> str:
+    p = Path(path)
+    if str(p) == ":memory:" or p.is_absolute():
+        return str(p)
+    return str((PROJECT_ROOT / p).resolve())
 
 
 @dataclass(frozen=True)
@@ -36,7 +45,7 @@ class Settings:
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
 
     # storage
-    DB_PATH: str = os.getenv("DB_PATH", DEFAULT_DB_PATH)
+    DB_PATH: str = resolve_db_path(os.getenv("DB_PATH", DEFAULT_DB_PATH))
     DB_BUSY_TIMEOUT_MS: int = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
     DB_LOCK_RETRY_COUNT: int = int(os.getenv("DB_LOCK_RETRY_COUNT", "2"))
     DB_LOCK_RETRY_BACKOFF_MS: int = int(os.getenv("DB_LOCK_RETRY_BACKOFF_MS", "50"))
@@ -94,8 +103,8 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     if db_path_env is None or not db_path_env.strip():
         issues.append("DB_PATH must be explicitly set when MODE=live")
     else:
-        configured_db_path = os.path.abspath(os.path.normpath(cfg.DB_PATH))
-        default_db_path = os.path.abspath(os.path.normpath(DEFAULT_DB_PATH))
+        configured_db_path = resolve_db_path(cfg.DB_PATH)
+        default_db_path = resolve_db_path(DEFAULT_DB_PATH)
         if configured_db_path == default_db_path:
             issues.append(
                 "DB_PATH must not point to the default paper/shared DB path "

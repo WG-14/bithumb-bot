@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .config import settings
+from .config import resolve_db_path, settings
 from .sqlite_resilience import configure_connection
 
 
@@ -12,7 +12,7 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     """
     Single place to open sqlite connection with sane defaults.
     """
-    path = db_path or settings.DB_PATH
+    path = resolve_db_path(db_path or settings.DB_PATH)
     # ensure parent directory exists (if path is a file path)
     try:
         p = Path(path)
