@@ -10,6 +10,9 @@ from .notifier import is_configured as notifier_is_configured
 
 DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+LIVE_DB_PATH_REQUIRED_MSG = (
+    "DB_PATH must be explicitly set when MODE=live; live env 파일에 DB_PATH를 명시하라"
+)
 PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
@@ -29,6 +32,23 @@ def resolve_db_path(path: str) -> str:
     if str(p) == ":memory:" or p.is_absolute():
         return str(p)
     return str((PROJECT_ROOT / p).resolve())
+
+
+class LiveModeValidationError(ValueError):
+    pass
+
+
+class ModeValidationError(ValueError):
+    pass
+
+
+def resolve_db_path_from_env(mode: str) -> str:
+    raw_db_path = os.getenv("DB_PATH")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode == "live" and (raw_db_path is None or not raw_db_path.strip()):
+        raise LiveModeValidationError(LIVE_DB_PATH_REQUIRED_MSG)
+    selected_db_path = raw_db_path if raw_db_path and raw_db_path.strip() else DEFAULT_DB_PATH
+    return resolve_db_path(selected_db_path)
 
 
 def default_run_lock_path(mode: str) -> str:
@@ -58,7 +78,7 @@ class Settings:
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
 
     # storage
-    DB_PATH: str = resolve_db_path(os.getenv("DB_PATH", DEFAULT_DB_PATH))
+    DB_PATH: str = resolve_db_path_from_env(os.getenv("MODE", "paper"))
     RUN_LOCK_PATH: str = resolve_run_lock_path(
         os.getenv("RUN_LOCK_PATH", default_run_lock_path(os.getenv("MODE", "paper")))
     )
@@ -106,14 +126,6 @@ class Settings:
 settings = Settings()
 
 
-class LiveModeValidationError(ValueError):
-    pass
-
-
-class ModeValidationError(ValueError):
-    pass
-
-
 def validate_mode_or_raise(mode: str) -> None:
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode in ALLOWED_RUNTIME_MODES:
@@ -131,7 +143,7 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     issues: list[str] = []
     db_path_env = os.getenv("DB_PATH")
     if db_path_env is None or not db_path_env.strip():
-        issues.append("DB_PATH must be explicitly set when MODE=live")
+        issues.append(LIVE_DB_PATH_REQUIRED_MSG)
     else:
         configured_db_path = resolve_db_path(cfg.DB_PATH)
         default_db_path = resolve_db_path(DEFAULT_DB_PATH)
