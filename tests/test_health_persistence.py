@@ -557,6 +557,7 @@ def test_healthcheck_healthy_default_path(tmp_path):
 
     env = dict(os.environ)
     env["DB_PATH"] = str(db_path)
+    env["RUN_LOCK_PATH"] = str(tmp_path / "locks" / "healthcheck.lock")
     env["PYTHONPATH"] = str(Path.cwd() / "src")
     env["NOTIFIER_ENABLED"] = "false"
 
@@ -569,6 +570,7 @@ def test_healthcheck_healthy_default_path(tmp_path):
     )
 
     assert proc.returncode == 0
+    assert env["RUN_LOCK_PATH"] in proc.stdout
     assert "[HEALTHCHECK] OK" in proc.stdout
 
 

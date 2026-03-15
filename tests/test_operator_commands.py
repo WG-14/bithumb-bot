@@ -2094,7 +2094,7 @@ def test_cmd_run_notifies_run_lock_conflict(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", lambda: _RaiseOnEnter())
+    monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", lambda *_args, **_kwargs: _RaiseOnEnter())
 
     with pytest.raises(SystemExit) as exc:
         cmd_run(5, 20)

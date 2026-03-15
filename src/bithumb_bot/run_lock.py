@@ -7,7 +7,6 @@ from pathlib import Path
 import logging
 import os
 import socket
-import tempfile
 import time
 from typing import Iterator
 
@@ -73,7 +72,12 @@ class RunLockStatus:
 
 
 def _default_lock_path() -> Path:
-    return Path(tempfile.gettempdir()) / "bithumb-bot-run.lock"
+    configured_path = os.getenv("RUN_LOCK_PATH")
+    if configured_path:
+        return Path(configured_path)
+
+    mode = (os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
+    return Path(f"/tmp/bithumb-bot-run-{mode}.lock")
 
 
 def _pid_is_running(pid: int) -> bool:

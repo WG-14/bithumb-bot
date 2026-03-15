@@ -72,3 +72,18 @@ def test_settings_db_path_is_resolved_from_project_root(tmp_path, monkeypatch):
         object.__setattr__(config.settings, "DB_PATH", old_db_path)
 
     assert (project_root / "data" / "test.sqlite").exists()
+
+
+def test_relative_run_lock_path_is_project_root_based(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.setattr(config, "PROJECT_ROOT", project_root)
+
+    resolved = config.resolve_run_lock_path("data/locks/instance-a.lock")
+
+    assert resolved == str((project_root / "data" / "locks" / "instance-a.lock").resolve())
+
+
+def test_default_run_lock_path_is_mode_scoped():
+    assert config.default_run_lock_path("paper") == "data/locks/bithumb-bot-run-paper.lock"
+    assert config.default_run_lock_path("live") == "data/locks/bithumb-bot-run-live.lock"

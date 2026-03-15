@@ -332,7 +332,7 @@ def cmd_run(short_n: int, long_n: int):
     from .run_lock import RunLockError, acquire_run_lock
 
     try:
-        with acquire_run_lock():
+        with acquire_run_lock(Path(settings.RUN_LOCK_PATH)):
             run_loop(short_n, long_n)
     except RunLockError as e:
         notify(

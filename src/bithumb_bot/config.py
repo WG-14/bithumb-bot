@@ -30,6 +30,18 @@ def resolve_db_path(path: str) -> str:
     return str((PROJECT_ROOT / p).resolve())
 
 
+def default_run_lock_path(mode: str) -> str:
+    normalized_mode = (mode or "paper").strip().lower() or "paper"
+    return f"data/locks/bithumb-bot-run-{normalized_mode}.lock"
+
+
+def resolve_run_lock_path(path: str) -> str:
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    return str((PROJECT_ROOT / p).resolve())
+
+
 @dataclass(frozen=True)
 class Settings:
     # runtime
@@ -46,6 +58,9 @@ class Settings:
 
     # storage
     DB_PATH: str = resolve_db_path(os.getenv("DB_PATH", DEFAULT_DB_PATH))
+    RUN_LOCK_PATH: str = resolve_run_lock_path(
+        os.getenv("RUN_LOCK_PATH", default_run_lock_path(os.getenv("MODE", "paper")))
+    )
     DB_BUSY_TIMEOUT_MS: int = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
     DB_LOCK_RETRY_COUNT: int = int(os.getenv("DB_LOCK_RETRY_COUNT", "2"))
     DB_LOCK_RETRY_BACKOFF_MS: int = int(os.getenv("DB_LOCK_RETRY_BACKOFF_MS", "50"))
