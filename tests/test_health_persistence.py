@@ -29,6 +29,16 @@ def _write_env_file(tmp_path: Path, *, db_path: Path | None) -> Path:
     return env_file
 
 
+def _healthcheck_subprocess_env(*, env_file: Path, db_path: Path, run_lock_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    env["BITHUMB_ENV_FILE"] = str(env_file)
+    env["DB_PATH"] = str(db_path)
+    env["RUN_LOCK_PATH"] = str(run_lock_path)
+    env["PYTHONPATH"] = str(Path.cwd() / "src")
+    env["NOTIFIER_ENABLED"] = "false"
+    return env
+
+
 def test_health_state_written_by_one_component_read_by_another(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -515,10 +525,11 @@ def test_healthcheck_reports_disabled_state_from_persistent_store(tmp_path):
     runtime_state.set_last_candle_age_sec(1.0)
     runtime_state.disable_trading_until(999.0, reason="recovery required")
 
-    env = dict(os.environ)
-    env["BITHUMB_ENV_FILE"] = str(env_file)
-    env["PYTHONPATH"] = str(Path.cwd() / "src")
-    env["NOTIFIER_ENABLED"] = "false"
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck-disabled.lock",
+    )
 
     proc = subprocess.run(
         [sys.executable, "scripts/healthcheck.py"],
@@ -541,10 +552,11 @@ def test_healthcheck_reports_reconcile_failure(tmp_path):
     runtime_state.enable_trading()
     runtime_state.record_reconcile_result(success=False, error="reconcile blew up")
 
-    env = dict(os.environ)
-    env["BITHUMB_ENV_FILE"] = str(env_file)
-    env["PYTHONPATH"] = str(Path.cwd() / "src")
-    env["NOTIFIER_ENABLED"] = "false"
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck-reconcile.lock",
+    )
 
     proc = subprocess.run(
         [sys.executable, "scripts/healthcheck.py"],
@@ -567,11 +579,11 @@ def test_healthcheck_healthy_default_path(tmp_path):
     runtime_state.set_last_candle_age_sec(None)
     runtime_state.record_reconcile_result(success=True)
 
-    env = dict(os.environ)
-    env["BITHUMB_ENV_FILE"] = str(env_file)
-    env["RUN_LOCK_PATH"] = str(tmp_path / "locks" / "healthcheck.lock")
-    env["PYTHONPATH"] = str(Path.cwd() / "src")
-    env["NOTIFIER_ENABLED"] = "false"
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck.lock",
+    )
 
     proc = subprocess.run(
         [sys.executable, "scripts/healthcheck.py"],

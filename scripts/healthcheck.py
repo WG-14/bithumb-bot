@@ -19,7 +19,7 @@ def _resolve_explicit_env_file() -> str | None:
     return None
 
 
-def _load_env_file(env_file: Path) -> None:
+def _load_env_file(env_file: Path, *, override: bool = False) -> None:
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -36,7 +36,10 @@ def _load_env_file(env_file: Path) -> None:
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
             value = value[1:-1]
-        os.environ.setdefault(key, value)
+        if override:
+            os.environ[key] = value
+        else:
+            os.environ.setdefault(key, value)
 
 
 def _validate_healthcheck_env() -> str | None:
@@ -51,7 +54,7 @@ def _validate_healthcheck_env() -> str | None:
     if not env_file.exists() or not env_file.is_file():
         return f"healthcheck config error: env file not found: {env_file}"
 
-    _load_env_file(env_file)
+    _load_env_file(env_file, override=True)
 
     db_path_env = os.getenv("DB_PATH")
     if db_path_env is None or not db_path_env.strip():
