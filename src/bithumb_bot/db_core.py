@@ -134,6 +134,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             halt_operator_action_required INTEGER NOT NULL DEFAULT 0,
             error_count INTEGER NOT NULL DEFAULT 0,
             last_candle_age_sec REAL,
+            last_candle_status TEXT NOT NULL DEFAULT 'waiting_first_sync',
+            last_candle_sync_epoch_sec REAL,
+            last_candle_ts_ms INTEGER,
+            last_candle_status_detail TEXT,
             retry_at_epoch_sec REAL,
             last_disable_reason TEXT,
             unresolved_open_order_count INTEGER NOT NULL DEFAULT 0,
@@ -215,6 +219,31 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "halt_operator_action_required",
         "halt_operator_action_required INTEGER NOT NULL DEFAULT 0",
+    )
+
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_candle_status",
+        "last_candle_status TEXT NOT NULL DEFAULT 'waiting_first_sync'",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_candle_sync_epoch_sec",
+        "last_candle_sync_epoch_sec REAL",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_candle_ts_ms",
+        "last_candle_ts_ms INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_candle_status_detail",
+        "last_candle_status_detail TEXT",
     )
 
     _ensure_column(

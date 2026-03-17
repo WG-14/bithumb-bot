@@ -858,13 +858,22 @@ def test_get_with_retry_retries_on_429(monkeypatch):
 
 def test_health_status_contains_runtime_flags():
     runtime_state.set_error_count(3)
-    runtime_state.set_last_candle_age_sec(12.5)
+    runtime_state.set_last_candle_observation(
+        status="ok",
+        age_sec=12.5,
+        sync_epoch_sec=1700000000.0,
+        candle_ts_ms=1700000000000,
+    )
     runtime_state.disable_trading_until(999.0)
 
     health = get_health_status()
 
     assert health["error_count"] == 3
     assert health["last_candle_age_sec"] == 12.5
+    assert health["last_candle_status"] == "ok"
+    assert health["last_candle_sync_epoch_sec"] == 1700000000.0
+    assert health["last_candle_ts_ms"] == 1700000000000
+    assert health["last_candle_status_detail"] is None
     assert health["trading_enabled"] is False
     assert health["retry_at_epoch_sec"] == 999.0
     assert health["last_disable_reason"] is None
@@ -881,7 +890,13 @@ def test_health_status_contains_runtime_flags():
 
     runtime_state.enable_trading()
     runtime_state.set_error_count(0)
-    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.set_last_candle_observation(
+        status="waiting_first_sync",
+        age_sec=None,
+        sync_epoch_sec=None,
+        candle_ts_ms=None,
+        detail="test cleanup",
+    )
     runtime_state.set_startup_gate_reason(None)
 
 

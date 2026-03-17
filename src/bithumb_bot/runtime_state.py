@@ -35,6 +35,10 @@ class RuntimeState:
     halt_operator_action_required: bool = False
     error_count: int = 0
     last_candle_age_sec: float | None = None
+    last_candle_status: str = "waiting_first_sync"
+    last_candle_sync_epoch_sec: float | None = None
+    last_candle_ts_ms: int | None = None
+    last_candle_status_detail: str | None = None
     retry_at_epoch_sec: float | None = None
     last_disable_reason: str | None = None
     unresolved_open_order_count: int = 0
@@ -81,6 +85,10 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.halt_operator_action_required = persisted.halt_operator_action_required
     _STATE.error_count = persisted.error_count
     _STATE.last_candle_age_sec = persisted.last_candle_age_sec
+    _STATE.last_candle_status = persisted.last_candle_status
+    _STATE.last_candle_sync_epoch_sec = persisted.last_candle_sync_epoch_sec
+    _STATE.last_candle_ts_ms = persisted.last_candle_ts_ms
+    _STATE.last_candle_status_detail = persisted.last_candle_status_detail
     _STATE.retry_at_epoch_sec = persisted.retry_at_epoch_sec
     _STATE.last_disable_reason = persisted.last_disable_reason
     _STATE.unresolved_open_order_count = persisted.unresolved_open_order_count
@@ -130,6 +138,10 @@ def _persist_state(state: RuntimeState) -> None:
                     halt_operator_action_required,
                     error_count,
                     last_candle_age_sec,
+                    last_candle_status,
+                    last_candle_sync_epoch_sec,
+                    last_candle_ts_ms,
+                    last_candle_status_detail,
                     retry_at_epoch_sec,
                     last_disable_reason,
                     unresolved_open_order_count,
@@ -154,7 +166,7 @@ def _persist_state(state: RuntimeState) -> None:
                     resume_gate_reason,
                     updated_ts
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                     trading_enabled=excluded.trading_enabled,
                     halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -169,6 +181,10 @@ def _persist_state(state: RuntimeState) -> None:
                     halt_operator_action_required=excluded.halt_operator_action_required,
                     error_count=excluded.error_count,
                     last_candle_age_sec=excluded.last_candle_age_sec,
+                    last_candle_status=excluded.last_candle_status,
+                    last_candle_sync_epoch_sec=excluded.last_candle_sync_epoch_sec,
+                    last_candle_ts_ms=excluded.last_candle_ts_ms,
+                    last_candle_status_detail=excluded.last_candle_status_detail,
                     retry_at_epoch_sec=excluded.retry_at_epoch_sec,
                     last_disable_reason=excluded.last_disable_reason,
                     unresolved_open_order_count=excluded.unresolved_open_order_count,
@@ -207,6 +223,10 @@ def _persist_state(state: RuntimeState) -> None:
                     1 if state.halt_operator_action_required else 0,
                     int(state.error_count),
                     state.last_candle_age_sec,
+                    _clip(state.last_candle_status),
+                    state.last_candle_sync_epoch_sec,
+                    state.last_candle_ts_ms,
+                    _clip(state.last_candle_status_detail),
                     state.retry_at_epoch_sec,
                     _clip(state.last_disable_reason),
                     int(state.unresolved_open_order_count),
@@ -257,6 +277,10 @@ def _read_persisted_state() -> RuntimeState | None:
                 halt_operator_action_required,
                 error_count,
                 last_candle_age_sec,
+                last_candle_status,
+                last_candle_sync_epoch_sec,
+                last_candle_ts_ms,
+                last_candle_status_detail,
                 retry_at_epoch_sec,
                 last_disable_reason,
                 unresolved_open_order_count,
@@ -304,6 +328,24 @@ def _read_persisted_state() -> RuntimeState | None:
         error_count=max(0, int(row["error_count"])),
         last_candle_age_sec=(
             float(row["last_candle_age_sec"]) if row["last_candle_age_sec"] is not None else None
+        ),
+        last_candle_status=(
+            str(row["last_candle_status"])
+            if row["last_candle_status"] is not None
+            else "waiting_first_sync"
+        ),
+        last_candle_sync_epoch_sec=(
+            float(row["last_candle_sync_epoch_sec"])
+            if row["last_candle_sync_epoch_sec"] is not None
+            else None
+        ),
+        last_candle_ts_ms=(
+            int(row["last_candle_ts_ms"]) if row["last_candle_ts_ms"] is not None else None
+        ),
+        last_candle_status_detail=(
+            str(row["last_candle_status_detail"])
+            if row["last_candle_status_detail"] is not None
+            else None
         ),
         retry_at_epoch_sec=(float(row["retry_at_epoch_sec"]) if row["retry_at_epoch_sec"] is not None else None),
         last_disable_reason=(
@@ -562,6 +604,30 @@ def set_last_candle_age_sec(age_sec: float | None) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
         _STATE.last_candle_age_sec = age_sec
+        if age_sec is None:
+            _STATE.last_candle_status = "age_not_available"
+            _STATE.last_candle_status_detail = "candle age value was cleared"
+        else:
+            _STATE.last_candle_status = "ok"
+            _STATE.last_candle_status_detail = None
+        _persist_state(_STATE)
+
+
+def set_last_candle_observation(
+    *,
+    status: str,
+    age_sec: float | None,
+    sync_epoch_sec: float | None,
+    candle_ts_ms: int | None,
+    detail: str | None = None,
+) -> None:
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        _STATE.last_candle_status = _clip(status) or "unknown"
+        _STATE.last_candle_age_sec = age_sec
+        _STATE.last_candle_sync_epoch_sec = sync_epoch_sec
+        _STATE.last_candle_ts_ms = candle_ts_ms
+        _STATE.last_candle_status_detail = _clip(detail)
         _persist_state(_STATE)
 
 

@@ -124,6 +124,10 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
+        "last_candle_status": state.last_candle_status,
+        "last_candle_sync_epoch_sec": state.last_candle_sync_epoch_sec,
+        "last_candle_ts_ms": state.last_candle_ts_ms,
+        "last_candle_status_detail": state.last_candle_status_detail,
         "error_count": state.error_count,
         "trading_enabled": state.trading_enabled,
         "retry_at_epoch_sec": state.retry_at_epoch_sec,
@@ -833,6 +837,7 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             try:
                 cmd_sync(quiet=True)
+                sync_observed_epoch_sec = time.time()
                 conn = ensure_db()
                 try:
                     row = conn.execute(
@@ -843,13 +848,26 @@ def run_loop(short_n: int, long_n: int) -> None:
                     conn.close()
 
                 if row is None:
+                    runtime_state.set_last_candle_observation(
+                        status="missing_after_sync",
+                        age_sec=None,
+                        sync_epoch_sec=sync_observed_epoch_sec,
+                        candle_ts_ms=None,
+                        detail="sync completed but latest candle row was not found",
+                    )
                     notify("no candles after sync")
                     continue
 
                 last_ts = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
                 last_close = float(row["close"] if hasattr(row, "keys") else row[1])
                 candle_age_sec = max(0.0, (time.time() * 1000 - last_ts) / 1000)
-                runtime_state.set_last_candle_age_sec(candle_age_sec)
+                runtime_state.set_last_candle_observation(
+                    status="ok",
+                    age_sec=candle_age_sec,
+                    sync_epoch_sec=sync_observed_epoch_sec,
+                    candle_ts_ms=last_ts,
+                    detail=None,
+                )
 
                 fail_count = 0
                 runtime_state.set_error_count(fail_count)

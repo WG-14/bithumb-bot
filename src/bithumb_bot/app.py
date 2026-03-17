@@ -465,6 +465,12 @@ def cmd_health() -> None:
             f"reason_code={health['last_reconcile_reason_code'] or '-'}"
         )
 
+    candle_status = str(health.get("last_candle_status") or "unknown")
+    candle_age = health.get("last_candle_age_sec")
+    candle_observed = health.get("last_candle_sync_epoch_sec")
+    candle_ts_ms = health.get("last_candle_ts_ms")
+    candle_detail = health.get("last_candle_status_detail")
+
     print("[HEALTH]")
     print("  [HALT-RECOVERY-STATUS]")
     print(
@@ -508,7 +514,17 @@ def cmd_health() -> None:
             f"position={position_summary}"
         )
         print(f"    next_commands={recommended_commands}")
-    print(f"  last_candle_age_sec={health['last_candle_age_sec']}")
+    print(
+        "  "
+        f"last_candle_age_sec={candle_age} "
+        f"(status={candle_status}, sync_epoch_sec={candle_observed if candle_observed is not None else '-'}, "
+        f"candle_ts_ms={candle_ts_ms if candle_ts_ms is not None else '-'}, "
+        f"detail={candle_detail or '-'})"
+    )
+    print(f"  last_candle_status={candle_status}")
+    print(f"  last_candle_sync_epoch_sec={candle_observed}")
+    print(f"  last_candle_ts_ms={candle_ts_ms}")
+    print(f"  last_candle_status_detail={candle_detail}")
     print(f"  error_count={health['error_count']}")
     print(f"  trading_enabled={health['trading_enabled']}")
     print(f"  retry_at_epoch_sec={health['retry_at_epoch_sec']}")

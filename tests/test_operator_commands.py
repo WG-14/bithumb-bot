@@ -1410,6 +1410,10 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
         "bithumb_bot.app.get_health_status",
         lambda: {
             "last_candle_age_sec": None,
+            "last_candle_status": "waiting_first_sync",
+            "last_candle_sync_epoch_sec": None,
+            "last_candle_ts_ms": None,
+            "last_candle_status_detail": "startup warming up",
             "error_count": 0,
             "trading_enabled": False,
             "retry_at_epoch_sec": None,
@@ -1443,6 +1447,8 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     assert "can_resume=true" in out
     assert "blockers=none" in out
     assert "resume_safety=safe" in out
+    assert "last_candle_age_sec=None (status=waiting_first_sync" in out
+    assert "last_candle_status_detail=startup warming up" in out
 
 
 def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_path):
