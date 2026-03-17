@@ -65,6 +65,10 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
                 halt_operator_action_required,
                 error_count,
                 last_candle_age_sec,
+                last_candle_status,
+                last_candle_sync_epoch_sec,
+                last_candle_ts_ms,
+                last_candle_status_detail,
                 retry_at_epoch_sec,
                 last_disable_reason,
                 unresolved_open_order_count,
@@ -103,6 +107,10 @@ def test_health_state_written_by_one_component_read_by_another(tmp_path):
     assert int(row["halt_operator_action_required"]) == 0
     assert int(row["error_count"]) == 4
     assert float(row["last_candle_age_sec"]) == 8.5
+    assert str(row["last_candle_status"]) == "ok"
+    assert row["last_candle_sync_epoch_sec"] is None
+    assert row["last_candle_ts_ms"] is None
+    assert row["last_candle_status_detail"] is None
     assert float(row["retry_at_epoch_sec"]) == 456.0
     assert str(row["last_disable_reason"]) == "manual stop"
     assert int(row["unresolved_open_order_count"]) == 0
@@ -739,3 +747,39 @@ def test_emergency_flatten_failure_persists_across_restart(tmp_path):
     assert lines[0] == "1"
     assert "emergency flatten unresolved" in lines[1]
     assert "submit boom" in lines[1]
+
+
+def test_last_candle_observation_fields_roundtrip_in_health_persistence(tmp_path):
+    _set_tmp_db(tmp_path)
+
+    runtime_state.set_last_candle_observation(
+        status="missing_after_sync",
+        age_sec=None,
+        sync_epoch_sec=1700001234.5,
+        candle_ts_ms=None,
+        detail="sync completed but latest candle row was not found",
+    )
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                last_candle_age_sec,
+                last_candle_status,
+                last_candle_sync_epoch_sec,
+                last_candle_ts_ms,
+                last_candle_status_detail
+            FROM bot_health
+            WHERE id=1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["last_candle_age_sec"] is None
+    assert str(row["last_candle_status"]) == "missing_after_sync"
+    assert float(row["last_candle_sync_epoch_sec"]) == 1700001234.5
+    assert row["last_candle_ts_ms"] is None
+    assert str(row["last_candle_status_detail"]) == "sync completed but latest candle row was not found"
