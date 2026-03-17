@@ -4,6 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
+# systemd backup service passes BITHUMB_ENV_FILE; load it so DB_PATH and related
+# variables match the runtime environment instead of falling back to defaults.
+if [[ -n "${BITHUMB_ENV_FILE:-}" ]]; then
+  if [[ ! -f "$BITHUMB_ENV_FILE" ]]; then
+    echo "[BACKUP] env file not found: $BITHUMB_ENV_FILE" >&2
+    exit 1
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$BITHUMB_ENV_FILE"
+  set +a
+fi
+
 resolve_path() {
   local path="$1"
   if [[ "$path" = /* ]]; then
