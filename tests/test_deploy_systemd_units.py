@@ -62,3 +62,16 @@ def test_backup_service_uses_bash_script_invocation_without_shell_string() -> No
 
     assert exec_start == "/usr/bin/env bash @BITHUMB_BOT_ROOT@/scripts/backup_sqlite.sh"
     assert "-lc" not in exec_start
+
+
+def test_healthcheck_service_uses_absolute_uv_path_and_ec2_user_context() -> None:
+    healthcheck = _read_unit(SYSTEMD_DIR / "bithumb-bot-healthcheck.service")
+    service = healthcheck["Service"]
+
+    assert service["Type"] == "oneshot"
+    assert service["User"] == "ec2-user"
+    assert service["WorkingDirectory"] == "@BITHUMB_BOT_ROOT@"
+    assert service["Environment"] == "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@"
+    assert service["SyslogIdentifier"] == "bithumb-bot-healthcheck"
+    assert service["ExecStart"] == "@BITHUMB_UV_BIN@ run python @BITHUMB_BOT_ROOT@/scripts/healthcheck.py"
+    assert "/usr/bin/env uv" not in service["ExecStart"]

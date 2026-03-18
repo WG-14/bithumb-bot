@@ -59,6 +59,8 @@
 sudo mkdir -p /etc/bithumb-bot
 sudo cp .env.example /etc/bithumb-bot/bithumb-bot.live.env
 
+BITHUMB_BOT_ROOT=/home/ec2-user/bithumb-bot \
+BITHUMB_UV_BIN=/home/ec2-user/.local/bin/uv \
 ./deploy/systemd/render_units.sh /tmp/bithumb-systemd-units
 sudo cp /tmp/bithumb-systemd-units/bithumb-bot.service /etc/systemd/system/
 sudo cp /tmp/bithumb-systemd-units/bithumb-bot-healthcheck.service /etc/systemd/system/
@@ -76,6 +78,7 @@ sudo systemctl enable --now bithumb-bot-backup.timer
   - `bithumb-bot.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
   - `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
   - 세 유닛이 같은 env 파일을 보므로 `DB_PATH`, notifier, 임계치를 단일 파일 기준으로 관리.
+- `bithumb-bot-healthcheck.service`는 `User=ec2-user`, `WorkingDirectory=/home/ec2-user/bithumb-bot`, `ExecStart=/home/ec2-user/.local/bin/uv run python /home/ec2-user/bithumb-bot/scripts/healthcheck.py`처럼 절대경로 기반으로 렌더링해 systemd PATH 차이로 인한 `status=127`을 피한다.
 - healthcheck는 fail-fast 정책이다.
   - `BITHUMB_ENV_FILE`이 비어 있거나 파일이 없으면 즉시 실패
   - env 파일 내 `DB_PATH`가 비어 있어도 실패(기본 DB fallback 금지)
