@@ -16,6 +16,8 @@ from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
 from ..oms import (
     TERMINAL_ORDER_STATUSES,
+    build_order_intent_key,
+    claim_order_intent_dedup,
     evaluate_unresolved_order_gate,
     new_client_order_id,
     payload_fingerprint,
@@ -25,6 +27,7 @@ from ..oms import (
     record_submit_started,
     set_exchange_order_id,
     set_status,
+    update_order_intent_dedup,
 )
 from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
 
@@ -395,6 +398,30 @@ def _record_submit_attempt_preflight(
     )
 
 
+def _order_intent_strategy_context() -> str:
+    return f"{settings.MODE}:sma_cross:{settings.INTERVAL}"
+
+
+def _order_intent_type(*, side: str) -> str:
+    return "market_entry" if side == "BUY" else "market_exit"
+
+
+def _intent_log_line(
+    *,
+    prefix: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    intent_ts: int,
+    intent_key: str,
+    reason: str,
+) -> str:
+    return (
+        f"{prefix} {symbol} side={side} qty={float(qty):.12f} "
+        f"intent_ts={int(intent_ts)} key={intent_key} reason={reason}"
+    )
+
+
 def _encode_submit_evidence(*, payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -408,6 +435,7 @@ def _submit_via_standard_path(
     side: str,
     qty: float,
     ts: int,
+    intent_key: str,
     reference_price: float | None,
     top_of_book_summary: dict[str, float | str] | None,
 ):
@@ -524,6 +552,13 @@ def _submit_via_standard_path(
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
         )
+        update_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            order_status="SUBMIT_UNKNOWN",
+            last_error=str(err),
+        )
         conn.commit()
         return None
     except Exception as e:
@@ -568,6 +603,13 @@ def _submit_via_standard_path(
             timeout_flag=False,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
+        )
+        update_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            order_status="FAILED",
+            last_error=reason,
         )
         conn.commit()
         return None
@@ -627,6 +669,13 @@ def _submit_via_standard_path(
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
         )
+        update_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            order_status="SUBMIT_UNKNOWN",
+            last_error=reason,
+        )
         conn.commit()
         return None
 
@@ -665,6 +714,12 @@ def _submit_via_standard_path(
         timeout_flag=False,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=True,
+    )
+    update_order_intent_dedup(
+        conn,
+        intent_key=intent_key,
+        client_order_id=client_order_id,
+        order_status=order.status,
     )
     conn.commit()
     return order
@@ -730,6 +785,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         submit_attempt_id = _submit_attempt_id()
         client_order_id = _client_order_id(ts=ts, side=side, submit_attempt_id=submit_attempt_id)
+        strategy_context = _order_intent_strategy_context()
+        intent_type = _order_intent_type(side=side)
+        intent_key = build_order_intent_key(
+            symbol=settings.PAIR,
+            side=side,
+            strategy_context=strategy_context,
+            intent_ts=int(ts),
+            intent_type=intent_type,
+            qty=normalized_qty,
+        )
 
         reference_price: float | None = None
         top_of_book_summary: dict[str, float | str] | None = None
@@ -799,6 +864,73 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 conn.commit()
                 return None
 
+        claimed, existing_intent = claim_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            symbol=settings.PAIR,
+            side=side,
+            strategy_context=strategy_context,
+            intent_type=intent_type,
+            intent_ts=int(ts),
+            qty=normalized_qty,
+            order_status="PENDING_SUBMIT",
+        )
+        if not claimed:
+            existing_client_order_id = (
+                str(existing_intent["client_order_id"])
+                if existing_intent is not None and existing_intent["client_order_id"] is not None
+                else "-"
+            )
+            existing_status = (
+                str(existing_intent["order_status"])
+                if existing_intent is not None and existing_intent["order_status"] is not None
+                else "UNKNOWN"
+            )
+            skip_reason = (
+                f"duplicate intent already recorded "
+                f"existing_client_order_id={existing_client_order_id} existing_status={existing_status}"
+            )
+            print(
+                _intent_log_line(
+                    prefix="[SKIP] duplicate order intent",
+                    symbol=settings.PAIR,
+                    side=side,
+                    qty=normalized_qty,
+                    intent_ts=int(ts),
+                    intent_key=intent_key,
+                    reason=skip_reason,
+                )
+            )
+            notify(
+                format_event(
+                    "order_intent_dedup_skip",
+                    symbol=settings.PAIR,
+                    side=side,
+                    qty=float(normalized_qty),
+                    intent_ts=int(ts),
+                    client_order_id=client_order_id,
+                    dedup_key=intent_key,
+                    skip_reason=skip_reason,
+                    existing_client_order_id=existing_client_order_id,
+                    existing_status=existing_status,
+                )
+            )
+            conn.commit()
+            return None
+
+        print(
+            _intent_log_line(
+                prefix="[RUN] submit order intent",
+                symbol=settings.PAIR,
+                side=side,
+                qty=normalized_qty,
+                intent_ts=int(ts),
+                intent_key=intent_key,
+                reason=f"client_order_id={client_order_id}",
+            )
+        )
+
         order = _submit_via_standard_path(
             conn=conn,
             broker=broker,
@@ -807,6 +939,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             side=side,
             qty=normalized_qty,
             ts=ts,
+            intent_key=intent_key,
             reference_price=reference_price,
             top_of_book_summary=top_of_book_summary,
         )
@@ -830,6 +963,12 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         refreshed = broker.get_order(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
         set_status(client_order_id, refreshed.status, conn=conn)
+        update_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            order_status=refreshed.status,
+        )
         conn.commit()
         return trade
 
