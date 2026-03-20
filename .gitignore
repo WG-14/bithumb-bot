@@ -61,3 +61,6 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+# generated runtime artifacts
+snapshots/
+deploy/systemd/rendered/
