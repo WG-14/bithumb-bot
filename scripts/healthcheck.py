@@ -137,12 +137,22 @@ def main() -> int:
     reconcile_ts = health.get("last_reconcile_epoch_sec")
     if reconcile_status == "error":
         problems.append(f"last reconcile failed: {reconcile_error}")
-    if reconcile_ts is not None:
-        reconcile_age_sec = max(0.0, time.time() - float(reconcile_ts))
-        if reconcile_age_sec > reconcile_stale_threshold_sec:
-            problems.append(
-                f"reconcile stale: age={reconcile_age_sec:.1f}s > {reconcile_stale_threshold_sec:.1f}s"
-            )
+
+    reconcile_freshness_required = unresolved_count > 0 or recovery_required_count > 0
+    if reconcile_freshness_required:
+        if reconcile_ts is None:
+            problems.append("reconcile stale: no reconcile timestamp while unresolved/recovery state exists")
+        else:
+            reconcile_age_sec = max(0.0, time.time() - float(reconcile_ts))
+            if reconcile_age_sec > reconcile_stale_threshold_sec:
+                problems.append(
+                    f"reconcile stale: age={reconcile_age_sec:.1f}s > {reconcile_stale_threshold_sec:.1f}s"
+                )
+    else:
+        print(
+            "[HEALTHCHECK] SKIP reconcile freshness check: "
+            "no unresolved open orders / no recovery required"
+        )
 
     if problems:
         notify("healthcheck failed: " + "; ".join(problems))

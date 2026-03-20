@@ -39,6 +39,48 @@ def _healthcheck_subprocess_env(*, env_file: Path, db_path: Path, run_lock_path:
     return env
 
 
+def _insert_order(
+    db_path: Path,
+    *,
+    client_order_id: str,
+    status: str,
+    created_ts_ms: int = 0,
+) -> None:
+    conn = ensure_db(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id,
+                exchange_order_id,
+                status,
+                side,
+                price,
+                qty_req,
+                qty_filled,
+                created_ts,
+                updated_ts,
+                last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                client_order_id,
+                None,
+                status,
+                "buy",
+                100.0,
+                1.0,
+                0.0,
+                created_ts_ms,
+                created_ts_ms,
+                None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_health_state_written_by_one_component_read_by_another(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -576,6 +618,64 @@ def test_healthcheck_reports_reconcile_failure(tmp_path):
 
     assert proc.returncode == 1
     assert "last reconcile failed" in proc.stdout
+
+
+def test_healthcheck_skips_reconcile_stale_without_unresolved_or_recovery_required(tmp_path):
+    db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
+
+    runtime_state.enable_trading()
+    runtime_state.set_error_count(0)
+    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.record_reconcile_result(success=True, now_epoch_sec=1.0)
+
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck-reconcile-skip.lock",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/healthcheck.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert "[HEALTHCHECK] SKIP reconcile freshness check" in proc.stdout
+    assert "reconcile stale" not in proc.stdout
+    assert "[HEALTHCHECK] FAIL" not in proc.stdout
+
+
+def test_healthcheck_fails_reconcile_stale_with_unresolved_open_order(tmp_path):
+    db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
+
+    runtime_state.enable_trading()
+    runtime_state.set_error_count(0)
+    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.record_reconcile_result(success=True, now_epoch_sec=1.0)
+    _insert_order(db_path, client_order_id="hc-unresolved", status="NEW", created_ts_ms=0)
+
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck-reconcile-stale.lock",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/healthcheck.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "reconcile stale" in proc.stdout
+    assert "[HEALTHCHECK] SKIP reconcile freshness check" not in proc.stdout
 
 
 def test_healthcheck_healthy_default_path(tmp_path):
