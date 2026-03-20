@@ -14,6 +14,7 @@ from .config import settings
 
 OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
 TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED", "RECOVERY_REQUIRED")
+ORDER_INTENT_DEDUP_RELEASE_STATUSES = {"FAILED", "RELEASED"}
 
 
 def evaluate_unresolved_order_gate(
@@ -205,6 +206,125 @@ def _record_order_event(
 def payload_fingerprint(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_order_intent_key(
+    *,
+    symbol: str,
+    side: str,
+    strategy_context: str,
+    intent_ts: int,
+    intent_type: str,
+    qty: float | None,
+) -> str:
+    payload = {
+        "intent_ts": int(intent_ts),
+        "intent_type": str(intent_type),
+        "qty": (round(float(qty), 12) if qty is not None and math.isfinite(float(qty)) else None),
+        "side": str(side).upper(),
+        "strategy_context": str(strategy_context),
+        "symbol": str(symbol),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def claim_order_intent_dedup(
+    conn: sqlite3.Connection,
+    *,
+    intent_key: str,
+    client_order_id: str,
+    symbol: str,
+    side: str,
+    strategy_context: str,
+    intent_type: str,
+    intent_ts: int,
+    qty: float | None,
+    order_status: str,
+) -> tuple[bool, sqlite3.Row | None]:
+    now_ms = int(time.time() * 1000)
+    try:
+        conn.execute(
+            """
+            INSERT INTO order_intent_dedup(
+                intent_key,
+                symbol,
+                side,
+                strategy_context,
+                intent_type,
+                intent_ts,
+                qty,
+                client_order_id,
+                order_status,
+                created_ts,
+                updated_ts,
+                last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                intent_key,
+                symbol,
+                side,
+                strategy_context,
+                intent_type,
+                int(intent_ts),
+                (float(qty) if qty is not None else None),
+                client_order_id,
+                order_status,
+                now_ms,
+                now_ms,
+            ),
+        )
+        return True, None
+    except sqlite3.IntegrityError:
+        row = conn.execute(
+            """
+            SELECT intent_key, symbol, side, strategy_context, intent_type, intent_ts, qty,
+                   client_order_id, order_status, created_ts, updated_ts, last_error
+            FROM order_intent_dedup
+            WHERE intent_key=?
+            """,
+            (intent_key,),
+        ).fetchone()
+        if row is not None:
+            conn.execute(
+                """
+                UPDATE order_intent_dedup
+                SET updated_ts=?
+                WHERE intent_key=?
+                """,
+                (now_ms, intent_key),
+            )
+        return False, row
+
+
+def update_order_intent_dedup(
+    conn: sqlite3.Connection,
+    *,
+    intent_key: str,
+    client_order_id: str,
+    order_status: str,
+    last_error: str | None = None,
+) -> None:
+    if order_status in ORDER_INTENT_DEDUP_RELEASE_STATUSES:
+        conn.execute("DELETE FROM order_intent_dedup WHERE intent_key=?", (intent_key,))
+        return
+
+    now_ms = int(time.time() * 1000)
+    conn.execute(
+        """
+        UPDATE order_intent_dedup
+        SET client_order_id=?, order_status=?, updated_ts=?, last_error=?
+        WHERE intent_key=?
+        """,
+        (
+            client_order_id,
+            order_status,
+            now_ms,
+            (last_error[:500] if last_error else None),
+            intent_key,
+        ),
+    )
 
 
 def record_submit_attempt(

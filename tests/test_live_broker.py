@@ -466,7 +466,7 @@ def test_validate_pretrade_price_protection_blocks_stale_reference() -> None:
     runtime_state.set_last_candle_age_sec(None)
 
 
-def test_live_retry_after_cancel_uses_new_attempt_row_and_client_order_id(monkeypatch, tmp_path):
+def test_live_duplicate_intent_after_cancel_is_skipped_by_submit_dedup(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "retry_after_cancel.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
 
@@ -474,40 +474,6 @@ def test_live_retry_after_cancel_uses_new_attempt_row_and_client_order_id(monkey
 
     attempt_ids = iter(["attempt_a", "attempt_b"])
     monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
-
-    broker = _CanceledBroker()
-    first = live_execute_signal(broker, "BUY", 1000, 100000000.0)
-    second = live_execute_signal(broker, "BUY", 1000, 100000000.0)
-
-    assert first is None
-    assert second is None
-
-    conn = ensure_db(str(tmp_path / "retry_after_cancel.sqlite"))
-    rows = conn.execute(
-        """
-        SELECT client_order_id, submit_attempt_id, status
-        FROM orders
-        WHERE client_order_id LIKE 'live_1000_buy_%'
-        ORDER BY id
-        """
-    ).fetchall()
-    conn.close()
-
-    assert len(rows) == 2
-    assert rows[0]["status"] == "CANCELED"
-    assert rows[1]["status"] == "CANCELED"
-    assert rows[0]["submit_attempt_id"] == "attempt_a"
-    assert rows[1]["submit_attempt_id"] == "attempt_b"
-    assert rows[0]["client_order_id"] != rows[1]["client_order_id"]
-
-
-def test_live_duplicate_attempt_with_terminal_status_blocks_resubmit(monkeypatch, tmp_path):
-    object.__setattr__(settings, "DB_PATH", str(tmp_path / "terminal_resubmit_guard.sqlite"))
-    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
-
-    from bithumb_bot.broker import live as live_module
-
-    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: "attempt_terminal")
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
 
@@ -519,26 +485,78 @@ def test_live_duplicate_attempt_with_terminal_status_blocks_resubmit(monkeypatch
     assert second is None
     assert broker.place_order_calls == 1
 
-    conn = ensure_db(str(tmp_path / "terminal_resubmit_guard.sqlite"))
+    conn = ensure_db(str(tmp_path / "retry_after_cancel.sqlite"))
     try:
-        blocked = conn.execute(
+        rows = conn.execute(
             """
-            SELECT event_type, order_status, message
-            FROM order_events
-            WHERE client_order_id LIKE 'live_1000_buy_%' AND event_type='submit_blocked'
-            ORDER BY id DESC
-            LIMIT 1
+            SELECT client_order_id, submit_attempt_id, status
+            FROM orders
+            WHERE client_order_id LIKE 'live_1000_buy_%'
+            ORDER BY id
+            """
+        ).fetchall()
+        dedup_row = conn.execute(
+            """
+            SELECT client_order_id, order_status
+            FROM order_intent_dedup
+            WHERE symbol='BTC_KRW' AND side='BUY' AND intent_ts=1000
             """
         ).fetchone()
     finally:
         conn.close()
 
-    assert blocked is not None
-    assert blocked["event_type"] == "submit_blocked"
-    assert blocked["order_status"] == "CANCELED"
-    assert "terminal status CANCELED" in str(blocked["message"])
-    assert any("event=order_submit_blocked" in msg and "reason_code=RISKY_ORDER_BLOCK" in msg for msg in notifications)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "CANCELED"
+    assert rows[0]["submit_attempt_id"] == "attempt_a"
+    assert dedup_row is not None
+    assert dedup_row["client_order_id"] == rows[0]["client_order_id"]
+    assert dedup_row["order_status"] == "CANCELED"
+    assert any("event=order_intent_dedup_skip" in msg for msg in notifications)
 
+
+def test_live_failed_before_send_releases_dedup_for_same_intent_retry(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "terminal_resubmit_guard.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    from bithumb_bot.broker import live as live_module
+
+    attempt_ids = iter(["attempt_fail", "attempt_retry"])
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
+
+    failed_trade = live_execute_signal(_FailingSubmitBroker(), "BUY", 1000, 100000000.0)
+    retried_trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+
+    assert failed_trade is None
+    assert retried_trade is not None
+
+    conn = ensure_db(str(tmp_path / "terminal_resubmit_guard.sqlite"))
+    try:
+        rows = conn.execute(
+            """
+            SELECT client_order_id, submit_attempt_id, status
+            FROM orders
+            WHERE client_order_id LIKE 'live_1000_buy_%'
+            ORDER BY id
+            """
+        ).fetchall()
+        dedup_row = conn.execute(
+            """
+            SELECT client_order_id, order_status
+            FROM order_intent_dedup
+            WHERE symbol='BTC_KRW' AND side='BUY' AND intent_ts=1000
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert len(rows) == 2
+    assert rows[0]["status"] == "FAILED"
+    assert rows[0]["submit_attempt_id"] == "attempt_fail"
+    assert rows[1]["status"] == "FILLED"
+    assert rows[1]["submit_attempt_id"] == "attempt_retry"
+    assert dedup_row is not None
+    assert dedup_row["client_order_id"] == rows[1]["client_order_id"]
+    assert dedup_row["order_status"] == "FILLED"
 
 def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_gate.sqlite"))

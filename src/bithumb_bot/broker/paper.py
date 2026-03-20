@@ -7,7 +7,13 @@ from ..risk import evaluate_buy_guardrails
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..marketdata import fetch_orderbook_top
 from ..notifier import notify
-from ..oms import new_client_order_id, set_status
+from ..oms import (
+    build_order_intent_key,
+    claim_order_intent_dedup,
+    new_client_order_id,
+    set_status,
+    update_order_intent_dedup,
+)
 from ..execution import apply_fill_and_trade, record_order_if_missing
 
 POSITION_EPSILON = 1e-12
@@ -47,6 +53,8 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
         return None
 
     conn = ensure_db()
+    client_order_id = ""
+    intent_key = ""
     try:
         init_portfolio(conn)
         cash, qty = get_portfolio(conn)
@@ -85,6 +93,57 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             return None
 
         client_order_id = new_client_order_id("paper")
+        intent_key = build_order_intent_key(
+            symbol=settings.PAIR,
+            side=side,
+            strategy_context=f"{settings.MODE}:sma_cross:{settings.INTERVAL}",
+            intent_ts=int(ts),
+            intent_type=("market_entry" if side == "BUY" else "market_exit"),
+            qty=float(trade_qty),
+        )
+        claimed, existing_intent = claim_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            symbol=settings.PAIR,
+            side=side,
+            strategy_context=f"{settings.MODE}:sma_cross:{settings.INTERVAL}",
+            intent_type=("market_entry" if side == "BUY" else "market_exit"),
+            intent_ts=int(ts),
+            qty=float(trade_qty),
+            order_status="PENDING_SUBMIT",
+        )
+        if not claimed:
+            existing_client_order_id = (
+                str(existing_intent["client_order_id"])
+                if existing_intent is not None and existing_intent["client_order_id"] is not None
+                else "-"
+            )
+            existing_status = (
+                str(existing_intent["order_status"])
+                if existing_intent is not None and existing_intent["order_status"] is not None
+                else "UNKNOWN"
+            )
+            print(
+                "[SKIP] duplicate order intent "
+                f"{settings.PAIR} side={side} qty={float(trade_qty):.12f} "
+                f"intent_ts={int(ts)} key={intent_key} "
+                f"reason=duplicate intent already recorded existing_client_order_id={existing_client_order_id} "
+                f"existing_status={existing_status}"
+            )
+            notify(
+                f"event=order_intent_dedup_skip symbol={settings.PAIR} side={side} qty={float(trade_qty)} "
+                f"intent_ts={int(ts)} dedup_key={intent_key} existing_client_order_id={existing_client_order_id} "
+                f"existing_status={existing_status}"
+            )
+            conn.commit()
+            return None
+
+        print(
+            "[RUN] submit order intent "
+            f"{settings.PAIR} side={side} qty={float(trade_qty):.12f} "
+            f"intent_ts={int(ts)} key={intent_key} reason=client_order_id={client_order_id}"
+        )
         note = f"client_order_id={client_order_id}; signal_price={price}"
 
         record_order_if_missing(
@@ -109,11 +168,31 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
         )
 
         set_status(client_order_id, "FILLED", conn=conn)
+        update_order_intent_dedup(
+            conn,
+            intent_key=intent_key,
+            client_order_id=client_order_id,
+            order_status="FILLED",
+        )
         conn.commit()
         return trade
 
     except Exception:
         conn.rollback()
+        if intent_key:
+            retry_conn = ensure_db()
+            try:
+                update_order_intent_dedup(
+                    retry_conn,
+                    intent_key=intent_key,
+                    client_order_id=client_order_id,
+                    order_status="FAILED",
+                )
+                retry_conn.commit()
+            except Exception:
+                retry_conn.rollback()
+            finally:
+                retry_conn.close()
         raise
 
     finally:

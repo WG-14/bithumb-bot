@@ -484,6 +484,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_intent_dedup (
+            intent_key TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            strategy_context TEXT NOT NULL,
+            intent_type TEXT NOT NULL,
+            intent_ts INTEGER NOT NULL,
+            qty REAL,
+            client_order_id TEXT NOT NULL,
+            order_status TEXT NOT NULL,
+            created_ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL,
+            last_error TEXT
+        )
+        """
+    )
+
+    _ensure_column(conn, "order_intent_dedup", "qty", "qty REAL")
+    _ensure_column(conn, "order_intent_dedup", "last_error", "last_error TEXT")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_intent_dedup_lookup
+        ON order_intent_dedup(symbol, side, intent_ts, updated_ts)
+        """
+    )
+
     conn.commit()
 
 
