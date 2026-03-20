@@ -294,6 +294,71 @@ def test_recent_orders_falls_back_to_open_orders_when_history_unavailable(monkey
     assert recent[0].status == "PARTIAL"
 
 
+def test_recent_orders_skips_malformed_transaction_rows(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    open_order = broker._broker_order_from_open_row(
+        {
+            "order_id": "open-1",
+            "type": "buy",
+            "price": "150000000",
+            "units": "0.0200",
+            "units_remaining": "0.0200",
+        },
+        now_ts=1710000000000,
+    )
+    monkeypatch.setattr(broker, "get_open_orders", lambda: [open_order])
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "status": "0000",
+            "data": [
+                "bad-row",
+                123,
+                {
+                    "order_id": "filled-bad-ts",
+                    "search": "sell",
+                    "price": "152000000",
+                    "units_traded": "0.0050",
+                    "transfer_date": "not-a-timestamp",
+                },
+                {
+                    "order_id": "filled-bad-qty",
+                    "search": "sell",
+                    "price": "152000000",
+                    "units_traded": object(),
+                    "transfer_date": "1710000001500",
+                },
+                {
+                    "order_id": "filled-bad-price",
+                    "search": "sell",
+                    "price": "not-a-price",
+                    "units_traded": "0.0050",
+                    "transfer_date": "1710000001600",
+                },
+                {
+                    "order_id": "filled-good",
+                    "search": "sell",
+                    "price": "152000000",
+                    "units_traded": "0.0050",
+                    "transfer_date": "1710000002000",
+                },
+            ],
+        },
+    )
+
+    recent = broker.get_recent_orders(limit=10)
+
+    by_id = {str(order.exchange_order_id): order for order in recent}
+    assert set(by_id) == {"open-1", "filled-good"}
+    assert by_id["open-1"].status == "NEW"
+    assert by_id["filled-good"].status == "FILLED"
+    assert by_id["filled-good"].qty_filled == pytest.approx(0.005)
+    assert by_id["filled-good"].price == pytest.approx(152000000.0)
+
+
 def test_open_order_lookup_still_uses_open_orders_endpoint(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
