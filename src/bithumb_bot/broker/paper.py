@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..config import settings
@@ -7,6 +8,7 @@ from ..risk import evaluate_buy_guardrails
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..marketdata import fetch_orderbook_top
 from ..notifier import notify
+from ..observability import format_log_kv
 from ..oms import (
     build_order_intent_key,
     claim_order_intent_dedup,
@@ -17,6 +19,7 @@ from ..oms import (
 from ..execution import apply_fill_and_trade, record_order_if_missing
 
 POSITION_EPSILON = 1e-12
+RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
 def _get_fill_price(signal: str) -> float | None:
@@ -124,12 +127,21 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
                 if existing_intent is not None and existing_intent["order_status"] is not None
                 else "UNKNOWN"
             )
-            print(
-                "[SKIP] duplicate order intent "
-                f"{settings.PAIR} side={side} qty={float(trade_qty):.12f} "
-                f"intent_ts={int(ts)} key={intent_key} "
-                f"reason=duplicate intent already recorded existing_client_order_id={existing_client_order_id} "
-                f"existing_status={existing_status}"
+            RUN_LOG.info(
+                format_log_kv(
+                    "[SKIP] duplicate order intent",
+                    mode=settings.MODE,
+                    symbol=settings.PAIR,
+                    side=side,
+                    qty=f"{float(trade_qty):.12f}",
+                    intent_ts=int(ts),
+                    intent_key=intent_key,
+                    reason=(
+                        "duplicate intent already recorded "
+                        f"existing_client_order_id={existing_client_order_id} "
+                        f"existing_status={existing_status}"
+                    ),
+                )
             )
             notify(
                 f"event=order_intent_dedup_skip symbol={settings.PAIR} side={side} qty={float(trade_qty)} "
@@ -139,10 +151,17 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             conn.commit()
             return None
 
-        print(
-            "[RUN] submit order intent "
-            f"{settings.PAIR} side={side} qty={float(trade_qty):.12f} "
-            f"intent_ts={int(ts)} key={intent_key} reason=client_order_id={client_order_id}"
+        RUN_LOG.info(
+            format_log_kv(
+                "[RUN] submit order intent",
+                mode=settings.MODE,
+                symbol=settings.PAIR,
+                side=side,
+                qty=f"{float(trade_qty):.12f}",
+                intent_ts=int(ts),
+                intent_key=intent_key,
+                reason=f"client_order_id={client_order_id}",
+            )
         )
         note = f"client_order_id={client_order_id}; signal_price={price}"
 

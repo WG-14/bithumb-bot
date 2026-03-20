@@ -33,7 +33,9 @@ def test_services_use_consistent_explicit_env_source_rule() -> None:
         unit = _read_unit(path)
         service = unit["Service"]
         assert "Environment" in service
-        assert service["Environment"].startswith("BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_")
+        assert "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_" in service["Environment"]
+        if path.name in {"bithumb-bot.service", "bithumb-bot-paper.service"}:
+            assert "PYTHONUNBUFFERED=1" in service["Environment"]
         assert "EnvironmentFile" not in service
 
 
@@ -43,13 +45,15 @@ def test_live_and_paper_services_use_mode_specific_env_and_canonical_entrypoint(
 
     live_env = live["Service"]["Environment"]
     paper_env = paper["Service"]["Environment"]
-    assert live_env == "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@"
-    assert paper_env == "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_PAPER@"
+    assert "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" in live_env
+    assert "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_PAPER@" in paper_env
+    assert "PYTHONUNBUFFERED=1" in live_env
+    assert "PYTHONUNBUFFERED=1" in paper_env
 
     live_exec = live["Service"]["ExecStart"]
     paper_exec = paper["Service"]["ExecStart"]
-    assert "python -m bithumb_bot run" in live_exec
-    assert "python -m bithumb_bot run" in paper_exec
+    assert "@BITHUMB_UV_BIN@ run python -u -m bithumb_bot run" in live_exec
+    assert "@BITHUMB_UV_BIN@ run python -u -m bithumb_bot run" in paper_exec
     assert "--mode live" in live_exec
     assert "--mode paper" in paper_exec
 

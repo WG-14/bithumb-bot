@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 
@@ -9,7 +10,7 @@ from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
-from ..observability import safety_event
+from ..observability import format_log_kv, safety_event
 from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
@@ -40,6 +41,7 @@ SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
 SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
 SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
 SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
+RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
 def _classify_temporary_submit_error(exc: Exception) -> tuple[str, bool]:
@@ -404,23 +406,6 @@ def _order_intent_strategy_context() -> str:
 
 def _order_intent_type(*, side: str) -> str:
     return "market_entry" if side == "BUY" else "market_exit"
-
-
-def _intent_log_line(
-    *,
-    prefix: str,
-    symbol: str,
-    side: str,
-    qty: float,
-    intent_ts: int,
-    intent_key: str,
-    reason: str,
-) -> str:
-    return (
-        f"{prefix} {symbol} side={side} qty={float(qty):.12f} "
-        f"intent_ts={int(intent_ts)} key={intent_key} reason={reason}"
-    )
-
 
 def _encode_submit_evidence(*, payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -891,12 +876,13 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 f"duplicate intent already recorded "
                 f"existing_client_order_id={existing_client_order_id} existing_status={existing_status}"
             )
-            print(
-                _intent_log_line(
-                    prefix="[SKIP] duplicate order intent",
+            RUN_LOG.info(
+                format_log_kv(
+                    "[SKIP] duplicate order intent",
+                    mode=settings.MODE,
                     symbol=settings.PAIR,
                     side=side,
-                    qty=normalized_qty,
+                    qty=f"{float(normalized_qty):.12f}",
                     intent_ts=int(ts),
                     intent_key=intent_key,
                     reason=skip_reason,
@@ -919,12 +905,13 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             conn.commit()
             return None
 
-        print(
-            _intent_log_line(
-                prefix="[RUN] submit order intent",
+        RUN_LOG.info(
+            format_log_kv(
+                "[RUN] submit order intent",
+                mode=settings.MODE,
                 symbol=settings.PAIR,
                 side=side,
-                qty=normalized_qty,
+                qty=f"{float(normalized_qty):.12f}",
                 intent_ts=int(ts),
                 intent_key=intent_key,
                 reason=f"client_order_id={client_order_id}",

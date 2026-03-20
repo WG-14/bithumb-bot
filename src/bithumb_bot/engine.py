@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 import json
@@ -15,7 +16,7 @@ from .broker.base import BrokerError
 from .db_core import ensure_db
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
-from .observability import safety_event
+from .observability import configure_runtime_logging, format_log_kv, safety_event
 from .reason_codes import CANCEL_FAILURE, POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
@@ -27,6 +28,7 @@ FAILSAFE_RETRY_DELAY_SEC = 180
 STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
+RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
 @dataclass(frozen=True)
@@ -63,12 +65,8 @@ RISK_EXPOSURE_HALT_REASON_CODES = {
     POSITION_LOSS_LIMIT,
 }
 
-
-def _processed_candle_log_prefix(*, symbol: str, interval: str, candle_ts_ms: int | None, last_processed_candle_ts_ms: int | None) -> str:
-    return (
-        f"symbol={symbol} interval={interval} "
-        f"candle_ts={candle_ts_ms} last_processed_candle_ts={last_processed_candle_ts_ms}"
-    )
+def _log_loop_event(level: int, prefix: str, /, **fields: object) -> None:
+    RUN_LOG.log(level, format_log_kv(prefix, mode=settings.MODE, **fields))
 
 
 def _close_guard_ms(interval_sec: int) -> int:
@@ -764,6 +762,7 @@ def _attempt_risk_breach_flatten(
 def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import reconcile_with_broker
 
+    configure_runtime_logging()
     validate_live_mode_preflight(settings)
 
     state = runtime_state.snapshot()
@@ -802,7 +801,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                 ),
             )
         )
-        print("[RUN] persisted runtime halt is active. refusing to enter trading loop.")
+        _log_loop_event(
+            logging.WARNING,
+            "[RUN] startup_blocked",
+            symbol=settings.PAIR,
+            interval=settings.INTERVAL,
+            reason="persisted runtime halt is active; refusing to enter trading loop",
+        )
         return
 
     broker = None
@@ -854,11 +859,16 @@ def run_loop(short_n: int, long_n: int) -> None:
             return
 
     sec = parse_interval_sec(settings.INTERVAL)
-    print(
-        f"[RUN] MODE={settings.MODE} PAIR={settings.PAIR} "
-        f"INTERVAL={settings.INTERVAL} (every {sec}s) short={short_n} long={long_n}"
+    _log_loop_event(
+        logging.INFO,
+        "[RUN] loop_start",
+        symbol=settings.PAIR,
+        interval=settings.INTERVAL,
+        every_sec=sec,
+        sma_short=short_n,
+        sma_long=long_n,
     )
-    print("중지: Ctrl+C")
+    _log_loop_event(logging.INFO, "[RUN] operator_hint", action="Ctrl+C to stop")
     fail_count = 0
     MAX_FAILS = 5
     last_open_order_reconcile_at: float | None = None
@@ -873,11 +883,24 @@ def run_loop(short_n: int, long_n: int) -> None:
             state = runtime_state.snapshot()
             if (not state.trading_enabled) and state.retry_at_epoch_sec:
                 if math.isinf(state.retry_at_epoch_sec):
-                    print("[RUN] trading halted indefinitely. exiting run loop.")
+                    _log_loop_event(
+                        logging.WARNING,
+                        "[RUN] halted_exit",
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        reason="trading halted indefinitely",
+                    )
                     return
                 if now < state.retry_at_epoch_sec:
                     wait_sec = max(0, int(state.retry_at_epoch_sec - now))
-                    print(f"[RUN] failsafe active. trading paused for {wait_sec}s")
+                    _log_loop_event(
+                        logging.WARNING,
+                        "[RUN] failsafe_pause",
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        wait_sec=wait_sec,
+                        reason="retry window not reached",
+                    )
                     continue
                 runtime_state.enable_trading()
                 notify("failsafe retry window reached, attempting auto-resume")
@@ -1159,54 +1182,50 @@ def run_loop(short_n: int, long_n: int) -> None:
             last_processed_candle_ts_ms = state.last_processed_candle_ts_ms
 
             if incomplete_ts is not None:
-                print(
-                    "[SKIP] incomplete/open candle "
-                    + _processed_candle_log_prefix(
-                        symbol=settings.PAIR,
-                        interval=settings.INTERVAL,
-                        candle_ts_ms=incomplete_ts,
-                        last_processed_candle_ts_ms=last_processed_candle_ts_ms,
-                    )
-                    + f" reason=latest candle has not cleared close guard ({_close_guard_ms(sec)}ms)"
+                _log_loop_event(
+                    logging.INFO,
+                    "[SKIP] incomplete/open candle",
+                    symbol=settings.PAIR,
+                    interval=settings.INTERVAL,
+                    candle_ts=incomplete_ts,
+                    last_processed_candle_ts=last_processed_candle_ts_ms,
+                    reason=f"latest candle has not cleared close guard ({_close_guard_ms(sec)}ms)",
                 )
 
             if closed_row is None:
-                print(
-                    "[SKIP] incomplete/open candle "
-                    + _processed_candle_log_prefix(
-                        symbol=settings.PAIR,
-                        interval=settings.INTERVAL,
-                        candle_ts_ms=incomplete_ts,
-                        last_processed_candle_ts_ms=last_processed_candle_ts_ms,
-                    )
-                    + " reason=no fully closed candle available yet"
+                _log_loop_event(
+                    logging.INFO,
+                    "[SKIP] incomplete/open candle",
+                    symbol=settings.PAIR,
+                    interval=settings.INTERVAL,
+                    candle_ts=incomplete_ts,
+                    last_processed_candle_ts=last_processed_candle_ts_ms,
+                    reason="no fully closed candle available yet",
                 )
                 continue
 
             closed_candle_ts_ms = int(closed_row["ts"]) if hasattr(closed_row, "keys") else int(closed_row[0])
             if last_processed_candle_ts_ms is not None:
                 if closed_candle_ts_ms == last_processed_candle_ts_ms:
-                    print(
-                        "[SKIP] duplicate candle "
-                        + _processed_candle_log_prefix(
-                            symbol=settings.PAIR,
-                            interval=settings.INTERVAL,
-                            candle_ts_ms=closed_candle_ts_ms,
-                            last_processed_candle_ts_ms=last_processed_candle_ts_ms,
-                        )
-                        + " reason=closed candle already processed before restart/previous tick"
+                    _log_loop_event(
+                        logging.INFO,
+                        "[SKIP] duplicate candle",
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        candle_ts=closed_candle_ts_ms,
+                        last_processed_candle_ts=last_processed_candle_ts_ms,
+                        reason="closed candle already processed before restart/previous tick",
                     )
                     continue
                 if closed_candle_ts_ms < last_processed_candle_ts_ms:
-                    print(
-                        "[SKIP] stale candle "
-                        + _processed_candle_log_prefix(
-                            symbol=settings.PAIR,
-                            interval=settings.INTERVAL,
-                            candle_ts_ms=closed_candle_ts_ms,
-                            last_processed_candle_ts_ms=last_processed_candle_ts_ms,
-                        )
-                        + " reason=closed candle is older than persisted last processed candle"
+                    _log_loop_event(
+                        logging.INFO,
+                        "[SKIP] stale candle",
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        candle_ts=closed_candle_ts_ms,
+                        last_processed_candle_ts=last_processed_candle_ts_ms,
+                        reason="closed candle is older than persisted last processed candle",
                     )
                     continue
 
@@ -1217,21 +1236,28 @@ def run_loop(short_n: int, long_n: int) -> None:
                 conn.close()
 
             if r is None:
-                print("[RUN] 데이터 부족. sync가 쌓이면 다시 계산됨.")
-                continue
-
-            print(
-                "[RUN] processed closed candle "
-                + _processed_candle_log_prefix(
+                _log_loop_event(
+                    logging.INFO,
+                    "[RUN] signal_skipped",
                     symbol=settings.PAIR,
                     interval=settings.INTERVAL,
-                    candle_ts_ms=r["ts"],
-                    last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                    candle_ts=closed_candle_ts_ms,
+                    last_processed_candle_ts=last_processed_candle_ts_ms,
+                    reason="insufficient candle history; signal will be recalculated after more syncs",
                 )
-                + (
-                    f" close={r['last_close']:,.0f} SMA{short_n}={r['curr_s']:.2f} "
-                    f"SMA{long_n}={r['curr_l']:.2f} signal={r['signal']}"
-                )
+                continue
+
+            _log_loop_event(
+                logging.INFO,
+                "[RUN] processed closed candle",
+                symbol=settings.PAIR,
+                interval=settings.INTERVAL,
+                candle_ts=r["ts"],
+                last_processed_candle_ts=last_processed_candle_ts_ms,
+                close=f"{r['last_close']:,.0f}",
+                signal=r["signal"],
+                sma_short=f"SMA{short_n}={r['curr_s']:.2f}",
+                sma_long=f"SMA{long_n}={r['curr_l']:.2f}",
             )
             runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
 
@@ -1277,12 +1303,25 @@ def run_loop(short_n: int, long_n: int) -> None:
                     continue
 
             if trade:
-                print(
-                    f"  [{settings.MODE.upper()}] {trade['side']} "
-                    f"qty={trade['qty']:.8f} price={trade['price']:,.0f} "
-                    f"fee={trade['fee']:,.0f} cash={trade['cash']:,.0f} "
-                    f"asset={trade['asset']:.8f}"
+                _log_loop_event(
+                    logging.INFO,
+                    "[RUN] trade_applied",
+                    symbol=settings.PAIR,
+                    interval=settings.INTERVAL,
+                    candle_ts=r["ts"],
+                    side=trade["side"],
+                    qty=f"{trade['qty']:.8f}",
+                    price=f"{trade['price']:,.0f}",
+                    fee=f"{trade['fee']:,.0f}",
+                    cash=f"{trade['cash']:,.0f}",
+                    asset=f"{trade['asset']:.8f}",
                 )
 
     except KeyboardInterrupt:
-        print("\n[RUN] stopped by user (Ctrl+C)")
+        _log_loop_event(
+            logging.INFO,
+            "[RUN] stopped",
+            symbol=settings.PAIR,
+            interval=settings.INTERVAL,
+            reason="stopped by user (Ctrl+C)",
+        )

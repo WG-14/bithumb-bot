@@ -78,6 +78,7 @@ sudo systemctl enable --now bithumb-bot-backup.timer
   - `bithumb-bot.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
   - `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`: `Environment=BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env`
   - 세 유닛이 같은 env 파일을 보므로 `DB_PATH`, notifier, 임계치를 단일 파일 기준으로 관리.
+- `bithumb-bot.service` / `bithumb-bot-paper.service`는 `PYTHONUNBUFFERED=1` + `python -u` + `@BITHUMB_UV_BIN@` 절대경로를 사용해 systemd/journald 환경에서도 런루프 로그가 즉시 출력되도록 유지한다.
 - `bithumb-bot-healthcheck.service`는 `User=ec2-user`, `WorkingDirectory=/home/ec2-user/bithumb-bot`, `ExecStart=/home/ec2-user/.local/bin/uv run python /home/ec2-user/bithumb-bot/scripts/healthcheck.py`처럼 절대경로 기반으로 렌더링해 systemd PATH 차이로 인한 `status=127`을 피한다.
 - healthcheck는 fail-fast 정책이다.
   - `BITHUMB_ENV_FILE`이 비어 있거나 파일이 없으면 즉시 실패

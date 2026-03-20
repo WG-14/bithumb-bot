@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import json
+import logging
+import sys
 import time
 from typing import Any
 
 from .config import settings
 from .notifier import AlertSeverity, format_event
 
+
+_STDOUT_HANDLER_NAME = "bithumb_bot_stdout"
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+_LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
 
 
@@ -70,3 +77,61 @@ def safety_event(
     }
     payload.update(fields)
     return format_event(event, **payload)
+
+
+def _reconfigure_text_stream(stream: Any) -> None:
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(line_buffering=True, write_through=True)
+        except Exception:
+            return
+
+
+def configure_runtime_logging(level: int = logging.INFO) -> None:
+    _reconfigure_text_stream(sys.stdout)
+    _reconfigure_text_stream(sys.stderr)
+
+    root_logger = logging.getLogger()
+    handler = next(
+        (
+            existing
+            for existing in root_logger.handlers
+            if getattr(existing, "name", "") == _STDOUT_HANDLER_NAME
+        ),
+        None,
+    )
+    if handler is None:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.set_name(_STDOUT_HANDLER_NAME)
+        handler.setFormatter(logging.Formatter(_LOG_FORMAT, _LOG_DATE_FORMAT))
+        root_logger.addHandler(handler)
+    else:
+        try:
+            handler.setStream(sys.stdout)
+        except ValueError:
+            root_logger.removeHandler(handler)
+            handler = logging.StreamHandler(sys.stdout)
+            handler.set_name(_STDOUT_HANDLER_NAME)
+            handler.setFormatter(logging.Formatter(_LOG_FORMAT, _LOG_DATE_FORMAT))
+            root_logger.addHandler(handler)
+    root_logger.setLevel(level)
+
+
+def format_log_kv(prefix: str, /, **fields: Any) -> str:
+    parts = [prefix]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            rendered = "1" if value else "0"
+        elif isinstance(value, float):
+            rendered = f"{value:.3f}"
+        elif isinstance(value, (dict, list, tuple)):
+            rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        else:
+            rendered = str(value)
+        if any(ch.isspace() for ch in rendered):
+            rendered = json.dumps(rendered, ensure_ascii=False)
+        parts.append(f"{key}={rendered}")
+    return " ".join(parts)
