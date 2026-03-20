@@ -349,14 +349,25 @@ class BithumbBroker:
         except (BrokerRejectError, BrokerTemporaryError):
             return open_orders[:lim]
 
+        if not isinstance(tx_rows, list):
+            tx_rows = []
+
         aggregated: dict[str, dict[str, float | int | str | None]] = {}
         for row in tx_rows:
+            if not isinstance(row, dict):
+                continue
+
             exchange_order_id = str(row.get("order_id") or "")
             if not exchange_order_id:
                 continue
-            ts = int(float(row.get("transfer_date") or 0))
-            qty = float(row.get("units_traded") or 0.0)
-            price = float(row.get("price") or 0.0)
+
+            try:
+                ts = int(float(row.get("transfer_date") or 0))
+                qty = float(row.get("units_traded") or 0.0)
+                price = float(row.get("price") or 0.0)
+            except (TypeError, ValueError):
+                continue
+
             slot = aggregated.setdefault(
                 exchange_order_id,
                 {
