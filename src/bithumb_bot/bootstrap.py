@@ -95,6 +95,8 @@ def bootstrap_argv(argv: list[str]) -> list[str]:
 def run_cli() -> None:
     sys.argv = bootstrap_argv(sys.argv[:])
 
+    from .observability import configure_runtime_logging
     from .cli import main as cli_main
 
+    configure_runtime_logging()
     cli_main()
