@@ -137,6 +137,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             last_candle_status TEXT NOT NULL DEFAULT 'waiting_first_sync',
             last_candle_sync_epoch_sec REAL,
             last_candle_ts_ms INTEGER,
+            last_processed_candle_ts_ms INTEGER,
             last_candle_status_detail TEXT,
             retry_at_epoch_sec REAL,
             last_disable_reason TEXT,
@@ -238,6 +239,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "bot_health",
         "last_candle_ts_ms",
         "last_candle_ts_ms INTEGER",
+    )
+    _ensure_column(
+        conn,
+        "bot_health",
+        "last_processed_candle_ts_ms",
+        "last_processed_candle_ts_ms INTEGER",
     )
     _ensure_column(
         conn,
