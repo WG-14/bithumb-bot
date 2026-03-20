@@ -1,18 +1,31 @@
 # src/bithumb_bot/strategy/sma.py
 from __future__ import annotations
+
 import sqlite3
 from typing import Any
+
 from ..config import settings
 
-def compute_signal(conn: sqlite3.Connection, short_n: int, long_n: int) -> dict[str, Any] | None:
+
+def compute_signal(
+    conn: sqlite3.Connection,
+    short_n: int,
+    long_n: int,
+    *,
+    through_ts_ms: int | None = None,
+) -> dict[str, Any] | None:
     if short_n >= long_n:
         raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
     need = long_n + 2
-    rows = conn.execute(
-        "SELECT ts, close FROM candles WHERE pair=? AND interval=? ORDER BY ts ASC",
-        (settings.PAIR, settings.INTERVAL),
-    ).fetchall()
+    query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
+    params: list[object] = [settings.PAIR, settings.INTERVAL]
+    if through_ts_ms is not None:
+        query += " AND ts <= ?"
+        params.append(int(through_ts_ms))
+    query += " ORDER BY ts ASC"
+
+    rows = conn.execute(query, tuple(params)).fetchall()
 
     if len(rows) < need:
         return None

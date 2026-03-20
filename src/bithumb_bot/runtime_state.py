@@ -38,6 +38,7 @@ class RuntimeState:
     last_candle_status: str = "waiting_first_sync"
     last_candle_sync_epoch_sec: float | None = None
     last_candle_ts_ms: int | None = None
+    last_processed_candle_ts_ms: int | None = None
     last_candle_status_detail: str | None = None
     retry_at_epoch_sec: float | None = None
     last_disable_reason: str | None = None
@@ -88,6 +89,7 @@ def _sync_state_from_persisted_locked() -> None:
     _STATE.last_candle_status = persisted.last_candle_status
     _STATE.last_candle_sync_epoch_sec = persisted.last_candle_sync_epoch_sec
     _STATE.last_candle_ts_ms = persisted.last_candle_ts_ms
+    _STATE.last_processed_candle_ts_ms = persisted.last_processed_candle_ts_ms
     _STATE.last_candle_status_detail = persisted.last_candle_status_detail
     _STATE.retry_at_epoch_sec = persisted.retry_at_epoch_sec
     _STATE.last_disable_reason = persisted.last_disable_reason
@@ -141,6 +143,7 @@ def _persist_state(state: RuntimeState) -> None:
                     last_candle_status,
                     last_candle_sync_epoch_sec,
                     last_candle_ts_ms,
+                    last_processed_candle_ts_ms,
                     last_candle_status_detail,
                     retry_at_epoch_sec,
                     last_disable_reason,
@@ -166,7 +169,7 @@ def _persist_state(state: RuntimeState) -> None:
                     resume_gate_reason,
                     updated_ts
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s', 'now'))
                 ON CONFLICT(id) DO UPDATE SET
                     trading_enabled=excluded.trading_enabled,
                     halt_new_orders_blocked=excluded.halt_new_orders_blocked,
@@ -184,6 +187,7 @@ def _persist_state(state: RuntimeState) -> None:
                     last_candle_status=excluded.last_candle_status,
                     last_candle_sync_epoch_sec=excluded.last_candle_sync_epoch_sec,
                     last_candle_ts_ms=excluded.last_candle_ts_ms,
+                    last_processed_candle_ts_ms=excluded.last_processed_candle_ts_ms,
                     last_candle_status_detail=excluded.last_candle_status_detail,
                     retry_at_epoch_sec=excluded.retry_at_epoch_sec,
                     last_disable_reason=excluded.last_disable_reason,
@@ -226,6 +230,7 @@ def _persist_state(state: RuntimeState) -> None:
                     _clip(state.last_candle_status),
                     state.last_candle_sync_epoch_sec,
                     state.last_candle_ts_ms,
+                    state.last_processed_candle_ts_ms,
                     _clip(state.last_candle_status_detail),
                     state.retry_at_epoch_sec,
                     _clip(state.last_disable_reason),
@@ -280,6 +285,7 @@ def _read_persisted_state() -> RuntimeState | None:
                 last_candle_status,
                 last_candle_sync_epoch_sec,
                 last_candle_ts_ms,
+                last_processed_candle_ts_ms,
                 last_candle_status_detail,
                 retry_at_epoch_sec,
                 last_disable_reason,
@@ -341,6 +347,11 @@ def _read_persisted_state() -> RuntimeState | None:
         ),
         last_candle_ts_ms=(
             int(row["last_candle_ts_ms"]) if row["last_candle_ts_ms"] is not None else None
+        ),
+        last_processed_candle_ts_ms=(
+            int(row["last_processed_candle_ts_ms"])
+            if row["last_processed_candle_ts_ms"] is not None
+            else None
         ),
         last_candle_status_detail=(
             str(row["last_candle_status_detail"])
@@ -628,6 +639,25 @@ def set_last_candle_observation(
         _STATE.last_candle_sync_epoch_sec = sync_epoch_sec
         _STATE.last_candle_ts_ms = candle_ts_ms
         _STATE.last_candle_status_detail = _clip(detail)
+        _persist_state(_STATE)
+
+
+
+
+def mark_processed_candle(*, candle_ts_ms: int, now_epoch_sec: float | None = None) -> None:
+    ts = now_epoch_sec
+    if ts is None:
+        import time
+
+        ts = time.time()
+
+    with _LOCK:
+        _sync_state_from_persisted_locked()
+        _STATE.last_processed_candle_ts_ms = int(candle_ts_ms)
+        _STATE.last_candle_status = "processed_closed"
+        _STATE.last_candle_status_detail = _clip(
+            f"processed closed candle ts={int(candle_ts_ms)} at epoch={float(ts):.3f}"
+        )
         _persist_state(_STATE)
 
 

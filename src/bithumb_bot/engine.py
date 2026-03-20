@@ -64,6 +64,52 @@ RISK_EXPOSURE_HALT_REASON_CODES = {
 }
 
 
+def _processed_candle_log_prefix(*, symbol: str, interval: str, candle_ts_ms: int | None, last_processed_candle_ts_ms: int | None) -> str:
+    return (
+        f"symbol={symbol} interval={interval} "
+        f"candle_ts={candle_ts_ms} last_processed_candle_ts={last_processed_candle_ts_ms}"
+    )
+
+
+def _close_guard_ms(interval_sec: int) -> int:
+    interval_ms = max(1, int(interval_sec)) * 1000
+    return max(2_000, min(30_000, interval_ms // 20))
+
+
+def _is_closed_candle(*, candle_ts_ms: int, now_ms: int, interval_sec: int) -> bool:
+    interval_ms = max(1, int(interval_sec)) * 1000
+    close_ready_ts_ms = candle_ts_ms + interval_ms + _close_guard_ms(interval_sec)
+    return now_ms >= close_ready_ts_ms
+
+
+def _select_latest_closed_candle(conn, *, pair: str, interval: str, interval_sec: int, now_ms: int):
+    rows = conn.execute(
+        """
+        SELECT ts, close
+        FROM candles
+        WHERE pair=? AND interval=?
+        ORDER BY ts DESC
+        LIMIT 5
+        """,
+        (pair, interval),
+    ).fetchall()
+    if not rows:
+        return None, None
+
+    latest_row = rows[0]
+    latest_ts = int(latest_row["ts"]) if hasattr(latest_row, "keys") else int(latest_row[0])
+    incomplete_ts = None
+    if not _is_closed_candle(candle_ts_ms=latest_ts, now_ms=now_ms, interval_sec=interval_sec):
+        incomplete_ts = latest_ts
+
+    for row in rows:
+        candle_ts_ms = int(row["ts"]) if hasattr(row, "keys") else int(row[0])
+        if _is_closed_candle(candle_ts_ms=candle_ts_ms, now_ms=now_ms, interval_sec=interval_sec):
+            return row, incomplete_ts
+
+    return None, incomplete_ts
+
+
 def _get_open_order_snapshot(now_ms: int) -> tuple[int, float | None]:
     conn = ensure_db()
     try:
@@ -127,6 +173,7 @@ def get_health_status() -> dict[str, float | int | bool | str | None]:
         "last_candle_status": state.last_candle_status,
         "last_candle_sync_epoch_sec": state.last_candle_sync_epoch_sec,
         "last_candle_ts_ms": state.last_candle_ts_ms,
+        "last_processed_candle_ts_ms": state.last_processed_candle_ts_ms,
         "last_candle_status_detail": state.last_candle_status_detail,
         "error_count": state.error_count,
         "trading_enabled": state.trading_enabled,
@@ -844,6 +891,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                         "SELECT ts, close FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
                         (settings.PAIR, settings.INTERVAL),
                     ).fetchone()
+                    closed_row, incomplete_ts = _select_latest_closed_candle(
+                        conn,
+                        pair=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        interval_sec=sec,
+                        now_ms=int(sync_observed_epoch_sec * 1000),
+                    )
                 finally:
                     conn.close()
 
@@ -866,7 +920,11 @@ def run_loop(short_n: int, long_n: int) -> None:
                     age_sec=candle_age_sec,
                     sync_epoch_sec=sync_observed_epoch_sec,
                     candle_ts_ms=last_ts,
-                    detail=None,
+                    detail=(
+                        None
+                        if incomplete_ts is None
+                        else f"latest candle ts={incomplete_ts} still open; using latest fully closed candle"
+                    ),
                 )
 
                 fail_count = 0
@@ -1097,19 +1155,85 @@ def run_loop(short_n: int, long_n: int) -> None:
                         notify(safety_event("order_submit_blocked", reason_code=RISKY_ORDER_BLOCK, reason="unresolved open order exists; skip new order placement"))
                         continue
 
+            state = runtime_state.snapshot()
+            last_processed_candle_ts_ms = state.last_processed_candle_ts_ms
+
+            if incomplete_ts is not None:
+                print(
+                    "[SKIP] incomplete/open candle "
+                    + _processed_candle_log_prefix(
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        candle_ts_ms=incomplete_ts,
+                        last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                    )
+                    + f" reason=latest candle has not cleared close guard ({_close_guard_ms(sec)}ms)"
+                )
+
+            if closed_row is None:
+                print(
+                    "[SKIP] incomplete/open candle "
+                    + _processed_candle_log_prefix(
+                        symbol=settings.PAIR,
+                        interval=settings.INTERVAL,
+                        candle_ts_ms=incomplete_ts,
+                        last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                    )
+                    + " reason=no fully closed candle available yet"
+                )
+                continue
+
+            closed_candle_ts_ms = int(closed_row["ts"]) if hasattr(closed_row, "keys") else int(closed_row[0])
+            if last_processed_candle_ts_ms is not None:
+                if closed_candle_ts_ms == last_processed_candle_ts_ms:
+                    print(
+                        "[SKIP] duplicate candle "
+                        + _processed_candle_log_prefix(
+                            symbol=settings.PAIR,
+                            interval=settings.INTERVAL,
+                            candle_ts_ms=closed_candle_ts_ms,
+                            last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                        )
+                        + " reason=closed candle already processed before restart/previous tick"
+                    )
+                    continue
+                if closed_candle_ts_ms < last_processed_candle_ts_ms:
+                    print(
+                        "[SKIP] stale candle "
+                        + _processed_candle_log_prefix(
+                            symbol=settings.PAIR,
+                            interval=settings.INTERVAL,
+                            candle_ts_ms=closed_candle_ts_ms,
+                            last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                        )
+                        + " reason=closed candle is older than persisted last processed candle"
+                    )
+                    continue
+
             conn = ensure_db()
-            r = compute_signal(conn, short_n, long_n)
-            conn.close()
+            try:
+                r = compute_signal(conn, short_n, long_n, through_ts_ms=closed_candle_ts_ms)
+            finally:
+                conn.close()
 
             if r is None:
                 print("[RUN] 데이터 부족. sync가 쌓이면 다시 계산됨.")
                 continue
 
             print(
-                f"[RUN] {kst_str(r['ts'])} close={r['last_close']:,.0f}  "
-                f"SMA{short_n}={r['curr_s']:.2f}  "
-                f"SMA{long_n}={r['curr_l']:.2f}  => {r['signal']}"
+                "[RUN] processed closed candle "
+                + _processed_candle_log_prefix(
+                    symbol=settings.PAIR,
+                    interval=settings.INTERVAL,
+                    candle_ts_ms=r["ts"],
+                    last_processed_candle_ts_ms=last_processed_candle_ts_ms,
+                )
+                + (
+                    f" close={r['last_close']:,.0f} SMA{short_n}={r['curr_s']:.2f} "
+                    f"SMA{long_n}={r['curr_l']:.2f} signal={r['signal']}"
+                )
             )
+            runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
 
             if r["signal"] not in ("BUY", "SELL"):
                 continue
