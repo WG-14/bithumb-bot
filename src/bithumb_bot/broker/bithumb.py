@@ -4,15 +4,18 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from urllib.parse import urlencode
 
 import httpx
 
 from ..config import settings
 from ..marketdata import fetch_orderbook_top, to_v1_market
+from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
@@ -27,6 +30,7 @@ _HTTPX_TRANSIENT_ERRORS = tuple(
     )
     if isinstance(cls, type)
 )
+RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
 class BithumbPrivateAPI:
@@ -286,8 +290,31 @@ class BithumbBroker:
         return to_v1_market(settings.PAIR)
 
     @staticmethod
-    def _format_volume(qty: float) -> str:
-        return f"{float(qty):.16f}".rstrip("0").rstrip(".") or "0"
+    def _decimal_from_value(value: object) -> Decimal:
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise BrokerRejectError(f"invalid numeric value for order serialization: {value}") from exc
+        if not decimal_value.is_finite():
+            raise BrokerRejectError(f"invalid non-finite numeric value for order serialization: {value}")
+        return decimal_value
+
+    @classmethod
+    def _format_krw_amount(cls, value: object) -> str:
+        amount = cls._decimal_from_value(value)
+        if amount <= 0:
+            return "0"
+        rounded = amount.quantize(Decimal("1"), rounding=ROUND_DOWN)
+        return format(rounded, "f").split(".", 1)[0]
+
+    @classmethod
+    def _format_volume(cls, qty: object, *, places: int = 8) -> str:
+        quantizer = Decimal("1").scaleb(-places)
+        volume = cls._decimal_from_value(qty)
+        if volume <= 0:
+            return "0"
+        rounded = volume.quantize(quantizer, rounding=ROUND_DOWN)
+        return format(rounded, "f").rstrip("0").rstrip(".") or "0"
 
     @staticmethod
     def _parse_ts(raw: object) -> int:
@@ -384,28 +411,47 @@ class BithumbBroker:
         if self.dry_run:
             return BrokerOrder(client_order_id, f"dry_{client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
+        normalized_side = str(side).strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            raise BrokerRejectError(f"unsupported order side: {side}")
+
         payload: dict[str, object] = {
             "market": self._market(),
-            "side": "bid" if side.lower() == "buy" else "ask",
+            "side": "bid" if normalized_side == "buy" else "ask",
         }
+        volume_text = self._format_volume(qty)
         if price is None:
-            if side.lower() == "buy":
-                bid, ask = fetch_orderbook_top(settings.PAIR)
+            if normalized_side == "buy":
+                _, ask = fetch_orderbook_top(settings.PAIR)
+                notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 payload.update({
-                    "price": str(max(float(ask), 0.0) * float(qty)),
+                    "price": self._format_krw_amount(notional),
                     "ord_type": "price",
                 })
             else:
                 payload.update({
-                    "volume": self._format_volume(qty),
+                    "volume": volume_text,
                     "ord_type": "market",
                 })
         else:
             payload.update({
-                "volume": self._format_volume(qty),
-                "price": str(price),
+                "volume": volume_text,
+                "price": self._format_krw_amount(price),
                 "ord_type": "limit",
             })
+
+        RUN_LOG.info(
+            format_log_kv(
+                "[ORDER_SUBMIT] broker payload",
+                market=payload.get("market"),
+                side=normalized_side,
+                ord_type=payload.get("ord_type"),
+                volume=payload.get("volume"),
+                price=payload.get("price"),
+                payload=payload,
+                client_order_id=client_order_id,
+            )
+        )
 
         data = self._post_private("/v2/orders", payload, retry_safe=False)
         if not isinstance(data, dict):

@@ -9,6 +9,7 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
 from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.config import settings
+from decimal import Decimal
 
 _HTTPX_TIMEOUT = getattr(httpx, "ReadTimeout", getattr(httpx, "RequestError"))
 _HTTPX_CONNECT = getattr(httpx, "ConnectError", getattr(httpx, "RequestError"))
@@ -248,7 +249,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     assert call["payload"] == {
         "market": "KRW-BTC",
         "side": "bid",
-        "price": str(150_000_000.0 * 0.1234),
+        "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
         "ord_type": "price",
     }
 
