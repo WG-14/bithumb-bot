@@ -866,6 +866,53 @@ def _capture_broker_read_journal(metadata: dict[str, int | str], broker: Broker)
     if compact:
         metadata["broker_read_journal"] = str(compact)[:500]
 
+
+def _clear_stale_initial_reconcile_halt_if_safe(
+    *,
+    conn,
+    reason_code: str,
+    metadata: dict[str, int | str],
+    broker_open_order_count: int,
+) -> None:
+    state = runtime_state.snapshot()
+    if not (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == "INITIAL_RECONCILE_FAILED"
+    ):
+        return
+    if reason_code != REASON_RECONCILE_OK:
+        return
+    if int(metadata.get("balance_split_mismatch_count", 0) or 0) != 0:
+        return
+    unresolved_row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN') THEN 1 ELSE 0 END) AS unresolved_count,
+            SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
+        FROM orders
+        """
+    ).fetchone()
+    portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+    unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
+    recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
+    position_flat = abs(float(portfolio_row["asset_qty"] or 0.0)) <= 1e-12 if portfolio_row else True
+    if not (
+        unresolved_count == 0
+        and recovery_required_count == 0
+        and broker_open_order_count == 0
+        and position_flat
+    ):
+        return
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=None,
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+
+
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
@@ -1092,6 +1139,12 @@ def reconcile_with_broker(broker: Broker) -> None:
         _capture_broker_read_journal(metadata, broker)
         runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
         runtime_state.refresh_open_order_health()
+        _clear_stale_initial_reconcile_halt_if_safe(
+            conn=conn,
+            reason_code=reason_code,
+            metadata=metadata,
+            broker_open_order_count=len(remote_open),
+        )
     finally:
         conn.close()
 

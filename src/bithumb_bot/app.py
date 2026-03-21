@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
-from .engine import evaluate_resume_eligibility, get_health_status
+from .engine import evaluate_resume_eligibility, get_health_status, maybe_clear_stale_initial_reconcile_halt
 from .recovery import (
     cancel_open_orders_with_broker,
     load_recent_order_lifecycle,
@@ -1179,6 +1179,7 @@ def _load_recovery_report(
     *,
     oldest_limit: int = 5,
 ) -> dict[str, int | float | str | bool | None | list[dict[str, str | float | bool]]]:
+    maybe_clear_stale_initial_reconcile_halt()
     conn = conn = ensure_db()
     try:
         placeholders = ",".join("?" for _ in OPEN_ORDER_STATUSES)
@@ -1659,6 +1660,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
 
 
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
+    maybe_clear_stale_initial_reconcile_halt()
     report = _load_recovery_report()
     state = runtime_state.snapshot()
 

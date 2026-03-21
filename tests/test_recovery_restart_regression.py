@@ -1048,6 +1048,35 @@ def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monk
     assert evaluate_startup_safety_gate() is None
 
 
+def test_reconcile_success_auto_clears_stale_initial_reconcile_halt(isolated_db):
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "START_CASH_KRW", 1000.0)
+    try:
+        runtime_state.disable_trading_until(
+            float("inf"),
+            reason=(
+                "initial reconcile failed (BrokerRejectError): "
+                "bithumb private /info/orders rejected with http status=400"
+            ),
+            reason_code="INITIAL_RECONCILE_FAILED",
+            halt_new_orders_blocked=True,
+            unresolved=True,
+        )
+
+        reconcile_with_broker(_NoopBroker())
+
+        state = runtime_state.snapshot()
+        assert state.trading_enabled is False
+        assert state.halt_new_orders_blocked is False
+        assert state.halt_state_unresolved is False
+        assert state.halt_reason_code is None
+        assert state.last_disable_reason is None
+        assert state.last_reconcile_status == "ok"
+        assert state.last_reconcile_reason_code == "RECONCILE_OK"
+    finally:
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+
 def test_restart_reconcile_api_exception_halts_and_prevents_resume(isolated_db, monkeypatch):
     _patch_single_tick_run_loop(monkeypatch)
 

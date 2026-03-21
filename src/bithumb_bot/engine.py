@@ -51,6 +51,21 @@ def _halt_reason(code: str, detail: str) -> HaltReason:
 def _resume_blocker(*, code: str, detail: str, overridable: bool) -> ResumeBlocker:
     return ResumeBlocker(code=code, detail=detail, overridable=overridable)
 
+
+def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
+    if not metadata_raw:
+        return 0
+    try:
+        reconcile_meta = json.loads(str(metadata_raw))
+    except json.JSONDecodeError:
+        return 0
+    mismatch_raw = reconcile_meta.get("balance_split_mismatch_count", 0)
+    try:
+        return max(0, int(mismatch_raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
     "NEW",
@@ -174,7 +189,50 @@ def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
         conn.close()
 
 
+def maybe_clear_stale_initial_reconcile_halt() -> bool:
+    runtime_state.refresh_open_order_health()
+    state = runtime_state.snapshot()
+
+    if not (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == "INITIAL_RECONCILE_FAILED"
+    ):
+        return False
+
+    startup_gate_reason = evaluate_startup_safety_gate()
+
+    open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+    mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
+    if not (
+        state.last_reconcile_status == "ok"
+        and state.last_reconcile_reason_code == "RECONCILE_OK"
+        and mismatch_count == 0
+        and not startup_gate_reason
+        and state.unresolved_open_order_count == 0
+        and state.recovery_required_count == 0
+        and not open_orders_present
+        and not position_present
+    ):
+        return False
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=None,
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    _log_loop_event(
+        logging.INFO,
+        "[RUN] stale_initial_reconcile_halt_cleared",
+        reason_code="INITIAL_RECONCILE_FAILED",
+        reconcile_reason_code=state.last_reconcile_reason_code or "-",
+    )
+    return True
+
 def get_health_status() -> dict[str, float | int | bool | str | None]:
+    maybe_clear_stale_initial_reconcile_halt()
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
@@ -314,6 +372,7 @@ def evaluate_startup_safety_gate() -> str | None:
 
 def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     """Returns whether operator resume may proceed and structured blockers."""
+    maybe_clear_stale_initial_reconcile_halt()
     startup_gate_reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
 
@@ -395,15 +454,11 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             )
 
     if settings.MODE == "live" and state.last_reconcile_metadata:
+        mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
         try:
             reconcile_meta = json.loads(str(state.last_reconcile_metadata))
         except json.JSONDecodeError:
             reconcile_meta = {}
-        mismatch_raw = reconcile_meta.get("balance_split_mismatch_count", 0)
-        try:
-            mismatch_count = max(0, int(mismatch_raw))
-        except (TypeError, ValueError):
-            mismatch_count = 0
         if mismatch_count > 0:
             mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "-")
             reasons.append(
