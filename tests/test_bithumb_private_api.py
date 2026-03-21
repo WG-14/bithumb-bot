@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from bithumb_bot.broker.bithumb import BithumbBroker
+from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
 from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.config import settings
 
@@ -120,6 +120,21 @@ def test_private_safe_call_retries_temporary_error(monkeypatch):
     assert _SequencedClient.calls == 2
     assert sleeps == [0.2]
 
+
+
+def test_query_string_for_order_chance_market_is_exact():
+    assert BithumbPrivateAPI._query_string({"market": "KRW-BTC"}) == "market=KRW-BTC"
+    claims = BithumbPrivateAPI._query_hash_claims({"market": "KRW-BTC"})
+    assert claims == {
+        "query_hash": "b749dfc2e17f75e5b46c8161f97fe7c9298ed4167ea21c5c94d16573efd8a801351470c0ff1a9a3f1e763f8249968218c04c571c8b45aa80cd4588e6c4be0738",
+        "query_hash_alg": "SHA512",
+    }
+
+
+def test_build_order_rules_market_uses_v1_symbol():
+    from bithumb_bot.broker.order_rules import build_order_rules_market
+
+    assert build_order_rules_market("BTC") == "KRW-BTC"
 
 
 def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
