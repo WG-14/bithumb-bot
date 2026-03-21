@@ -450,10 +450,24 @@ def test_validate_pretrade_price_protection_blocks_missing_reference_price(monke
         )
 
 
-def test_validate_pretrade_price_protection_blocks_stale_reference() -> None:
+def test_validate_pretrade_price_protection_uses_fresh_quote_age_not_last_candle_age() -> None:
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
     object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 5)
     runtime_state.set_last_candle_age_sec(30.0)
+
+    validate_pretrade(
+        broker=_FakeBroker(),
+        side="BUY",
+        qty=0.001,
+        market_price=100.5,
+    )
+
+    runtime_state.set_last_candle_age_sec(None)
+
+
+def test_validate_pretrade_price_protection_blocks_stale_quote_timestamp() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
+    object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 5)
 
     with pytest.raises(ValueError, match="reference price stale"):
         validate_pretrade(
@@ -461,9 +475,11 @@ def test_validate_pretrade_price_protection_blocks_stale_reference() -> None:
             side="BUY",
             qty=0.001,
             market_price=100.5,
+            reference_bid=100.0,
+            reference_ask=101.0,
+            reference_ts_epoch_sec=time.time() - 30.0,
+            reference_source="test_quote",
         )
-
-    runtime_state.set_last_candle_age_sec(None)
 
 
 def test_live_duplicate_intent_after_cancel_is_skipped_by_submit_dedup(monkeypatch, tmp_path):
