@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
+import importlib
+import importlib.util
 import json
 import time
 import uuid
@@ -14,6 +14,9 @@ import httpx
 from ..config import settings
 from ..marketdata import fetch_orderbook_top, to_v1_market
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
+
+_jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
+
 
 _HTTPX_TRANSIENT_ERRORS = tuple(
     cls
@@ -34,10 +37,6 @@ class BithumbPrivateAPI:
         self.dry_run = dry_run
 
     @staticmethod
-    def _base64url(data: bytes) -> str:
-        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-    @staticmethod
     def _payload_items(payload: dict[str, object] | None) -> list[tuple[str, str]]:
         if not payload:
             return []
@@ -56,25 +55,25 @@ class BithumbPrivateAPI:
     def _query_string(cls, payload: dict[str, object] | None) -> str:
         return urlencode(cls._payload_items(payload), doseq=True)
 
+    @classmethod
+    def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
+        query_string = cls._query_string(payload)
+        if not query_string:
+            return {}
+        return {
+            "query_hash": hashlib.sha512(query_string.encode()).hexdigest(),
+            "query_hash_alg": "SHA512",
+        }
+
     def _jwt_token(self, payload: dict[str, object] | None) -> str:
         claims: dict[str, object] = {
             "access_key": self.api_key,
             "nonce": str(uuid.uuid4()),
             "timestamp": int(time.time() * 1000),
+            **self._query_hash_claims(payload),
         }
-        query_string = self._query_string(payload)
-        if query_string:
-            claims["query_hash"] = hashlib.sha512(query_string.encode()).hexdigest()
-            claims["query_hash_alg"] = "SHA512"
-
-        header = {"alg": "HS256", "typ": "JWT"}
-        signing_input = (
-            self._base64url(json.dumps(header, separators=(",", ":")).encode())
-            + "."
-            + self._base64url(json.dumps(claims, separators=(",", ":")).encode())
-        )
-        signature = hmac.new(self.api_secret.encode(), signing_input.encode(), hashlib.sha256).digest()
-        return signing_input + "." + self._base64url(signature)
+        token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
+        return token if isinstance(token, str) else token.decode()
 
     def _headers(self, payload: dict[str, object] | None, *, has_json_body: bool) -> dict[str, str]:
         if self.dry_run:

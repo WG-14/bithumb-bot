@@ -87,8 +87,14 @@ def _pick_int(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> in
     return None
 
 
+def build_order_rules_market(pair: str) -> str:
+    token = str(pair).strip()
+    normalized = token if any(sep in token for sep in ("_", "-")) else f"{token}_KRW"
+    return to_v1_market(normalized)
+
+
 def fetch_exchange_order_rules(pair: str) -> OrderRules:
-    market = to_v1_market(pair)
+    market = build_order_rules_market(pair)
     payload = BithumbBroker().get_order_chance(market=market)
 
     if not isinstance(payload, dict):
