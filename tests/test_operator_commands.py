@@ -21,6 +21,7 @@ from bithumb_bot.app import (
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.engine import evaluate_resume_eligibility
 
 import os
 import pytest
@@ -533,6 +534,29 @@ def test_resume_non_risk_halt_with_open_exposure_message_is_unchanged(tmp_path, 
     assert exc.value.code == 1
 
 
+def _set_stale_initial_reconcile_halt_with_clean_reconcile() -> None:
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=(
+            "initial reconcile failed (BrokerRejectError): "
+            "bithumb private /info/orders rejected with http status=400"
+        ),
+        reason_code="INITIAL_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "balance_split_mismatch_summary": "none",
+            "remote_open_order_found": 0,
+        },
+    )
+    runtime_state.refresh_open_order_health()
+
+
 def test_resume_refuses_when_halt_state_unresolved_even_without_open_orders(
     tmp_path, capsys
 ):
@@ -686,6 +710,22 @@ def test_resume_force_rejects_initial_reconcile_failure_with_operator_readable_r
     assert "INITIAL_RECONCILE_FAILED" in out
     assert "broker timeout" in out
     assert exc.value.code == 1
+
+
+def test_resume_auto_clears_stale_initial_reconcile_halt_after_clean_reconcile(tmp_path):
+    _set_tmp_db(tmp_path)
+    _set_stale_initial_reconcile_halt_with_clean_reconcile()
+
+    eligible, blockers = evaluate_resume_eligibility()
+
+    assert eligible is True
+    assert blockers == []
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
+    assert state.halt_reason_code is None
+    assert state.last_disable_reason is None
 
 
 def test_resume_force_enables_for_safe_manual_pause(tmp_path):
@@ -1469,6 +1509,22 @@ def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_pat
 
 
 
+def test_health_auto_clears_stale_initial_reconcile_halt(capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    _set_stale_initial_reconcile_halt_with_clean_reconcile()
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "halt_new_orders_blocked=0" in out
+    assert "can_resume=true" in out
+    assert "blockers=none" in out
+    assert "resume_safety=safe" in out
+    assert "halt_state_unresolved=False" in out
+    assert "halt_reason_code=None" in out
+
+
+
 
 def test_recovery_report_includes_submit_unknown_count(tmp_path):
     _set_tmp_db(tmp_path)
@@ -1671,6 +1727,20 @@ def test_recovery_report_blocker_summary_view_for_persistent_halt(tmp_path):
     assert view[0]["blocker"] == "HALT_STATE_UNRESOLVED"
     assert "halt unresolved:" in view[0]["evidence"]
     assert view[0]["recommended_next_action"] == "uv run python bot.py restart-checklist"
+def test_recovery_report_auto_clears_stale_initial_reconcile_halt(tmp_path):
+    _set_tmp_db(tmp_path)
+    _set_stale_initial_reconcile_halt_with_clean_reconcile()
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
+    assert report["recent_halt_reason"] == "none"
+    state = runtime_state.snapshot()
+    assert state.halt_state_unresolved is False
+    assert state.halt_reason_code is None
+
+
 def test_recovery_report_can_resume_clean_state(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -2156,6 +2226,17 @@ def test_restart_checklist_blocks_when_restart_risks_exist(tmp_path, capsys):
     assert "BLOCKED halt state" in out
     assert "BLOCKED last reconcile" in out
     assert "safe_to_resume=0" in out
+
+
+def test_restart_checklist_auto_clears_stale_initial_reconcile_halt(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    _set_stale_initial_reconcile_halt_with_clean_reconcile()
+
+    cmd_restart_checklist()
+    out = capsys.readouterr().out
+
+    assert "PASS    halt state" in out
+    assert "safe_to_resume=1" in out
 
 
 def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
