@@ -415,12 +415,15 @@ def _submit_via_standard_path(
     *,
     conn,
     broker: Broker,
+    signal: str,
     client_order_id: str,
     submit_attempt_id: str,
     side: str,
+    order_qty: float,
     qty: float,
     ts: int,
     intent_key: str,
+    market_price: float,
     reference_price: float | None,
     top_of_book_summary: dict[str, float | str] | None,
 ):
@@ -490,6 +493,18 @@ def _submit_via_standard_path(
     conn.commit()
 
     try:
+        RUN_LOG.info(
+            format_log_kv(
+                "[ORDER_DECISION] broker.place_order dispatch",
+                signal=signal,
+                side=side,
+                market_price=market_price,
+                order_qty=order_qty,
+                normalized_qty=qty,
+                reference_price=reference_price,
+                client_order_id=client_order_id,
+            )
+        )
         request_ts = int(time.time() * 1000)
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
         response_ts = int(time.time() * 1000)
@@ -718,6 +733,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         if state.halt_new_orders_blocked:
             halt_reason = f"runtime halted: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}"
+            RUN_LOG.info(format_log_kv("[ORDER_SKIP] runtime halt", side=signal, reason=halt_reason, signal=signal))
             notify(
                 safety_event(  # CHANGED
                     "order_submit_blocked",
@@ -737,17 +753,21 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         if signal == "BUY" and qty <= POSITION_EPSILON:
             if not math.isfinite(float(market_price)) or float(market_price) <= 0:
-                notify(f"live pretrade validation blocked (BUY): invalid market/reference price: {market_price}")
+                reason = f"invalid market/reference price: {market_price}"
+                RUN_LOG.info(format_log_kv("[ORDER_SKIP] invalid market price", side="BUY", reason=reason, signal=signal))
+                notify(f"live pretrade validation blocked (BUY): {reason}")
                 return None
 
-            blocked, _ = evaluate_buy_guardrails(conn=conn, ts_ms=ts, cash=cash, qty=qty, price=market_price)
+            blocked, guardrail_reason = evaluate_buy_guardrails(conn=conn, ts_ms=ts, cash=cash, qty=qty, price=market_price)
             if blocked:
+                RUN_LOG.info(format_log_kv("[ORDER_SKIP] buy guardrails", signal=signal, side="BUY", reason=guardrail_reason or "blocked"))
                 return None
 
             spend = cash * float(settings.BUY_FRACTION)
             if settings.MAX_ORDER_KRW > 0:
                 spend = min(spend, float(settings.MAX_ORDER_KRW))
             if spend <= 0:
+                RUN_LOG.info(format_log_kv("[ORDER_SKIP] non-positive spend", side="BUY", reason=f"spend={float(spend):.8f}", signal=signal))
                 return None
 
             order_qty = max(0.0, spend / market_price)
@@ -758,6 +778,8 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             side = "SELL"
 
         else:
+            skip_reason = "no actionable position state for signal"
+            RUN_LOG.info(format_log_kv("[ORDER_SKIP] no-op signal", side=signal, reason=skip_reason, signal=signal, position_qty=f"{float(qty):.12f}"))
             return None
 
         try:
@@ -765,6 +787,16 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             validate_order(signal=signal, side=side, qty=normalized_qty, market_price=market_price)
             validate_pretrade(broker=broker, side=side, qty=normalized_qty, market_price=market_price)
         except ValueError as e:
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SKIP] pretrade blocked",
+                    signal=signal,
+                    side=side,
+                    reason=str(e),
+                    market_price=market_price,
+                    order_qty=order_qty,
+                )
+            )
             notify(f"live pretrade validation blocked ({side}): {e}")
             return None
 
@@ -811,6 +843,14 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 max_open_order_age_sec=int(settings.MAX_OPEN_ORDER_AGE_SEC),
             )
             if gate_blocked:
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] unresolved risk gate",
+                        signal=signal,
+                        side=side,
+                        reason=gate_reason,
+                    )
+                )
                 _block_new_submission_for_unresolved_risk(
                     conn=conn,
                     client_order_id=client_order_id,
@@ -823,6 +863,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 conn.commit()
                 return None
 
+            RUN_LOG.info(format_log_kv("[ORDER_SKIP] submission halt", signal=signal, side=side, reason=reason))
             notify(f"live order placement blocked ({side}): {reason}")
             return None
 
@@ -834,6 +875,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             existing_status = str(existing["status"])
             if existing_status in TERMINAL_ORDER_STATUSES:
                 reason = f"duplicate submit blocked: terminal status {existing_status}"
+                RUN_LOG.info(format_log_kv("[ORDER_SKIP] duplicate client order id", signal=signal, side=side, reason=reason, client_order_id=client_order_id))
                 record_submit_blocked(client_order_id, status=existing_status, reason=reason, conn=conn)
                 notify(
                     safety_event(  # CHANGED
@@ -878,7 +920,7 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             )
             RUN_LOG.info(
                 format_log_kv(
-                    "[SKIP] duplicate order intent",
+                    "[ORDER_SKIP] duplicate order intent",
                     mode=settings.MODE,
                     symbol=settings.PAIR,
                     side=side,
@@ -907,26 +949,34 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
 
         RUN_LOG.info(
             format_log_kv(
-                "[RUN] submit order intent",
+                "[ORDER_DECISION] submit order intent",
                 mode=settings.MODE,
                 symbol=settings.PAIR,
+                signal=signal,
                 side=side,
-                qty=f"{float(normalized_qty):.12f}",
+                market_price=market_price,
+                order_qty=order_qty,
+                normalized_qty=normalized_qty,
+                reference_price=reference_price,
+                client_order_id=client_order_id,
                 intent_ts=int(ts),
                 intent_key=intent_key,
-                reason=f"client_order_id={client_order_id}",
+                top_of_book=top_of_book_summary,
             )
         )
 
         order = _submit_via_standard_path(
             conn=conn,
             broker=broker,
+            signal=signal,
             client_order_id=client_order_id,
             submit_attempt_id=submit_attempt_id,
             side=side,
+            order_qty=order_qty,
             qty=normalized_qty,
             ts=ts,
             intent_key=intent_key,
+            market_price=market_price,
             reference_price=reference_price,
             top_of_book_summary=top_of_book_summary,
         )
