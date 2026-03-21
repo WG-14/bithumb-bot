@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import time
 from urllib.parse import urlencode
 
@@ -10,6 +11,16 @@ import httpx
 
 from ..config import settings
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
+
+_HTTPX_TRANSIENT_ERRORS = tuple(
+    cls
+    for cls in (
+        getattr(httpx, "TimeoutException", None),
+        getattr(httpx, "TransportError", None),
+        getattr(httpx, "RequestError", None),
+    )
+    if isinstance(cls, type)
+)
 
 
 class BithumbBroker:
@@ -28,6 +39,45 @@ class BithumbBroker:
                 continue
             redacted[key] = value
         return redacted
+
+    def _sanitize_debug_value(self, value: object) -> object:
+        if isinstance(value, dict):
+            return {k: self._sanitize_debug_value(v) for k, v in self._mask_sensitive(value).items()}
+        if isinstance(value, list):
+            return [self._sanitize_debug_value(item) for item in value[:5]]
+        return value
+
+    def _response_body_excerpt(self, response: httpx.Response, *, limit: int = 240) -> str:
+        try:
+            body: object = response.json()
+        except ValueError:
+            body = str(getattr(response, "text", "")).strip()
+
+        if isinstance(body, (dict, list)):
+            rendered = json.dumps(self._sanitize_debug_value(body), ensure_ascii=False, separators=(",", ":"))
+        else:
+            rendered = str(body)
+
+        rendered = " ".join(rendered.split())
+        if len(rendered) > limit:
+            return rendered[: limit - 3] + "..."
+        return rendered
+
+    def _normalize_order_side(self, side: str | None, *, default: str = "BUY") -> str:
+        token = str(side or "").strip().lower()
+        if token in {"buy", "bid"}:
+            return "BUY"
+        if token in {"sell", "ask"}:
+            return "SELL"
+        return default
+
+    def _private_order_type(self, side: str | None) -> str:
+        token = str(side or "").strip().lower()
+        if token in {"buy", "bid"}:
+            return "bid"
+        if token in {"sell", "ask"}:
+            return "ask"
+        return token
 
     def _journal_read_summary(self, *, path: str, data: dict[str, object] | None) -> None:
         payload = data or {}
@@ -89,10 +139,12 @@ class BithumbBroker:
                     res = client.post(endpoint, data=payload, headers=headers)
 
                 if 500 <= res.status_code <= 599:
-                    raise BrokerTemporaryError(f"bithumb private {endpoint} server error status={res.status_code}")
+                    raise BrokerTemporaryError(
+                        f"bithumb private {endpoint} server error status={res.status_code} body={self._response_body_excerpt(res)}"
+                    )
                 res.raise_for_status()
                 data = res.json()
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
+            except _HTTPX_TRANSIENT_ERRORS as exc:
                 if attempt < attempts - 1:
                     time.sleep(backoffs[attempt])
                     continue
@@ -103,10 +155,10 @@ class BithumbBroker:
                         time.sleep(backoffs[attempt])
                         continue
                     raise BrokerTemporaryError(
-                        f"bithumb private {endpoint} server error status={exc.response.status_code}"
+                        f"bithumb private {endpoint} server error status={exc.response.status_code} body={self._response_body_excerpt(exc.response)}"
                     ) from exc
                 raise BrokerRejectError(
-                    f"bithumb private {endpoint} rejected with http status={exc.response.status_code}"
+                    f"bithumb private {endpoint} rejected with http status={exc.response.status_code} body={self._response_body_excerpt(exc.response)}"
                 ) from exc
 
             if str(data.get("status")) != "0000":
@@ -158,7 +210,7 @@ class BithumbBroker:
             "/trade/cancel",
             {
                 "order_id": str(order.exchange_order_id),
-                "type": order.side.lower(),
+                "type": self._private_order_type(order.side),
                 "order_currency": order_currency,
                 "payment_currency": payment_currency,
             },
@@ -174,18 +226,21 @@ class BithumbBroker:
             return BrokerOrder(client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
 
         order_currency, payment_currency = self._pair()
-        open_data = self._post_private(
-            "/info/orders",
-            {
-                "count": "100",
-                "order_id": str(exid),
-                "order_currency": order_currency,
-                "payment_currency": payment_currency,
-            },
-            retry_safe=True,
-        )
-        self._journal_read_summary(path="/info/orders(get_order)", data=open_data)
-        open_rows = open_data.get("data") or []
+        open_rows: list[dict] = []
+        for order_type in ("bid", "ask"):
+            open_data = self._post_private(
+                "/info/orders",
+                {
+                    "count": "100",
+                    "order_id": str(exid),
+                    "type": order_type,
+                    "order_currency": order_currency,
+                    "payment_currency": payment_currency,
+                },
+                retry_safe=True,
+            )
+            self._journal_read_summary(path=f"/info/orders(get_order:{order_type})", data=open_data)
+            open_rows.extend(open_data.get("data") or [])
         for row in open_rows:
             if str(row.get("order_id")) != str(exid):
                 continue
@@ -195,7 +250,7 @@ class BithumbBroker:
             return BrokerOrder(
                 client_order_id,
                 str(exid),
-                str(row.get("type", "BUY")).upper(),
+                self._normalize_order_side(str(row.get("type")), default="BUY"),
                 "PARTIAL" if qty_filled > 0 else "NEW",
                 float(row.get("price")) if row.get("price") else None,
                 qty_req,
@@ -237,7 +292,7 @@ class BithumbBroker:
         return BrokerOrder(
             client_order_id,
             str(exid),
-            str(row.get("type", "BUY")).upper(),
+            self._normalize_order_side(str(row.get("type")), default="BUY"),
             status,
             float(row.get("price")) if row.get("price") else None,
             qty_req,
@@ -250,18 +305,22 @@ class BithumbBroker:
         if self.dry_run:
             return []
         order_currency, payment_currency = self._pair()
-        data = self._post_private(
-            "/info/orders",
-            {
-                "count": "100",
-                "order_currency": order_currency,
-                "payment_currency": payment_currency,
-            },
-            retry_safe=True,
-        )
-        self._journal_read_summary(path="/info/orders(open_orders)", data=data)
+        rows: list[dict] = []
+        for order_type in ("bid", "ask"):
+            data = self._post_private(
+                "/info/orders",
+                {
+                    "count": "100",
+                    "type": order_type,
+                    "order_currency": order_currency,
+                    "payment_currency": payment_currency,
+                },
+                retry_safe=True,
+            )
+            self._journal_read_summary(path=f"/info/orders(open_orders:{order_type})", data=data)
+            rows.extend(data.get("data") or [])
         now = int(time.time() * 1000)
-        return [self._broker_order_from_open_row(row, now_ts=now) for row in data.get("data") or []]
+        return [self._broker_order_from_open_row(row, now_ts=now) for row in rows]
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         if self.dry_run:
@@ -420,7 +479,7 @@ class BithumbBroker:
         return BrokerOrder(
             client_order_id="",
             exchange_order_id=str(row.get("order_id")),
-            side=str(row.get("type", "buy")).upper(),
+            side=self._normalize_order_side(str(row.get("type")), default="BUY"),
             status="PARTIAL" if qty_filled > 0 else "NEW",
             price=float(row.get("price")) if row.get("price") else None,
             qty_req=qty_req,
