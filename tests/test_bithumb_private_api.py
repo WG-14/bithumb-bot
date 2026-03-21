@@ -176,7 +176,19 @@ def test_private_jwt_headers_include_query_hash_for_post(monkeypatch):
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    assert call["json"] == {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}
+    import json
+
+    assert "content" in call
+    sent = call["content"]
+    if isinstance(sent, bytes):
+        sent = sent.decode("utf-8")
+
+    assert json.loads(sent) == {
+        "market": "KRW-BTC",
+        "side": "ask",
+        "volume": "0.1",
+    }
+    assert "json" not in call
 
 
 

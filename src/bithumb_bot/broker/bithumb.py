@@ -87,8 +87,12 @@ class BithumbPrivateAPI:
             "Accept": "application/json",
         }
         if has_json_body:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = "application/json; charset=utf-8"
         return headers
+
+    @staticmethod
+    def _json_body_bytes(payload: dict[str, object]) -> bytes:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def request(
         self,
@@ -107,17 +111,48 @@ class BithumbPrivateAPI:
         backoffs = (0.2, 0.5)
         method = method.upper()
         auth_payload = params if method in {"GET", "DELETE"} else json_body
+        debug_order_submit = method == "POST" and endpoint == "/v2/orders"
         request_kwargs: dict[str, object] = {}
+        signed_payload_repr = repr(self._query_string(auth_payload)) if debug_order_submit else ""
+        transmitted_payload_repr = ""
         if params:
             request_kwargs["params"] = params
         if json_body:
-            request_kwargs["json"] = json_body
+            if debug_order_submit:
+                body_bytes = self._json_body_bytes(json_body)
+                request_kwargs["content"] = body_bytes
+                transmitted_payload_repr = repr(body_bytes.decode("utf-8"))
+            else:
+                request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
             headers = self._headers(auth_payload, has_json_body=bool(json_body))
+            if debug_order_submit:
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_HTTP_DEBUG] request",
+                        method=method,
+                        endpoint=endpoint,
+                        content_type=headers.get("Content-Type"),
+                        signed_payload_repr=signed_payload_repr,
+                        transmitted_payload_repr=transmitted_payload_repr,
+                    )
+                )
             try:
                 with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
                     res = client.request(method, endpoint, headers=headers, **request_kwargs)
+
+                if debug_order_submit:
+                    RUN_LOG.info(
+                        format_log_kv(
+                            "[ORDER_HTTP_DEBUG] response",
+                            method=method,
+                            endpoint=endpoint,
+                            content_type=headers.get("Content-Type"),
+                            status_code=res.status_code,
+                            response_body=response_excerpt(res) if response_excerpt else "",
+                        )
+                    )
 
                 if 500 <= res.status_code <= 599:
                     body = response_excerpt(res) if response_excerpt else ""
