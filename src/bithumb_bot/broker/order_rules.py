@@ -5,11 +5,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from ..config import settings
-from ..marketdata import BASE_URL, _get_with_retry, to_v1_market
 from ..notifier import notify
+from ..marketdata import to_v1_market
+from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
 _cached_rules: dict[str, tuple[float, "OrderRules", "OrderRules"]] = {}
@@ -90,9 +89,7 @@ def _pick_int(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> in
 
 def fetch_exchange_order_rules(pair: str) -> OrderRules:
     market = to_v1_market(pair)
-    with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
-        response = _get_with_retry(client, "/v1/orders/chance", params={"market": market})
-        payload = response.json()
+    payload = BithumbBroker().get_order_chance(market=market)
 
     if not isinstance(payload, dict):
         raise RuntimeError(f"unexpected order rules payload type: {type(payload).__name__}")
@@ -103,6 +100,8 @@ def fetch_exchange_order_rules(pair: str) -> OrderRules:
             ("market", "ask", "min_volume"),
             ("market", "bid", "min_volume"),
             ("market", "min_volume"),
+            ("ask", "min_volume"),
+            ("bid", "min_volume"),
             ("min_order_quantity",),
             ("min_qty",),
         ),
@@ -113,6 +112,8 @@ def fetch_exchange_order_rules(pair: str) -> OrderRules:
             ("market", "ask", "volume_step"),
             ("market", "bid", "volume_step"),
             ("market", "volume_step"),
+            ("ask", "volume_step"),
+            ("bid", "volume_step"),
             ("order_sizing", "step"),
             ("qty_step",),
         ),
@@ -123,6 +124,8 @@ def fetch_exchange_order_rules(pair: str) -> OrderRules:
             ("market", "ask", "min_total"),
             ("market", "bid", "min_total"),
             ("market", "min_total"),
+            ("ask", "min_total"),
+            ("bid", "min_total"),
             ("min_order_amount",),
             ("min_notional",),
         ),
@@ -133,6 +136,8 @@ def fetch_exchange_order_rules(pair: str) -> OrderRules:
             ("market", "ask", "max_decimal_places"),
             ("market", "bid", "max_decimal_places"),
             ("market", "max_decimal_places"),
+            ("ask", "max_decimal_places"),
+            ("bid", "max_decimal_places"),
             ("qty_unit_scale",),
             ("max_qty_decimals",),
         ),
@@ -156,7 +161,11 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
     try:
         auto = fetch_exchange_order_rules(pair)
     except Exception as exc:
-        notify(f"[WARN] order rules auto-sync failed for {pair}; using manual config only ({type(exc).__name__}: {exc})")
+        code, summary = classify_private_api_error(exc)
+        notify(
+            f"[WARN] order rules auto-sync failed for {pair}; using manual config only "
+            f"({code}: {summary}; {type(exc).__name__}: {exc})"
+        )
         _cached_rules[pair] = (now, manual, manual)
         return RuleResolution(
             rules=manual,

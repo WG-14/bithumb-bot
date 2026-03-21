@@ -802,7 +802,7 @@ def cmd_cancel_open_orders() -> None:
         print(f"[CANCEL-OPEN-ORDERS] skipped: MODE={settings.MODE} (live only)")
         return
 
-    from .broker.bithumb import BithumbBroker
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     broker = BithumbBroker()
     summary = cancel_open_orders_with_broker(broker)
@@ -830,7 +830,7 @@ def cmd_broker_diagnose() -> None:
         print(f"[BROKER-DIAGNOSE] failed: MODE={settings.MODE} (live only)")
         raise SystemExit(1)
 
-    from .broker.bithumb import BithumbBroker
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     broker = BithumbBroker()
     checks: list[dict[str, str | bool]] = []
@@ -848,13 +848,13 @@ def cmd_broker_diagnose() -> None:
     add_check(
         "order submit routing",
         "PASS",
-        "price=None => market_buy/market_sell, price set => trade/place limit",
+        "price=None => /v2/orders market/price order, price set => /v2/orders limit order",
         critical=True,
     )
     add_check(
         "order lookup path",
         "PASS",
-        "get_order checks /info/orders first, then /info/order_detail fallback",
+        "get_order reads /v1/order directly; open/recent snapshots use /v1/orders",
         critical=True,
     )
 
@@ -869,7 +869,8 @@ def cmd_broker_diagnose() -> None:
         balance = broker.get_balance()
         add_check("broker authentication", "PASS", "private API reachable", critical=True)
     except Exception as e:
-        detail = f"private API failed ({type(e).__name__}: {e})"
+        code, summary = classify_private_api_error(e)
+        detail = f"private API failed [{code}] {summary} ({type(e).__name__}: {e})"
         add_check("broker authentication", "FAIL", detail, critical=True)
         add_check("balance query", "FAIL", detail, critical=True)
 
@@ -974,7 +975,7 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
     if settings.MODE != "live":
         return [], "broker snapshot unavailable in non-live mode"
     try:
-        from .broker.bithumb import BithumbBroker
+        from .broker.bithumb import BithumbBroker, classify_private_api_error
 
         return BithumbBroker().get_recent_orders(limit=limit), None
     except Exception as e:
@@ -1754,7 +1755,7 @@ def cmd_pause() -> None:
 
 def cmd_resume(force: bool = False) -> None:
     if settings.MODE == "live":
-        from .broker.bithumb import BithumbBroker
+        from .broker.bithumb import BithumbBroker, classify_private_api_error
 
         reconcile_with_broker(BithumbBroker())
 
@@ -1806,7 +1807,7 @@ def cmd_reconcile() -> None:
         print(f"[RECONCILE] skipped: MODE={settings.MODE} (live only)")
         return
 
-    from .broker.bithumb import BithumbBroker
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     reconcile_with_broker(BithumbBroker())
     print("[RECONCILE] completed one live reconciliation pass")
@@ -1824,7 +1825,7 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
             print(f"[FLATTEN-POSITION] failed: {e}")
             raise SystemExit(1)
 
-    from .broker.bithumb import BithumbBroker
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     broker = BithumbBroker()
     summary = flatten_btc_position(broker=broker, dry_run=dry_run, trigger="operator")
@@ -1936,7 +1937,7 @@ def cmd_recover_order(*, client_order_id: str, exchange_order_id: str, dry_run: 
         print("[RECOVER-ORDER] confirmation required: re-run with --yes to apply")
         raise SystemExit(1)
 
-    from .broker.bithumb import BithumbBroker
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
 
     disable_trading_until(float("inf"), reason="manual recovery in progress")
     try:
