@@ -1663,8 +1663,8 @@ class _JournaledReconcileBroker:
 
     def get_read_journal_summary(self) -> dict[str, str]:
         return {
-            "/info/balance": "{'path': '/info/balance', 'status': '0000', 'row_count': 1}",
-            "/info/orders(open_orders)": "{'path': '/info/orders(open_orders)', 'status': '0000', 'row_count': 0}",
+            "/v1/accounts": "{'path': '/v1/accounts', 'status': '0000', 'row_count': 1}",
+            "/v1/orders(open_orders)": "{'path': '/v1/orders(open_orders)', 'status': '0000', 'row_count': 0}",
         }
 
 
@@ -1677,4 +1677,4 @@ def test_reconcile_persists_broker_read_journal_metadata(tmp_path):
     assert state.last_reconcile_metadata is not None
     payload = json.loads(state.last_reconcile_metadata)
     assert "broker_read_journal" in payload
-    assert "/info/balance" in str(payload["broker_read_journal"])
+    assert "/v1/accounts" in str(payload["broker_read_journal"])

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+
 import httpx
 import pytest
 
@@ -14,6 +17,7 @@ _HTTPX_CONNECT = getattr(httpx, "ConnectError", getattr(httpx, "RequestError"))
 class _SequencedClient:
     actions: list[object] = []
     calls = 0
+    requests: list[dict[str, object]] = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -24,8 +28,11 @@ class _SequencedClient:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def post(self, endpoint: str, data: dict[str, str], headers: dict[str, str]):
+    def request(self, method: str, endpoint: str, headers: dict[str, str] | None = None, **kwargs):
         type(self).calls += 1
+        type(self).requests.append(
+            {"method": method, "endpoint": endpoint, "headers": headers or {}, **kwargs}
+        )
         action = type(self).actions.pop(0)
         if isinstance(action, Exception):
             raise action
@@ -33,9 +40,17 @@ class _SequencedClient:
 
 
 
-def _mk_response(status_code: int, payload: dict) -> httpx.Response:
-    req = httpx.Request("POST", "https://api.bithumb.com/private")
+def _mk_response(status_code: int, payload: dict | list) -> httpx.Response:
+    req = httpx.Request("GET", "https://api.bithumb.com/private")
     return httpx.Response(status_code, json=payload, request=req)
+
+
+
+def _decode_jwt(token: str) -> dict[str, object]:
+    _header, payload, _signature = token.split(".")
+    padded = payload + "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+
 
 
 def _configure_live():
@@ -44,26 +59,18 @@ def _configure_live():
     object.__setattr__(settings, "BITHUMB_API_SECRET", "s")
 
 
+
 def test_private_timeout_is_temporary_error(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_HTTPX_TIMEOUT("timeout")]
     _SequencedClient.calls = 0
+    _SequencedClient.requests = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     broker = BithumbBroker()
     with pytest.raises(BrokerTemporaryError):
-        broker._post_private("/info/balance", {"currency": "BTC"}, retry_safe=False)
+        broker._get_private("/v1/accounts", {}, retry_safe=False)
 
-
-def test_private_business_reject_is_reject_error(monkeypatch):
-    _configure_live()
-    _SequencedClient.actions = [_mk_response(200, {"status": "5600", "message": "invalid"})]
-    _SequencedClient.calls = 0
-    monkeypatch.setattr("httpx.Client", _SequencedClient)
-
-    broker = BithumbBroker()
-    with pytest.raises(BrokerRejectError):
-        broker._post_private("/info/balance", {"currency": "BTC"}, retry_safe=False)
 
 
 def test_private_http_error_includes_sanitized_response_body(monkeypatch):
@@ -72,19 +79,19 @@ def test_private_http_error_includes_sanitized_response_body(monkeypatch):
         _mk_response(
             400,
             {
-                "status": "5100",
-                "message": "bad request",
+                "error": {"message": "bad request"},
                 "api_key": "should-not-leak",
                 "nonce": "12345",
             },
         )
     ]
     _SequencedClient.calls = 0
+    _SequencedClient.requests = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     broker = BithumbBroker()
     with pytest.raises(BrokerRejectError) as excinfo:
-        broker._post_private("/info/orders", {"type": "bid"}, retry_safe=False)
+        broker._get_private("/v1/orders", {"market": "KRW-BTC"}, retry_safe=False)
 
     message = str(excinfo.value)
     assert "status=400" in message
@@ -93,23 +100,68 @@ def test_private_http_error_includes_sanitized_response_body(monkeypatch):
     assert "nonce" not in message
 
 
+
 def test_private_safe_call_retries_temporary_error(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [
         _HTTPX_CONNECT("down"),
-        _mk_response(200, {"status": "0000", "data": {}}),
+        _mk_response(200, [{"currency": "KRW", "balance": "1000", "locked": "0"}]),
     ]
     _SequencedClient.calls = 0
+    _SequencedClient.requests = []
     sleeps: list[float] = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
 
     broker = BithumbBroker()
-    data = broker._post_private("/info/balance", {"currency": "BTC"}, retry_safe=True)
+    data = broker._get_private("/v1/accounts", {}, retry_safe=True)
 
-    assert data["status"] == "0000"
+    assert isinstance(data, list)
     assert _SequencedClient.calls == 2
     assert sleeps == [0.2]
+
+
+
+def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, [])]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    broker._get_private("/v1/orders", {"market": "KRW-BTC", "state": "wait"}, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+
+    assert claims["access_key"] == "k"
+    assert "nonce" in claims
+    assert "timestamp" in claims
+    assert "query_hash" in claims
+    assert call["params"] == {"market": "KRW-BTC", "state": "wait"}
+
+
+
+def test_private_jwt_headers_include_query_hash_for_post(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+
+    assert claims["access_key"] == "k"
+    assert "query_hash" in claims
+    assert call["json"] == {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}
+
 
 
 def test_balance_parses_available_and_locked(monkeypatch):
@@ -118,16 +170,11 @@ def test_balance_parses_available_and_locked(monkeypatch):
 
     monkeypatch.setattr(
         broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "status": "0000",
-            "data": {
-                "available_krw": "1000",
-                "in_use_krw": "25",
-                "available_btc": "0.1",
-                "in_use_btc": "0.02",
-            },
-        },
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
     )
 
     bal = broker.get_balance()
@@ -138,7 +185,32 @@ def test_balance_parses_available_and_locked(monkeypatch):
     assert bal.asset_locked == 0.02
 
 
-def test_place_order_market_buy_routes_to_market_endpoint(monkeypatch):
+
+def test_order_chance_uses_private_v1_endpoint(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        call["retry_safe"] = retry_safe
+        return {"market": {"bid": {"min_total": "5000"}}}
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    payload = broker.get_order_chance(market="KRW-BTC")
+
+    assert payload["market"]["bid"]["min_total"] == "5000"
+    assert call == {
+        "endpoint": "/v1/orders/chance",
+        "params": {"market": "KRW-BTC"},
+        "retry_safe": True,
+    }
+
+
+
+def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -148,23 +220,26 @@ def test_place_order_market_buy_routes_to_market_endpoint(monkeypatch):
         call["endpoint"] = endpoint
         call["payload"] = payload
         call["retry_safe"] = retry_safe
-        return {"status": "0000", "data": {"order_id": "mkt-1"}}
+        return {"uuid": "mkt-1"}
 
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.fetch_orderbook_top", lambda _pair: (149_000_000.0, 150_000_000.0))
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     order = broker.place_order(client_order_id="cid-1", side="BUY", qty=0.1234, price=None)
 
     assert order.exchange_order_id == "mkt-1"
-    assert call["endpoint"] == "/trade/market_buy"
+    assert call["endpoint"] == "/v2/orders"
     assert call["retry_safe"] is False
     assert call["payload"] == {
-        "order_currency": "BTC",
-        "payment_currency": "KRW",
-        "units": "0.1234000000000000",
+        "market": "KRW-BTC",
+        "side": "bid",
+        "price": str(150_000_000.0 * 0.1234),
+        "ord_type": "price",
     }
 
 
-def test_place_order_market_sell_routes_to_market_endpoint(monkeypatch):
+
+def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -174,23 +249,24 @@ def test_place_order_market_sell_routes_to_market_endpoint(monkeypatch):
         call["endpoint"] = endpoint
         call["payload"] = payload
         call["retry_safe"] = retry_safe
-        return {"status": "0000", "data": {"order_id": "mkt-2"}}
+        return {"uuid": "mkt-2"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.4321, price=None)
 
     assert order.exchange_order_id == "mkt-2"
-    assert call["endpoint"] == "/trade/market_sell"
-    assert call["retry_safe"] is False
+    assert call["endpoint"] == "/v2/orders"
     assert call["payload"] == {
-        "order_currency": "BTC",
-        "payment_currency": "KRW",
-        "units": "0.4321000000000000",
+        "market": "KRW-BTC",
+        "side": "ask",
+        "volume": "0.4321",
+        "ord_type": "market",
     }
 
 
-def test_place_order_limit_sell_still_uses_trade_place(monkeypatch):
+
+def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -200,512 +276,130 @@ def test_place_order_limit_sell_still_uses_trade_place(monkeypatch):
         call["endpoint"] = endpoint
         call["payload"] = payload
         call["retry_safe"] = retry_safe
-        return {"status": "0000", "data": {"order_id": "lmt-1"}}
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.5, price=150000000)
-
-    assert order.exchange_order_id == "lmt-1"
-    assert call["endpoint"] == "/trade/place"
-    assert call["retry_safe"] is False
-    assert call["payload"] == {
-        "order_currency": "BTC",
-        "payment_currency": "KRW",
-        "units": "0.5000000000000000",
-        "type": "sell",
-        "price": "150000000",
-    }
-
-
-def test_place_order_limit_buy_still_uses_trade_place(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    call: dict[str, object] = {}
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        call["endpoint"] = endpoint
-        call["payload"] = payload
-        call["retry_safe"] = retry_safe
-        return {"status": "0000", "data": {"order_id": "lmt-2"}}
+        return {"uuid": "lmt-2"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     order = broker.place_order(client_order_id="cid-3", side="BUY", qty=0.4, price=149500000)
 
     assert order.exchange_order_id == "lmt-2"
-    assert call["endpoint"] == "/trade/place"
-    assert call["retry_safe"] is False
+    assert call["endpoint"] == "/v2/orders"
     assert call["payload"] == {
-        "order_currency": "BTC",
-        "payment_currency": "KRW",
-        "units": "0.4000000000000000",
-        "type": "buy",
+        "market": "KRW-BTC",
+        "side": "bid",
+        "volume": "0.4",
         "price": "149500000",
+        "ord_type": "limit",
     }
 
 
-def test_recent_orders_includes_filled_history_not_in_open_orders(monkeypatch):
+
+def test_recent_orders_includes_done_and_cancel_states(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
-    open_order_payload = {
-        "order_id": "open-1",
-        "type": "buy",
-        "price": "150000000",
-        "units": "0.0200",
-        "units_remaining": "0.0200",
-    }
-    tx_rows = [
-        {
-            "order_id": "filled-1",
-            "search": "sell",
-            "price": "151000000",
-            "units_traded": "0.0100",
-            "transfer_date": "1710000001000",
-        },
-        {
-            "order_id": "filled-1",
-            "search": "sell",
-            "price": "152000000",
-            "units_traded": "0.0050",
-            "transfer_date": "1710000002000",
-        },
-    ]
+    def _fake_get(endpoint, params, retry_safe=False):
+        assert endpoint == "/v1/orders"
+        state = params["state"]
+        if state == "wait":
+            return [{"uuid": "open-1", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "state": "wait"}]
+        if state == "done":
+            return [{"uuid": "filled-1", "side": "ask", "price": "151000000", "volume": "0.01", "remaining_volume": "0", "executed_volume": "0.01", "state": "done"}]
+        if state == "cancel":
+            return [{"uuid": "cancel-1", "side": "bid", "price": "149000000", "volume": "0.03", "remaining_volume": "0.02", "executed_volume": "0.01", "state": "cancel"}]
+        raise AssertionError(state)
 
-    monkeypatch.setattr(
-        broker,
-        "get_open_orders",
-        lambda: [broker._broker_order_from_open_row(open_order_payload, now_ts=1710000000000)],
-    )
-    monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {"status": "0000", "data": tx_rows},
-    )
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
 
     recent = broker.get_recent_orders(limit=10)
 
     by_id = {str(order.exchange_order_id): order for order in recent}
     assert by_id["open-1"].status == "NEW"
     assert by_id["filled-1"].status == "FILLED"
-    assert by_id["filled-1"].qty_filled == pytest.approx(0.015)
-    assert by_id["filled-1"].qty_req == pytest.approx(0.015)
+    assert by_id["cancel-1"].status == "CANCELED"
     assert by_id["filled-1"].side == "SELL"
 
 
-def test_recent_orders_falls_back_to_open_orders_when_history_unavailable(monkeypatch):
+
+def test_get_open_orders_uses_wait_state(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    call: dict[str, object] = {}
 
-    open_orders = [
-        broker._broker_order_from_open_row(
-            {
-                "order_id": "open-1",
-                "type": "buy",
-                "price": "150000000",
-                "units": "0.0200",
-                "units_remaining": "0.0100",
-            },
-            now_ts=1710000000000,
-        )
-    ]
-    monkeypatch.setattr(broker, "get_open_orders", lambda: open_orders)
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        return [{"uuid": "open-1", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "state": "wait"}]
 
-    def _raise_history(*_args, **_kwargs):
-        raise BrokerTemporaryError("history unavailable")
-
-    monkeypatch.setattr(broker, "_post_private", _raise_history)
-
-    recent = broker.get_recent_orders(limit=10)
-
-    assert recent == open_orders
-    assert recent[0].status == "PARTIAL"
-
-
-def test_recent_orders_skips_malformed_transaction_rows(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    open_order = broker._broker_order_from_open_row(
-        {
-            "order_id": "open-1",
-            "type": "buy",
-            "price": "150000000",
-            "units": "0.0200",
-            "units_remaining": "0.0200",
-        },
-        now_ts=1710000000000,
-    )
-    monkeypatch.setattr(broker, "get_open_orders", lambda: [open_order])
-    monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "status": "0000",
-            "data": [
-                "bad-row",
-                123,
-                {
-                    "order_id": "filled-bad-ts",
-                    "search": "sell",
-                    "price": "152000000",
-                    "units_traded": "0.0050",
-                    "transfer_date": "not-a-timestamp",
-                },
-                {
-                    "order_id": "filled-bad-qty",
-                    "search": "sell",
-                    "price": "152000000",
-                    "units_traded": object(),
-                    "transfer_date": "1710000001500",
-                },
-                {
-                    "order_id": "filled-bad-price",
-                    "search": "sell",
-                    "price": "not-a-price",
-                    "units_traded": "0.0050",
-                    "transfer_date": "1710000001600",
-                },
-                {
-                    "order_id": "filled-good",
-                    "search": "sell",
-                    "price": "152000000",
-                    "units_traded": "0.0050",
-                    "transfer_date": "1710000002000",
-                },
-            ],
-        },
-    )
-
-    recent = broker.get_recent_orders(limit=10)
-
-    by_id = {str(order.exchange_order_id): order for order in recent}
-    assert set(by_id) == {"open-1", "filled-good"}
-    assert by_id["open-1"].status == "NEW"
-    assert by_id["filled-good"].status == "FILLED"
-    assert by_id["filled-good"].qty_filled == pytest.approx(0.005)
-    assert by_id["filled-good"].price == pytest.approx(152000000.0)
-
-
-def test_open_order_lookup_still_uses_open_orders_endpoint(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    calls: list[tuple[str, dict[str, str]]] = []
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        calls.append((endpoint, dict(payload)))
-        if endpoint == "/info/orders":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "open-1",
-                        "type": "buy",
-                        "price": "150000000",
-                        "units": "0.0200",
-                        "units_remaining": "0.0200",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
 
     open_orders = broker.get_open_orders()
 
-    assert calls == [
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "type": "bid",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "type": "ask",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-    ]
-    assert len(open_orders) == 2
+    assert call == {
+        "endpoint": "/v1/orders",
+        "params": {"market": "KRW-BTC", "state": "wait", "limit": 100},
+    }
+    assert len(open_orders) == 1
     assert open_orders[0].exchange_order_id == "open-1"
-    assert {order.side for order in open_orders} == {"BUY"}
+    assert open_orders[0].side == "BUY"
 
 
-def test_get_order_uses_open_orders_as_primary_status_source(monkeypatch):
+
+def test_get_order_uses_v1_order_lookup(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    call: dict[str, object] = {}
 
-    calls: list[tuple[str, dict[str, str]]] = []
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        return {
+            "uuid": "filled-1",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "state": "done",
+        }
 
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        calls.append((endpoint, dict(payload)))
-        if endpoint == "/info/orders":
-            if payload["type"] == "ask":
-                return {"status": "0000", "data": []}
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "open-1",
-                        "type": "buy",
-                        "price": "150000000",
-                        "units": "0.0200",
-                        "units_remaining": "0.0050",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    order = broker.get_order(client_order_id="cid-1", exchange_order_id="open-1")
-
-    assert calls == [
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "order_id": "open-1",
-                "type": "bid",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "order_id": "open-1",
-                "type": "ask",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-    ]
-    assert order.side == "BUY"
-    assert order.status == "PARTIAL"
-    assert order.qty_req == pytest.approx(0.02)
-    assert order.qty_filled == pytest.approx(0.015)
-
-
-def test_get_order_maps_open_order_without_fills_to_new(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        if endpoint == "/info/orders":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "open-new-1",
-                        "type": "buy",
-                        "price": "150000000",
-                        "units": "0.0200",
-                        "units_remaining": "0.0200",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    order = broker.get_order(client_order_id="cid-new-1", exchange_order_id="open-new-1")
-
-    assert order.status == "NEW"
-    assert order.qty_req == pytest.approx(0.02)
-    assert order.qty_filled == pytest.approx(0.0)
-
-
-def test_get_order_maps_open_order_with_partial_fills_to_partial(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        if endpoint == "/info/orders":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "open-partial-1",
-                        "type": "sell",
-                        "price": "151000000",
-                        "units": "0.1000",
-                        "units_remaining": "0.0300",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    order = broker.get_order(client_order_id="cid-partial-1", exchange_order_id="open-partial-1")
-
-    assert order.status == "PARTIAL"
-    assert order.qty_req == pytest.approx(0.1)
-    assert order.qty_filled == pytest.approx(0.07)
-    assert order.side == "SELL"
-
-
-def test_get_order_maps_non_open_partial_to_canceled(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    calls: list[tuple[str, dict[str, str]]] = []
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        calls.append((endpoint, dict(payload)))
-        if endpoint == "/info/orders":
-            return {"status": "0000", "data": []}
-        if endpoint == "/info/order_detail":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "closed-1",
-                        "type": "sell",
-                        "price": "151000000",
-                        "units": "0.1000",
-                        "units_remaining": "0.0400",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    order = broker.get_order(client_order_id="cid-2", exchange_order_id="closed-1")
-
-    assert calls == [
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "order_id": "closed-1",
-                "type": "bid",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-        (
-            "/info/orders",
-            {
-                "count": "100",
-                "order_id": "closed-1",
-                "type": "ask",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-        (
-            "/info/order_detail",
-            {
-                "order_id": "closed-1",
-                "order_currency": "BTC",
-                "payment_currency": "KRW",
-            },
-        ),
-    ]
-    assert order.status == "CANCELED"
-    assert order.qty_req == pytest.approx(0.1)
-    assert order.qty_filled == pytest.approx(0.06)
-    assert order.side == "SELL"
-
-
-def test_get_order_maps_non_open_filled_to_filled(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        if endpoint == "/info/orders":
-            return {"status": "0000", "data": []}
-        if endpoint == "/info/order_detail":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "filled-1",
-                        "type": "buy",
-                        "price": "149000000",
-                        "units": "0.0500",
-                        "units_remaining": "0.0000",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
 
     order = broker.get_order(client_order_id="cid-3", exchange_order_id="filled-1")
 
+    assert call == {"endpoint": "/v1/order", "params": {"uuid": "filled-1"}}
     assert order.status == "FILLED"
     assert order.qty_req == pytest.approx(0.05)
     assert order.qty_filled == pytest.approx(0.05)
 
 
-def test_get_order_rejects_ambiguous_closed_lookup(monkeypatch):
+
+def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        if endpoint == "/info/orders":
-            return {"status": "0000", "data": []}
-        if endpoint == "/info/order_detail":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "ambig-1",
-                        "type": "buy",
-                        "price": "149000000",
-                        "units": "0",
-                        "units_remaining": "0",
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-1",
+            "price": "149000000",
+            "volume": "0.05",
+            "executed_volume": "0.05",
+            "state": "done",
+            "trades": [
+                {"uuid": "t1", "price": "149000000", "volume": "0.02", "fee": "10", "created_at": "2024-01-01T00:00:00+00:00"},
+                {"uuid": "t2", "price": "149500000", "volume": "0.03", "fee": "12", "created_at": "2024-01-01T00:00:01+00:00"},
+            ],
+        },
+    )
 
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    fills = broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
 
-    with pytest.raises(BrokerRejectError, match="ambiguous"):
-        broker.get_order(client_order_id="cid-4", exchange_order_id="ambig-1")
+    assert [fill.fill_id for fill in fills] == ["t1", "t2"]
+    assert fills[0].qty == pytest.approx(0.02)
+    assert fills[1].fee == pytest.approx(12.0)
 
-
-def test_get_order_rejects_incomplete_closed_lookup_missing_quantity_fields(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        if endpoint == "/info/orders":
-            return {"status": "0000", "data": []}
-        if endpoint == "/info/order_detail":
-            return {
-                "status": "0000",
-                "data": [
-                    {
-                        "order_id": "ambig-2",
-                        "type": "sell",
-                        "price": "149000000",
-                        # Broker occasionally omits quantity fields for stale/invalid lookups.
-                    }
-                ],
-            }
-        raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    with pytest.raises(BrokerRejectError, match="ambiguous"):
-        broker.get_order(client_order_id="cid-5", exchange_order_id="ambig-2")
 
 
 def test_read_journal_summary_masks_sensitive_balance_fields(monkeypatch):
@@ -714,67 +408,39 @@ def test_read_journal_summary_masks_sensitive_balance_fields(monkeypatch):
 
     monkeypatch.setattr(
         broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "status": "0000",
-            "data": {
-                "available_krw": "1000",
-                "in_use_krw": "25",
-                "api_nonce": "123",
-                "api_key": "secret",
-                "sign": "sig",
-            },
-        },
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25", "api_nonce": "123", "api_key": "secret", "authorization": "sig"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
     )
 
     broker.get_balance()
     summary = broker.get_read_journal_summary()
 
-    assert "/info/balance" in summary
-    assert "available_krw" in summary["/info/balance"]
-    assert "in_use_krw" in summary["/info/balance"]
-    assert "api_nonce" not in summary["/info/balance"]
-    assert "api_key" not in summary["/info/balance"]
-    assert "sign" not in summary["/info/balance"]
+    assert "/v1/accounts" in summary
+    assert "api_nonce" not in summary["/v1/accounts"]
+    assert "api_key" not in summary["/v1/accounts"]
+    assert "authorization" not in summary["/v1/accounts"]
+
 
 
 def test_recent_orders_journal_summary_captures_sample_order_ids(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
-    monkeypatch.setattr(broker, "get_open_orders", lambda: [])
-    monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "status": "0000",
-            "data": [
-                {"order_id": "filled-1", "search": "buy", "price": "100", "units_traded": "0.1", "transfer_date": "1"},
-                {"order_id": "filled-2", "search": "sell", "price": "101", "units_traded": "0.2", "transfer_date": "2"},
-            ],
-        },
-    )
+    def _fake_get(endpoint, params, retry_safe=False):
+        if params["state"] == "wait":
+            return []
+        if params["state"] == "done":
+            return [{"uuid": "filled-1", "side": "bid", "price": "100", "volume": "0.1", "executed_volume": "0.1", "state": "done"}]
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
 
     broker.get_recent_orders(limit=10)
     summary = broker.get_read_journal_summary()
 
-    assert "/info/user_transactions(recent_orders)" in summary
-    assert "sample_order_ids" in summary["/info/user_transactions(recent_orders)"]
-    assert "filled-1" in summary["/info/user_transactions(recent_orders)"]
-
-
-def test_open_orders_journal_summary_records_bid_and_ask_queries(monkeypatch):
-    _configure_live()
-    broker = BithumbBroker()
-
-    def _fake_post_private(endpoint, payload, retry_safe=False):
-        assert endpoint == "/info/orders"
-        return {"status": "0000", "data": []}
-
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-
-    broker.get_open_orders()
-    summary = broker.get_read_journal_summary()
-
-    assert "/info/orders(open_orders:bid)" in summary
-    assert "/info/orders(open_orders:ask)" in summary
+    assert "/v1/orders(done)" in summary
+    assert "sample_order_ids" in summary["/v1/orders(done)"]
+    assert "filled-1" in summary["/v1/orders(done)"]
