@@ -160,7 +160,7 @@ def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
 
 
 
-def test_private_jwt_headers_include_query_hash_for_post(monkeypatch):
+def test_private_jwt_headers_include_query_hash_for_post_and_form_body(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
     _SequencedClient.calls = 0
@@ -176,18 +176,13 @@ def test_private_jwt_headers_include_query_hash_for_post(monkeypatch):
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    import json
-
+    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded; charset=utf-8"
     assert "content" in call
     sent = call["content"]
     if isinstance(sent, bytes):
         sent = sent.decode("utf-8")
 
-    assert json.loads(sent) == {
-        "market": "KRW-BTC",
-        "side": "ask",
-        "volume": "0.1",
-    }
+    assert sent == "market=KRW-BTC&side=ask&volume=0.1"
     assert "json" not in call
 
 
@@ -472,3 +467,37 @@ def test_recent_orders_journal_summary_captures_sample_order_ids(monkeypatch):
     assert "/v1/orders(done)" in summary
     assert "sample_order_ids" in summary["/v1/orders(done)"]
     assert "filled-1" in summary["/v1/orders(done)"]
+
+
+def test_private_non_order_posts_keep_json_body(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"ok": True})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    assert call["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    assert call["json"] == {"order_id": "abc123"}
+    assert "content" not in call
+
+
+def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, caplog):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(400, {"error": {"message": "Invalid request"}, "api_key": "leak-me"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        with pytest.raises(BrokerRejectError):
+            broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}, retry_safe=False)
+
+    order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] response" in record.message]
+    assert order_logs
+    assert "Invalid request" in order_logs[-1]
+    assert "api_key" not in order_logs[-1]

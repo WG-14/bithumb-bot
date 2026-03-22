@@ -79,20 +79,24 @@ class BithumbPrivateAPI:
         token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
         return token if isinstance(token, str) else token.decode()
 
-    def _headers(self, payload: dict[str, object] | None, *, has_json_body: bool) -> dict[str, str]:
+    def _headers(self, payload: dict[str, object] | None, *, content_type: str | None = None) -> dict[str, str]:
         if self.dry_run:
             return {}
         headers = {
             "Authorization": f"Bearer {self._jwt_token(payload)}",
             "Accept": "application/json",
         }
-        if has_json_body:
-            headers["Content-Type"] = "application/json; charset=utf-8"
+        if content_type:
+            headers["Content-Type"] = content_type
         return headers
 
     @staticmethod
     def _json_body_bytes(payload: dict[str, object]) -> bytes:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    @classmethod
+    def _form_body_bytes(cls, payload: dict[str, object]) -> bytes:
+        return cls._query_string(payload).encode("utf-8")
 
     def request(
         self,
@@ -113,20 +117,24 @@ class BithumbPrivateAPI:
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = method == "POST" and endpoint == "/v2/orders"
         request_kwargs: dict[str, object] = {}
-        signed_payload_repr = repr(self._query_string(auth_payload)) if debug_order_submit else ""
+        signed_payload = self._query_string(auth_payload) if debug_order_submit else ""
+        signed_payload_repr = repr(signed_payload) if debug_order_submit else ""
         transmitted_payload_repr = ""
+        request_content_type: str | None = None
         if params:
             request_kwargs["params"] = params
         if json_body:
             if debug_order_submit:
-                body_bytes = self._json_body_bytes(json_body)
+                body_bytes = self._form_body_bytes(json_body)
+                request_content_type = "application/x-www-form-urlencoded; charset=utf-8"
                 request_kwargs["content"] = body_bytes
                 transmitted_payload_repr = repr(body_bytes.decode("utf-8"))
             else:
+                request_content_type = "application/json; charset=utf-8"
                 request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
-            headers = self._headers(auth_payload, has_json_body=bool(json_body))
+            headers = self._headers(auth_payload, content_type=request_content_type)
             if debug_order_submit:
                 RUN_LOG.info(
                     format_log_kv(
