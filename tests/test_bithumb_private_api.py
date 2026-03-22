@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -150,6 +152,33 @@ def test_canonical_payload_for_query_hash_matches_order_submit_payload():
         "market=KRW-BTC&side=bid&price=9999&ord_type=price"
     )
     assert BithumbPrivateAPI._query_string(payload) == "market=KRW-BTC&side=bid&price=9999&ord_type=price"
+
+
+def test_order_submit_query_hash_matches_official_urlencode_sha512_rule():
+    payload = {
+        "market": "KRW-BTC",
+        "side": "bid",
+        "price": "9998",
+        "ord_type": "price",
+    }
+
+    official_query = urlencode(
+        [
+            ("market", "KRW-BTC"),
+            ("side", "bid"),
+            ("price", "9998"),
+            ("ord_type", "price"),
+        ],
+        doseq=False,
+        safe="[]",
+    )
+    official_hash = hashlib.sha512(official_query.encode("utf-8")).hexdigest()
+
+    assert BithumbPrivateAPI._canonical_payload_for_query_hash(payload) == official_query
+    assert BithumbPrivateAPI._query_hash_from_canonical_payload(official_query) == {
+        "query_hash": official_hash,
+        "query_hash_alg": "SHA512",
+    }
 
 
 def test_build_order_rules_market_uses_v1_symbol():
@@ -510,13 +539,13 @@ def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
     calls: list[dict[str, object]] = []
-    original = api._order_submit_request_parts
+    original = api._order_submit_auth_context
 
     def _spy(payload, *, nonce=None, timestamp=None):
         calls.append({"payload": payload, "nonce": nonce, "timestamp": timestamp})
         return original(payload, nonce=nonce, timestamp=timestamp)
 
-    monkeypatch.setattr(api, "_order_submit_request_parts", _spy)
+    monkeypatch.setattr(api, "_order_submit_auth_context", _spy)
 
     payload = {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"}
     api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
@@ -526,6 +555,36 @@ def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
     assert calls[1]["payload"] == payload
     assert calls[0]["nonce"] == calls[1]["nonce"]
     assert calls[0]["timestamp"] == calls[1]["timestamp"]
+
+
+def test_order_submit_auth_context_matches_official_claim_contract(monkeypatch):
+    _configure_live()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.uuid.uuid4", lambda: "nonce-fixed")
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "ord_type": "price"}
+
+    context = api._order_submit_auth_context(payload)
+
+    assert context["canonical_payload"] == "market=KRW-BTC&side=bid&price=9998&ord_type=price"
+    assert context["request_content"] == b"market=KRW-BTC&side=bid&price=9998&ord_type=price"
+    assert context["query_hash_claims"] == {
+        "query_hash": hashlib.sha512(context["request_content"]).hexdigest(),
+        "query_hash_alg": "SHA512",
+    }
+    assert context["claims"] == {
+        "access_key": "k",
+        "nonce": "nonce-fixed",
+        "timestamp": 1712230310689,
+        "query_hash": hashlib.sha512(context["request_content"]).hexdigest(),
+        "query_hash_alg": "SHA512",
+    }
+    assert context["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert context["headers"]["Authorization"].startswith("Bearer ")
+    assert context["request_kwargs"] == {
+        "content": b"market=KRW-BTC&side=bid&price=9998&ord_type=price",
+    }
 
 
 
@@ -541,7 +600,7 @@ def test_non_order_post_does_not_use_order_submit_auth_builder(monkeypatch):
     def _boom(*args, **kwargs):
         raise AssertionError("order submit auth builder should not be used")
 
-    monkeypatch.setattr(api, "_order_submit_request_parts", _boom)
+    monkeypatch.setattr(api, "_order_submit_auth_context", _boom)
 
     api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
 
@@ -613,6 +672,7 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
     assert claims["nonce"] == "nonce-fixed"
     assert claims["timestamp"] == 1712230310689
     assert claims["query_hash"] == BithumbPrivateAPI._query_hash_from_canonical_payload(canonical_payload)["query_hash"]
+    assert claims["query_hash_alg"] == "SHA512"
 
 
 def test_order_http_debug_request_logs_matching_signed_and_transmitted_payload(monkeypatch, caplog):
@@ -653,3 +713,36 @@ def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, capl
     assert order_logs
     assert "Invalid request" in order_logs[-1]
     assert "api_key" not in order_logs[-1]
+
+
+def test_order_submit_live_failure_regression_uses_canonical_form_bytes_and_matching_hash(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(401, {"error": {"name": "invalid_query_payload"}})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.uuid.uuid4", lambda: "nonce-fixed")
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "ord_type": "price"}
+
+    with pytest.raises(BrokerRejectError) as excinfo:
+        api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+
+    assert "status=401" in str(excinfo.value)
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+    canonical_payload = "market=KRW-BTC&side=bid&price=9998&ord_type=price"
+
+    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert call["content"] == canonical_payload.encode("utf-8")
+    assert "json" not in call
+    assert claims == {
+        "access_key": "k",
+        "nonce": "nonce-fixed",
+        "timestamp": 1712230310689,
+        "query_hash": hashlib.sha512(canonical_payload.encode("utf-8")).hexdigest(),
+        "query_hash_alg": "SHA512",
+    }

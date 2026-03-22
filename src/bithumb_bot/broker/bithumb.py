@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from urllib.parse import urlencode
+from typing import TypedDict
 
 import httpx
 
@@ -33,8 +34,18 @@ _HTTPX_TRANSIENT_ERRORS = tuple(
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
+class _OrderSubmitAuthContext(TypedDict):
+    canonical_payload: str
+    request_content: bytes
+    query_hash_claims: dict[str, str]
+    claims: dict[str, object]
+    headers: dict[str, str]
+    request_kwargs: dict[str, object]
+
+
 class BithumbPrivateAPI:
     ORDER_SUBMIT_ENDPOINT = "/v2/orders"
+    ORDER_SUBMIT_CONTENT_TYPE = "application/x-www-form-urlencoded"
 
     def __init__(self, *, api_key: str, api_secret: str, base_url: str, dry_run: bool) -> None:
         self.api_key = api_key
@@ -91,7 +102,7 @@ class BithumbPrivateAPI:
         timestamp: int | None = None,
     ) -> dict[str, object]:
         resolved_nonce = nonce or str(uuid.uuid4())
-        resolved_timestamp = int(time.time() * 1000) if timestamp is None else int(timestamp)
+        resolved_timestamp = round(time.time() * 1000) if timestamp is None else int(timestamp)
         return {
             "access_key": self.api_key,
             "nonce": resolved_nonce,
@@ -132,6 +143,35 @@ class BithumbPrivateAPI:
             headers["Content-Type"] = content_type
         return headers
 
+    def _order_submit_auth_context(
+        self,
+        payload: dict[str, object],
+        *,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> _OrderSubmitAuthContext:
+        canonical_payload = self._query_string(payload)
+        request_content = canonical_payload.encode("utf-8")
+        query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload)
+        claims = {
+            **self._base_jwt_claims(nonce=nonce, timestamp=timestamp),
+            **query_hash_claims,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._jwt_token_from_claims(claims)}",
+            "Accept": "application/json",
+            "Content-Type": self.ORDER_SUBMIT_CONTENT_TYPE,
+        }
+        request_kwargs: dict[str, object] = {"content": request_content}
+        return {
+            "canonical_payload": canonical_payload,
+            "request_content": request_content,
+            "query_hash_claims": query_hash_claims,
+            "claims": claims,
+            "headers": headers,
+            "request_kwargs": request_kwargs,
+        }
+
     def _order_submit_request_parts(
         self,
         payload: dict[str, object],
@@ -139,16 +179,8 @@ class BithumbPrivateAPI:
         nonce: str | None = None,
         timestamp: int | None = None,
     ) -> tuple[dict[str, str], dict[str, object], str]:
-        canonical_payload = self._query_string(payload)
-        headers = self._headers(
-            None,
-            content_type="application/x-www-form-urlencoded",
-            canonical_payload=canonical_payload,
-            nonce=nonce,
-            timestamp=timestamp,
-        )
-        request_kwargs: dict[str, object] = {"content": canonical_payload.encode("utf-8")}
-        return headers, request_kwargs, canonical_payload
+        context = self._order_submit_auth_context(payload, nonce=nonce, timestamp=timestamp)
+        return context["headers"], context["request_kwargs"], context["canonical_payload"]
 
     @staticmethod
     def _json_body_text(payload: dict[str, object]) -> str:
@@ -190,15 +222,16 @@ class BithumbPrivateAPI:
         if json_body:
             if is_order_submit:
                 fixed_nonce = str(uuid.uuid4())
-                fixed_timestamp = int(time.time() * 1000)
-                headers, order_request_kwargs, canonical_payload = self._order_submit_request_parts(
+                fixed_timestamp = round(time.time() * 1000)
+                order_context = self._order_submit_auth_context(
                     json_body,
                     nonce=fixed_nonce,
                     timestamp=fixed_timestamp,
                 )
-                request_content_type = headers.get("Content-Type")
-                request_kwargs.update(order_request_kwargs)
-                transmitted_payload_repr = repr(canonical_payload) if debug_order_submit else ""
+                request_content_type = order_context["headers"].get("Content-Type")
+                request_kwargs.update(order_context["request_kwargs"])
+                canonical_payload = order_context["canonical_payload"]
+                transmitted_payload_repr = repr(order_context["request_content"].decode("utf-8")) if debug_order_submit else ""
             else:
                 request_content_type = "application/json"
                 if debug_order_submit:
@@ -207,11 +240,13 @@ class BithumbPrivateAPI:
 
         for attempt in range(attempts):
             if is_order_submit:
-                headers, _order_request_kwargs, canonical_payload = self._order_submit_request_parts(
+                order_context = self._order_submit_auth_context(
                     json_body or {},
                     nonce=fixed_nonce,
                     timestamp=fixed_timestamp,
                 )
+                headers = order_context["headers"]
+                canonical_payload = order_context["canonical_payload"]
             else:
                 headers = self._headers(
                     auth_payload,
