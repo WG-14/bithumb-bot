@@ -29,7 +29,7 @@ DEFAULT_FORM_PAIRS: tuple[tuple[str, str], ...] = (
     ("market", "KRW-BTC"),
     ("side", "bid"),
     ("price", "9999"),
-    ("ord_type", "price"),
+    ("order_type", "price"),
 )
 
 

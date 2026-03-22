@@ -326,7 +326,7 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "PERMISSION", "API key scope/permission denied"
     if any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
         return "FUNDS", "balance or orderable-funds check failed"
-    if any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
+    if any(token in detail for token in ("market", "price", "volume", "ord_type", "order_type", "validation")):
         return "PARAM", "market/order parameter validation failed"
     return "UNKNOWN", "unclassified private API failure"
 
@@ -590,18 +590,18 @@ class BithumbBroker:
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 payload.update({
                     "price": self._format_krw_amount(notional),
-                    "ord_type": "price",
+                    "order_type": "price",
                 })
             else:
                 payload.update({
                     "volume": volume_text,
-                    "ord_type": "market",
+                    "order_type": "market",
                 })
         else:
             payload.update({
                 "volume": volume_text,
                 "price": self._format_krw_amount(price),
-                "ord_type": "limit",
+                "order_type": "limit",
             })
 
         RUN_LOG.info(
@@ -609,7 +609,7 @@ class BithumbBroker:
                 "[ORDER_SUBMIT] broker payload",
                 market=payload.get("market"),
                 side=normalized_side,
-                ord_type=payload.get("ord_type"),
+                order_type=payload.get("order_type"),
                 volume=payload.get("volume"),
                 price=payload.get("price"),
                 payload=payload,
@@ -620,7 +620,7 @@ class BithumbBroker:
         data = self._post_private("/v2/orders", payload, retry_safe=False)
         if not isinstance(data, dict):
             raise BrokerRejectError(f"unexpected /v2/orders payload type: {type(data).__name__}")
-        exchange_order_id = str(data.get("uuid") or data.get("order_id") or data.get("data", {}).get("uuid") or "")
+        exchange_order_id = str(data.get("uuid") or data.get("order_id") or data.get("data", {}).get("uuid") or data.get("data", {}).get("order_id") or "")
         if not exchange_order_id:
             raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
         return BrokerOrder(client_order_id, exchange_order_id, side, "NEW", price, qty, 0.0, now, now)
@@ -633,7 +633,7 @@ class BithumbBroker:
 
         self._delete_private(
             "/v2/order",
-            {"uuid": str(order.exchange_order_id)},
+            {"order_id": str(order.exchange_order_id)},
             retry_safe=False,
         )
         now = int(time.time() * 1000)
