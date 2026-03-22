@@ -138,6 +138,20 @@ def test_query_string_preserves_bithumb_array_brackets():
     )
 
 
+def test_canonical_payload_for_query_hash_matches_order_submit_payload():
+    payload = {
+        "market": "KRW-BTC",
+        "side": "bid",
+        "price": "9999",
+        "ord_type": "price",
+    }
+
+    assert BithumbPrivateAPI._canonical_payload_for_query_hash(payload) == (
+        "market=KRW-BTC&side=bid&price=9999&ord_type=price"
+    )
+    assert BithumbPrivateAPI._query_string(payload) == "market=KRW-BTC&side=bid&price=9999&ord_type=price"
+
+
 def test_build_order_rules_market_uses_v1_symbol():
     from bithumb_bot.broker.order_rules import build_order_rules_market
 
@@ -182,14 +196,9 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    assert call["headers"]["Content-Type"] == "application/json; charset=utf-8"
-    assert "content" in call
-    sent = call["content"]
-    if isinstance(sent, bytes):
-        sent = sent.decode("utf-8")
-
-    assert sent == "{\"market\":\"KRW-BTC\",\"side\":\"ask\",\"volume\":\"0.1\"}"
-    assert "json" not in call
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["json"] == {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}
+    assert "content" not in call
 
 
 
@@ -486,9 +495,31 @@ def test_private_non_order_posts_keep_json_body(monkeypatch):
     api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
-    assert call["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    assert call["headers"]["Content-Type"] == "application/json"
     assert call["json"] == {"order_id": "abc123"}
     assert "content" not in call
+
+
+def test_order_http_debug_request_logs_canonical_query_and_json_preview(monkeypatch, caplog):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        broker._post_private(
+            "/v2/orders",
+            {"market": "KRW-BTC", "side": "bid", "price": "9999", "ord_type": "price"},
+            retry_safe=False,
+        )
+
+    order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] request" in record.message]
+    assert order_logs
+    assert "content_type=application/json" in order_logs[-1]
+    assert "signed_payload_repr='market=KRW-BTC&side=bid&price=9999&ord_type=price'" in order_logs[-1]
+    assert 'transmitted_payload_repr=\'{"market":"KRW-BTC","side":"bid","price":"9999","ord_type":"price"}\'' in order_logs[-1]
 
 
 def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, caplog):

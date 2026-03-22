@@ -58,8 +58,12 @@ class BithumbPrivateAPI:
         return items
 
     @classmethod
-    def _query_string(cls, payload: dict[str, object] | None) -> str:
+    def _canonical_payload_for_query_hash(cls, payload: dict[str, object] | None) -> str:
         return urlencode(cls._payload_items(payload), doseq=False, safe="[]")
+
+    @classmethod
+    def _query_string(cls, payload: dict[str, object] | None) -> str:
+        return cls._canonical_payload_for_query_hash(payload)
 
     @classmethod
     def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
@@ -93,8 +97,8 @@ class BithumbPrivateAPI:
         return headers
 
     @staticmethod
-    def _json_body_bytes(payload: dict[str, object]) -> bytes:
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    def _json_body_text(payload: dict[str, object]) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
     def _form_body_bytes(cls, payload: dict[str, object]) -> bytes:
@@ -126,13 +130,10 @@ class BithumbPrivateAPI:
         if params:
             request_kwargs["params"] = params
         if json_body:
-            request_content_type = "application/json; charset=utf-8"
+            request_content_type = "application/json"
             if debug_order_submit:
-                body_bytes = self._json_body_bytes(json_body)
-                request_kwargs["content"] = body_bytes
-                transmitted_payload_repr = repr(body_bytes.decode("utf-8"))
-            else:
-                request_kwargs["json"] = json_body
+                transmitted_payload_repr = repr(self._json_body_text(json_body))
+            request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
             headers = self._headers(auth_payload, content_type=request_content_type)
