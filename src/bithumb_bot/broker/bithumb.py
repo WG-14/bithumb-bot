@@ -37,6 +37,7 @@ RUN_LOG = logging.getLogger("bithumb_bot.run")
 class _OrderSubmitAuthContext(TypedDict):
     canonical_payload: str
     request_content: bytes
+    request_body_text: str
     query_hash_claims: dict[str, str]
     claims: dict[str, object]
     headers: dict[str, str]
@@ -45,7 +46,7 @@ class _OrderSubmitAuthContext(TypedDict):
 
 class BithumbPrivateAPI:
     ORDER_SUBMIT_ENDPOINT = "/v2/orders"
-    ORDER_SUBMIT_CONTENT_TYPE = "application/x-www-form-urlencoded"
+    ORDER_SUBMIT_CONTENT_TYPE = "application/json"
 
     def __init__(self, *, api_key: str, api_secret: str, base_url: str, dry_run: bool) -> None:
         self.api_key = api_key
@@ -151,7 +152,8 @@ class BithumbPrivateAPI:
         timestamp: int | None = None,
     ) -> _OrderSubmitAuthContext:
         canonical_payload = self._query_string(payload)
-        request_content = canonical_payload.encode("utf-8")
+        request_body_text = self._json_body_text(payload)
+        request_content = request_body_text.encode("utf-8")
         query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload)
         claims = {
             **self._base_jwt_claims(nonce=nonce, timestamp=timestamp),
@@ -166,6 +168,7 @@ class BithumbPrivateAPI:
         return {
             "canonical_payload": canonical_payload,
             "request_content": request_content,
+            "request_body_text": request_body_text,
             "query_hash_claims": query_hash_claims,
             "claims": claims,
             "headers": headers,
@@ -231,7 +234,7 @@ class BithumbPrivateAPI:
                 request_content_type = order_context["headers"].get("Content-Type")
                 request_kwargs.update(order_context["request_kwargs"])
                 canonical_payload = order_context["canonical_payload"]
-                transmitted_payload_repr = repr(order_context["request_content"].decode("utf-8")) if debug_order_submit else ""
+                transmitted_payload_repr = repr(order_context["request_body_text"]) if debug_order_submit else ""
             else:
                 request_content_type = "application/json"
                 if debug_order_submit:
@@ -256,12 +259,25 @@ class BithumbPrivateAPI:
                     timestamp=fixed_timestamp,
                 )
             if debug_order_submit:
+                query_hash = str(order_context["query_hash_claims"].get("query_hash", ""))
+                masked_query_hash = f"{query_hash[:12]}...{query_hash[-12:]}" if len(query_hash) > 24 else query_hash
+                auth_header = headers.get("Authorization", "")
+                auth_preview = ""
+                if auth_header.startswith("Bearer "):
+                    token = auth_header.removeprefix("Bearer ")
+                    auth_preview = f"Bearer {token[:12]}...{token[-8:]}" if len(token) > 24 else "Bearer ***"
                 RUN_LOG.info(
                     format_log_kv(
                         "[ORDER_HTTP_DEBUG] request",
                         method=method,
                         endpoint=endpoint,
                         content_type=headers.get("Content-Type"),
+                        canonical_query_string=canonical_payload,
+                        query_hash=masked_query_hash,
+                        query_hash_alg=order_context["query_hash_claims"].get("query_hash_alg"),
+                        nonce_present=bool(order_context["claims"].get("nonce")),
+                        timestamp_present=bool(order_context["claims"].get("timestamp")),
+                        authorization_preview=auth_preview,
                         signed_payload_repr=signed_payload_repr,
                         transmitted_payload_repr=transmitted_payload_repr,
                     )

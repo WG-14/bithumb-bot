@@ -145,10 +145,11 @@ def main() -> int:
         return 2
 
     canonical_payload = build_canonical_payload(DEFAULT_FORM_PAIRS)
+    request_body = {key: value for key, value in DEFAULT_FORM_PAIRS}
     query_hash = compute_query_hash(canonical_payload)
     claims = build_claims(access_key, query_hash)
     authorization_header = build_authorization_header(secret_key, claims)
-    content_type = "application/x-www-form-urlencoded"
+    content_type = "application/json"
 
     print_debug_summary(
         endpoint=DEFAULT_ENDPOINT,
@@ -172,7 +173,7 @@ def main() -> int:
 
     request = Request(
         url=url,
-        data=canonical_payload.encode("utf-8"),
+        data=json.dumps(request_body, separators=(",", ":")).encode("utf-8"),
         headers=headers,
         method="POST",
     )
