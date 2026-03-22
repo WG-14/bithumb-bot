@@ -48,16 +48,18 @@ class BithumbPrivateAPI:
         for key, value in payload.items():
             if value is None:
                 continue
+            key_text = str(key)
             if isinstance(value, (list, tuple)):
+                array_key = key_text if key_text.endswith("[]") else f"{key_text}[]"
                 for item in value:
-                    items.append((str(key), str(item)))
+                    items.append((array_key, str(item)))
                 continue
-            items.append((str(key), str(value)))
+            items.append((key_text, str(value)))
         return items
 
     @classmethod
     def _query_string(cls, payload: dict[str, object] | None) -> str:
-        return urlencode(cls._payload_items(payload), doseq=True)
+        return urlencode(cls._payload_items(payload), doseq=False, safe="[]")
 
     @classmethod
     def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
@@ -124,13 +126,12 @@ class BithumbPrivateAPI:
         if params:
             request_kwargs["params"] = params
         if json_body:
+            request_content_type = "application/json; charset=utf-8"
             if debug_order_submit:
-                body_bytes = self._form_body_bytes(json_body)
-                request_content_type = "application/x-www-form-urlencoded; charset=utf-8"
+                body_bytes = self._json_body_bytes(json_body)
                 request_kwargs["content"] = body_bytes
                 transmitted_payload_repr = repr(body_bytes.decode("utf-8"))
             else:
-                request_content_type = "application/json; charset=utf-8"
                 request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
@@ -168,7 +169,8 @@ class BithumbPrivateAPI:
                         f"bithumb private {endpoint} server error status={res.status_code} body={body}"
                     )
                 res.raise_for_status()
-                data = res.json() if res.content else {}
+                response_content = getattr(res, "content", None)
+                data = res.json() if response_content != b"" else {}
             except _HTTPX_TRANSIENT_ERRORS as exc:
                 if attempt < attempts - 1:
                     time.sleep(backoffs[attempt])

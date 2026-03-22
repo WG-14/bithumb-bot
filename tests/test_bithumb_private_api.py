@@ -132,6 +132,12 @@ def test_query_string_for_order_chance_market_is_exact():
     }
 
 
+def test_query_string_preserves_bithumb_array_brackets():
+    assert BithumbPrivateAPI._query_string({"uuids": ["order-1", "order-2"], "state": "wait"}) == (
+        "uuids[]=order-1&uuids[]=order-2&state=wait"
+    )
+
+
 def test_build_order_rules_market_uses_v1_symbol():
     from bithumb_bot.broker.order_rules import build_order_rules_market
 
@@ -160,7 +166,7 @@ def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
 
 
 
-def test_private_jwt_headers_include_query_hash_for_post_and_form_body(monkeypatch):
+def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
     _SequencedClient.calls = 0
@@ -176,13 +182,13 @@ def test_private_jwt_headers_include_query_hash_for_post_and_form_body(monkeypat
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded; charset=utf-8"
+    assert call["headers"]["Content-Type"] == "application/json; charset=utf-8"
     assert "content" in call
     sent = call["content"]
     if isinstance(sent, bytes):
         sent = sent.decode("utf-8")
 
-    assert sent == "market=KRW-BTC&side=ask&volume=0.1"
+    assert sent == "{\"market\":\"KRW-BTC\",\"side\":\"ask\",\"volume\":\"0.1\"}"
     assert "json" not in call
 
 
