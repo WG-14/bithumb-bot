@@ -538,6 +538,33 @@ def test_order_submit_uses_form_encoded_body_consistently(monkeypatch, payload, 
 
 
 
+
+
+def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.uuid.uuid4", lambda: "nonce-fixed")
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
+
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "10002", "ord_type": "price"}
+    broker = BithumbBroker()
+    broker._post_private("/v2/orders", payload, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+    canonical_payload = call["content"].decode()
+
+    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert canonical_payload == "market=KRW-BTC&side=bid&price=10002&ord_type=price"
+    assert claims["nonce"] == "nonce-fixed"
+    assert claims["timestamp"] == 1712230310689
+    assert claims["query_hash"] == BithumbPrivateAPI._query_hash_from_canonical_payload(canonical_payload)["query_hash"]
+
+
 def test_order_http_debug_request_logs_matching_signed_and_transmitted_payload(monkeypatch, caplog):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]

@@ -65,31 +65,52 @@ class BithumbPrivateAPI:
     def _query_string(cls, payload: dict[str, object] | None) -> str:
         return cls._canonical_payload_for_query_hash(payload)
 
-    @classmethod
-    def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
-        query_string = cls._query_string(payload)
+    @staticmethod
+    def _query_hash_from_canonical_payload(query_string: str) -> dict[str, str]:
         if not query_string:
             return {}
         return {
-            "query_hash": hashlib.sha512(query_string.encode()).hexdigest(),
+            "query_hash": hashlib.sha512(query_string.encode("utf-8")).hexdigest(),
             "query_hash_alg": "SHA512",
         }
 
-    def _jwt_token(self, payload: dict[str, object] | None) -> str:
+    @classmethod
+    def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
+        return cls._query_hash_from_canonical_payload(cls._query_string(payload))
+
+    def _jwt_token(
+        self,
+        payload: dict[str, object] | None,
+        *,
+        canonical_payload: str | None = None,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> str:
+        resolved_nonce = nonce or str(uuid.uuid4())
+        resolved_timestamp = int(time.time() * 1000) if timestamp is None else int(timestamp)
+        query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload) if canonical_payload is not None else self._query_hash_claims(payload)
         claims: dict[str, object] = {
             "access_key": self.api_key,
-            "nonce": str(uuid.uuid4()),
-            "timestamp": int(time.time() * 1000),
-            **self._query_hash_claims(payload),
+            "nonce": resolved_nonce,
+            "timestamp": resolved_timestamp,
+            **query_hash_claims,
         }
         token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
         return token if isinstance(token, str) else token.decode()
 
-    def _headers(self, payload: dict[str, object] | None, *, content_type: str | None = None) -> dict[str, str]:
+    def _headers(
+        self,
+        payload: dict[str, object] | None,
+        *,
+        content_type: str | None = None,
+        canonical_payload: str | None = None,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> dict[str, str]:
         if self.dry_run:
             return {}
         headers = {
-            "Authorization": f"Bearer {self._jwt_token(payload)}",
+            "Authorization": f"Bearer {self._jwt_token(payload, canonical_payload=canonical_payload, nonce=nonce, timestamp=timestamp)}",
             "Accept": "application/json",
         }
         if content_type:
@@ -124,17 +145,22 @@ class BithumbPrivateAPI:
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = method == "POST" and endpoint == "/v2/orders"
         request_kwargs: dict[str, object] = {}
-        signed_payload = self._query_string(auth_payload) if debug_order_submit else ""
+        canonical_payload = self._query_string(auth_payload) if auth_payload else ""
+        signed_payload = canonical_payload if debug_order_submit else ""
         signed_payload_repr = repr(signed_payload) if debug_order_submit else ""
         transmitted_payload_repr = ""
         request_content_type: str | None = None
+        fixed_nonce: str | None = None
+        fixed_timestamp: int | None = None
         if params:
             request_kwargs["params"] = params
         if json_body:
             if use_form_body:
                 request_content_type = "application/x-www-form-urlencoded"
-                transmitted_payload_repr = repr(self._query_string(json_body)) if debug_order_submit else ""
-                request_kwargs["content"] = self._form_body_bytes(json_body)
+                transmitted_payload_repr = repr(canonical_payload) if debug_order_submit else ""
+                request_kwargs["content"] = canonical_payload.encode("utf-8")
+                fixed_nonce = str(uuid.uuid4())
+                fixed_timestamp = int(time.time() * 1000)
             else:
                 request_content_type = "application/json"
                 if debug_order_submit:
@@ -142,7 +168,13 @@ class BithumbPrivateAPI:
                 request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
-            headers = self._headers(auth_payload, content_type=request_content_type)
+            headers = self._headers(
+                auth_payload,
+                content_type=request_content_type,
+                canonical_payload=canonical_payload if use_form_body else None,
+                nonce=fixed_nonce,
+                timestamp=fixed_timestamp,
+            )
             if debug_order_submit:
                 RUN_LOG.info(
                     format_log_kv(
