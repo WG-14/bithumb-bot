@@ -180,7 +180,7 @@ def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
 
 
 
-def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypatch):
+def test_private_jwt_headers_include_query_hash_for_post_and_form_body(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
     _SequencedClient.calls = 0
@@ -188,7 +188,7 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     broker = BithumbBroker()
-    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}, retry_safe=False)
+    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -196,9 +196,9 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    assert call["headers"]["Content-Type"] == "application/json"
-    assert call["json"] == {"market": "KRW-BTC", "side": "ask", "volume": "0.1"}
-    assert "content" not in call
+    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert call["content"] == b"market=KRW-BTC&side=ask&volume=0.1&ord_type=market"
+    assert "json" not in call
 
 
 
@@ -500,7 +500,45 @@ def test_private_non_order_posts_keep_json_body(monkeypatch):
     assert "content" not in call
 
 
-def test_order_http_debug_request_logs_canonical_query_and_json_preview(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    ("payload", "expected_content"),
+    [
+        (
+            {"market": "KRW-BTC", "side": "bid", "price": "9999", "ord_type": "price"},
+            b"market=KRW-BTC&side=bid&price=9999&ord_type=price",
+        ),
+        (
+            {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"},
+            b"market=KRW-BTC&side=ask&volume=0.1&ord_type=market",
+        ),
+        (
+            {"market": "KRW-BTC", "side": "bid", "volume": "0.4", "price": "149500000", "ord_type": "limit"},
+            b"market=KRW-BTC&side=bid&volume=0.4&price=149500000&ord_type=limit",
+        ),
+    ],
+)
+def test_order_submit_uses_form_encoded_body_consistently(monkeypatch, payload, expected_content):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    broker._post_private("/v2/orders", payload, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+
+    assert call["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert call["content"] == expected_content
+    assert "json" not in call
+    assert claims["query_hash"] == BithumbPrivateAPI._query_hash_claims(payload)["query_hash"]
+
+
+
+def test_order_http_debug_request_logs_matching_signed_and_transmitted_payload(monkeypatch, caplog):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
     _SequencedClient.calls = 0
@@ -517,9 +555,9 @@ def test_order_http_debug_request_logs_canonical_query_and_json_preview(monkeypa
 
     order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] request" in record.message]
     assert order_logs
-    assert "content_type=application/json" in order_logs[-1]
+    assert "content_type=application/x-www-form-urlencoded" in order_logs[-1]
     assert "signed_payload_repr='market=KRW-BTC&side=bid&price=9999&ord_type=price'" in order_logs[-1]
-    assert 'transmitted_payload_repr=\'{"market":"KRW-BTC","side":"bid","price":"9999","ord_type":"price"}\'' in order_logs[-1]
+    assert "transmitted_payload_repr='market=KRW-BTC&side=bid&price=9999&ord_type=price'" in order_logs[-1]
 
 
 def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, caplog):

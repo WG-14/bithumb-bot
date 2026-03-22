@@ -120,6 +120,7 @@ class BithumbPrivateAPI:
         attempts = 3 if retry_safe else 1
         backoffs = (0.2, 0.5)
         method = method.upper()
+        use_form_body = method == "POST" and endpoint == "/v2/orders" and bool(json_body)
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = method == "POST" and endpoint == "/v2/orders"
         request_kwargs: dict[str, object] = {}
@@ -130,10 +131,15 @@ class BithumbPrivateAPI:
         if params:
             request_kwargs["params"] = params
         if json_body:
-            request_content_type = "application/json"
-            if debug_order_submit:
-                transmitted_payload_repr = repr(self._json_body_text(json_body))
-            request_kwargs["json"] = json_body
+            if use_form_body:
+                request_content_type = "application/x-www-form-urlencoded"
+                transmitted_payload_repr = repr(self._query_string(json_body)) if debug_order_submit else ""
+                request_kwargs["content"] = self._form_body_bytes(json_body)
+            else:
+                request_content_type = "application/json"
+                if debug_order_submit:
+                    transmitted_payload_repr = repr(self._json_body_text(json_body))
+                request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
             headers = self._headers(auth_payload, content_type=request_content_type)
