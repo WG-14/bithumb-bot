@@ -34,6 +34,8 @@ RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
 class BithumbPrivateAPI:
+    ORDER_SUBMIT_ENDPOINT = "/v2/orders"
+
     def __init__(self, *, api_key: str, api_secret: str, base_url: str, dry_run: bool) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -78,6 +80,24 @@ class BithumbPrivateAPI:
     def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
         return cls._query_hash_from_canonical_payload(cls._query_string(payload))
 
+    def _jwt_token_from_claims(self, claims: dict[str, object]) -> str:
+        token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
+        return token if isinstance(token, str) else token.decode()
+
+    def _base_jwt_claims(
+        self,
+        *,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> dict[str, object]:
+        resolved_nonce = nonce or str(uuid.uuid4())
+        resolved_timestamp = int(time.time() * 1000) if timestamp is None else int(timestamp)
+        return {
+            "access_key": self.api_key,
+            "nonce": resolved_nonce,
+            "timestamp": resolved_timestamp,
+        }
+
     def _jwt_token(
         self,
         payload: dict[str, object] | None,
@@ -86,17 +106,12 @@ class BithumbPrivateAPI:
         nonce: str | None = None,
         timestamp: int | None = None,
     ) -> str:
-        resolved_nonce = nonce or str(uuid.uuid4())
-        resolved_timestamp = int(time.time() * 1000) if timestamp is None else int(timestamp)
         query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload) if canonical_payload is not None else self._query_hash_claims(payload)
-        claims: dict[str, object] = {
-            "access_key": self.api_key,
-            "nonce": resolved_nonce,
-            "timestamp": resolved_timestamp,
+        claims = {
+            **self._base_jwt_claims(nonce=nonce, timestamp=timestamp),
             **query_hash_claims,
         }
-        token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
-        return token if isinstance(token, str) else token.decode()
+        return self._jwt_token_from_claims(claims)
 
     def _headers(
         self,
@@ -116,6 +131,24 @@ class BithumbPrivateAPI:
         if content_type:
             headers["Content-Type"] = content_type
         return headers
+
+    def _order_submit_request_parts(
+        self,
+        payload: dict[str, object],
+        *,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> tuple[dict[str, str], dict[str, object], str]:
+        canonical_payload = self._query_string(payload)
+        headers = self._headers(
+            None,
+            content_type="application/x-www-form-urlencoded",
+            canonical_payload=canonical_payload,
+            nonce=nonce,
+            timestamp=timestamp,
+        )
+        request_kwargs: dict[str, object] = {"content": canonical_payload.encode("utf-8")}
+        return headers, request_kwargs, canonical_payload
 
     @staticmethod
     def _json_body_text(payload: dict[str, object]) -> str:
@@ -141,9 +174,9 @@ class BithumbPrivateAPI:
         attempts = 3 if retry_safe else 1
         backoffs = (0.2, 0.5)
         method = method.upper()
-        use_form_body = method == "POST" and endpoint == "/v2/orders" and bool(json_body)
+        is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
         auth_payload = params if method in {"GET", "DELETE"} else json_body
-        debug_order_submit = method == "POST" and endpoint == "/v2/orders"
+        debug_order_submit = is_order_submit
         request_kwargs: dict[str, object] = {}
         canonical_payload = self._query_string(auth_payload) if auth_payload else ""
         signed_payload = canonical_payload if debug_order_submit else ""
@@ -155,12 +188,17 @@ class BithumbPrivateAPI:
         if params:
             request_kwargs["params"] = params
         if json_body:
-            if use_form_body:
-                request_content_type = "application/x-www-form-urlencoded"
-                transmitted_payload_repr = repr(canonical_payload) if debug_order_submit else ""
-                request_kwargs["content"] = canonical_payload.encode("utf-8")
+            if is_order_submit:
                 fixed_nonce = str(uuid.uuid4())
                 fixed_timestamp = int(time.time() * 1000)
+                headers, order_request_kwargs, canonical_payload = self._order_submit_request_parts(
+                    json_body,
+                    nonce=fixed_nonce,
+                    timestamp=fixed_timestamp,
+                )
+                request_content_type = headers.get("Content-Type")
+                request_kwargs.update(order_request_kwargs)
+                transmitted_payload_repr = repr(canonical_payload) if debug_order_submit else ""
             else:
                 request_content_type = "application/json"
                 if debug_order_submit:
@@ -168,13 +206,20 @@ class BithumbPrivateAPI:
                 request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
-            headers = self._headers(
-                auth_payload,
-                content_type=request_content_type,
-                canonical_payload=canonical_payload if use_form_body else None,
-                nonce=fixed_nonce,
-                timestamp=fixed_timestamp,
-            )
+            if is_order_submit:
+                headers, _order_request_kwargs, canonical_payload = self._order_submit_request_parts(
+                    json_body or {},
+                    nonce=fixed_nonce,
+                    timestamp=fixed_timestamp,
+                )
+            else:
+                headers = self._headers(
+                    auth_payload,
+                    content_type=request_content_type,
+                    canonical_payload=None,
+                    nonce=fixed_nonce,
+                    timestamp=fixed_timestamp,
+                )
             if debug_order_submit:
                 RUN_LOG.info(
                     format_log_kv(

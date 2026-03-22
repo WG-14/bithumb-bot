@@ -500,6 +500,56 @@ def test_private_non_order_posts_keep_json_body(monkeypatch):
     assert "content" not in call
 
 
+
+def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "created-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    calls: list[dict[str, object]] = []
+    original = api._order_submit_request_parts
+
+    def _spy(payload, *, nonce=None, timestamp=None):
+        calls.append({"payload": payload, "nonce": nonce, "timestamp": timestamp})
+        return original(payload, nonce=nonce, timestamp=timestamp)
+
+    monkeypatch.setattr(api, "_order_submit_request_parts", _spy)
+
+    payload = {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"}
+    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+
+    assert len(calls) == 2
+    assert calls[0]["payload"] == payload
+    assert calls[1]["payload"] == payload
+    assert calls[0]["nonce"] == calls[1]["nonce"]
+    assert calls[0]["timestamp"] == calls[1]["timestamp"]
+
+
+
+def test_non_order_post_does_not_use_order_submit_auth_builder(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"ok": True})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("order submit auth builder should not be used")
+
+    monkeypatch.setattr(api, "_order_submit_request_parts", _boom)
+
+    api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    assert call["headers"]["Content-Type"] == "application/json"
+    assert call["json"] == {"order_id": "abc123"}
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_content"),
     [
