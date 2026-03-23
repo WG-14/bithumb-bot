@@ -284,6 +284,36 @@ def test_manual_pause_then_resume_success_path(tmp_path):
     assert state.resume_gate_reason is None
 
 
+def test_resume_live_accepts_injected_reconcile_dependencies(tmp_path):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    broker = object()
+    calls: list[object] = []
+
+    def _broker_factory():
+        calls.append("factory")
+        return broker
+
+    def _reconcile(candidate):
+        calls.append(("reconcile", candidate))
+
+    try:
+        cmd_pause()
+        cmd_resume(
+            force=False,
+            broker_factory=_broker_factory,
+            reconcile_fn=_reconcile,
+        )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert calls == ["factory", ("reconcile", broker)]
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+
+
 def test_resume_refuses_when_unresolved_state_exists_without_force(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -1877,6 +1907,31 @@ def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "[RECONCILE] skipped" in out
+
+
+def test_reconcile_live_accepts_injected_dependencies(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    broker = object()
+    calls: list[object] = []
+
+    def _broker_factory():
+        calls.append("factory")
+        return broker
+
+    def _reconcile(candidate):
+        calls.append(("reconcile", candidate))
+
+    try:
+        cmd_reconcile(broker_factory=_broker_factory, reconcile_fn=_reconcile)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    assert "[RECONCILE] completed one live reconciliation pass" in out
+    assert calls == ["factory", ("reconcile", broker)]
 
 
 def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path):

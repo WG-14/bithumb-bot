@@ -1755,11 +1755,29 @@ def cmd_pause() -> None:
     print("[PAUSE] trading disabled via persistent runtime state")
 
 
-def cmd_resume(force: bool = False) -> None:
-    if settings.MODE == "live":
-        from .broker.bithumb import BithumbBroker, classify_private_api_error
+def _build_live_broker():
+    from .broker.bithumb import BithumbBroker
 
-        reconcile_with_broker(BithumbBroker())
+    return BithumbBroker()
+
+
+def _run_live_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
+    broker_factory = broker_factory or _build_live_broker
+    reconcile_fn = reconcile_fn or reconcile_with_broker
+    reconcile_fn(broker_factory())
+
+
+def cmd_resume(
+    force: bool = False,
+    *,
+    broker_factory=None,
+    reconcile_fn=None,
+) -> None:
+    if settings.MODE == "live":
+        _run_live_reconcile(
+            broker_factory=broker_factory,
+            reconcile_fn=reconcile_fn,
+        )
 
     eligible, resume_blocks = evaluate_resume_eligibility()
 
@@ -1804,14 +1822,15 @@ def cmd_resume(force: bool = False) -> None:
         print("[RESUME] trading enabled")
 
 
-def cmd_reconcile() -> None:
+def cmd_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
     if settings.MODE != "live":
         print(f"[RECONCILE] skipped: MODE={settings.MODE} (live only)")
         return
 
-    from .broker.bithumb import BithumbBroker, classify_private_api_error
-
-    reconcile_with_broker(BithumbBroker())
+    _run_live_reconcile(
+        broker_factory=broker_factory,
+        reconcile_fn=reconcile_fn,
+    )
     print("[RECONCILE] completed one live reconciliation pass")
 
 
