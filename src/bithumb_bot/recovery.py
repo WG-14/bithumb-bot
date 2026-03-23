@@ -503,6 +503,23 @@ def _sync_recent_order_activity(
     return conflicts
 
 
+def _status_after_recent_fill_replay(*, current_status: str, qty_req: float, qty_filled: float) -> str | None:
+    fill_tol = order_fill_tolerance(qty_req)
+    if qty_req > 0 and qty_filled >= qty_req - fill_tol:
+        return "FILLED"
+    if qty_filled <= 1e-12:
+        return None
+    if current_status in {"FILLED", "CANCELED"}:
+        _LOG.info(
+            "recent_fill_terminal_state_preserved current_status=%s qty_req=%.12g qty_filled=%.12g",
+            current_status,
+            qty_req,
+            qty_filled,
+        )
+        return current_status
+    return "PARTIAL"
+
+
 def _apply_recent_fills(
     conn,
     recent_fills: list[BrokerFill],
@@ -583,18 +600,18 @@ def _apply_recent_fills(
         applied = True
 
         order_row = conn.execute(
-            "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+            "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
             (local_id,),
         ).fetchone()
         if order_row is None:
             continue
-        qty_req = float(order_row["qty_req"])
-        qty_filled = float(order_row["qty_filled"])
-        fill_tol = order_fill_tolerance(qty_req)
-        if qty_req > 0 and qty_filled >= qty_req - fill_tol:
-            set_status(local_id, "FILLED", conn=conn)
-        elif qty_filled > 1e-12:
-            set_status(local_id, "PARTIAL", conn=conn)
+        next_status = _status_after_recent_fill_replay(
+            current_status=str(order_row["status"]),
+            qty_req=float(order_row["qty_req"]),
+            qty_filled=float(order_row["qty_filled"]),
+        )
+        if next_status is not None:
+            set_status(local_id, next_status, conn=conn)
 
     return applied, conflicts
 
@@ -781,17 +798,17 @@ def _try_resolve_submit_unknown_from_recent_activity(
         next_status = matched_order.status
     elif applied_fill:
         order_row = conn.execute(
-            "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+            "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
             (client_order_id,),
         ).fetchone()
         if order_row is not None:
-            qty_req = float(order_row["qty_req"])
-            qty_filled = float(order_row["qty_filled"])
-            fill_tol = order_fill_tolerance(qty_req)
-            if qty_req > 0 and qty_filled >= qty_req - fill_tol:
-                next_status = "FILLED"
-            elif qty_filled > 1e-12:
-                next_status = "PARTIAL"
+            reconciled_status = _status_after_recent_fill_replay(
+                current_status=str(order_row["status"]),
+                qty_req=float(order_row["qty_req"]),
+                qty_filled=float(order_row["qty_filled"]),
+            )
+            if reconciled_status is not None:
+                next_status = reconciled_status
 
     set_status(client_order_id, next_status, conn=conn)
     if prev_status != next_status:

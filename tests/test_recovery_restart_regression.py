@@ -5,7 +5,7 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db
+from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
@@ -108,6 +108,57 @@ class _AggregateDuplicateFillBroker(_NoopBroker):
                 exchange_order_id="ex-dup",
             )
         ]
+
+
+class _TerminalFillReplayBroker(_NoopBroker):
+    def __init__(self, *, balance: BrokerBalance | None = None) -> None:
+        self._balance = balance or BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-filled-replay:aggregate:201",
+                fill_ts=201,
+                price=100.0,
+                qty=0.4,
+                fee=0.0,
+                exchange_order_id="ex-filled-replay",
+            )
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        return self._balance
+
+
+class _FilledFlatReplayBroker(_NoopBroker):
+    def __init__(self, *, balance: BrokerBalance) -> None:
+        self._balance = balance
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-flat-buy:aggregate:301",
+                fill_ts=301,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                exchange_order_id="ex-flat-buy",
+            ),
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-flat-sell:aggregate:302",
+                fill_ts=302,
+                price=110.0,
+                qty=1.0,
+                fee=0.0,
+                exchange_order_id="ex-flat-sell",
+            ),
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        return self._balance
 
 
 class _FailAfterWriteBroker(_NoopBroker):
@@ -736,6 +787,137 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
     assert autolink is not None
     assert "outcome=success" in str(autolink["message"])
     assert gate_reason is None
+
+
+def test_reconcile_recent_fill_replay_preserves_filled_terminal_state(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="filled_replay_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="PENDING_SUBMIT",
+        )
+        set_exchange_order_id("filled_replay_restart", "ex-filled-replay", conn=conn)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="filled_replay_restart",
+            side="BUY",
+            fill_id="fill-existing-partial",
+            fill_ts=120,
+            price=100.0,
+            qty=0.4,
+            fee=0.0,
+        )
+        set_status("filled_replay_restart", "FILLED", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_TerminalFillReplayBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='filled_replay_restart'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM fills WHERE client_order_id='filled_replay_restart'"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.4)
+    assert fill_count == 1
+
+
+def test_reconcile_filled_buy_and_flattened_sell_remains_idempotent(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="flat_buy",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="PENDING_SUBMIT",
+        )
+        set_exchange_order_id("flat_buy", "ex-flat-buy", conn=conn)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="flat_buy",
+            side="BUY",
+            fill_id="flat-buy-fill",
+            fill_ts=110,
+            price=100.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        set_status("flat_buy", "FILLED", conn=conn)
+
+        record_order_if_missing(
+            conn,
+            client_order_id="flat_sell",
+            side="SELL",
+            qty_req=1.0,
+            price=110.0,
+            ts_ms=200,
+            status="PENDING_SUBMIT",
+        )
+        set_exchange_order_id("flat_sell", "ex-flat-sell", conn=conn)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="flat_sell",
+            side="SELL",
+            fill_id="flat-sell-fill",
+            fill_ts=210,
+            price=110.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        set_status("flat_sell", "FILLED", conn=conn)
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    balance = BrokerBalance(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    broker = _FilledFlatReplayBroker(balance=balance)
+
+    reconcile_with_broker(broker)
+    reconcile_with_broker(broker)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        rows = conn.execute(
+            "SELECT client_order_id, status, qty_filled FROM orders WHERE client_order_id IN ('flat_buy', 'flat_sell') ORDER BY client_order_id"
+        ).fetchall()
+        buy_fill_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM fills WHERE client_order_id='flat_buy'"
+        ).fetchone()["c"]
+        sell_fill_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM fills WHERE client_order_id='flat_sell'"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+
+    assert [row["client_order_id"] for row in rows] == ["flat_buy", "flat_sell"]
+    assert [row["status"] for row in rows] == ["FILLED", "FILLED"]
+    assert [float(row["qty_filled"]) for row in rows] == pytest.approx([1.0, 1.0])
+    assert buy_fill_count == 1
+    assert sell_fill_count == 1
+    assert evaluate_startup_safety_gate() is None
 
 
 def test_reconcile_repeated_fill_sources_apply_only_once(isolated_db):

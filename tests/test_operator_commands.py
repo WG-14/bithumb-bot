@@ -21,8 +21,11 @@ from bithumb_bot.app import (
 )
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db
+from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_resume_eligibility
+from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.oms import set_exchange_order_id, set_status
+from bithumb_bot.recovery import reconcile_with_broker
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +84,39 @@ def _set_last_error(*, client_order_id: str, last_error: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+class _ResumeFilledReplayBroker:
+    def __init__(self, *, balance: BrokerBalance) -> None:
+        self._balance = balance
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-resume-filled", "BUY", "FILLED", 100.0, 1.0, 1.0, 1, 1)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-resume-filled:aggregate:201",
+                fill_ts=201,
+                price=100.0,
+                qty=0.4,
+                fee=0.0,
+                exchange_order_id="ex-resume-filled",
+            )
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        return self._balance
 
 
 def _insert_order_event(
@@ -292,6 +328,98 @@ def test_manual_pause_then_resume_success_path(tmp_path):
     assert state.halt_reason_code is None
     assert state.resume_gate_blocked is False
     assert state.resume_gate_reason is None
+
+
+def test_resume_live_recent_fill_replay_does_not_fail_with_filled_to_partial(tmp_path):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db()
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="resume_filled_replay",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="PENDING_SUBMIT",
+        )
+        set_exchange_order_id("resume_filled_replay", "ex-resume-filled", conn=conn)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="resume_filled_replay",
+            side="BUY",
+            fill_id="resume-fill-existing",
+            fill_ts=120,
+            price=100.0,
+            qty=0.4,
+            fee=0.0,
+        )
+        set_status("resume_filled_replay", "FILLED", conn=conn)
+
+        record_order_if_missing(
+            conn,
+            client_order_id="resume_flatten",
+            side="SELL",
+            qty_req=0.4,
+            price=110.0,
+            ts_ms=130,
+            status="PENDING_SUBMIT",
+        )
+        set_exchange_order_id("resume_flatten", "ex-resume-flat", conn=conn)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="resume_flatten",
+            side="SELL",
+            fill_id="resume-flat-fill",
+            fill_ts=140,
+            price=110.0,
+            qty=0.4,
+            fee=0.0,
+        )
+        set_status("resume_flatten", "FILLED", conn=conn)
+
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _ResumeFilledReplayBroker(
+        balance=BrokerBalance(
+            cash_available=cash_available,
+            cash_locked=cash_locked,
+            asset_available=asset_available,
+            asset_locked=asset_locked,
+        )
+    )
+
+    try:
+        cmd_pause()
+        cmd_resume(
+            force=False,
+            broker_factory=lambda: broker,
+            reconcile_fn=reconcile_with_broker,
+        )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.last_reconcile_status in {"ok", "success"}
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='resume_filled_replay'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.4)
 
 
 def test_resume_live_accepts_injected_reconcile_dependencies(tmp_path):
