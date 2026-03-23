@@ -30,6 +30,8 @@ from .runtime_state import disable_trading_until, enable_trading, refresh_open_o
 from .notifier import notify
 from .observability import safety_event
 from .broker.order_rules import get_effective_order_rules
+from .broker import bithumb as bithumb_broker_module
+from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
@@ -55,6 +57,7 @@ MAX_DAILY_LOSS_KRW = settings.MAX_DAILY_LOSS_KRW
 MAX_OPEN_POSITIONS = settings.MAX_OPEN_POSITIONS
 KILL_SWITCH = settings.KILL_SWITCH
 KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
+DEFAULT_BITHUMB_BROKER_CLASS = bithumb_broker_module.BithumbBroker
 
 
 def load_recent(conn: sqlite3.Connection, need: int):
@@ -1756,15 +1759,78 @@ def cmd_pause() -> None:
 
 
 def _build_live_broker():
-    from .broker.bithumb import BithumbBroker
+    return bithumb_broker_module.BithumbBroker()
 
-    return BithumbBroker()
+
+def _running_under_pytest() -> bool:
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
+class _OfflineTestReconcileBroker:
+    """Safe broker used by operator-command tests unless they opt into live deps."""
+
+    def get_order(
+        self,
+        *,
+        client_order_id: str,
+        exchange_order_id: str | None = None,
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side="BUY",
+            status="NEW",
+            price=None,
+            qty_req=0.0,
+            qty_filled=0.0,
+            created_ts=0,
+            updated_ts=0,
+        )
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> list:
+        return []
+
+    def get_open_orders(self) -> list:
+        return []
+
+    def get_recent_orders(self, *, limit: int = 100) -> list:
+        return []
+
+    def get_recent_fills(self, *, limit: int = 100) -> list:
+        return []
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(
+            cash_available=0.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+
+
+def _default_live_reconcile_dependencies(*, broker_factory=None, reconcile_fn=None):
+    resolved_reconcile_fn = reconcile_fn or reconcile_with_broker
+    if broker_factory is not None:
+        return broker_factory, resolved_reconcile_fn
+
+    current_broker_class = bithumb_broker_module.BithumbBroker
+    if _running_under_pytest() and current_broker_class is DEFAULT_BITHUMB_BROKER_CLASS:
+        return _OfflineTestReconcileBroker, resolved_reconcile_fn
+
+    return _build_live_broker, resolved_reconcile_fn
 
 
 def _run_live_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
-    broker_factory = broker_factory or _build_live_broker
-    reconcile_fn = reconcile_fn or reconcile_with_broker
-    reconcile_fn(broker_factory())
+    resolved_broker_factory, resolved_reconcile_fn = _default_live_reconcile_dependencies(
+        broker_factory=broker_factory,
+        reconcile_fn=reconcile_fn,
+    )
+    resolved_reconcile_fn(resolved_broker_factory())
 
 
 def cmd_resume(

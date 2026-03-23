@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 
 import pytest
@@ -23,8 +24,17 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import evaluate_resume_eligibility
 
-import os
-import pytest
+
+@pytest.fixture(autouse=True)
+def _default_operator_mode(monkeypatch: pytest.MonkeyPatch):
+    original_mode = settings.MODE
+    monkeypatch.setenv("MODE", "paper")
+    object.__setattr__(settings, "MODE", "paper")
+    try:
+        yield
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
 
 def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
     db_path = str(tmp_path / "operator.sqlite")
