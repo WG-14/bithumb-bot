@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from typing import TypeVar
 from .config import settings
 
 T = TypeVar("T")
+_LOG = logging.getLogger(__name__)
 
 
 def configure_connection(conn: sqlite3.Connection) -> None:
@@ -25,6 +27,7 @@ def is_lock_error(exc: BaseException) -> bool:
 def run_with_locked_db_retry(
     fn: Callable[[], T],
     *,
+    context: str = "sqlite_operation",
     retries: int | None = None,
     backoff_ms: int | None = None,
 ) -> T:
@@ -37,6 +40,13 @@ def run_with_locked_db_retry(
         except Exception as exc:
             if not is_lock_error(exc) or attempt >= attempts:
                 raise
+            _LOG.warning(
+                "sqlite_lock_retry context=%s attempt=%s/%s error=%s",
+                context,
+                attempt + 1,
+                attempts + 1,
+                exc,
+            )
             if sleep_ms > 0:
                 time.sleep((sleep_ms / 1000.0) * (attempt + 1))
 

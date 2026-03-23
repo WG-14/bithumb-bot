@@ -258,7 +258,7 @@ def _persist_state(state: RuntimeState) -> None:
             )
             conn.commit()
 
-        run_with_locked_db_retry(_write)
+        run_with_locked_db_retry(_write, context="runtime_state.persist")
     finally:
         conn.close()
 
@@ -266,53 +266,56 @@ def _persist_state(state: RuntimeState) -> None:
 def _read_persisted_state() -> RuntimeState | None:
     conn = ensure_db()
     try:
-        row = conn.execute(
-            """
-            SELECT
-                trading_enabled,
-                halt_new_orders_blocked,
-                halt_reason_code,
-                halt_state_unresolved,
-                halt_policy_stage,
-                halt_policy_block_new_orders,
-                halt_policy_attempt_cancel_open_orders,
-                halt_policy_auto_liquidate_positions,
-                halt_position_present,
-                halt_open_orders_present,
-                halt_operator_action_required,
-                error_count,
-                last_candle_age_sec,
-                last_candle_status,
-                last_candle_sync_epoch_sec,
-                last_candle_ts_ms,
-                last_processed_candle_ts_ms,
-                last_candle_status_detail,
-                retry_at_epoch_sec,
-                last_disable_reason,
-                unresolved_open_order_count,
-                oldest_unresolved_order_age_sec,
-                recovery_required_count,
-                last_reconcile_epoch_sec,
-                last_reconcile_status,
-                last_reconcile_error,
-                last_reconcile_reason_code,
-                last_reconcile_metadata,
-                last_cancel_open_orders_epoch_sec,
-                last_cancel_open_orders_trigger,
-                last_cancel_open_orders_status,
-                last_cancel_open_orders_summary,
-                last_flatten_position_epoch_sec,
-                last_flatten_position_status,
-                last_flatten_position_summary,
-                emergency_flatten_blocked,
-                emergency_flatten_block_reason,
-                startup_gate_reason,
-                resume_gate_blocked,
-                resume_gate_reason
-            FROM bot_health
-            WHERE id = 1
-            """
-        ).fetchone()
+        def _read():
+            return conn.execute(
+                """
+                SELECT
+                    trading_enabled,
+                    halt_new_orders_blocked,
+                    halt_reason_code,
+                    halt_state_unresolved,
+                    halt_policy_stage,
+                    halt_policy_block_new_orders,
+                    halt_policy_attempt_cancel_open_orders,
+                    halt_policy_auto_liquidate_positions,
+                    halt_position_present,
+                    halt_open_orders_present,
+                    halt_operator_action_required,
+                    error_count,
+                    last_candle_age_sec,
+                    last_candle_status,
+                    last_candle_sync_epoch_sec,
+                    last_candle_ts_ms,
+                    last_processed_candle_ts_ms,
+                    last_candle_status_detail,
+                    retry_at_epoch_sec,
+                    last_disable_reason,
+                    unresolved_open_order_count,
+                    oldest_unresolved_order_age_sec,
+                    recovery_required_count,
+                    last_reconcile_epoch_sec,
+                    last_reconcile_status,
+                    last_reconcile_error,
+                    last_reconcile_reason_code,
+                    last_reconcile_metadata,
+                    last_cancel_open_orders_epoch_sec,
+                    last_cancel_open_orders_trigger,
+                    last_cancel_open_orders_status,
+                    last_cancel_open_orders_summary,
+                    last_flatten_position_epoch_sec,
+                    last_flatten_position_status,
+                    last_flatten_position_summary,
+                    emergency_flatten_blocked,
+                    emergency_flatten_block_reason,
+                    startup_gate_reason,
+                    resume_gate_blocked,
+                    resume_gate_reason
+                FROM bot_health
+                WHERE id = 1
+                """
+            ).fetchone()
+
+        row = run_with_locked_db_retry(_read, context="runtime_state.read")
     finally:
         conn.close()
 

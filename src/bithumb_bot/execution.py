@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any
 
@@ -7,6 +8,15 @@ from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .notifier import format_event, notify
 from .oms import add_fill, create_order, set_exchange_order_id, set_status
+
+_LOG = logging.getLogger(__name__)
+
+
+def order_fill_tolerance(qty_req: float | None = None) -> float:
+    base = max(1e-12, abs(float(settings.LIVE_ORDER_QTY_STEP or 0.0)) * 0.51)
+    if qty_req is None:
+        return base
+    return max(base, abs(float(qty_req)) * 1e-9)
 
 
 def record_order_if_missing(
@@ -70,6 +80,40 @@ def _fill_exists(
     return row is not None
 
 
+def _aggregate_fill_duplicate_reason(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    qty: float,
+) -> str | None:
+    fill_id_text = str(fill_id or "")
+    if ":aggregate:" not in fill_id_text:
+        return None
+
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS fill_count, COALESCE(SUM(qty), 0.0) AS total_qty
+        FROM fills
+        WHERE client_order_id=?
+        """,
+        (client_order_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    fill_count = int(row["fill_count"] or 0)
+    existing_total_qty = float(row["total_qty"] or 0.0)
+    tol = order_fill_tolerance(existing_total_qty if existing_total_qty > 0 else qty)
+    if fill_count <= 0 or abs(existing_total_qty - float(qty)) > tol:
+        return None
+    return (
+        "aggregate_snapshot_already_accounted "
+        f"fill_id={fill_id_text} existing_total_qty={existing_total_qty:.12g} "
+        f"incoming_qty={float(qty):.12g} tolerance={tol:.12g}"
+    )
+
+
 def apply_fill_and_trade(
     conn: sqlite3.Connection,
     *,
@@ -94,7 +138,22 @@ def apply_fill_and_trade(
         raise RuntimeError(f"invalid fill side for {client_order_id}: {side}")
 
     init_portfolio(conn)
+    duplicate_reason: str | None = None
     if _fill_exists(conn, client_order_id=client_order_id, fill_id=fill_id, fill_ts=fill_ts, price=price, qty=qty):
+        duplicate_reason = (
+            "existing_fill_identity "
+            f"client_order_id={client_order_id} fill_id={fill_id or '-'} fill_ts={int(fill_ts)} "
+            f"price={float(price):.12g} qty={float(qty):.12g}"
+        )
+    else:
+        duplicate_reason = _aggregate_fill_duplicate_reason(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            qty=qty,
+        )
+    if duplicate_reason is not None:
+        _LOG.info("fill_duplicate_skipped %s", duplicate_reason)
         return None
 
     order = conn.execute(
@@ -104,9 +163,22 @@ def apply_fill_and_trade(
     if order is not None:
         qty_req = float(order["qty_req"])
         qty_filled = float(order["qty_filled"])
-        if qty_filled + qty > qty_req + eps:
+        fill_tol = order_fill_tolerance(qty_req)
+        projected_qty = qty_filled + float(qty)
+        _LOG.info(
+            "fill_apply_candidate client_order_id=%s fill_id=%s side=%s requested_qty=%.12g existing_filled_qty=%.12g incoming_fill_qty=%.12g projected_qty=%.12g tolerance=%.12g",
+            client_order_id,
+            fill_id or "-",
+            side,
+            qty_req,
+            qty_filled,
+            float(qty),
+            projected_qty,
+            fill_tol,
+        )
+        if projected_qty > qty_req + fill_tol:
             raise RuntimeError(
-                f"overfill detected for {client_order_id}: existing={qty_filled}, fill={qty}, requested={qty_req}"
+                f"overfill detected for {client_order_id}: existing={qty_filled}, fill={qty}, requested={qty_req}, tolerance={fill_tol}"
             )
 
     cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)

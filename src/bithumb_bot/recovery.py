@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from enum import Enum
 
 from .broker.base import Broker, BrokerFill, BrokerOrder
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
-from .execution import apply_fill_and_trade, record_order_if_missing
+from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
 from .notifier import format_event, notify
@@ -327,6 +328,7 @@ def _mark_recovery_required_with_reason(
 
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
+_LOG = logging.getLogger(__name__)
 
 
 def _balance_split_mismatch_summary(
@@ -588,7 +590,8 @@ def _apply_recent_fills(
             continue
         qty_req = float(order_row["qty_req"])
         qty_filled = float(order_row["qty_filled"])
-        if qty_req > 0 and qty_filled >= qty_req - 1e-12:
+        fill_tol = order_fill_tolerance(qty_req)
+        if qty_req > 0 and qty_filled >= qty_req - fill_tol:
             set_status(local_id, "FILLED", conn=conn)
         elif qty_filled > 1e-12:
             set_status(local_id, "PARTIAL", conn=conn)
@@ -784,7 +787,8 @@ def _try_resolve_submit_unknown_from_recent_activity(
         if order_row is not None:
             qty_req = float(order_row["qty_req"])
             qty_filled = float(order_row["qty_filled"])
-            if qty_req > 0 and qty_filled >= qty_req - 1e-12:
+            fill_tol = order_fill_tolerance(qty_req)
+            if qty_req > 0 and qty_filled >= qty_req - fill_tol:
                 next_status = "FILLED"
             elif qty_filled > 1e-12:
                 next_status = "PARTIAL"
@@ -867,7 +871,7 @@ def _capture_broker_read_journal(metadata: dict[str, int | str], broker: Broker)
         metadata["broker_read_journal"] = str(compact)[:500]
 
 
-def _clear_stale_initial_reconcile_halt_if_safe(
+def _clear_reconcile_halt_if_safe(
     *,
     conn,
     reason_code: str,
@@ -875,15 +879,18 @@ def _clear_stale_initial_reconcile_halt_if_safe(
     broker_open_order_count: int,
 ) -> None:
     state = runtime_state.snapshot()
-    if not (
-        state.halt_new_orders_blocked
-        and state.halt_state_unresolved
-        and state.halt_reason_code == "INITIAL_RECONCILE_FAILED"
-    ):
+    if not state.halt_new_orders_blocked:
+        return
+    if (state.halt_reason_code or "") == "MANUAL_PAUSE":
         return
     if reason_code != REASON_RECONCILE_OK:
         return
     if int(metadata.get("balance_split_mismatch_count", 0) or 0) != 0:
+        _LOG.info(
+            "reconcile_halt_retained reason=balance_split_mismatch halt_reason_code=%s mismatch_count=%s",
+            state.halt_reason_code or "-",
+            int(metadata.get("balance_split_mismatch_count", 0) or 0),
+        )
         return
     unresolved_row = conn.execute(
         """
@@ -897,13 +904,33 @@ def _clear_stale_initial_reconcile_halt_if_safe(
     unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
     recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
     position_flat = abs(float(portfolio_row["asset_qty"] or 0.0)) <= 1e-12 if portfolio_row else True
+    _LOG.info(
+        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s halt_reason_code=%s",
+        unresolved_count,
+        recovery_required_count,
+        broker_open_order_count,
+        int(position_flat),
+        state.halt_reason_code or "-",
+    )
     if not (
         unresolved_count == 0
         and recovery_required_count == 0
         and broker_open_order_count == 0
         and position_flat
     ):
+        _LOG.info(
+            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s",
+            unresolved_count,
+            recovery_required_count,
+            broker_open_order_count,
+            int(position_flat),
+        )
         return
+    _LOG.info(
+        "reconcile_halt_cleared previous_reason_code=%s previous_unresolved=%s",
+        state.halt_reason_code or "-",
+        int(state.halt_state_unresolved),
+    )
     runtime_state.disable_trading_until(
         float("inf"),
         reason=None,
@@ -1113,6 +1140,15 @@ def reconcile_with_broker(broker: Broker) -> None:
         conn.commit()
     except Exception as e:
         _capture_broker_read_journal(metadata, broker)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        conn = None
         runtime_state.record_reconcile_result(
             success=False,
             error=f"{type(e).__name__}: {e}",
@@ -1139,14 +1175,15 @@ def reconcile_with_broker(broker: Broker) -> None:
         _capture_broker_read_journal(metadata, broker)
         runtime_state.record_reconcile_result(success=True, reason_code=reason_code, metadata=metadata)
         runtime_state.refresh_open_order_health()
-        _clear_stale_initial_reconcile_halt_if_safe(
+        _clear_reconcile_halt_if_safe(
             conn=conn,
             reason_code=reason_code,
             metadata=metadata,
             broker_open_order_count=len(remote_open),
         )
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def recover_order_with_exchange_id(

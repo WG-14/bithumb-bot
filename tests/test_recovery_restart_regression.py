@@ -79,6 +79,58 @@ class _RecentFillBroker(_NoopBroker):
         ]
 
 
+class _AggregateDuplicateFillBroker(_NoopBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-dup", "BUY", "FILLED", 100.0, 1.0, 1.0, 1, 2)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id=client_order_id or "",
+                fill_id="trade-fill-1",
+                fill_ts=200,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                exchange_order_id=exchange_order_id or "ex-dup",
+            )
+        ]
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-dup:aggregate:201",
+                fill_ts=201,
+                price=100.0,
+                qty=1.0,
+                fee=0.0,
+                exchange_order_id="ex-dup",
+            )
+        ]
+
+
+class _FailAfterWriteBroker(_NoopBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-write-fail", "BUY", "PARTIAL", 100.0, 1.0, 0.4, 1, 2)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id=client_order_id or "",
+                fill_id="write-before-fail",
+                fill_ts=200,
+                price=100.0,
+                qty=0.4,
+                fee=0.0,
+                exchange_order_id=exchange_order_id or "ex-write-fail",
+            )
+        ]
+
+    def get_balance(self) -> BrokerBalance:
+        raise RuntimeError("boom after ledger write")
+
+
 class _SubmitUnknownRecentFillBroker(_NoopBroker):
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         return [
@@ -684,6 +736,72 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
     assert autolink is not None
     assert "outcome=success" in str(autolink["message"])
     assert gate_reason is None
+
+
+def test_reconcile_repeated_fill_sources_apply_only_once(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="dup_fill_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("dup_fill_restart", "ex-dup", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_AggregateDuplicateFillBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='dup_fill_restart'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM fills WHERE client_order_id='dup_fill_restart'"
+        ).fetchone()["c"]
+        trade_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM trades"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(1.0)
+    assert fill_count == 1
+    assert trade_count == 1
+
+
+def test_reconcile_failure_after_local_write_records_original_error_without_locked_db(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="write_fail_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("write_fail_restart", "ex-write-fail", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeError, match="boom after ledger write"):
+        reconcile_with_broker(_FailAfterWriteBroker())
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_status == "error"
+    assert state.last_reconcile_reason_code == "RECONCILE_FAILED"
+    assert "boom after ledger write" in str(state.last_reconcile_error)
 
 
 def test_submit_unknown_timeout_metadata_weak_correlation_stays_recovery_required(isolated_db):

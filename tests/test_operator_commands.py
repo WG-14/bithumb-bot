@@ -506,6 +506,65 @@ def test_resume_allows_risk_halt_when_exposure_is_flat(tmp_path):
     assert state.resume_gate_reason is None
 
 
+def test_resume_live_clears_post_trade_reconcile_halt_after_flatten(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path, monkeypatch)
+    old_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.0, 1000000.0, 0.0, 0.0, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="post trade reconcile failed (RuntimeError): duplicate fill replay",
+        reason_code="POST_TRADE_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    class _SafeFlatBroker:
+        def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+            return BrokerOrder(client_order_id, exchange_order_id or "ex-safe-flat", "BUY", "FILLED", 100.0, 1.0, 1.0, 1, 1)
+
+        def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+            return []
+
+        def get_open_orders(self) -> list[BrokerOrder]:
+            return []
+
+        def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+            return []
+
+        def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+            return []
+
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=1000000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _SafeFlatBroker())
+
+    try:
+        cmd_resume(force=False)
+
+        state = runtime_state.snapshot()
+        assert state.trading_enabled is True
+        assert state.halt_new_orders_blocked is False
+        assert state.halt_state_unresolved is False
+        assert state.halt_reason_code is None
+    finally:
+        object.__setattr__(settings, "MODE", old_mode)
+
+
 def test_resume_non_risk_halt_with_open_exposure_message_is_unchanged(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     conn = ensure_db()
