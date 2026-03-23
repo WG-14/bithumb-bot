@@ -1377,6 +1377,93 @@ def test_reconcile_success_auto_clears_stale_initial_reconcile_halt(isolated_db)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 
 
+def test_reconcile_recent_fill_success_clears_prior_locked_post_trade_halt(isolated_db):
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "START_CASH_KRW", 1000.0)
+    try:
+        conn = ensure_db(str(isolated_db))
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO portfolio(
+                    id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+                ) VALUES (1, 1000.0, 1.0, 900.0, 0.0, 1.0, 0.0)
+                """
+            )
+            record_order_if_missing(
+                conn,
+                client_order_id="locked_halt_replay",
+                side="SELL",
+                qty_req=1.0,
+                price=100.0,
+                ts_ms=100,
+                status="PARTIAL",
+            )
+            set_exchange_order_id("locked_halt_replay", "ex-partial", conn=conn)
+            apply_fill_and_trade(
+                conn,
+                client_order_id="locked_halt_replay",
+                side="SELL",
+                fill_id="fill-existing",
+                fill_ts=110,
+                price=100.0,
+                qty=0.4,
+                fee=0.0,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        runtime_state.disable_trading_until(
+            float("inf"),
+            reason="reconcile failed (OperationalError): database is locked",
+            reason_code="POST_TRADE_RECONCILE_FAILED",
+            halt_new_orders_blocked=True,
+            unresolved=True,
+        )
+
+        class _SellRecentFillBroker(_NoopBroker):
+            def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+                return BrokerOrder(client_order_id, exchange_order_id or "ex-partial", "SELL", "FILLED", 100.0, 1.0, 1.0, 1, 1)
+
+            def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+                return [
+                    BrokerFill(
+                        client_order_id="",
+                        fill_id="fill-rest",
+                        fill_ts=220,
+                        price=100.0,
+                        qty=0.6,
+                        fee=0.0,
+                        exchange_order_id="ex-partial",
+                    )
+                ]
+
+        reconcile_with_broker(_SellRecentFillBroker())
+
+        state = runtime_state.snapshot()
+        assert state.halt_new_orders_blocked is False
+        assert state.halt_state_unresolved is False
+        assert state.halt_reason_code is None
+        assert state.last_reconcile_status == "ok"
+        assert state.last_reconcile_reason_code == "RECENT_FILL_APPLIED"
+
+        conn = ensure_db(str(isolated_db))
+        try:
+            row = conn.execute(
+                "SELECT status, qty_filled FROM orders WHERE client_order_id='locked_halt_replay'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        assert row["status"] == "FILLED"
+        assert float(row["qty_filled"]) == pytest.approx(1.0)
+        assert evaluate_startup_safety_gate() is None
+    finally:
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+
 def test_restart_reconcile_api_exception_halts_and_prevents_resume(isolated_db, monkeypatch):
     _patch_single_tick_run_loop(monkeypatch)
 

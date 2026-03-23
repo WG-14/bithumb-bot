@@ -80,6 +80,19 @@ RISK_EXPOSURE_HALT_REASON_CODES = {
     POSITION_LOSS_LIMIT,
 }
 
+SAFE_CLEARABLE_RECONCILE_HALT_REASON_CODES = {
+    "INITIAL_RECONCILE_FAILED",
+    "PERIODIC_RECONCILE_FAILED",
+    "POST_TRADE_RECONCILE_FAILED",
+}
+
+NON_CLEARING_RECONCILE_REASON_CODES = {
+    "RECONCILE_FAILED",
+    "SOURCE_CONFLICT_HALT",
+    "STARTUP_GATE_BLOCKED",
+    "SUBMIT_UNKNOWN_UNRESOLVED",
+}
+
 def _log_loop_event(level: int, prefix: str, /, **fields: object) -> None:
     RUN_LOG.log(level, format_log_kv(prefix, mode=settings.MODE, **fields))
 
@@ -189,6 +202,23 @@ def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
         conn.close()
 
 
+def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None) -> bool:
+    open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+    mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
+    reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
+    return bool(
+        state.last_reconcile_status == "ok"
+        and reconcile_reason_code
+        and reconcile_reason_code not in NON_CLEARING_RECONCILE_REASON_CODES
+        and mismatch_count == 0
+        and not startup_gate_reason
+        and state.unresolved_open_order_count == 0
+        and state.recovery_required_count == 0
+        and not open_orders_present
+        and not position_present
+    )
+
+
 def maybe_clear_stale_initial_reconcile_halt() -> bool:
     runtime_state.refresh_open_order_health()
     state = runtime_state.snapshot()
@@ -196,23 +226,14 @@ def maybe_clear_stale_initial_reconcile_halt() -> bool:
     if not (
         state.halt_new_orders_blocked
         and state.halt_state_unresolved
-        and state.halt_reason_code == "INITIAL_RECONCILE_FAILED"
+        and state.halt_reason_code in SAFE_CLEARABLE_RECONCILE_HALT_REASON_CODES
     ):
         return False
 
     startup_gate_reason = evaluate_startup_safety_gate()
-
-    open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
-    mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
-    if not (
-        state.last_reconcile_status == "ok"
-        and state.last_reconcile_reason_code == "RECONCILE_OK"
-        and mismatch_count == 0
-        and not startup_gate_reason
-        and state.unresolved_open_order_count == 0
-        and state.recovery_required_count == 0
-        and not open_orders_present
-        and not position_present
+    if not _can_clear_reconcile_failure_halt(
+        state=runtime_state.snapshot(),
+        startup_gate_reason=startup_gate_reason,
     ):
         return False
 
@@ -225,8 +246,8 @@ def maybe_clear_stale_initial_reconcile_halt() -> bool:
     runtime_state.set_resume_gate(blocked=False, reason=None)
     _log_loop_event(
         logging.INFO,
-        "[RUN] stale_initial_reconcile_halt_cleared",
-        reason_code="INITIAL_RECONCILE_FAILED",
+        "[RUN] stale_reconcile_failure_halt_cleared",
+        halt_reason_code=state.halt_reason_code or "-",
         reconcile_reason_code=state.last_reconcile_reason_code or "-",
     )
     return True

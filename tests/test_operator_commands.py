@@ -1968,6 +1968,46 @@ def test_recovery_report_auto_clears_stale_initial_reconcile_halt(tmp_path):
     assert state.halt_reason_code is None
 
 
+def test_recovery_report_auto_clears_stale_locked_post_trade_reconcile_halt_when_safe(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=(
+            "reconcile failed (OperationalError): database is locked"
+        ),
+        reason_code="POST_TRADE_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "recent_fill_applied": 1,
+            "balance_split_mismatch_count": 0,
+            "balance_split_mismatch_summary": "none",
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+            "startup_gate_blocked": 0,
+            "source_conflict_halt": 0,
+        },
+    )
+    runtime_state.refresh_open_order_health()
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
+    assert report["recent_halt_reason"] == "none"
+    assert report["last_reconcile_summary"] != "none"
+    assert "status=ok" in str(report["last_reconcile_summary"])
+    assert "reason_code=RECENT_FILL_APPLIED" in str(report["last_reconcile_summary"])
+    state = runtime_state.snapshot()
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
+    assert state.halt_reason_code is None
+
+
 def test_recovery_report_can_resume_clean_state(tmp_path):
     _set_tmp_db(tmp_path)
 
@@ -2032,6 +2072,36 @@ def test_recovery_report_can_resume_true_again_after_risk_halt_is_flat(tmp_path)
 
     assert report["can_resume"] is True
     assert report["resume_blockers"] == []
+
+
+def test_resume_eligibility_clears_stale_lock_halt_after_successful_reconcile_evidence(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="reconcile failed (OperationalError): database is locked",
+        reason_code="POST_TRADE_RECONCILE_FAILED",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "recent_fill_applied": 1,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+    runtime_state.refresh_open_order_health()
+
+    eligible, blockers = evaluate_resume_eligibility()
+
+    assert eligible is True
+    assert blockers == []
+    state = runtime_state.snapshot()
+    assert state.resume_gate_blocked is False
+    assert state.resume_gate_reason is None
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
 
 
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):

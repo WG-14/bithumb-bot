@@ -28,6 +28,12 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+NON_CLEARING_RECONCILE_REASON_CODES = {
+    REASON_RECONCILE_FAILED,
+    REASON_SOURCE_CONFLICT_HALT,
+    REASON_STARTUP_GATE_BLOCKED,
+    REASON_SUBMIT_UNKNOWN_UNRESOLVED,
+}
 
 
 class RecoveryDisposition(str, Enum):
@@ -900,7 +906,7 @@ def _clear_reconcile_halt_if_safe(
         return
     if (state.halt_reason_code or "") == "MANUAL_PAUSE":
         return
-    if reason_code != REASON_RECONCILE_OK:
+    if reason_code in NON_CLEARING_RECONCILE_REASON_CODES:
         return
     if int(metadata.get("balance_split_mismatch_count", 0) or 0) != 0:
         _LOG.info(
@@ -944,9 +950,10 @@ def _clear_reconcile_halt_if_safe(
         )
         return
     _LOG.info(
-        "reconcile_halt_cleared previous_reason_code=%s previous_unresolved=%s",
+        "reconcile_halt_cleared previous_reason_code=%s previous_unresolved=%s reconcile_reason_code=%s",
         state.halt_reason_code or "-",
         int(state.halt_state_unresolved),
+        reason_code,
     )
     runtime_state.disable_trading_until(
         float("inf"),
