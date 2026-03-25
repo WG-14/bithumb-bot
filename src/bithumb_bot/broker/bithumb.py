@@ -531,6 +531,38 @@ class BithumbBroker:
                 continue
         return 0.0
 
+    @staticmethod
+    def _optional_number(payload: dict[str, object], *keys: str) -> float | None:
+        for key in keys:
+            raw = payload.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _resolve_fill_price(
+        self,
+        payload: dict[str, object],
+        *,
+        normalized_row: dict[str, object] | None = None,
+    ) -> float | None:
+        candidates: tuple[float | None, ...] = (
+            self._optional_number(payload, "price", "trade_price", "avg_price", "avg_execution_price"),
+            self._optional_number(payload, "cont_price", "contract_price"),
+            self._optional_number(payload, "order_price"),
+            self._optional_number(payload, "price_avg"),
+            (float(normalized_row["price"]) if normalized_row and normalized_row.get("price") is not None else None),
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if candidate > 0:
+                return float(candidate)
+        return None
+
     def _normalize_order_row(self, row: dict[str, object]) -> dict[str, object]:
         volume = self._number(row, "volume", "units")
         remaining = self._number(row, "remaining_volume", "units_remaining")
@@ -541,7 +573,7 @@ class BithumbBroker:
             "uuid": str(row.get("uuid") or row.get("order_id") or ""),
             "side": self._normalize_order_side(str(row.get("side") or row.get("type")), default="BUY"),
             "state": str(row.get("state") or ""),
-            "price": self._number(row, "price") or None,
+            "price": self._resolve_fill_price(row),
             "volume": volume,
             "remaining_volume": remaining,
             "executed_volume": executed,
@@ -712,15 +744,17 @@ class BithumbBroker:
                     if not isinstance(trade, dict):
                         continue
                     qty = self._number(trade, "volume", "qty", "units_traded")
-                    price = self._number(trade, "price")
+                    price = self._resolve_fill_price(trade, normalized_row=normalized)
                     fee = self._number(trade, "fee")
+                    if qty <= 0 or price is None:
+                        continue
                     ts = self._parse_ts(trade.get("created_at") or trade.get("timestamp") or normalized["updated_ts"])
                     fills.append(
                         BrokerFill(
                             client_order_id=client_order_id or "",
                             fill_id=str(trade.get("uuid") or trade.get("id") or f"{normalized['uuid']}:{index}:{ts}"),
                             fill_ts=ts,
-                            price=price,
+                            price=float(price),
                             qty=qty,
                             fee=fee,
                             exchange_order_id=str(normalized["uuid"]),
@@ -731,13 +765,16 @@ class BithumbBroker:
             qty_filled = float(normalized["executed_volume"])
             if qty_filled <= 0:
                 continue
+            price = self._resolve_fill_price(row, normalized_row=normalized)
+            if price is None:
+                continue
             ts = int(normalized["updated_ts"])
             fills.append(
                 BrokerFill(
                     client_order_id=client_order_id or "",
                     fill_id=f"{normalized['uuid']}:aggregate:{ts}",
                     fill_ts=ts,
-                    price=float(normalized["price"] or 0.0),
+                    price=float(price),
                     qty=qty_filled,
                     fee=0.0,
                     exchange_order_id=str(normalized["uuid"]),

@@ -25,6 +25,7 @@ REASON_STARTUP_GATE_BLOCKED = "STARTUP_GATE_BLOCKED"
 REASON_SOURCE_CONFLICT_HALT = "SOURCE_CONFLICT_HALT"
 REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
+REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
@@ -531,7 +532,7 @@ def _apply_recent_fills(
     recent_fills: list[BrokerFill],
     *,
     trusted_open_exchange_ids: set[str],
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[str], int]:
     local_rows = conn.execute(
         "SELECT client_order_id, exchange_order_id, side, status, qty_req, qty_filled FROM orders"
     ).fetchall()
@@ -540,6 +541,7 @@ def _apply_recent_fills(
 
     applied = False
     conflicts: list[str] = []
+    blocked_invalid_price = 0
 
     for fill in recent_fills:
         remote_exchange_id = str(fill.exchange_order_id or "")
@@ -592,6 +594,21 @@ def _apply_recent_fills(
         if remote_exchange_id:
             set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
 
+        if float(fill.price) <= 0:
+            _mark_recovery_required_with_reason(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                from_status=str(local["status"]),
+                reason_code=REASON_RECENT_FILL_INVALID_PRICE,
+                reason=(
+                    "recent fill has missing/invalid execution price; "
+                    f"exchange_order_id={remote_exchange_id or '<none>'}; manual recovery required"
+                ),
+            )
+            blocked_invalid_price += 1
+            continue
+
         apply_fill_and_trade(
             conn,
             client_order_id=local_id,
@@ -619,7 +636,7 @@ def _apply_recent_fills(
         if next_status is not None:
             set_status(local_id, next_status, conn=conn)
 
-    return applied, conflicts
+    return applied, conflicts, blocked_invalid_price
 
 
 def _halt_on_source_conflict(conflicts: list[str]) -> None:
@@ -974,6 +991,7 @@ def reconcile_with_broker(broker: Broker) -> None:
         "submit_unknown_unresolved": 0,
         "startup_gate_blocked": 0,
         "source_conflict_halt": 0,
+        "invalid_fill_price_blocked": 0,
         "balance_split_mismatch_count": 0,
     }
     try:
@@ -1052,6 +1070,25 @@ def reconcile_with_broker(broker: Broker) -> None:
                     )
                 )
             fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
+            invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
+            if invalid_fill is not None:
+                reason = (
+                    "reconcile blocked: fill has missing/invalid execution price; "
+                    f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                    f"fill_id={invalid_fill.fill_id}"
+                )
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
+                    from_status=remote.status,
+                    reason_code=REASON_RECENT_FILL_INVALID_PRICE,
+                    reason=reason,
+                )
+                metadata["invalid_fill_price_blocked"] += 1
+                if reason_code == REASON_RECONCILE_OK:
+                    reason_code = REASON_RECENT_FILL_INVALID_PRICE
+                continue
             for fill in fills:
                 apply_fill_and_trade(
                     conn,
@@ -1112,17 +1149,21 @@ def reconcile_with_broker(broker: Broker) -> None:
             recent_orders,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
-        applied_recent_fill, fill_conflicts = _apply_recent_fills(
+        applied_recent_fill, fill_conflicts, blocked_recent_fill_price = _apply_recent_fills(
             conn,
             recent_fills,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         conflicts.extend(fill_conflicts)
+        metadata["invalid_fill_price_blocked"] += int(blocked_recent_fill_price)
 
         if applied_recent_fill:
             metadata["recent_fill_applied"] += 1
             if reason_code == REASON_RECONCILE_OK:
                 reason_code = REASON_RECENT_FILL_APPLIED
+
+        if int(metadata["invalid_fill_price_blocked"]) > 0 and reason_code == REASON_RECONCILE_OK:
+            reason_code = REASON_RECENT_FILL_INVALID_PRICE
 
         if conflicts:
             source_conflicts = conflicts
@@ -1242,6 +1283,12 @@ def recover_order_with_exchange_id(
             client_order_id=client_order_id,
             exchange_order_id=resolved_exchange_order_id,
         )
+        invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
+        if invalid_fill is not None:
+            raise RuntimeError(
+                "manual recovery blocked: fill has missing/invalid execution price; "
+                f"exchange_order_id={resolved_exchange_order_id}; fill_id={invalid_fill.fill_id}"
+            )
         for fill in fills:
             apply_fill_and_trade(
                 conn,

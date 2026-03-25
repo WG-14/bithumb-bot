@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
@@ -161,3 +163,46 @@ def test_apply_fill_allows_small_requested_qty_precision_gap(tmp_path):
 
     assert result is not None
     assert float(qty_filled) == qty
+
+
+def test_apply_fill_rejects_non_positive_price_without_partial_commit(tmp_path):
+    db_path = tmp_path / "fill_invalid_price.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-invalid-price",
+            side="SELL",
+            qty_req=0.1,
+            price=100.0,
+            ts_ms=1000,
+        )
+
+        with pytest.raises(RuntimeError, match="invalid fill price"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-invalid-price",
+                side="SELL",
+                fill_id="fill-invalid-price",
+                fill_ts=1001,
+                price=0.0,
+                qty=0.1,
+                fee=0.0,
+            )
+
+        conn.commit()
+
+        fill_count = conn.execute("SELECT COUNT(*) FROM fills WHERE client_order_id='o-invalid-price'").fetchone()[0]
+        trade_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        qty_filled = conn.execute(
+            "SELECT qty_filled FROM orders WHERE client_order_id='o-invalid-price'"
+        ).fetchone()["qty_filled"]
+    finally:
+        conn.close()
+
+    assert fill_count == 0
+    assert trade_count == 0
+    assert float(qty_filled) == 0.0

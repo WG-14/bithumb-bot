@@ -130,7 +130,7 @@ def apply_fill_and_trade(
 
     if qty <= 0:
         raise RuntimeError(f"invalid fill qty for {client_order_id}: {qty}")
-    if price < 0:
+    if price <= 0:
         raise RuntimeError(f"invalid fill price for {client_order_id}: {price}")
     if fee < 0:
         raise RuntimeError(f"invalid fill fee for {client_order_id}: {fee}")

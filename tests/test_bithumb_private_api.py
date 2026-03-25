@@ -508,6 +508,56 @@ def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     assert fills[1].fee == pytest.approx(12.0)
 
 
+def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {
+                "uuid": "filled-1",
+                "side": "ask",
+                "price": "",
+                "volume": "0.05",
+                "executed_volume": "0.05",
+                "state": "done",
+            }
+        ],
+    )
+
+    fills = broker.get_fills(client_order_id="cid-1", exchange_order_id=None)
+
+    assert fills == []
+
+
+def test_get_fills_uses_avg_price_fallback_for_aggregate_fill(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {
+                "uuid": "filled-2",
+                "side": "ask",
+                "price": "",
+                "avg_price": "151000000",
+                "volume": "0.03",
+                "executed_volume": "0.03",
+                "state": "done",
+            }
+        ],
+    )
+
+    fills = broker.get_fills(client_order_id="cid-2", exchange_order_id=None)
+
+    assert len(fills) == 1
+    assert fills[0].price == pytest.approx(151000000.0)
+
+
 
 def test_read_journal_summary_masks_sensitive_balance_fields(monkeypatch):
     _configure_live()

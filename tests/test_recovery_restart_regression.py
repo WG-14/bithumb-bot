@@ -161,6 +161,42 @@ class _FilledFlatReplayBroker(_NoopBroker):
         return self._balance
 
 
+class _RecentSellMissingPriceBroker(_NoopBroker):
+    def __init__(self, *, repeat_count: int = 1) -> None:
+        self._repeat_count = max(1, int(repeat_count))
+
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        fills: list[BrokerFill] = []
+        for idx in range(self._repeat_count):
+            fills.append(
+                BrokerFill(
+                    client_order_id="",
+                    fill_id=f"ex-sell-missing-price-{idx}",
+                    fill_ts=300 + idx,
+                    price=0.0,
+                    qty=1.0,
+                    fee=0.0,
+                    exchange_order_id="ex-reconcile-sell",
+                )
+            )
+        return fills[:limit]
+
+
+class _RecentSellValidPriceBroker(_NoopBroker):
+    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id="",
+                fill_id="ex-sell-valid-price",
+                fill_ts=330,
+                price=110.0,
+                qty=1.0,
+                fee=0.0,
+                exchange_order_id="ex-reconcile-sell",
+            )
+        ]
+
+
 class _FailAfterWriteBroker(_NoopBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         return BrokerOrder(client_order_id, exchange_order_id or "ex-write-fail", "BUY", "PARTIAL", 100.0, 1.0, 0.4, 1, 2)
@@ -958,6 +994,174 @@ def test_reconcile_repeated_fill_sources_apply_only_once(isolated_db):
     assert float(row["qty_filled"]) == pytest.approx(1.0)
     assert fill_count == 1
     assert trade_count == 1
+
+
+def test_reconcile_recent_sell_missing_price_blocks_ledger_and_sets_recovery_required(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="reconcile_sell_missing_price",
+            side="SELL",
+            qty_req=1.0,
+            price=110.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("reconcile_sell_missing_price", "ex-reconcile-sell", conn=conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="seed_buy",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=80,
+            status="FILLED",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="seed_buy",
+            side="BUY",
+            fill_id="seed-buy-fill",
+            fill_ts=90,
+            price=100.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_RecentSellMissingPriceBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='reconcile_sell_missing_price'"
+        ).fetchone()
+        bad_trade_count = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE note LIKE 'reconcile recent%' AND price <= 0"
+        ).fetchone()[0]
+        fill_count = conn.execute(
+            "SELECT COUNT(*) FROM fills WHERE client_order_id='reconcile_sell_missing_price'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert "missing/invalid execution price" in str(row["last_error"])
+    assert bad_trade_count == 0
+    assert fill_count == 0
+
+
+def test_reconcile_recent_sell_valid_price_applies_and_flattens_position(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="reconcile_sell_valid_price",
+            side="SELL",
+            qty_req=1.0,
+            price=110.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("reconcile_sell_valid_price", "ex-reconcile-sell", conn=conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="seed_buy_valid",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=80,
+            status="FILLED",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="seed_buy_valid",
+            side="BUY",
+            fill_id="seed-buy-fill-valid",
+            fill_ts=90,
+            price=100.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_RecentSellValidPriceBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='reconcile_sell_valid_price'"
+        ).fetchone()
+        trade_row = conn.execute(
+            "SELECT price, asset_after, cash_after FROM trades WHERE note LIKE 'reconcile recent%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(1.0)
+    assert trade_row is not None
+    assert float(trade_row["price"]) == pytest.approx(110.0)
+    assert float(trade_row["asset_after"]) == pytest.approx(0.0)
+    assert float(trade_row["cash_after"]) > 0.0
+
+
+def test_reconcile_repeated_recent_sell_missing_price_pattern_never_writes_zero_price_trade(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="reconcile_sell_missing_price_repeat",
+            side="SELL",
+            qty_req=1.0,
+            price=110.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("reconcile_sell_missing_price_repeat", "ex-reconcile-sell", conn=conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="seed_buy_repeat",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=80,
+            status="FILLED",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="seed_buy_repeat",
+            side="BUY",
+            fill_id="seed-buy-repeat",
+            fill_ts=90,
+            price=100.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_RecentSellMissingPriceBroker(repeat_count=3))
+    reconcile_with_broker(_RecentSellMissingPriceBroker(repeat_count=3))
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        zero_price_reconcile_trades = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE note LIKE 'reconcile recent%' AND price <= 0"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert zero_price_reconcile_trades == 0
 
 
 def test_reconcile_failure_after_local_write_records_original_error_without_locked_db(isolated_db):

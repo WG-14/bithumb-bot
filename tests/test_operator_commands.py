@@ -1937,6 +1937,27 @@ def test_recovery_report_blocker_summary_view_for_recovery_required(tmp_path):
     )
 
 
+def test_recovery_report_exposes_invalid_fill_price_recovery_reason(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="invalid_price_recovery",
+        created_ts=now_ms - 5_000,
+    )
+    _set_last_error(
+        client_order_id="invalid_price_recovery",
+        last_error="recent fill has missing/invalid execution price; exchange_order_id=ex-sell-1; manual recovery required",
+    )
+
+    report = _load_recovery_report()
+    rows = report["recovery_required_summary"]
+
+    assert rows
+    assert rows[0]["client_order_id"] == "invalid_price_recovery"
+    assert "missing/invalid execution price" in rows[0]["last_error"]
+
+
 def test_recovery_report_blocker_summary_view_for_persistent_halt(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(
