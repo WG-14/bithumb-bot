@@ -589,6 +589,77 @@ def test_get_fills_warns_for_missing_or_zero_fee(monkeypatch, caplog, trade_row,
     assert any(expected_message in rec.message for rec in caplog.records)
 
 
+@pytest.mark.parametrize("fee_key", ["fee", "paid_fee", "commission", "trade_fee"])
+def test_get_fills_fee_key_regression_parses_numeric_string(monkeypatch, fee_key):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-fee-key",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        fee_key: "25.03",
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-fee-key",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-fee-key", exchange_order_id="filled-fee-key")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(25.03)
+
+
+@pytest.mark.parametrize(
+    ("fee_value", "expected_warning"),
+    [
+        ("", "empty fee value"),
+        (None, "empty fee value"),
+        ("not-a-number", "invalid fee value"),
+    ],
+)
+def test_get_fills_fee_parsing_regression_defaults_to_zero_for_invalid_values(monkeypatch, caplog, fee_value, expected_warning):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-invalid-fee",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "fee": fee_value,
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-invalid-fee",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
+        fills = broker.get_fills(client_order_id="cid-invalid-fee", exchange_order_id="filled-invalid-fee")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(0.0)
+    assert any(expected_warning in rec.message for rec in caplog.records)
+
+
 def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
