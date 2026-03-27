@@ -220,3 +220,11 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
     assert conservative.context["filters"]["cost_edge"]["threshold"] > permissive.context["filters"][
         "cost_edge"
     ]["threshold"]
+
+
+def test_filtered_strategy_default_thresholds_are_conservative_and_valid() -> None:
+    strategy = create_sma_with_filter_strategy(short_n=2, long_n=3, pair="BTC_KRW", interval="1m")
+
+    assert strategy.min_gap_ratio >= 0.001
+    assert strategy.min_volatility_ratio >= 0.003
+    assert strategy.overextended_max_return_ratio <= 0.02

@@ -74,19 +74,22 @@ class Settings:
     EVERY: int = int(os.getenv("EVERY", "60"))  # seconds
 
     # strategy
-    STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "sma_cross")
+    # 운영 기본 전략은 필터 포함 sma_with_filter를 권장.
+    # Backward compatibility: STRATEGY_NAME 환경변수로 언제든 sma_cross 등으로 즉시 전환 가능.
+    STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "sma_with_filter")
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
-    SMA_FILTER_GAP_MIN_RATIO: float = float(os.getenv("SMA_FILTER_GAP_MIN_RATIO", "0.0005"))
+    # 실거래 수수료/슬리피지 환경에서 과도한 잔진입을 줄이기 위한 보수적 기본 임계값.
+    SMA_FILTER_GAP_MIN_RATIO: float = float(os.getenv("SMA_FILTER_GAP_MIN_RATIO", "0.0012"))
     SMA_FILTER_VOL_WINDOW: int = int(os.getenv("SMA_FILTER_VOL_WINDOW", "10"))
     SMA_FILTER_VOL_MIN_RANGE_RATIO: float = float(
-        os.getenv("SMA_FILTER_VOL_MIN_RANGE_RATIO", "0.002")
+        os.getenv("SMA_FILTER_VOL_MIN_RANGE_RATIO", "0.003")
     )
     SMA_FILTER_OVEREXT_LOOKBACK: int = int(os.getenv("SMA_FILTER_OVEREXT_LOOKBACK", "3"))
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
-        os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.03")
+        os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.02")
     )
     ENTRY_EDGE_BUFFER_RATIO: float = float(os.getenv("ENTRY_EDGE_BUFFER_RATIO", "0.0005"))
     STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = float(

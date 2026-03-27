@@ -588,7 +588,7 @@ def _record_submit_attempt_preflight(
 
 
 def _order_intent_strategy_context() -> str:
-    return f"{settings.MODE}:sma_cross:{settings.INTERVAL}"
+    return f"{settings.MODE}:{settings.STRATEGY_NAME}:{settings.INTERVAL}"
 
 
 def _order_intent_type(*, side: str) -> str:

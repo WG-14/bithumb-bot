@@ -100,7 +100,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
         intent_key = build_order_intent_key(
             symbol=settings.PAIR,
             side=side,
-            strategy_context=f"{settings.MODE}:sma_cross:{settings.INTERVAL}",
+            strategy_context=f"{settings.MODE}:{settings.STRATEGY_NAME}:{settings.INTERVAL}",
             intent_ts=int(ts),
             intent_type=("market_entry" if side == "BUY" else "market_exit"),
             qty=float(trade_qty),
@@ -111,7 +111,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             client_order_id=client_order_id,
             symbol=settings.PAIR,
             side=side,
-            strategy_context=f"{settings.MODE}:sma_cross:{settings.INTERVAL}",
+            strategy_context=f"{settings.MODE}:{settings.STRATEGY_NAME}:{settings.INTERVAL}",
             intent_type=("market_entry" if side == "BUY" else "market_exit"),
             intent_ts=int(ts),
             qty=float(trade_qty),

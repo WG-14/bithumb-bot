@@ -184,3 +184,47 @@ def test_config_paper_fee_rate_falls_back_to_legacy_fee_rate() -> None:
 
     assert proc.returncode == 0
     assert float(proc.stdout.strip()) == 0.0044
+
+
+def test_config_strategy_name_defaults_to_filtered_sma() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env.pop("STRATEGY_NAME", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_NAME)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "sma_with_filter"
+
+
+def test_config_strategy_name_supports_legacy_override_to_sma_cross() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["STRATEGY_NAME"] = "sma_cross"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_NAME)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "sma_cross"
