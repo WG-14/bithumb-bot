@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+import bithumb_bot.app as app_module
 from bithumb_bot import runtime_state
 from bithumb_bot.app import (
     _load_recovery_report,
@@ -1077,9 +1078,13 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
         object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(app_module.settings, "MAX_ORDER_KRW", original_max_order)
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(app_module.settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
         object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
@@ -1147,9 +1152,13 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
         object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(app_module.settings, "MAX_ORDER_KRW", original_max_order)
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(app_module.settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
         object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
@@ -1175,12 +1184,19 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
     original_api_key = settings.BITHUMB_API_KEY
     original_api_secret = settings.BITHUMB_API_SECRET
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "MODE", "live")
     object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
+    object.__setattr__(app_module.settings, "MAX_ORDER_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
+    object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", 0.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
+    object.__setattr__(app_module.settings, "MAX_DAILY_ORDER_COUNT", 0)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(app_module.settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
+    object.__setattr__(app_module.settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
+    object.__setattr__(app_module.settings, "BITHUMB_API_SECRET", "")
 
     class _DiagBroker:
         def get_balance(self):
@@ -1190,6 +1206,15 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
             return []
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        app_module,
+        "validate_live_mode_preflight",
+        lambda _cfg: (_ for _ in ()).throw(
+            app_module.LiveModeValidationError(
+                "live mode preflight validation failed: MAX_ORDER_KRW must be > 0"
+            )
+        ),
+    )
     monkeypatch.setattr(
         "bithumb_bot.app.get_effective_order_rules",
         lambda _pair: type(
@@ -1213,15 +1238,22 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
 
     try:
         with pytest.raises(SystemExit):
-            cmd_broker_diagnose()
+            app_module.cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
         object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(app_module.settings, "MAX_ORDER_KRW", original_max_order)
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(app_module.settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(app_module.settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "BITHUMB_API_KEY", original_api_key)
+        object.__setattr__(app_module.settings, "BITHUMB_API_KEY", original_api_key)
         object.__setattr__(settings, "BITHUMB_API_SECRET", original_api_secret)
+        object.__setattr__(app_module.settings, "BITHUMB_API_SECRET", original_api_secret)
 
     out = capsys.readouterr().out
     assert "overall=FAIL" in out
@@ -1297,9 +1329,13 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
         cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
         object.__setattr__(settings, "MAX_ORDER_KRW", original_max_order)
+        object.__setattr__(app_module.settings, "MAX_ORDER_KRW", original_max_order)
         object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
+        object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", original_max_daily_loss)
         object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
+        object.__setattr__(app_module.settings, "MAX_DAILY_ORDER_COUNT", original_max_daily_count)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", original_max_market_slippage_bps)
         object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", original_live_price_protection_max_slippage_bps)
@@ -2770,10 +2806,8 @@ def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
 
-    from bithumb_bot.config import LiveModeValidationError
-
     def _raise_preflight(_cfg):
-        raise LiveModeValidationError("preflight boom")
+        raise app_module.LiveModeValidationError("preflight boom")
 
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", _raise_preflight)
 
@@ -2799,10 +2833,8 @@ def test_flatten_position_blocks_when_live_unarmed(monkeypatch, tmp_path, capsys
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
 
-    from bithumb_bot.config import LiveModeValidationError
-
     def _armed_gate(_cfg):
-        raise LiveModeValidationError("LIVE_REAL_ORDER_ARMED=true is required")
+        raise app_module.LiveModeValidationError("LIVE_REAL_ORDER_ARMED=true is required")
 
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", _armed_gate)
 
