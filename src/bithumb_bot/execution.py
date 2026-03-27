@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
+from .lifecycle import apply_fill_lifecycle
 from .notifier import format_event, notify
 from .oms import add_fill, create_order, set_exchange_order_id, set_status
 
@@ -246,7 +247,7 @@ def apply_fill_and_trade(
         asset_available=max(asset_available_after, 0.0),
         asset_locked=max(asset_locked_after, 0.0),
     )
-    conn.execute(
+    trade_row = conn.execute(
         """
         INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, note)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -263,6 +264,19 @@ def apply_fill_and_trade(
             float(asset_after),
             note,
         ),
+    )
+    trade_id = int(trade_row.lastrowid)
+    apply_fill_lifecycle(
+        conn,
+        side=side,
+        pair=settings.PAIR,
+        trade_id=trade_id,
+        client_order_id=client_order_id,
+        fill_id=fill_id,
+        fill_ts=int(fill_ts),
+        price=float(price),
+        qty=float(qty),
+        fee=float(fee),
     )
     notify(
         format_event(

@@ -543,6 +543,82 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS open_position_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            entry_client_order_id TEXT NOT NULL,
+            entry_fill_id TEXT,
+            entry_ts INTEGER NOT NULL,
+            entry_price REAL NOT NULL,
+            qty_open REAL NOT NULL,
+            entry_fee_total REAL NOT NULL DEFAULT 0,
+            strategy_name TEXT,
+            entry_decision_id INTEGER,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+
+    _ensure_column(conn, "open_position_lots", "entry_fill_id", "entry_fill_id TEXT")
+    _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "open_position_lots", "strategy_name", "strategy_name TEXT")
+    _ensure_column(conn, "open_position_lots", "entry_decision_id", "entry_decision_id INTEGER")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_open_position_lots_pair_ts
+        ON open_position_lots(pair, entry_ts, id)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_lifecycles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            exit_trade_id INTEGER NOT NULL,
+            entry_client_order_id TEXT NOT NULL,
+            exit_client_order_id TEXT NOT NULL,
+            entry_fill_id TEXT,
+            exit_fill_id TEXT,
+            entry_ts INTEGER NOT NULL,
+            exit_ts INTEGER NOT NULL,
+            matched_qty REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_price REAL NOT NULL,
+            gross_pnl REAL NOT NULL,
+            fee_total REAL NOT NULL,
+            net_pnl REAL NOT NULL,
+            holding_time_sec REAL NOT NULL,
+            strategy_name TEXT,
+            entry_decision_id INTEGER,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+
+    _ensure_column(conn, "trade_lifecycles", "entry_fill_id", "entry_fill_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "exit_fill_id", "exit_fill_id TEXT")
+    _ensure_column(conn, "trade_lifecycles", "strategy_name", "strategy_name TEXT")
+    _ensure_column(conn, "trade_lifecycles", "entry_decision_id", "entry_decision_id INTEGER")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trade_lifecycles_exit_trade
+        ON trade_lifecycles(exit_trade_id, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trade_lifecycles_entry_trade
+        ON trade_lifecycles(entry_trade_id, id)
+        """
+    )
+
     conn.commit()
 
 
