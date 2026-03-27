@@ -228,3 +228,149 @@ def test_config_strategy_name_supports_legacy_override_to_sma_cross() -> None:
 
     assert proc.returncode == 0
     assert proc.stdout.strip() == "sma_cross"
+
+
+def test_config_entry_edge_buffer_ratio_defaults_when_unset() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env.pop("ENTRY_EDGE_BUFFER_RATIO", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.ENTRY_EDGE_BUFFER_RATIO)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert float(proc.stdout.strip()) == 0.0005
+
+
+def test_config_entry_edge_buffer_ratio_supports_env_override() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["ENTRY_EDGE_BUFFER_RATIO"] = "0.0013"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.ENTRY_EDGE_BUFFER_RATIO)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert float(proc.stdout.strip()) == 0.0013
+
+
+def test_config_strategy_min_expected_edge_ratio_defaults_and_override() -> None:
+    env_default = dict(os.environ)
+    env_default["MODE"] = "paper"
+    env_default.pop("STRATEGY_MIN_EXPECTED_EDGE_RATIO", None)
+    env_default["PYTHONPATH"] = "src"
+    proc_default = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO)",
+        ],
+        env=env_default,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc_default.returncode == 0
+    assert float(proc_default.stdout.strip()) == 0.0
+
+    env_override = dict(os.environ)
+    env_override["MODE"] = "paper"
+    env_override["STRATEGY_MIN_EXPECTED_EDGE_RATIO"] = "0.0021"
+    env_override["PYTHONPATH"] = "src"
+    proc_override = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO)",
+        ],
+        env=env_override,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc_override.returncode == 0
+    assert float(proc_override.stdout.strip()) == 0.0021
+
+
+def test_config_strategy_exit_min_take_profit_ratio_defaults_and_override() -> None:
+    env_default = dict(os.environ)
+    env_default["MODE"] = "paper"
+    env_default.pop("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", None)
+    env_default["PYTHONPATH"] = "src"
+    proc_default = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO)",
+        ],
+        env=env_default,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc_default.returncode == 0
+    assert float(proc_default.stdout.strip()) == 0.0
+
+    env_override = dict(os.environ)
+    env_override["MODE"] = "paper"
+    env_override["STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO"] = "0.0042"
+    env_override["PYTHONPATH"] = "src"
+    proc_override = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO)",
+        ],
+        env=env_override,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc_override.returncode == 0
+    assert float(proc_override.stdout.strip()) == 0.0042
+
+
+def test_config_float_env_blank_value_falls_back_to_default() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["ENTRY_EDGE_BUFFER_RATIO"] = ""
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.ENTRY_EDGE_BUFFER_RATIO)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert float(proc.stdout.strip()) == 0.0005

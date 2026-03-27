@@ -29,6 +29,15 @@ def parse_bool_env(key: str, default: str = "false") -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def parse_float_env(key: str, default: str) -> float:
+    raw = os.getenv(key)
+    candidate = raw if raw is not None and raw.strip() != "" else default
+    try:
+        return float(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be a float-compatible value, got {candidate!r}") from exc
+
+
 def resolve_db_path(path: str) -> str:
     p = Path(path)
     if str(p) == ":memory:" or p.is_absolute():
@@ -91,14 +100,14 @@ class Settings:
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
         os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.02")
     )
-    ENTRY_EDGE_BUFFER_RATIO: float = float(os.getenv("ENTRY_EDGE_BUFFER_RATIO", "0.0005"))
-    STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = float(
-        os.getenv("STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0")
+    ENTRY_EDGE_BUFFER_RATIO: float = parse_float_env("ENTRY_EDGE_BUFFER_RATIO", "0.0005")
+    STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = parse_float_env(
+        "STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0"
     )
     STRATEGY_EXIT_RULES: str = os.getenv("STRATEGY_EXIT_RULES", "opposite_cross,max_holding_time")
     STRATEGY_EXIT_MAX_HOLDING_MIN: int = int(os.getenv("STRATEGY_EXIT_MAX_HOLDING_MIN", "0"))
-    STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO: float = float(
-        os.getenv("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", "0")
+    STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO: float = parse_float_env(
+        "STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", "0"
     )
     STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO: float = float(
         os.getenv("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", "0")
@@ -121,8 +130,8 @@ class Settings:
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
     # live pretrade 잔고/현금 검증 전용 보수적 추정 수수료율.
     # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE(legacy) > 0.0025(default)
-    LIVE_FEE_RATE_ESTIMATE: float = float(
-        os.getenv("LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025"))
+    LIVE_FEE_RATE_ESTIMATE: float = parse_float_env(
+        "LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025")
     )
     # paper 체결/손익 시뮬레이션 전용 수수료율.
     # 우선순위:
