@@ -77,6 +77,15 @@ class Settings:
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
+    SMA_FILTER_GAP_MIN_RATIO: float = float(os.getenv("SMA_FILTER_GAP_MIN_RATIO", "0.0005"))
+    SMA_FILTER_VOL_WINDOW: int = int(os.getenv("SMA_FILTER_VOL_WINDOW", "10"))
+    SMA_FILTER_VOL_MIN_RANGE_RATIO: float = float(
+        os.getenv("SMA_FILTER_VOL_MIN_RANGE_RATIO", "0.002")
+    )
+    SMA_FILTER_OVEREXT_LOOKBACK: int = int(os.getenv("SMA_FILTER_OVEREXT_LOOKBACK", "3"))
+    SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
+        os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.03")
+    )
 
     # storage
     DB_PATH: str = resolve_db_path_from_env(os.getenv("MODE", "paper"))

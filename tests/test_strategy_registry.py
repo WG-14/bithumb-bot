@@ -13,6 +13,7 @@ from bithumb_bot.strategy import create_strategy, list_strategies
 
 def test_registry_default_strategy_available() -> None:
     assert "sma_cross" in list_strategies()
+    assert "sma_with_filter" in list_strategies()
 
 
 def test_compute_signal_uses_default_strategy_name_from_settings(tmp_path) -> None:
@@ -58,6 +59,11 @@ def test_compute_signal_uses_default_strategy_name_from_settings(tmp_path) -> No
 def test_registry_rejects_unknown_strategy_name() -> None:
     with pytest.raises(ValueError, match="unknown strategy"):
         create_strategy("does_not_exist")
+
+
+def test_registry_can_create_filtered_sma_strategy() -> None:
+    strategy = create_strategy("sma_with_filter", short_n=2, long_n=3)
+    assert strategy.name == "sma_with_filter"
 
 
 def test_engine_no_direct_sma_import() -> None:
