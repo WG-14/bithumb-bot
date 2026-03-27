@@ -36,6 +36,10 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
+def _compute_gap_ratio(*, curr_s: float, curr_l: float) -> float:
+    return abs(_safe_ratio(curr_s - curr_l, curr_l))
+
+
 def _base_signal(*, prev_s: float, prev_l: float, curr_s: float, curr_l: float) -> tuple[str, str]:
     if prev_s <= prev_l and curr_s > curr_l:
         return "BUY", "sma golden cross"
@@ -98,6 +102,19 @@ def _evaluate_entry_edge_filter(
         "buffer_ratio": max(0.0, float(edge_buffer_ratio)),
         "min_expected_edge_ratio": max(0.0, float(strategy_min_expected_edge_ratio)),
     }
+
+
+def _resolve_signal_strength_label(
+    *,
+    base_signal: str,
+    expected_edge_ratio: float,
+    required_edge_ratio: float,
+) -> str:
+    if base_signal not in ("BUY", "SELL"):
+        return "neutral"
+    if expected_edge_ratio < required_edge_ratio:
+        return "weak"
+    return "tradable"
 
 
 def _load_position_context(
@@ -247,7 +264,7 @@ class SmaCrossStrategy:
         curr_l = _sma(closes, self.long_n, end_curr)
 
         base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
-        gap_ratio = abs(_safe_ratio(curr_s - curr_l, curr_l))
+        gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
         edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
             base_signal=base_signal,
             gap_ratio=gap_ratio,
@@ -261,6 +278,11 @@ class SmaCrossStrategy:
         if edge_filter_triggered:
             entry_signal = "HOLD"
             entry_reason = "filtered entry: cost_edge"
+        signal_strength_label = _resolve_signal_strength_label(
+            base_signal=base_signal,
+            expected_edge_ratio=float(edge_filter_details["expected_edge_ratio"]),
+            required_edge_ratio=float(edge_filter_details["required_edge_ratio"]),
+        )
         signal_context = {
             "strategy": self.name,
             "base_signal": base_signal,
@@ -297,6 +319,15 @@ class SmaCrossStrategy:
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
             "blocked_by_cost_filter": bool(edge_filter_triggered),
+            "signal_strength_label": signal_strength_label,
+            "signal_strength": {
+                "label": signal_strength_label,
+                "gap_ratio": gap_ratio,
+                "required_edge_ratio": float(edge_filter_details["required_edge_ratio"]),
+                "is_weak_cross": bool(signal_strength_label == "weak"),
+                # NOTE: sma_cross는 단순 교차 전략이며, 실거래 우선 전략은 sma_with_filter다.
+                "preferred_live_strategy": "sma_with_filter",
+            },
             "entry": {
                 "base_signal": base_signal,
                 "base_reason": base_reason,
@@ -386,7 +417,7 @@ class SmaWithFilterStrategy:
 
         base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
 
-        gap_ratio = abs(_safe_ratio(curr_s - curr_l, curr_l))
+        gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
 
         vol_window = max(1, int(self.volatility_window))
         vol_closes = closes[-vol_window:]

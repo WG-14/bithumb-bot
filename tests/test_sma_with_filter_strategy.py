@@ -285,6 +285,9 @@ def test_sma_cross_cost_edge_filter_blocks_weak_entry_and_records_context() -> N
     assert decision.context["blocked_by_cost_filter"] is True
     assert decision.context["gap_ratio"] < decision.context["cost_floor_ratio"]
     assert decision.context["filters"]["cost_edge"]["passed"] is False
+    assert decision.context["signal_strength_label"] == "weak"
+    assert decision.context["signal_strength"]["is_weak_cross"] is True
+    assert decision.context["signal_strength"]["preferred_live_strategy"] == "sma_with_filter"
 
 
 def test_sma_cross_cost_edge_filter_keeps_signal_when_edge_is_sufficient() -> None:
@@ -308,6 +311,8 @@ def test_sma_cross_cost_edge_filter_keeps_signal_when_edge_is_sufficient() -> No
     assert decision.context["blocked_by_cost_filter"] is False
     assert decision.context["gap_ratio"] > decision.context["cost_floor_ratio"]
     assert decision.context["filters"]["cost_edge"]["passed"] is True
+    assert decision.context["signal_strength_label"] == "tradable"
+    assert decision.context["signal_strength"]["is_weak_cross"] is False
 
 
 def test_strategy_entry_slippage_defaults_to_zero_when_env_values_are_unset(monkeypatch) -> None:
