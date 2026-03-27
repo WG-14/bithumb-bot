@@ -34,7 +34,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
-from .reporting import cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
+from .reporting import cmd_fee_diagnostics, cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
 
 import httpx
 
@@ -2138,6 +2138,20 @@ def main(argv: list[str] | None = None) -> int:
     ops = sub.add_parser("ops-report", help="operator observability report")
     ops.add_argument("--limit", type=int, default=20)
 
+    fee_diag = sub.add_parser(
+        "fee-diagnostics",
+        help="validate real fee application against recent fills/roundtrips",
+    )
+    fee_diag.add_argument("--fill-limit", type=int, default=100)
+    fee_diag.add_argument("--roundtrip-limit", type=int, default=50)
+    fee_diag.add_argument(
+        "--estimated-fee-rate",
+        type=float,
+        default=None,
+        help="expected fee rate (default: FEE_RATE setting)",
+    )
+    fee_diag.add_argument("--json", action="store_true")
+
     strategy_report = sub.add_parser(
         "strategy-report",
         help="strategy performance comparison report",
@@ -2191,6 +2205,13 @@ def main(argv: list[str] | None = None) -> int:
         cmd_fills(args.limit)
     elif args.cmd == "ops-report":
         cmd_ops_report(limit=max(1, int(args.limit)))
+    elif args.cmd == "fee-diagnostics":
+        cmd_fee_diagnostics(
+            fill_limit=max(1, int(args.fill_limit)),
+            roundtrip_limit=max(1, int(args.roundtrip_limit)),
+            estimated_fee_rate=args.estimated_fee_rate,
+            as_json=bool(args.json),
+        )
     elif args.cmd == "strategy-report":
         try:
             from_ts_ms, to_ts_ms = parse_kst_date_range_to_ts_ms(

@@ -5,7 +5,7 @@
 - "얼마 벌었는가?"
 - "왜 이런 주문/체결 판단이 나왔는가?"
 
-핵심 명령은 `ops-report` 입니다.
+핵심 명령은 `ops-report`, `fee-diagnostics` 입니다.
 
 ## 1) 필요한 환경변수
 
@@ -61,6 +61,33 @@ BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit
    - `submission_reason_code`, `message(note)`로 판단 근거 확인
 4. `[RECENT-TRADES-OPERATIONS]` 확인
    - `fee`, `cash_after`, `asset_after`, `note` 점검
+
+## 3-1) 수수료 반영 진단 (`fee-diagnostics`)
+
+실제 체결 수수료 반영 상태를 빠르게 검증하려면 `fee-diagnostics`를 사용합니다.
+
+### 제공 지표
+
+- 최근 N개 fill의 평균 수수료율(`average_fee_rate`)
+- `fee=0` fill 개수/비율
+- 평균/중앙값 fee bps
+- 추정 수수료율(`--estimated-fee-rate` 또는 `FEE_RATE`) 대비 실제 수수료율 차이(bps)
+- 최근 왕복 거래(`trade_lifecycles`) 기준 총 수수료
+- 수수료 반영 전/후 PnL 비교(`gross_pnl` vs `net_pnl`)
+
+### 실행 예시
+
+```bash
+# 사람이 읽기 쉬운 텍스트 리포트
+MODE=live DB_PATH=/var/lib/bithumb-bot/live.sqlite \
+  uv run bithumb-bot fee-diagnostics --fill-limit 200 --roundtrip-limit 100
+
+# JSON 출력 (외부 모니터링/대시보드 적재 용도)
+MODE=live DB_PATH=/var/lib/bithumb-bot/live.sqlite \
+  uv run bithumb-bot fee-diagnostics --fill-limit 200 --roundtrip-limit 100 --json
+```
+
+출력은 기본적으로 `stdout`만 사용합니다. 파일 저장이 필요하면 운영 환경에서 리다이렉트를 사용하세요.
 
 ## 4) 현재 스키마 기준 제약사항
 

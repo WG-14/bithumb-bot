@@ -4,6 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from statistics import median
 
 from .config import settings
 from .db_core import ensure_db
@@ -39,6 +40,27 @@ class StrategyPerformanceStat:
     holding_time_avg_sec: float | None
     holding_time_min_sec: float | None
     holding_time_max_sec: float | None
+
+
+@dataclass
+class FeeDiagnosticSummary:
+    fill_count: int
+    fills_with_notional: int
+    fee_zero_count: int
+    fee_zero_ratio: float
+    average_fee_rate: float | None
+    average_fee_bps: float | None
+    median_fee_bps: float | None
+    estimated_fee_rate: float
+    estimated_minus_actual_bps: float | None
+    total_fee_recent_fills: float
+    total_notional_recent_fills: float
+    roundtrip_count: int
+    roundtrip_fee_total: float
+    pnl_before_fee_total: float
+    pnl_after_fee_total: float
+    pnl_fee_drag_total: float
+    notes: list[str]
 
 
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
@@ -105,6 +127,220 @@ def _fetch_recent_trade_ops(conn: sqlite3.Connection, *, limit: int) -> list[sql
         (int(limit),),
     ).fetchall()
 
+
+def _fetch_recent_fills_with_side(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT
+            f.fill_ts,
+            f.client_order_id,
+            o.side,
+            f.price,
+            f.qty,
+            f.fee
+        FROM fills f
+        LEFT JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+
+
+def _fetch_recent_trade_lifecycles(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT id, pair, strategy_name, gross_pnl, fee_total, net_pnl, entry_ts, exit_ts
+        FROM trade_lifecycles
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+
+
+def summarize_fee_diagnostics(
+    recent_fills: list[sqlite3.Row],
+    *,
+    estimated_fee_rate: float,
+    recent_lifecycles: list[sqlite3.Row],
+) -> FeeDiagnosticSummary:
+    fill_count = len(recent_fills)
+    fee_zero_count = 0
+    total_fee = 0.0
+    total_notional = 0.0
+    per_fill_fee_bps: list[float] = []
+
+    for row in recent_fills:
+        fee = float(row["fee"] or 0.0)
+        if abs(fee) <= 1e-12:
+            fee_zero_count += 1
+        price = float(row["price"] or 0.0)
+        qty = float(row["qty"] or 0.0)
+        notional = max(0.0, price * qty)
+        total_fee += fee
+        if notional > 0:
+            total_notional += notional
+            per_fill_fee_bps.append((fee / notional) * 10000.0)
+
+    average_fee_rate = (total_fee / total_notional) if total_notional > 0 else None
+    average_fee_bps = (sum(per_fill_fee_bps) / len(per_fill_fee_bps)) if per_fill_fee_bps else None
+    median_fee_bps = median(per_fill_fee_bps) if per_fill_fee_bps else None
+    fee_zero_ratio = (fee_zero_count / fill_count) if fill_count > 0 else 0.0
+    estimated_minus_actual_bps = (
+        (estimated_fee_rate - average_fee_rate) * 10000.0 if average_fee_rate is not None else None
+    )
+
+    roundtrip_count = len(recent_lifecycles)
+    pnl_before_fee_total = sum(float(row["gross_pnl"] or 0.0) for row in recent_lifecycles)
+    roundtrip_fee_total = sum(float(row["fee_total"] or 0.0) for row in recent_lifecycles)
+    pnl_after_fee_total = sum(float(row["net_pnl"] or 0.0) for row in recent_lifecycles)
+    pnl_fee_drag_total = pnl_before_fee_total - pnl_after_fee_total
+
+    notes: list[str] = []
+    if fill_count == 0:
+        notes.append("no fills found in the selected window")
+    if fill_count > 0 and total_notional <= 0:
+        notes.append("fills exist but all notional values were non-positive")
+    if roundtrip_count == 0:
+        notes.append("no trade_lifecycles rows found for roundtrip fee/pnl diagnostics")
+
+    return FeeDiagnosticSummary(
+        fill_count=fill_count,
+        fills_with_notional=len(per_fill_fee_bps),
+        fee_zero_count=fee_zero_count,
+        fee_zero_ratio=fee_zero_ratio,
+        average_fee_rate=average_fee_rate,
+        average_fee_bps=average_fee_bps,
+        median_fee_bps=median_fee_bps,
+        estimated_fee_rate=float(estimated_fee_rate),
+        estimated_minus_actual_bps=estimated_minus_actual_bps,
+        total_fee_recent_fills=total_fee,
+        total_notional_recent_fills=total_notional,
+        roundtrip_count=roundtrip_count,
+        roundtrip_fee_total=roundtrip_fee_total,
+        pnl_before_fee_total=pnl_before_fee_total,
+        pnl_after_fee_total=pnl_after_fee_total,
+        pnl_fee_drag_total=pnl_fee_drag_total,
+        notes=notes,
+    )
+
+
+def fetch_fee_diagnostics(
+    conn: sqlite3.Connection,
+    *,
+    fill_limit: int,
+    roundtrip_limit: int,
+    estimated_fee_rate: float,
+) -> FeeDiagnosticSummary:
+    recent_fills = _fetch_recent_fills_with_side(conn, limit=max(1, int(fill_limit)))
+    recent_lifecycles = _fetch_recent_trade_lifecycles(conn, limit=max(1, int(roundtrip_limit)))
+    return summarize_fee_diagnostics(
+        recent_fills,
+        estimated_fee_rate=float(estimated_fee_rate),
+        recent_lifecycles=recent_lifecycles,
+    )
+
+
+def _fmt_rate(value: float | None, *, as_bps: bool = False) -> str:
+    if value is None:
+        return "-"
+    if as_bps:
+        return f"{value:.3f} bps"
+    return f"{value:.6f}"
+
+
+def cmd_fee_diagnostics(
+    *,
+    fill_limit: int = 100,
+    roundtrip_limit: int = 50,
+    estimated_fee_rate: float | None = None,
+    as_json: bool = False,
+) -> None:
+    estimate = settings.FEE_RATE if estimated_fee_rate is None else float(estimated_fee_rate)
+    conn = ensure_db()
+    try:
+        summary = fetch_fee_diagnostics(
+            conn,
+            fill_limit=fill_limit,
+            roundtrip_limit=roundtrip_limit,
+            estimated_fee_rate=estimate,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "db_path": settings.DB_PATH,
+        "mode": settings.MODE,
+        "pair": settings.PAIR,
+        "fill_window": {"limit": max(1, int(fill_limit)), "count": summary.fill_count},
+        "roundtrip_window": {"limit": max(1, int(roundtrip_limit)), "count": summary.roundtrip_count},
+        "fills": {
+            "average_fee_rate": summary.average_fee_rate,
+            "average_fee_bps": summary.average_fee_bps,
+            "median_fee_bps": summary.median_fee_bps,
+            "fee_zero_count": summary.fee_zero_count,
+            "fee_zero_ratio": summary.fee_zero_ratio,
+            "fills_with_notional": summary.fills_with_notional,
+            "total_fee": summary.total_fee_recent_fills,
+            "total_notional": summary.total_notional_recent_fills,
+        },
+        "fee_model_validation": {
+            "estimated_fee_rate": summary.estimated_fee_rate,
+            "estimated_minus_actual_bps": summary.estimated_minus_actual_bps,
+        },
+        "roundtrip": {
+            "total_fee": summary.roundtrip_fee_total,
+            "pnl_before_fee": summary.pnl_before_fee_total,
+            "pnl_after_fee": summary.pnl_after_fee_total,
+            "pnl_fee_drag": summary.pnl_fee_drag_total,
+        },
+        "notes": summary.notes,
+    }
+
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[FEE-DIAGNOSTICS]")
+    print(
+        "  "
+        f"mode={settings.MODE} pair={settings.PAIR} db_path={settings.DB_PATH} "
+        f"fills(last={max(1, int(fill_limit))}) roundtrips(last={max(1, int(roundtrip_limit))})"
+    )
+    print("\n[FILL-FEE-SUMMARY]")
+    print(
+        "  "
+        f"avg_fee_rate={_fmt_rate(summary.average_fee_rate)} "
+        f"avg_fee_bps={_fmt_rate(summary.average_fee_bps, as_bps=True)} "
+        f"median_fee_bps={_fmt_rate(summary.median_fee_bps, as_bps=True)}"
+    )
+    print(
+        "  "
+        f"fee_zero={summary.fee_zero_count}/{summary.fill_count} ({summary.fee_zero_ratio:.2%}) "
+        f"fills_with_notional={summary.fills_with_notional} "
+        f"total_fee={_fmt_float(summary.total_fee_recent_fills, 2)} "
+        f"total_notional={_fmt_float(summary.total_notional_recent_fills, 2)}"
+    )
+    print("\n[FEE-MODEL-VALIDATION]")
+    print(
+        "  "
+        f"estimated_fee_rate={summary.estimated_fee_rate:.6f} "
+        f"estimated_minus_actual_bps={_fmt_rate(summary.estimated_minus_actual_bps, as_bps=True)}"
+    )
+    print("\n[ROUNDTRIP-FEE-AND-PNL]")
+    print(
+        "  "
+        f"roundtrip_count={summary.roundtrip_count} "
+        f"fee_total={_fmt_float(summary.roundtrip_fee_total, 2)} "
+        f"pnl_before_fee={_fmt_float(summary.pnl_before_fee_total, 2)} "
+        f"pnl_after_fee={_fmt_float(summary.pnl_after_fee_total, 2)} "
+        f"pnl_fee_drag={_fmt_float(summary.pnl_fee_drag_total, 2)}"
+    )
+    if summary.notes:
+        print("\n[NOTES]")
+        for note in summary.notes:
+            print(f"  - {note}")
 
 def _fmt_float(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
@@ -384,6 +620,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         strategy_stats = _fetch_strategy_stats(conn)
         recent_flow = _fetch_recent_flow(conn, limit=max(1, int(limit)))
         recent_trades = _fetch_recent_trade_ops(conn, limit=max(1, int(limit)))
+        fee_summary = fetch_fee_diagnostics(
+            conn,
+            fill_limit=max(1, int(limit)),
+            roundtrip_limit=max(1, int(limit)),
+            estimated_fee_rate=float(settings.FEE_RATE),
+        )
     finally:
         conn.close()
 
@@ -442,3 +684,18 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print("  - trades 테이블에 strategy_context/client_order_id가 없어 전략별 확정 손익(realized PnL)은 직접 합산할 수 없습니다.")
     print("  - 현재는 fills+orders 기반 notional/fee로 pnl_proxy(sell-buy-fee)를 제공합니다.")
     print("  - TODO: trades에 strategy_context 또는 client_order_id를 저장하면 전략별 realized/unrealized PnL 정확도를 높일 수 있습니다.")
+    print("\n[FEE-DIAGNOSTICS-SNAPSHOT]")
+    print(
+        "  "
+        f"fills={fee_summary.fill_count} fee_zero={fee_summary.fee_zero_count} ({fee_summary.fee_zero_ratio:.2%}) "
+        f"avg_fee_bps={_fmt_rate(fee_summary.average_fee_bps, as_bps=True)} "
+        f"median_fee_bps={_fmt_rate(fee_summary.median_fee_bps, as_bps=True)} "
+        f"est_minus_actual_bps={_fmt_rate(fee_summary.estimated_minus_actual_bps, as_bps=True)}"
+    )
+    print(
+        "  "
+        f"roundtrip_count={fee_summary.roundtrip_count} "
+        f"roundtrip_fee_total={_fmt_float(fee_summary.roundtrip_fee_total, 2)} "
+        f"pnl_before_fee={_fmt_float(fee_summary.pnl_before_fee_total, 2)} "
+        f"pnl_after_fee={_fmt_float(fee_summary.pnl_after_fee_total, 2)}"
+    )
