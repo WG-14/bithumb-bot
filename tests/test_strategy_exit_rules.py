@@ -176,7 +176,11 @@ def test_opposite_cross_exits_on_large_loss_for_risk_defense() -> None:
 
 
 def test_opposite_cross_reason_context_include_expected_fields() -> None:
-    rule = OppositeCrossExitRule(min_take_profit_ratio=0.002, live_fee_rate_estimate=0.0004)
+    rule = OppositeCrossExitRule(
+        min_take_profit_ratio=0.002,
+        live_fee_rate_estimate=0.0004,
+        small_loss_tolerance_ratio=0.001,
+    )
     position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=-0.001)
 
     decision = rule.evaluate(
@@ -229,6 +233,7 @@ def test_max_holding_exit_is_not_blocked_by_take_profit_floor_when_opposite_cros
             exit_max_holding_min=10,
             exit_min_take_profit_ratio=0.002,
             live_fee_rate_estimate=0.0004,
+            exit_small_loss_tolerance_ratio=0.001,
         ).decide(conn)
     finally:
         conn.close()
@@ -271,3 +276,112 @@ def test_live_fee_rate_raises_take_profit_floor_for_opposite_cross_exit() -> Non
     assert high_fee_decision.should_exit is False
     assert low_fee_decision.context["min_profit_floor"] == 0.002
     assert high_fee_decision.context["min_profit_floor"] == 0.004
+
+
+def test_small_loss_tolerance_is_decoupled_from_min_profit_floor() -> None:
+    rule = OppositeCrossExitRule(
+        min_take_profit_ratio=0.004,
+        live_fee_rate_estimate=0.0,
+        small_loss_tolerance_ratio=0.001,
+    )
+    position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=-0.002)
+
+    decision = rule.evaluate(
+        position=position,
+        candle_ts=1_700_000_000_000,
+        market_price=99.8,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert decision.should_exit is True
+    assert decision.context["filter_applied"] is False
+    assert decision.context["small_loss_tolerance_ratio"] == 0.001
+    assert decision.context["min_profit_floor"] == 0.004
+
+
+def test_small_loss_and_small_gain_zones_are_separated_by_sign() -> None:
+    rule = OppositeCrossExitRule(
+        min_take_profit_ratio=0.002,
+        live_fee_rate_estimate=0.0,
+        small_loss_tolerance_ratio=0.001,
+    )
+
+    small_loss_decision = rule.evaluate(
+        position=PositionContext(
+            in_position=True,
+            entry_price=100.0,
+            qty_open=1.0,
+            unrealized_pnl_ratio=-0.0005,
+        ),
+        candle_ts=1_700_000_000_000,
+        market_price=99.95,
+        signal_context={"base_signal": "SELL"},
+    )
+    small_gain_decision = rule.evaluate(
+        position=PositionContext(
+            in_position=True,
+            entry_price=100.0,
+            qty_open=1.0,
+            unrealized_pnl_ratio=0.001,
+        ),
+        candle_ts=1_700_000_000_000,
+        market_price=100.1,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert small_loss_decision.context["small_loss_zone"] is True
+    assert small_loss_decision.context["small_gain_zone"] is False
+    assert small_loss_decision.context["filter_zone"] == "small_loss"
+    assert small_gain_decision.context["small_loss_zone"] is False
+    assert small_gain_decision.context["small_gain_zone"] is True
+    assert small_gain_decision.context["filter_zone"] == "small_gain"
+
+
+def test_noise_band_boundary_comparisons_are_applied_as_expected() -> None:
+    rule = OppositeCrossExitRule(
+        min_take_profit_ratio=0.002,
+        live_fee_rate_estimate=0.0,
+        small_loss_tolerance_ratio=0.001,
+    )
+
+    at_negative_tolerance = rule.evaluate(
+        position=PositionContext(
+            in_position=True,
+            entry_price=100.0,
+            qty_open=1.0,
+            unrealized_pnl_ratio=-0.001,
+        ),
+        candle_ts=1_700_000_000_000,
+        market_price=99.9,
+        signal_context={"base_signal": "SELL"},
+    )
+    at_zero = rule.evaluate(
+        position=PositionContext(
+            in_position=True,
+            entry_price=100.0,
+            qty_open=1.0,
+            unrealized_pnl_ratio=0.0,
+        ),
+        candle_ts=1_700_000_000_000,
+        market_price=100.0,
+        signal_context={"base_signal": "SELL"},
+    )
+    at_min_profit_floor = rule.evaluate(
+        position=PositionContext(
+            in_position=True,
+            entry_price=100.0,
+            qty_open=1.0,
+            unrealized_pnl_ratio=0.002,
+        ),
+        candle_ts=1_700_000_000_000,
+        market_price=100.2,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert at_negative_tolerance.context["small_loss_zone"] is True
+    assert at_negative_tolerance.should_exit is False
+    assert at_zero.context["small_gain_zone"] is True
+    assert at_zero.context["small_loss_zone"] is False
+    assert at_zero.should_exit is False
+    assert at_min_profit_floor.context["small_gain_zone"] is False
+    assert at_min_profit_floor.should_exit is True

@@ -48,10 +48,7 @@ class OppositeCrossExitRule:
             2.0 * max(0.0, float(self.live_fee_rate_estimate)),
         )
         unrealized_pnl_ratio = float(position.unrealized_pnl_ratio)
-        resolved_small_loss_tolerance = max(
-            min_profit_floor,
-            max(0.0, float(self.small_loss_tolerance_ratio)),
-        )
+        resolved_small_loss_tolerance = max(0.0, float(self.small_loss_tolerance_ratio))
         is_small_loss = (-resolved_small_loss_tolerance) <= unrealized_pnl_ratio < 0.0
         is_small_gain = 0.0 <= unrealized_pnl_ratio < min_profit_floor
         filtered_by_pnl_floor = bool(opposite_cross_triggered and (is_small_loss or is_small_gain))
