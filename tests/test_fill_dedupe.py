@@ -206,3 +206,114 @@ def test_apply_fill_rejects_non_positive_price_without_partial_commit(tmp_path):
     assert fill_count == 0
     assert trade_count == 0
     assert float(qty_filled) == 0.0
+
+
+def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
+    db_path = tmp_path / "fill_live_zero_fee_warning.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-live-zero-fee",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+
+        with caplog.at_level("WARNING", logger="bithumb_bot.execution"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-live-zero-fee",
+                side="BUY",
+                fill_id="fill-live-zero-fee",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.02,
+                fee=0.0,
+            )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert "live_fill_zero_fee_detected" in caplog.text
+    assert "client_order_id=o-live-zero-fee" in caplog.text
+    assert "fill_id=fill-live-zero-fee" in caplog.text
+    assert "side=BUY" in caplog.text
+
+
+def test_apply_fill_does_not_warn_for_live_positive_fee(tmp_path, caplog):
+    db_path = tmp_path / "fill_live_positive_fee_no_warning.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-live-positive-fee",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+
+        with caplog.at_level("WARNING", logger="bithumb_bot.execution"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-live-positive-fee",
+                side="BUY",
+                fill_id="fill-live-positive-fee",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.02,
+                fee=10.0,
+            )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert "live_fill_zero_fee_detected" not in caplog.text
+
+
+def test_apply_fill_does_not_warn_for_paper_zero_fee(tmp_path, caplog):
+    db_path = tmp_path / "fill_paper_zero_fee_no_warning.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "paper")
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-paper-zero-fee",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+
+        with caplog.at_level("WARNING", logger="bithumb_bot.execution"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-paper-zero-fee",
+                side="BUY",
+                fill_id="fill-paper-zero-fee",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.02,
+                fee=0.0,
+            )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert "live_fill_zero_fee_detected" not in caplog.text

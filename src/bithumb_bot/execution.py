@@ -138,6 +138,25 @@ def apply_fill_and_trade(
     if side not in ("BUY", "SELL"):
         raise RuntimeError(f"invalid fill side for {client_order_id}: {side}")
 
+    price_value = float(price)
+    qty_value = float(qty)
+    fee_value = float(fee)
+    fill_id_value = fill_id or "-"
+    if (
+        settings.MODE == "live"
+        and price_value > eps
+        and qty_value > eps
+        and abs(fee_value) <= eps
+    ):
+        _LOG.warning(
+            "live_fill_zero_fee_detected client_order_id=%s fill_id=%s side=%s price=%.12g qty=%.12g",
+            client_order_id,
+            fill_id_value,
+            side,
+            price_value,
+            qty_value,
+        )
+
     init_portfolio(conn)
     duplicate_reason: str | None = None
     if _fill_exists(conn, client_order_id=client_order_id, fill_id=fill_id, fill_ts=fill_ts, price=price, qty=qty):
