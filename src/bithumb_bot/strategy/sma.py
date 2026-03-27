@@ -195,6 +195,7 @@ class SmaCrossStrategy:
     )
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
     exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+    exit_small_loss_tolerance_ratio: float = settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
     slippage_bps: float = settings.STRATEGY_ENTRY_SLIPPAGE_BPS
     live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
     entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
@@ -268,6 +269,7 @@ class SmaCrossStrategy:
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
             min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
             live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            small_loss_tolerance_ratio=float(self.exit_small_loss_tolerance_ratio),
         )
         base_context = {
             "ts": ts_list[-1],
@@ -329,6 +331,7 @@ class SmaWithFilterStrategy:
     )
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
     exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+    exit_small_loss_tolerance_ratio: float = settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
 
     name: str = "sma_with_filter"
 
@@ -440,6 +443,7 @@ class SmaWithFilterStrategy:
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
             min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
             live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            small_loss_tolerance_ratio=float(self.exit_small_loss_tolerance_ratio),
         )
 
         base_context = {
@@ -520,6 +524,7 @@ def create_sma_strategy(
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
+    exit_small_loss_tolerance_ratio: float | None = None,
     slippage_bps: float | None = None,
     entry_edge_buffer_ratio: float | None = None,
     strategy_min_expected_edge_ratio: float | None = None,
@@ -544,6 +549,11 @@ def create_sma_strategy(
             settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
             if exit_min_take_profit_ratio is None
             else exit_min_take_profit_ratio
+        ),
+        exit_small_loss_tolerance_ratio=float(
+            settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
+            if exit_small_loss_tolerance_ratio is None
+            else exit_small_loss_tolerance_ratio
         ),
         slippage_bps=float(
             settings.STRATEGY_ENTRY_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
@@ -584,6 +594,7 @@ def create_sma_with_filter_strategy(
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
+    exit_small_loss_tolerance_ratio: float | None = None,
 ) -> SmaWithFilterStrategy:
     return SmaWithFilterStrategy(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
@@ -643,6 +654,11 @@ def create_sma_with_filter_strategy(
             settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
             if exit_min_take_profit_ratio is None
             else exit_min_take_profit_ratio
+        ),
+        exit_small_loss_tolerance_ratio=float(
+            settings.STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO
+            if exit_small_loss_tolerance_ratio is None
+            else exit_small_loss_tolerance_ratio
         ),
     )
 

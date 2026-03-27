@@ -100,6 +100,9 @@ class Settings:
     STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO: float = float(
         os.getenv("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", "0")
     )
+    STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO: float = float(
+        os.getenv("STRATEGY_EXIT_SMALL_LOSS_TOLERANCE_RATIO", "0")
+    )
 
     # storage
     DB_PATH: str = resolve_db_path_from_env(os.getenv("MODE", "paper"))

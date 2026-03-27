@@ -134,8 +134,11 @@ def test_opposite_cross_is_deferred_when_pnl_is_below_take_profit_floor() -> Non
     )
 
     assert decision.should_exit is False
+    assert decision.context["filter_applied"] is True
     assert decision.context["deferred_by_min_take_profit_floor"] is True
-    assert decision.context["required_take_profit_ratio"] == 0.002
+    assert decision.context["min_profit_floor"] == 0.002
+    assert decision.context["base_signal"] == "SELL"
+    assert decision.context["unrealized_pnl_ratio"] == 0.001
 
 
 def test_opposite_cross_exits_when_pnl_is_above_take_profit_floor() -> None:
@@ -150,7 +153,44 @@ def test_opposite_cross_exits_when_pnl_is_above_take_profit_floor() -> None:
     )
 
     assert decision.should_exit is True
+    assert decision.context["filter_applied"] is False
     assert decision.context["deferred_by_min_take_profit_floor"] is False
+    assert decision.context["min_profit_floor"] == 0.002
+
+
+def test_opposite_cross_exits_on_large_loss_for_risk_defense() -> None:
+    rule = OppositeCrossExitRule(min_take_profit_ratio=0.002, live_fee_rate_estimate=0.0004)
+    position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=-0.01)
+
+    decision = rule.evaluate(
+        position=position,
+        candle_ts=1_700_000_000_000,
+        market_price=99.0,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert decision.should_exit is True
+    assert decision.context["filter_applied"] is False
+    assert decision.context["small_loss_zone"] is False
+    assert decision.context["small_gain_zone"] is False
+
+
+def test_opposite_cross_reason_context_include_expected_fields() -> None:
+    rule = OppositeCrossExitRule(min_take_profit_ratio=0.002, live_fee_rate_estimate=0.0004)
+    position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=-0.001)
+
+    decision = rule.evaluate(
+        position=position,
+        candle_ts=1_700_000_000_000,
+        market_price=99.9,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert decision.reason == "opposite cross deferred: pnl in small loss/gain noise band"
+    assert decision.context["base_signal"] == "SELL"
+    assert decision.context["unrealized_pnl_ratio"] == -0.001
+    assert decision.context["min_profit_floor"] == 0.002
+    assert decision.context["filter_applied"] is True
 
 
 def test_max_holding_exit_is_not_blocked_by_take_profit_floor_when_opposite_cross_deferred(tmp_path) -> None:
@@ -211,5 +251,5 @@ def test_live_fee_rate_raises_take_profit_floor_for_opposite_cross_exit() -> Non
 
     assert low_fee_decision.should_exit is True
     assert high_fee_decision.should_exit is False
-    assert low_fee_decision.context["required_take_profit_ratio"] == 0.002
-    assert high_fee_decision.context["required_take_profit_ratio"] == 0.004
+    assert low_fee_decision.context["min_profit_floor"] == 0.002
+    assert high_fee_decision.context["min_profit_floor"] == 0.004
