@@ -4,7 +4,7 @@ After=bithumb-bot.service
 
 [Service]
 Type=oneshot
-User=ec2-user
+User=@BITHUMB_RUN_USER@
 WorkingDirectory=@BITHUMB_BOT_ROOT@
 Environment=BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@
 SyslogIdentifier=bithumb-bot-healthcheck

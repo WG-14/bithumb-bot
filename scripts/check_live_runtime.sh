@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/ec2-user/bithumb-bot
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="${BITHUMB_BOT_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}"
+cd "${REPO_ROOT}"
 
 echo "== systemd: bithumb-bot.service =="
 sudo systemctl status bithumb-bot.service --no-pager || true

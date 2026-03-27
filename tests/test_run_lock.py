@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import bithumb_bot.run_lock as run_lock
+from bithumb_bot import config
 from bithumb_bot.run_lock import (
     STALE_LOCK_MAX_AGE_SECONDS,
     RunLockError,
@@ -21,17 +22,17 @@ from bithumb_bot.run_lock import (
 def test_default_lock_path_is_mode_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUN_LOCK_PATH", raising=False)
     monkeypatch.setenv("MODE", "paper")
-    assert run_lock._default_lock_path() == Path("/tmp/bithumb-bot-run-paper.lock")
+    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/bithumb-bot-run-paper.lock"))
 
     monkeypatch.setenv("MODE", "live")
-    assert run_lock._default_lock_path() == Path("/tmp/bithumb-bot-run-live.lock")
+    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/bithumb-bot-run-live.lock"))
 
 
 def test_default_lock_path_prefers_run_lock_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RUN_LOCK_PATH", "/tmp/custom-run.lock")
+    monkeypatch.setenv("RUN_LOCK_PATH", "data/locks/custom-run.lock")
     monkeypatch.setenv("MODE", "live")
 
-    assert run_lock._default_lock_path() == Path("/tmp/custom-run.lock")
+    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/custom-run.lock"))
 
 
 def test_second_acquire_fails_while_first_is_held(tmp_path: Path) -> None:

@@ -21,6 +21,17 @@ def test_systemd_units_do_not_hardcode_workspace_path() -> None:
         assert "/workspace/bithumb-bot" not in content
 
 
+def test_operational_scripts_do_not_hardcode_home_directory_repo_path() -> None:
+    script_paths = [
+        REPO_ROOT / "scripts" / "check_live_runtime.sh",
+        REPO_ROOT / "scripts" / "collect_live_snapshot.sh",
+        REPO_ROOT / "deploy" / "systemd" / "render_units.sh",
+    ]
+    for path in script_paths:
+        content = path.read_text(encoding="utf-8")
+        assert "/home/ec2-user/bithumb-bot" not in content
+
+
 def test_services_use_consistent_explicit_env_source_rule() -> None:
     service_paths = [
         SYSTEMD_DIR / "bithumb-bot.service",
@@ -68,12 +79,12 @@ def test_backup_service_uses_bash_script_invocation_without_shell_string() -> No
     assert "-lc" not in exec_start
 
 
-def test_healthcheck_service_uses_absolute_uv_path_and_ec2_user_context() -> None:
+def test_healthcheck_service_uses_templated_runtime_user_and_uv_binary() -> None:
     healthcheck = _read_unit(SYSTEMD_DIR / "bithumb-bot-healthcheck.service")
     service = healthcheck["Service"]
 
     assert service["Type"] == "oneshot"
-    assert service["User"] == "ec2-user"
+    assert service["User"] == "@BITHUMB_RUN_USER@"
     assert service["WorkingDirectory"] == "@BITHUMB_BOT_ROOT@"
     assert service["Environment"] == "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@"
     assert service["SyslogIdentifier"] == "bithumb-bot-healthcheck"

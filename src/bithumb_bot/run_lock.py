@@ -10,6 +10,8 @@ import socket
 import time
 from typing import Iterator
 
+from .config import default_run_lock_path, resolve_run_lock_path
+
 try:
     import fcntl  # type: ignore[attr-defined]
 except ModuleNotFoundError:
@@ -74,10 +76,10 @@ class RunLockStatus:
 def _default_lock_path() -> Path:
     configured_path = os.getenv("RUN_LOCK_PATH")
     if configured_path:
-        return Path(configured_path)
+        return Path(resolve_run_lock_path(configured_path))
 
     mode = (os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
-    return Path(f"/tmp/bithumb-bot-run-{mode}.lock")
+    return Path(resolve_run_lock_path(default_run_lock_path(mode)))
 
 
 def _pid_is_running(pid: int) -> bool:

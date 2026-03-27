@@ -189,7 +189,8 @@ uv run bithumb-bot resume
 - 제한적 무인 운용 체크리스트(요약): `docs/LIMITED_UNATTENDED_CHECKLIST.md`
 - 백업 스크립트: `scripts/backup_sqlite.sh`
 - 세 유닛(`bithumb-bot.service`, `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`) 모두 `BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@`를 사용하도록 템플릿이 작성되어 있습니다. 설치 시 `render_units.sh`로 실제 경로를 치환한 뒤 배포하세요.
-- `bithumb-bot-healthcheck.service`는 비대화형 systemd PATH 의존성을 제거하기 위해 `BITHUMB_UV_BIN`(기본값: `/home/ec2-user/.local/bin/uv`) 절대경로를 사용합니다.
+- `bithumb-bot-healthcheck.service`는 비대화형 systemd PATH 의존성을 제거하기 위해 `BITHUMB_UV_BIN`(기본값: 렌더 시점 `command -v uv` 결과, 없으면 `uv`)을 사용합니다.
+- systemd 실행 계정은 `BITHUMB_RUN_USER`로 주입할 수 있으며, 기본값은 유닛 렌더링을 실행한 사용자(`id -un`)입니다.
 - `bithumb-bot.service` / `bithumb-bot-paper.service`는 `PYTHONUNBUFFERED=1`과 `python -u`를 함께 사용해 journald에서 `[RUN]`/`[SKIP]` 로그가 지연 버퍼링 없이 바로 보이도록 구성합니다.
 
 빠른 확인:

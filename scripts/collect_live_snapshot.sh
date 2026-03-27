@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/ec2-user/bithumb-bot
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="${BITHUMB_BOT_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd -P)}"
+cd "${REPO_ROOT}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="snapshots/live_${TS}"
