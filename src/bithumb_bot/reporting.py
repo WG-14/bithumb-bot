@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta, timezone
 
 from .config import settings
 from .db_core import ensure_db
@@ -20,6 +22,23 @@ class StrategyStat:
     @property
     def pnl_proxy(self) -> float:
         return self.sell_notional - self.buy_notional - self.fee_total
+
+
+@dataclass
+class StrategyPerformanceStat:
+    strategy_name: str
+    exit_rule_name: str
+    pair: str
+    trade_count: int
+    win_rate: float
+    avg_gain: float
+    avg_loss: float
+    net_pnl: float
+    expectancy_per_trade: float
+    fee_total: float
+    holding_time_avg_sec: float | None
+    holding_time_min_sec: float | None
+    holding_time_max_sec: float | None
 
 
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
@@ -89,6 +108,274 @@ def _fetch_recent_trade_ops(conn: sqlite3.Connection, *, limit: int) -> list[sql
 
 def _fmt_float(value: float, digits: int = 2) -> str:
     return f"{value:,.{digits}f}"
+
+
+def parse_kst_date_range_to_ts_ms(*, from_date: str | None, to_date: str | None) -> tuple[int | None, int | None]:
+    if from_date is None and to_date is None:
+        return None, None
+
+    kst = timezone(timedelta(hours=9))
+    start_ts: int | None = None
+    end_ts: int | None = None
+
+    if from_date:
+        from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=kst)
+        start_ts = int(from_dt.timestamp() * 1000)
+
+    if to_date:
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=kst)
+        to_dt = datetime.combine(to_dt.date(), time.max, tzinfo=kst)
+        end_ts = int(to_dt.timestamp() * 1000)
+
+    return start_ts, end_ts
+
+
+def _normalize_group_by(group_by: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    allowed = {"strategy_name", "exit_rule_name", "pair"}
+    normalized = []
+    for item in group_by or ("strategy_name", "exit_rule_name"):
+        key = str(item).strip().lower()
+        if key in allowed and key not in normalized:
+            normalized.append(key)
+    if not normalized:
+        normalized = ["strategy_name", "exit_rule_name"]
+    return tuple(normalized)
+
+
+def fetch_strategy_performance_stats(
+    conn: sqlite3.Connection,
+    *,
+    strategy_name: str | None = None,
+    exit_rule_name: str | None = None,
+    pair: str | None = None,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    group_by: tuple[str, ...] | list[str] | None = None,
+) -> list[StrategyPerformanceStat]:
+    group_axes = _normalize_group_by(group_by)
+
+    lifecycle_base = """
+        SELECT
+            tl.id,
+            COALESCE(tl.strategy_name, '<unknown>') AS strategy_name,
+            COALESCE(tl.pair, '<unknown>') AS pair,
+            tl.exit_ts,
+            tl.net_pnl,
+            tl.fee_total,
+            tl.holding_time_sec,
+            COALESCE(
+                json_extract(
+                    (
+                        SELECT sd.context_json
+                        FROM strategy_decisions sd
+                        WHERE sd.signal='SELL'
+                          AND sd.decision_ts <= tl.exit_ts
+                          AND (tl.strategy_name IS NULL OR sd.strategy_name = tl.strategy_name)
+                        ORDER BY sd.decision_ts DESC, sd.id DESC
+                        LIMIT 1
+                    ),
+                    '$.exit.rule'
+                ),
+                '<unknown>'
+            ) AS exit_rule_name
+        FROM trade_lifecycles tl
+    """
+
+    filters: list[str] = []
+    params: list[object] = []
+
+    if strategy_name:
+        filters.append("COALESCE(tl.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(tl.pair, '<unknown>') = ?")
+        params.append(str(pair))
+    if from_ts_ms is not None:
+        filters.append("tl.exit_ts >= ?")
+        params.append(int(from_ts_ms))
+    if to_ts_ms is not None:
+        filters.append("tl.exit_ts <= ?")
+        params.append(int(to_ts_ms))
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    cte = f"WITH lifecycle_base AS ({lifecycle_base} {where_clause})"
+
+    post_filters: list[str] = []
+    if exit_rule_name:
+        post_filters.append("exit_rule_name = ?")
+        params.append(str(exit_rule_name))
+
+    post_where = f"WHERE {' AND '.join(post_filters)}" if post_filters else ""
+
+    dims_expr = {
+        "strategy_name": "strategy_name",
+        "exit_rule_name": "exit_rule_name",
+        "pair": "pair",
+    }
+
+    select_dims = [f"{dims_expr[axis]} AS {axis}" for axis in group_axes]
+    group_dims = [dims_expr[axis] for axis in group_axes]
+
+    for axis in ("strategy_name", "exit_rule_name", "pair"):
+        if axis not in group_axes:
+            fallback = "'<all>'"
+            if axis == "pair":
+                fallback = "'<all>'"
+            select_dims.append(f"{fallback} AS {axis}")
+
+    select_dim_sql = ",\n            ".join(select_dims)
+    group_by_sql = ", ".join(group_dims)
+
+    query = f"""
+        {cte}
+        SELECT
+            {select_dim_sql},
+            COUNT(*) AS trade_count,
+            COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS win_count,
+            COALESCE(AVG(CASE WHEN net_pnl > 0 THEN net_pnl ELSE NULL END), 0.0) AS avg_gain,
+            COALESCE(AVG(CASE WHEN net_pnl < 0 THEN net_pnl ELSE NULL END), 0.0) AS avg_loss,
+            COALESCE(SUM(net_pnl), 0.0) AS net_pnl,
+            COALESCE(SUM(fee_total), 0.0) AS fee_total,
+            AVG(holding_time_sec) AS holding_time_avg_sec,
+            MIN(holding_time_sec) AS holding_time_min_sec,
+            MAX(holding_time_sec) AS holding_time_max_sec
+        FROM lifecycle_base
+        {post_where}
+        GROUP BY {group_by_sql}
+        ORDER BY trade_count DESC, strategy_name ASC, exit_rule_name ASC, pair ASC
+    """
+
+    rows = conn.execute(query, tuple(params)).fetchall()
+
+    stats: list[StrategyPerformanceStat] = []
+    for row in rows:
+        trade_count = int(row["trade_count"] or 0)
+        win_count = int(row["win_count"] or 0)
+        avg_gain = float(row["avg_gain"] or 0.0)
+        avg_loss = float(row["avg_loss"] or 0.0)
+        win_rate = (win_count / trade_count) if trade_count > 0 else 0.0
+        loss_rate = 1.0 - win_rate if trade_count > 0 else 0.0
+        expectancy = (win_rate * avg_gain) + (loss_rate * avg_loss)
+
+        stats.append(
+            StrategyPerformanceStat(
+                strategy_name=str(row["strategy_name"]),
+                exit_rule_name=str(row["exit_rule_name"]),
+                pair=str(row["pair"]),
+                trade_count=trade_count,
+                win_rate=win_rate,
+                avg_gain=avg_gain,
+                avg_loss=avg_loss,
+                net_pnl=float(row["net_pnl"] or 0.0),
+                expectancy_per_trade=expectancy,
+                fee_total=float(row["fee_total"] or 0.0),
+                holding_time_avg_sec=(
+                    None if row["holding_time_avg_sec"] is None else float(row["holding_time_avg_sec"])
+                ),
+                holding_time_min_sec=(
+                    None if row["holding_time_min_sec"] is None else float(row["holding_time_min_sec"])
+                ),
+                holding_time_max_sec=(
+                    None if row["holding_time_max_sec"] is None else float(row["holding_time_max_sec"])
+                ),
+            )
+        )
+    return stats
+
+
+def cmd_strategy_report(
+    *,
+    strategy_name: str | None,
+    exit_rule_name: str | None,
+    pair: str | None,
+    from_ts_ms: int | None,
+    to_ts_ms: int | None,
+    group_by: tuple[str, ...] | list[str] | None,
+    as_json: bool = False,
+) -> None:
+    conn = ensure_db()
+    try:
+        stats = fetch_strategy_performance_stats(
+            conn,
+            strategy_name=strategy_name,
+            exit_rule_name=exit_rule_name,
+            pair=pair,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            group_by=group_by,
+        )
+    finally:
+        conn.close()
+
+    normalized_group_by = _normalize_group_by(group_by)
+
+    if as_json:
+        payload = {
+            "group_by": list(normalized_group_by),
+            "filters": {
+                "strategy_name": strategy_name,
+                "exit_rule_name": exit_rule_name,
+                "pair": pair,
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+            },
+            "rows": [
+                {
+                    "strategy_name": stat.strategy_name,
+                    "exit_rule_name": stat.exit_rule_name,
+                    "pair": stat.pair,
+                    "trade_count": stat.trade_count,
+                    "win_rate": stat.win_rate,
+                    "average_gain": stat.avg_gain,
+                    "average_loss": stat.avg_loss,
+                    "net_pnl": stat.net_pnl,
+                    "expectancy_per_trade": stat.expectancy_per_trade,
+                    "fee_total": stat.fee_total,
+                    "holding_time": {
+                        "avg_sec": stat.holding_time_avg_sec,
+                        "min_sec": stat.holding_time_min_sec,
+                        "max_sec": stat.holding_time_max_sec,
+                    },
+                }
+                for stat in stats
+            ],
+            "notes": [] if stats else ["no trade_lifecycles rows matched the given filters"],
+        }
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[STRATEGY-PERFORMANCE-REPORT]")
+    print(
+        "  "
+        f"group_by={','.join(normalized_group_by)} "
+        f"strategy_name={strategy_name or '<all>'} "
+        f"exit_rule_name={exit_rule_name or '<all>'} "
+        f"pair={pair or '<all>'} "
+        f"from_ts_ms={from_ts_ms if from_ts_ms is not None else '<none>'} "
+        f"to_ts_ms={to_ts_ms if to_ts_ms is not None else '<none>'}"
+    )
+
+    if not stats:
+        print("  no matched trade_lifecycles rows")
+        print("  tip: 실행 구간/전략명/청산 규칙 필터를 완화하거나 lifecycle 데이터 생성 여부를 확인하세요.")
+        return
+
+    print(
+        "  "
+        "strategy_name,exit_rule_name,pair,trade_count,win_rate,average_gain,average_loss,"
+        "net_pnl,expectancy_per_trade,fee_total,holding_avg_sec,holding_min_sec,holding_max_sec"
+    )
+    for stat in stats:
+        holding_avg = "-" if stat.holding_time_avg_sec is None else f"{stat.holding_time_avg_sec:.2f}"
+        holding_min = "-" if stat.holding_time_min_sec is None else f"{stat.holding_time_min_sec:.2f}"
+        holding_max = "-" if stat.holding_time_max_sec is None else f"{stat.holding_time_max_sec:.2f}"
+        print(
+            "  "
+            f"{stat.strategy_name},{stat.exit_rule_name},{stat.pair},{stat.trade_count},"
+            f"{stat.win_rate:.4f},{stat.avg_gain:.2f},{stat.avg_loss:.2f},{stat.net_pnl:.2f},"
+            f"{stat.expectancy_per_trade:.2f},{stat.fee_total:.2f},{holding_avg},{holding_min},{holding_max}"
+        )
 
 
 def cmd_ops_report(*, limit: int = 20) -> None:

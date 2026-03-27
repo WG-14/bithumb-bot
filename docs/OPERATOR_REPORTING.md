@@ -99,3 +99,41 @@ LIMIT 50;
   - 전략별 realized/unrealized PnL 정확 집계를 위해 필요
 - 주문/체결과 판단 이벤트의 공통 correlation id
   - 장애 분석/감사 추적 속도 개선
+
+## 7) 전략 실험 비교 리포트 (`strategy-report`)
+
+`trade_lifecycles` 기반으로 전략별 성과를 비교합니다. 기본 출력은 `stdout`이며, JSON 응답이 필요하면 `--json`을 사용합니다.
+
+### 제공 지표
+
+- `trade_count`
+- `win_rate`
+- `average_gain`
+- `average_loss`
+- `net_pnl`
+- `expectancy_per_trade`
+- `fee_total`
+- `holding_time` 요약(`avg/min/max` 초)
+
+### 집계 축/필터
+
+- 집계 축(`--group-by`): `strategy_name`, `exit_rule_name`, `pair`
+- 필터: `--strategy-name`, `--exit-rule-name`, `--pair`, `--from-date`, `--to-date`
+  - 날짜는 KST `YYYY-MM-DD` 형식, `trade_lifecycles.exit_ts` 기준으로 필터링됩니다.
+
+### 실행 예시
+
+```bash
+# 기본: 전략명 + 청산 규칙 기준 집계
+MODE=paper DB_PATH=data/paper.sqlite uv run bithumb-bot strategy-report
+
+# 기간 + 마켓 필터 + JSON 출력
+MODE=paper DB_PATH=data/paper.sqlite \
+  uv run bithumb-bot strategy-report \
+  --from-date 2026-03-01 --to-date 2026-03-27 \
+  --pair BTC_KRW \
+  --group-by strategy_name,exit_rule_name,pair \
+  --json
+```
+
+데이터가 부족하거나 필터에 일치하는 거래가 없으면 실패(exit non-zero) 대신 설명 가능한 메시지를 출력합니다.

@@ -34,7 +34,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
-from .reporting import cmd_ops_report
+from .reporting import cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
 
 import httpx
 
@@ -2138,6 +2138,23 @@ def main(argv: list[str] | None = None) -> int:
     ops = sub.add_parser("ops-report", help="operator observability report")
     ops.add_argument("--limit", type=int, default=20)
 
+    strategy_report = sub.add_parser(
+        "strategy-report",
+        help="strategy performance comparison report",
+        description="Aggregate trade_lifecycles by strategy/exit-rule/date range for experiments.",
+    )
+    strategy_report.add_argument("--strategy-name")
+    strategy_report.add_argument("--exit-rule-name")
+    strategy_report.add_argument("--pair")
+    strategy_report.add_argument("--from-date", help="KST date (YYYY-MM-DD)")
+    strategy_report.add_argument("--to-date", help="KST date (YYYY-MM-DD)")
+    strategy_report.add_argument(
+        "--group-by",
+        default="strategy_name,exit_rule_name",
+        help="comma-separated axes: strategy_name,exit_rule_name,pair",
+    )
+    strategy_report.add_argument("--json", action="store_true")
+
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
@@ -2174,6 +2191,28 @@ def main(argv: list[str] | None = None) -> int:
         cmd_fills(args.limit)
     elif args.cmd == "ops-report":
         cmd_ops_report(limit=max(1, int(args.limit)))
+    elif args.cmd == "strategy-report":
+        try:
+            from_ts_ms, to_ts_ms = parse_kst_date_range_to_ts_ms(
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+        except ValueError:
+            p.error("invalid date format for --from-date/--to-date; expected YYYY-MM-DD")
+
+        if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
+            p.error("--from-date must be earlier than or equal to --to-date")
+
+        group_by = tuple(part.strip() for part in str(args.group_by or "").split(",") if part.strip())
+        cmd_strategy_report(
+            strategy_name=args.strategy_name,
+            exit_rule_name=args.exit_rule_name,
+            pair=args.pair,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            group_by=group_by,
+            as_json=bool(args.json),
+        )
     elif args.cmd == "report":
         cmd_report(max(1, int(args.days)))
     elif args.cmd == "audit-ledger":
