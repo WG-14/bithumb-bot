@@ -30,7 +30,7 @@ from ..oms import (
     set_status,
     update_order_intent_dedup,
 )
-from .base import Broker, BrokerSubmissionUnknownError, BrokerTemporaryError
+from .base import Broker, BrokerFill, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
 VALID_ORDER_SIDES = {"BUY", "SELL"}
@@ -42,6 +42,103 @@ SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
 SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
 SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+
+
+def _aggregate_fills_for_apply(
+    *,
+    fills: list[BrokerFill],
+    client_order_id: str,
+    exchange_order_id: str | None,
+    side: str,
+    context: str,
+) -> list[BrokerFill]:
+    if len(fills) <= 1:
+        return fills
+
+    weighted_notional = 0.0
+    total_qty = 0.0
+    total_fee = 0.0
+    aggregate_fill_ts = 0
+    for fill in fills:
+        fill_qty = float(fill.qty)
+        fill_price = float(fill.price)
+        fill_fee_raw = getattr(fill, "fee", None)
+
+        if not math.isfinite(fill_qty) or fill_qty <= 0:
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[FILL_AGG] invalid fill qty skipped",
+                    context=context,
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
+                    side=side,
+                    fill_id=fill.fill_id,
+                    qty=fill.qty,
+                )
+            )
+            continue
+        if not math.isfinite(fill_price) or fill_price <= 0:
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[FILL_AGG] invalid fill price skipped",
+                    context=context,
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
+                    side=side,
+                    fill_id=fill.fill_id,
+                    price=fill.price,
+                )
+            )
+            continue
+
+        fill_fee = 0.0
+        if fill_fee_raw is None or not math.isfinite(float(fill_fee_raw)) or float(fill_fee_raw) < 0:
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[FILL_AGG] missing_or_invalid fill fee; defaulting to 0",
+                    context=context,
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
+                    side=side,
+                    fill_id=fill.fill_id,
+                    fee=fill_fee_raw,
+                )
+            )
+        else:
+            fill_fee = float(fill_fee_raw)
+
+        weighted_notional += fill_price * fill_qty
+        total_qty += fill_qty
+        total_fee += fill_fee
+        aggregate_fill_ts = max(aggregate_fill_ts, int(fill.fill_ts))
+
+    if not math.isfinite(total_qty) or total_qty <= 0:
+        RUN_LOG.warning(
+            format_log_kv(
+                "[FILL_AGG] aggregate failed: no valid fills",
+                context=context,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
+                side=side,
+                input_fill_count=len(fills),
+            )
+        )
+        return []
+
+    aggregate_price = weighted_notional / total_qty
+    aggregate_root = str(exchange_order_id or client_order_id)
+    aggregate_fill_id = f"{aggregate_root}:aggregate:{aggregate_fill_ts}"
+    return [
+        BrokerFill(
+            client_order_id=client_order_id,
+            fill_id=aggregate_fill_id,
+            fill_ts=aggregate_fill_ts,
+            price=aggregate_price,
+            qty=total_qty,
+            fee=total_fee,
+            exchange_order_id=exchange_order_id,
+        )
+    ]
 
 
 def _classify_temporary_submit_error(exc: Exception) -> tuple[str, bool]:
@@ -1107,8 +1204,15 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             return None
 
         fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
+        fills_to_apply = _aggregate_fills_for_apply(
+            fills=fills,
+            client_order_id=client_order_id,
+            exchange_order_id=order.exchange_order_id,
+            side=side,
+            context="_submit_via_standard_path",
+        )
         trade = None
-        for fill in fills:
+        for fill in fills_to_apply:
             trade = apply_fill_and_trade(
                 conn,
                 client_order_id=client_order_id,
