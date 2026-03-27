@@ -158,6 +158,32 @@ class _NoExchangeIdBroker(_FakeBroker):
         return BrokerOrder(client_order_id, None, side, "NEW", price, qty, 0.0, 1, 1)
 
 
+class _InvalidFeeAggregateBroker(_FakeBroker):
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        if not client_order_id:
+            return []
+        return [
+            BrokerFill(
+                client_order_id=client_order_id,
+                fill_id="agg_bad_fee_1",
+                fill_ts=1000,
+                price=100000000.0,
+                qty=0.01,
+                fee=10.0,
+                exchange_order_id=exchange_order_id or "ex1",
+            ),
+            BrokerFill(
+                client_order_id=client_order_id,
+                fill_id="agg_bad_fee_2",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.01,
+                fee=float("nan"),
+                exchange_order_id=exchange_order_id or "ex1",
+            ),
+        ]
+
+
 class _CancelOpenOrdersBroker(_FakeBroker):
     def __init__(self) -> None:
         super().__init__()
@@ -360,6 +386,9 @@ def _reset_pretrade_guards():
         "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
         "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
         "LIVE_PRICE_REFERENCE_MAX_AGE_SEC": settings.LIVE_PRICE_REFERENCE_MAX_AGE_SEC,
+        "LIVE_FILL_FEE_STRICT_MODE": settings.LIVE_FILL_FEE_STRICT_MODE,
+        "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW,
+        "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW,
     }
 
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
@@ -375,6 +404,9 @@ def _reset_pretrade_guards():
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", False)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 100_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
 
     yield
 
@@ -1098,6 +1130,30 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
     assert submit_evidence["submit_path"] == "live_standard_market"
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg for msg in notifications)
+
+
+def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks_aggregate(tmp_path, monkeypatch):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "strict_fee_block.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", True)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+
+    trade = live_execute_signal(_InvalidFeeAggregateBroker(), "BUY", 1000, 100000000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "strict_fee_block.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "strict fee validation blocked fill aggregation" in str(row["last_error"])
+    assert any("event=recovery_required_transition" in msg for msg in notifications)
 
 
 def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_path):

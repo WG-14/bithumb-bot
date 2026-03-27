@@ -44,6 +44,10 @@ SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 
+class FillFeeStrictModeError(RuntimeError):
+    """Raised when strict fee validation blocks fill aggregation."""
+
+
 def _aggregate_fills_for_apply(
     *,
     fills: list[BrokerFill],
@@ -59,6 +63,8 @@ def _aggregate_fills_for_apply(
     total_qty = 0.0
     total_fee = 0.0
     aggregate_fill_ts = 0
+    invalid_fee_count = 0
+    invalid_fee_notional = 0.0
     for fill in fills:
         fill_qty = float(fill.qty)
         fill_price = float(fill.price)
@@ -93,6 +99,8 @@ def _aggregate_fills_for_apply(
 
         fill_fee = 0.0
         if fill_fee_raw is None or not math.isfinite(float(fill_fee_raw)) or float(fill_fee_raw) < 0:
+            invalid_fee_count += 1
+            invalid_fee_notional += fill_price * fill_qty
             RUN_LOG.warning(
                 format_log_kv(
                     "[FILL_AGG] missing_or_invalid fill fee; defaulting to 0",
@@ -124,6 +132,49 @@ def _aggregate_fills_for_apply(
             )
         )
         return []
+
+    hard_alert_min_notional = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    strict_mode_enabled = bool(settings.LIVE_FILL_FEE_STRICT_MODE)
+    strict_min_notional = max(0.0, float(settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW))
+    if invalid_fee_count > 0 and math.isfinite(invalid_fee_notional):
+        if invalid_fee_notional >= hard_alert_min_notional:
+            alert_message = safety_event(
+                "live_fill_fee_aggregate_invalid",
+                client_order_id=client_order_id,
+                exchange_order_id=(exchange_order_id or UNSET_EVENT_FIELD),
+                side=side,
+                status="FILL_AGGREGATE_FEE_ANOMALY",
+                reason_code="FILL_FEE_INVALID",
+                alert_kind="risk_breach",
+                context=context,
+                invalid_fee_count=invalid_fee_count,
+                invalid_fee_notional=f"{invalid_fee_notional:.12g}",
+                threshold_notional=f"{hard_alert_min_notional:.12g}",
+                strict_mode_enabled=strict_mode_enabled,
+                strict_min_notional=f"{strict_min_notional:.12g}",
+            )
+            RUN_LOG.error(
+                format_log_kv(
+                    "[FILL_AGG_HARD_ALERT] invalid fee encountered in high-notional aggregate",
+                    context=context,
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
+                    side=side,
+                    invalid_fee_count=invalid_fee_count,
+                    invalid_fee_notional=invalid_fee_notional,
+                    threshold_notional=hard_alert_min_notional,
+                    strict_mode_enabled=strict_mode_enabled,
+                )
+            )
+            notify(alert_message)
+
+        if strict_mode_enabled and invalid_fee_notional >= strict_min_notional:
+            raise FillFeeStrictModeError(
+                "strict fee validation blocked fill aggregation: "
+                f"context={context} invalid_fee_count={invalid_fee_count} "
+                f"invalid_fee_notional={invalid_fee_notional:.12g} "
+                f"strict_min_notional={strict_min_notional:.12g}"
+            )
 
     aggregate_price = weighted_notional / total_qty
     aggregate_root = str(exchange_order_id or client_order_id)
@@ -1204,13 +1255,41 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             return None
 
         fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
-        fills_to_apply = _aggregate_fills_for_apply(
-            fills=fills,
-            client_order_id=client_order_id,
-            exchange_order_id=order.exchange_order_id,
-            side=side,
-            context="_submit_via_standard_path",
-        )
+        try:
+            fills_to_apply = _aggregate_fills_for_apply(
+                fills=fills,
+                client_order_id=client_order_id,
+                exchange_order_id=order.exchange_order_id,
+                side=side,
+                context="_submit_via_standard_path",
+            )
+        except FillFeeStrictModeError as exc:
+            from_status = str(order.status or "NEW")
+            _mark_recovery_required(
+                conn=conn,
+                client_order_id=client_order_id,
+                side=side,
+                from_status=from_status,
+                reason=str(exc),
+            )
+            update_order_intent_dedup(
+                conn,
+                intent_key=intent_key,
+                client_order_id=client_order_id,
+                order_status="RECOVERY_REQUIRED",
+            )
+            conn.commit()
+            RUN_LOG.error(
+                format_log_kv(
+                    "[FILL_AGG] strict mode blocked aggregate; transitioned to recovery required",
+                    client_order_id=client_order_id,
+                    exchange_order_id=order.exchange_order_id or UNSET_EVENT_FIELD,
+                    side=side,
+                    from_status=from_status,
+                    reason=str(exc),
+                )
+            )
+            return None
         trade = None
         for fill in fills_to_apply:
             trade = apply_fill_and_trade(

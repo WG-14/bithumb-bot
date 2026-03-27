@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import runpy
+import importlib
 from pathlib import Path
 
 from bithumb_bot import bootstrap
@@ -93,3 +94,17 @@ def test_bootstrap_is_consistent_across_all_entrypoints(tmp_path, monkeypatch):
     assert _run_and_capture("bot.py") == "ok"
     assert _run_and_capture("main.py") == "ok"
     assert _run_and_capture("-m") == "ok"
+
+
+def test_live_fill_fee_strict_env_is_loaded(monkeypatch):
+    monkeypatch.setenv("LIVE_FILL_FEE_STRICT_MODE", "true")
+    monkeypatch.setenv("LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", "250000")
+
+    import bithumb_bot.config as config_module
+
+    reloaded = importlib.reload(config_module)
+    try:
+        assert reloaded.settings.LIVE_FILL_FEE_STRICT_MODE is True
+        assert reloaded.settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW == 250000.0
+    finally:
+        importlib.reload(config_module)

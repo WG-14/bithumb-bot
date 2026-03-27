@@ -178,6 +178,10 @@ class Settings:
     LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW: float = float(
         os.getenv("LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", "10000")
     )
+    LIVE_FILL_FEE_STRICT_MODE: bool = parse_bool_env("LIVE_FILL_FEE_STRICT_MODE", "false")
+    LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW: float = float(
+        os.getenv("LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", "100000")
+    )
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
 
