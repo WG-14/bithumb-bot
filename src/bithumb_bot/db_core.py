@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from .config import resolve_db_path, settings
 from .sqlite_resilience import configure_connection
@@ -513,7 +515,68 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_ts INTEGER NOT NULL,
+            strategy_name TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            candle_ts INTEGER,
+            market_price REAL,
+            confidence REAL,
+            context_json TEXT NOT NULL
+        )
+        """
+    )
+
+    _ensure_column(conn, "strategy_decisions", "candle_ts", "candle_ts INTEGER")
+    _ensure_column(conn, "strategy_decisions", "market_price", "market_price REAL")
+    _ensure_column(conn, "strategy_decisions", "confidence", "confidence REAL")
+    _ensure_column(conn, "strategy_decisions", "context_json", "context_json TEXT NOT NULL DEFAULT '{}'")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_decisions_lookup
+        ON strategy_decisions(strategy_name, decision_ts, signal)
+        """
+    )
+
     conn.commit()
+
+
+def record_strategy_decision(
+    conn: sqlite3.Connection,
+    *,
+    decision_ts: int,
+    strategy_name: str,
+    signal: str,
+    reason: str,
+    candle_ts: int | None,
+    market_price: float | None,
+    context: dict[str, Any] | None,
+    confidence: float | None = None,
+) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO strategy_decisions(
+            decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(decision_ts),
+            str(strategy_name),
+            str(signal),
+            str(reason),
+            None if candle_ts is None else int(candle_ts),
+            None if market_price is None else float(market_price),
+            None if confidence is None else float(confidence),
+            json.dumps(context or {}, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    return int(row.lastrowid)
 
 
 def init_portfolio(conn: sqlite3.Connection) -> None:

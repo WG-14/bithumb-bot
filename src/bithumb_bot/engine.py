@@ -14,6 +14,7 @@ from .broker.live import live_execute_signal
 from .broker.bithumb import BithumbBroker
 from .broker.base import BrokerError
 from .db_core import ensure_db
+from .db_core import record_strategy_decision
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
@@ -50,7 +51,9 @@ def compute_signal(
     decision = strategy.decide(conn, through_ts_ms=through_ts_ms)
     if decision is None:
         return None
-    return decision.as_dict()
+    payload = decision.as_dict()
+    payload.setdefault("strategy", strategy.name)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -1394,6 +1397,39 @@ def run_loop(short_n: int, long_n: int) -> None:
                 sma_long=f"SMA{long_n}={r['curr_l']:.2f}",
             )
             runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
+
+            conn = ensure_db()
+            try:
+                context = dict(r)
+                strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
+                signal = str(context.pop("signal", "HOLD"))
+                reason = str(context.pop("reason", ""))
+                candle_ts_raw = context.get("ts")
+                market_price_raw = context.get("last_close")
+                confidence_raw = context.get("confidence")
+                try:
+                    record_strategy_decision(
+                        conn,
+                        decision_ts=int(now * 1000),
+                        strategy_name=strategy_name,
+                        signal=signal,
+                        reason=reason,
+                        candle_ts=int(candle_ts_raw) if candle_ts_raw is not None else None,
+                        market_price=float(market_price_raw) if market_price_raw is not None else None,
+                        confidence=float(confidence_raw) if confidence_raw is not None else None,
+                        context=context,
+                    )
+                    conn.commit()
+                except Exception as exc:
+                    _log_loop_event(
+                        logging.WARNING,
+                        "[WARN] strategy decision persistence failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                        strategy=strategy_name,
+                        signal=signal,
+                    )
+            finally:
+                conn.close()
 
             if r["signal"] not in ("BUY", "SELL"):
                 continue

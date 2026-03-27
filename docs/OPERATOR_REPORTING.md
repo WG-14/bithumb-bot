@@ -74,11 +74,28 @@ BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit
 - 수수료 합계(`fee_total`)
 - `pnl_proxy = sell - buy - fee`
 
-## 5) TODO (추가되면 좋은 필드)
+## 5) 전략 판단 스냅샷 조회
+
+전략 판단은 `strategy_decisions` 테이블에 저장됩니다. `context_json`에는 전략 계산 피처(SMA, 포지션 상태 등)를 JSON으로 보관해 사후 분석 시 재구성이 가능합니다.
+
+```sql
+SELECT
+  decision_ts,
+  strategy_name,
+  signal,
+  reason,
+  candle_ts,
+  market_price,
+  confidence,
+  context_json
+FROM strategy_decisions
+ORDER BY decision_ts DESC
+LIMIT 50;
+```
+
+## 6) TODO (추가되면 좋은 필드)
 
 - `trades.client_order_id` 또는 `trades.strategy_context`
   - 전략별 realized/unrealized PnL 정확 집계를 위해 필요
-- 전략 판단 스냅샷 저장 테이블(예: signal 값, SMA 계산값, 근거 candle ts)
-  - "왜 HOLD/BUY/SELL이 나왔는가"를 사후 재현할 때 유용
 - 주문/체결과 판단 이벤트의 공통 correlation id
   - 장애 분석/감사 추적 속도 개선
