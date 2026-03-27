@@ -24,12 +24,13 @@ def test_compute_signal_uses_default_strategy_name_from_settings(tmp_path) -> No
     db_path = str(tmp_path / "strategy_default.sqlite")
     os.environ["DB_PATH"] = db_path
     object.__setattr__(settings, "DB_PATH", db_path)
-    object.__setattr__(settings, "STRATEGY_NAME", "sma_cross")
+    object.__setattr__(settings, "STRATEGY_NAME", "sma_with_filter")
 
     conn = ensure_db()
     base_ts = 1_700_000_000_000
     try:
-        for idx, close in enumerate([10.0, 11.0, 12.0, 13.0, 14.0]):
+        closes = [10.0 + 0.2 * idx for idx in range(40)]
+        for idx, close in enumerate(closes):
             ts = base_ts + idx * 60_000
             conn.execute(
                 """
@@ -45,6 +46,43 @@ def test_compute_signal_uses_default_strategy_name_from_settings(tmp_path) -> No
         conn.close()
         object.__setattr__(settings, "DB_PATH", old_db_path)
         object.__setattr__(settings, "STRATEGY_NAME", old_strategy_name)
+        if old_env_db_path is None:
+            os.environ.pop("DB_PATH", None)
+        else:
+            os.environ["DB_PATH"] = old_env_db_path
+
+    assert result is not None
+    assert result["signal"] in {"BUY", "SELL", "HOLD"}
+    assert result["strategy"] == "sma_with_filter"
+    assert "reason" in result
+
+
+def test_compute_signal_allows_strategy_override_for_backtest_compatibility(tmp_path) -> None:
+    old_db_path = settings.DB_PATH
+    old_env_db_path = os.environ.get("DB_PATH")
+
+    db_path = str(tmp_path / "strategy_override.sqlite")
+    os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    base_ts = 1_700_000_100_000
+    try:
+        for idx, close in enumerate([10.0, 11.0, 12.0, 13.0, 14.0]):
+            ts = base_ts + idx * 60_000
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ts, settings.PAIR, settings.INTERVAL, close, close, close, close, 1.0),
+            )
+        conn.commit()
+
+        result = compute_signal(conn, 2, 3, strategy_name="sma_cross")
+    finally:
+        conn.close()
+        object.__setattr__(settings, "DB_PATH", old_db_path)
         if old_env_db_path is None:
             os.environ.pop("DB_PATH", None)
         else:

@@ -71,6 +71,7 @@ uv run bithumb-bot run --short 7 --long 30
 - `PAIR` (기본: `BTC_KRW`)
 - `INTERVAL` (기본: `1m`)
 - `EVERY` (기본: `60`)
+- `STRATEGY_NAME` (기본: `sma_with_filter`)
 - `SMA_SHORT` (기본: `7`)
 - `SMA_LONG` (기본: `30`)
 - `COOLDOWN_MIN` (기본: `1`)
@@ -81,6 +82,8 @@ uv run bithumb-bot run --short 7 --long 30
 - `LIVE_ORDER_MAX_QTY_DECIMALS` (기본: `0`, 0이면 비활성)
 
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
+
+전략 선택은 전부 환경변수 주입(`STRATEGY_NAME`) 기반이며, 런타임/배포 환경(AWS EC2/ECS/Lambda 등)에서 파일 경로 하드코딩 없이 동일하게 동작합니다. 운영 기본값은 체결 비용/노이즈를 고려한 `sma_with_filter`이며, 백테스트/비교가 필요하면 `STRATEGY_NAME=sma_cross`로 즉시 override할 수 있습니다.
 
 ## Live 모드(실거래)
 

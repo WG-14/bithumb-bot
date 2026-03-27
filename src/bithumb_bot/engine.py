@@ -4,6 +4,7 @@ import logging
 import math
 import time
 import json
+import os
 from dataclasses import dataclass
 
 from .config import settings, validate_live_mode_preflight
@@ -977,6 +978,11 @@ def run_loop(short_n: int, long_n: int) -> None:
         interval=settings.INTERVAL,
         every_sec=sec,
         strategy=settings.STRATEGY_NAME,
+        strategy_source=(
+            "env:STRATEGY_NAME"
+            if os.getenv("STRATEGY_NAME") not in (None, "")
+            else "default:sma_with_filter"
+        ),
         sma_short=short_n,
         sma_long=long_n,
     )
