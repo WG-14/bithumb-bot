@@ -5,7 +5,7 @@ import json
 from bithumb_bot.app import main as app_main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.reporting import cmd_fee_diagnostics, fetch_fee_diagnostics
+from bithumb_bot.reporting import FeeDiagnosticSummary, cmd_fee_diagnostics, fetch_fee_diagnostics
 
 
 def test_fee_diagnostics_metrics_are_computed_correctly(tmp_path, monkeypatch):
@@ -119,3 +119,144 @@ def test_fee_diagnostics_cli_json_smoke(tmp_path, monkeypatch, capsys):
     assert payload["roundtrip_window"]["limit"] == 2
     assert "fills" in payload
     assert "roundtrip" in payload
+
+
+def test_fee_diagnostics_default_estimate_uses_live_fee_rate_in_live_mode(monkeypatch):
+    captured: dict[str, float] = {}
+
+    class _DummyConn:
+        def close(self) -> None:
+            return None
+
+    def _fake_fetch_fee_diagnostics(conn, *, fill_limit, roundtrip_limit, estimated_fee_rate):
+        captured["estimated_fee_rate"] = float(estimated_fee_rate)
+        return FeeDiagnosticSummary(
+            fill_count=0,
+            fills_with_notional=0,
+            fee_zero_count=0,
+            fee_zero_ratio=0.0,
+            average_fee_rate=None,
+            average_fee_bps=None,
+            median_fee_bps=None,
+            estimated_fee_rate=float(estimated_fee_rate),
+            estimated_minus_actual_bps=None,
+            total_fee_recent_fills=0.0,
+            total_notional_recent_fills=0.0,
+            roundtrip_count=0,
+            roundtrip_fee_total=0.0,
+            pnl_before_fee_total=0.0,
+            pnl_after_fee_total=0.0,
+            pnl_fee_drag_total=0.0,
+            notes=[],
+        )
+
+    monkeypatch.setattr("bithumb_bot.reporting.ensure_db", lambda: _DummyConn())
+    monkeypatch.setattr("bithumb_bot.reporting.fetch_fee_diagnostics", _fake_fetch_fee_diagnostics)
+    orig_mode = settings.MODE
+    orig_live = settings.LIVE_FEE_RATE_ESTIMATE
+    orig_paper = settings.PAPER_FEE_RATE
+    try:
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+        object.__setattr__(settings, "PAPER_FEE_RATE", 0.0004)
+        cmd_fee_diagnostics(as_json=True)
+    finally:
+        object.__setattr__(settings, "MODE", orig_mode)
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", orig_live)
+        object.__setattr__(settings, "PAPER_FEE_RATE", orig_paper)
+
+    assert captured["estimated_fee_rate"] == 0.0025
+
+
+def test_fee_diagnostics_default_estimate_uses_paper_fee_rate_in_non_live_mode(monkeypatch):
+    captured: dict[str, float] = {}
+
+    class _DummyConn:
+        def close(self) -> None:
+            return None
+
+    def _fake_fetch_fee_diagnostics(conn, *, fill_limit, roundtrip_limit, estimated_fee_rate):
+        captured["estimated_fee_rate"] = float(estimated_fee_rate)
+        return FeeDiagnosticSummary(
+            fill_count=0,
+            fills_with_notional=0,
+            fee_zero_count=0,
+            fee_zero_ratio=0.0,
+            average_fee_rate=None,
+            average_fee_bps=None,
+            median_fee_bps=None,
+            estimated_fee_rate=float(estimated_fee_rate),
+            estimated_minus_actual_bps=None,
+            total_fee_recent_fills=0.0,
+            total_notional_recent_fills=0.0,
+            roundtrip_count=0,
+            roundtrip_fee_total=0.0,
+            pnl_before_fee_total=0.0,
+            pnl_after_fee_total=0.0,
+            pnl_fee_drag_total=0.0,
+            notes=[],
+        )
+
+    monkeypatch.setattr("bithumb_bot.reporting.ensure_db", lambda: _DummyConn())
+    monkeypatch.setattr("bithumb_bot.reporting.fetch_fee_diagnostics", _fake_fetch_fee_diagnostics)
+    orig_mode = settings.MODE
+    orig_live = settings.LIVE_FEE_RATE_ESTIMATE
+    orig_paper = settings.PAPER_FEE_RATE
+    try:
+        object.__setattr__(settings, "MODE", "paper")
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+        object.__setattr__(settings, "PAPER_FEE_RATE", 0.0004)
+        cmd_fee_diagnostics(as_json=True)
+    finally:
+        object.__setattr__(settings, "MODE", orig_mode)
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", orig_live)
+        object.__setattr__(settings, "PAPER_FEE_RATE", orig_paper)
+
+    assert captured["estimated_fee_rate"] == 0.0004
+
+
+def test_fee_diagnostics_explicit_estimate_overrides_mode_defaults(monkeypatch):
+    captured: dict[str, float] = {}
+
+    class _DummyConn:
+        def close(self) -> None:
+            return None
+
+    def _fake_fetch_fee_diagnostics(conn, *, fill_limit, roundtrip_limit, estimated_fee_rate):
+        captured["estimated_fee_rate"] = float(estimated_fee_rate)
+        return FeeDiagnosticSummary(
+            fill_count=0,
+            fills_with_notional=0,
+            fee_zero_count=0,
+            fee_zero_ratio=0.0,
+            average_fee_rate=None,
+            average_fee_bps=None,
+            median_fee_bps=None,
+            estimated_fee_rate=float(estimated_fee_rate),
+            estimated_minus_actual_bps=None,
+            total_fee_recent_fills=0.0,
+            total_notional_recent_fills=0.0,
+            roundtrip_count=0,
+            roundtrip_fee_total=0.0,
+            pnl_before_fee_total=0.0,
+            pnl_after_fee_total=0.0,
+            pnl_fee_drag_total=0.0,
+            notes=[],
+        )
+
+    monkeypatch.setattr("bithumb_bot.reporting.ensure_db", lambda: _DummyConn())
+    monkeypatch.setattr("bithumb_bot.reporting.fetch_fee_diagnostics", _fake_fetch_fee_diagnostics)
+    orig_mode = settings.MODE
+    orig_live = settings.LIVE_FEE_RATE_ESTIMATE
+    orig_paper = settings.PAPER_FEE_RATE
+    try:
+        object.__setattr__(settings, "MODE", "live")
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+        object.__setattr__(settings, "PAPER_FEE_RATE", 0.0004)
+        cmd_fee_diagnostics(estimated_fee_rate=0.0011, as_json=True)
+    finally:
+        object.__setattr__(settings, "MODE", orig_mode)
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", orig_live)
+        object.__setattr__(settings, "PAPER_FEE_RATE", orig_paper)
+
+    assert captured["estimated_fee_rate"] == 0.0011

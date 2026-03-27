@@ -257,7 +257,13 @@ def cmd_fee_diagnostics(
     estimated_fee_rate: float | None = None,
     as_json: bool = False,
 ) -> None:
-    estimate = settings.FEE_RATE if estimated_fee_rate is None else float(estimated_fee_rate)
+    estimate = (
+        settings.LIVE_FEE_RATE_ESTIMATE
+        if estimated_fee_rate is None and settings.MODE == "live"
+        else settings.PAPER_FEE_RATE
+        if estimated_fee_rate is None
+        else float(estimated_fee_rate)
+    )
     conn = ensure_db()
     try:
         summary = fetch_fee_diagnostics(
