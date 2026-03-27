@@ -54,6 +54,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
     fill_price = _get_fill_price(signal)
     if fill_price is None:
         return None
+    fee_rate = max(0.0, float(settings.PAPER_FEE_RATE_ESTIMATE))
 
     conn = ensure_db()
     client_order_id = ""
@@ -82,14 +83,14 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             if spend <= 0:
                 return None
 
-            fee = spend * float(settings.FEE_RATE)
+            fee = spend * fee_rate
             spend_net = max(0.0, spend - fee)
             trade_qty = spend_net / float(fill_price)
             side = "BUY"
 
         elif signal == "SELL" and qty > POSITION_EPSILON:
             trade_qty = qty
-            fee = (qty * float(fill_price)) * float(settings.FEE_RATE)
+            fee = (qty * float(fill_price)) * fee_rate
             side = "SELL"
 
         else:

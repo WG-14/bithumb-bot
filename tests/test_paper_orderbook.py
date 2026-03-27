@@ -16,6 +16,7 @@ def _set(attr: str, value):
 def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch):
     old_db = _set("DB_PATH", str(tmp_path / "paper.sqlite"))
     old_slip = _set("SLIPPAGE_BPS", 10.0)
+    old_paper_fee = _set("PAPER_FEE_RATE_ESTIMATE", 0.0025)
     try:
         conn = ensure_db()
         set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
@@ -26,21 +27,26 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
 
         assert trade is not None
         expected_fill = 105.0 * (1 + 10.0 / 10000.0)
+        expected_fee = 1_000_000 * float(settings.BUY_FRACTION) * 0.0025
         assert trade["price"] == expected_fill
+        assert trade["fee"] == expected_fee
 
         conn = ensure_db()
-        t = conn.execute("SELECT price, note FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+        t = conn.execute("SELECT price, fee, note FROM trades ORDER BY id DESC LIMIT 1").fetchone()
         o = conn.execute("SELECT price FROM orders ORDER BY id DESC LIMIT 1").fetchone()
-        f = conn.execute("SELECT price FROM fills ORDER BY id DESC LIMIT 1").fetchone()
+        f = conn.execute("SELECT price, fee FROM fills ORDER BY id DESC LIMIT 1").fetchone()
         conn.close()
 
         assert t["price"] == expected_fill
+        assert t["fee"] == expected_fee
         assert o["price"] == expected_fill
         assert f["price"] == expected_fill
+        assert f["fee"] == expected_fee
         assert "signal_price=999.0" in t["note"]
     finally:
         _set("DB_PATH", old_db)
         _set("SLIPPAGE_BPS", old_slip)
+        _set("PAPER_FEE_RATE_ESTIMATE", old_paper_fee)
 
 
 def test_paper_execute_blocks_on_abnormal_spread(tmp_path: Path, monkeypatch):

@@ -17,6 +17,7 @@ PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
     "FEE_RATE",
+    "PAPER_FEE_RATE_ESTIMATE",
     "SLIPPAGE_BPS",
 )
 ALLOWED_RUNTIME_MODES = ("paper", "live")
@@ -107,6 +108,11 @@ class Settings:
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))  # 기본값은 너 코드와 다를 수 있음
     # live pretrade 잔고/현금 검증에서만 사용하는 보수적 fee 추정치 (실체결 fee 정산과 분리)
     LIVE_FEE_RATE_ESTIMATE: float = float(os.getenv("LIVE_FEE_RATE_ESTIMATE", "0.0025"))
+    # paper 체결 시뮬레이션 전용 추정 수수료율.
+    # 별도 지정이 없으면 LIVE_FEE_RATE_ESTIMATE 값을 재사용해 과도한 낙관을 방지한다.
+    PAPER_FEE_RATE_ESTIMATE: float = float(
+        os.getenv("PAPER_FEE_RATE_ESTIMATE", os.getenv("LIVE_FEE_RATE_ESTIMATE", "0.0025"))
+    )
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
     MAX_ORDERBOOK_SPREAD_BPS: float = float(os.getenv("MAX_ORDERBOOK_SPREAD_BPS", "100"))
     MAX_MARKET_SLIPPAGE_BPS: float = float(os.getenv("MAX_MARKET_SLIPPAGE_BPS", "0"))
