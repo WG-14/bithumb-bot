@@ -54,6 +54,21 @@ def _compute_entry_cost_floor_ratio(*, slippage_bps: float, live_fee_rate_estima
     return roundtrip_fee_ratio + slippage_ratio + max(0.0, float(buffer_ratio))
 
 
+def _compute_required_entry_edge_ratio(
+    *,
+    slippage_bps: float,
+    live_fee_rate_estimate: float,
+    edge_buffer_ratio: float,
+    strategy_min_expected_edge_ratio: float,
+) -> tuple[float, float]:
+    cost_floor_ratio = _compute_entry_cost_floor_ratio(
+        slippage_bps=slippage_bps,
+        live_fee_rate_estimate=live_fee_rate_estimate,
+        buffer_ratio=edge_buffer_ratio,
+    )
+    return cost_floor_ratio, max(cost_floor_ratio, max(0.0, float(strategy_min_expected_edge_ratio)))
+
+
 def _evaluate_entry_edge_filter(
     *,
     base_signal: str,
@@ -63,12 +78,12 @@ def _evaluate_entry_edge_filter(
     edge_buffer_ratio: float,
     strategy_min_expected_edge_ratio: float,
 ) -> tuple[bool, dict[str, float | bool]]:
-    cost_floor_ratio = _compute_entry_cost_floor_ratio(
+    cost_floor_ratio, required_edge_ratio = _compute_required_entry_edge_ratio(
         slippage_bps=slippage_bps,
         live_fee_rate_estimate=live_fee_rate_estimate,
-        buffer_ratio=edge_buffer_ratio,
+        edge_buffer_ratio=edge_buffer_ratio,
+        strategy_min_expected_edge_ratio=strategy_min_expected_edge_ratio,
     )
-    required_edge_ratio = max(cost_floor_ratio, max(0.0, float(strategy_min_expected_edge_ratio)))
     expected_edge_ratio = max(0.0, float(gap_ratio))
     enabled = base_signal in ("BUY", "SELL")
     blocked = enabled and expected_edge_ratio < required_edge_ratio
@@ -503,7 +518,13 @@ class SmaWithFilterStrategy:
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
             "blocked_by_cost_filter": bool(should_filter_entry and edge_filter_triggered),
-            "entry": {"base_signal": base_signal, "base_reason": base_reason},
+            "entry": {
+                "base_signal": base_signal,
+                "base_reason": base_reason,
+                "entry_signal": entry_signal,
+                "entry_reason": entry_reason,
+                "cost_edge_blocked": bool(should_filter_entry and edge_filter_triggered),
+            },
         }
 
         return _apply_entry_exit_policy(

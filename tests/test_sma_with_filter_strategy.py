@@ -148,8 +148,12 @@ def test_cost_edge_filter_blocks_small_gap_entry_and_records_reason() -> None:
     assert decision.signal == "HOLD"
     assert decision.reason.startswith("filtered entry")
     assert "cost_edge" in decision.context["blocked_filters"]
+    assert decision.context["filters"]["gap"]["passed"] is True
+    assert decision.context["filters"]["volatility"]["passed"] is True
+    assert decision.context["filters"]["overextended"]["passed"] is True
     assert decision.context["filters"]["cost_edge"]["passed"] is False
     assert decision.context["filters"]["cost_edge"]["cost_floor_ratio"] == 0.045
+    assert decision.context["entry"]["cost_edge_blocked"] is True
 
 
 def test_cost_edge_filter_allows_entry_when_signal_clears_cost_floor() -> None:
@@ -176,6 +180,34 @@ def test_cost_edge_filter_allows_entry_when_signal_clears_cost_floor() -> None:
     assert decision is not None
     assert decision.signal == "BUY"
     assert decision.context["filters"]["cost_edge"]["passed"] is True
+    assert decision.context["entry"]["cost_edge_blocked"] is False
+
+
+def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
+    conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "SELL"
+    assert decision.context["filters"]["cost_edge"]["passed"] is True
+    assert decision.context["entry"]["cost_edge_blocked"] is False
 
 
 def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase() -> None:
