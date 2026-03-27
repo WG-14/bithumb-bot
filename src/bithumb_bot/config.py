@@ -136,6 +136,15 @@ class Settings:
     # 하위호환 alias: 구버전 코드/테스트가 참조해도 동일 값 사용.
     PAPER_FEE_RATE_ESTIMATE: float = PAPER_FEE_RATE
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
+    # 전략 진입 비용 필터에서 기대 슬리피지를 추정할 때 사용하는 bps.
+    # 우선순위:
+    #   STRATEGY_ENTRY_SLIPPAGE_BPS > MAX_MARKET_SLIPPAGE_BPS > SLIPPAGE_BPS > 0
+    STRATEGY_ENTRY_SLIPPAGE_BPS: float = float(
+        os.getenv(
+            "STRATEGY_ENTRY_SLIPPAGE_BPS",
+            os.getenv("MAX_MARKET_SLIPPAGE_BPS", os.getenv("SLIPPAGE_BPS", "0")),
+        )
+    )
     MAX_ORDERBOOK_SPREAD_BPS: float = float(os.getenv("MAX_ORDERBOOK_SPREAD_BPS", "100"))
     MAX_MARKET_SLIPPAGE_BPS: float = float(os.getenv("MAX_MARKET_SLIPPAGE_BPS", "0"))
     LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS: float = float(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import sqlite3
 
 from bithumb_bot.strategy.sma import create_sma_strategy, create_sma_with_filter_strategy
@@ -228,3 +229,62 @@ def test_filtered_strategy_default_thresholds_are_conservative_and_valid() -> No
     assert strategy.min_gap_ratio >= 0.001
     assert strategy.min_volatility_ratio >= 0.003
     assert strategy.overextended_max_return_ratio <= 0.02
+
+
+def test_sma_cross_cost_edge_filter_blocks_weak_entry_and_records_context() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.02,
+            entry_edge_buffer_ratio=0.005,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.reason == "filtered entry: cost_edge"
+    assert decision.context["blocked_by_cost_filter"] is True
+    assert decision.context["gap_ratio"] < decision.context["cost_floor_ratio"]
+    assert decision.context["filters"]["cost_edge"]["passed"] is False
+
+
+def test_sma_cross_cost_edge_filter_keeps_signal_when_edge_is_sufficient() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert decision.context["blocked_by_cost_filter"] is False
+    assert decision.context["gap_ratio"] > decision.context["cost_floor_ratio"]
+    assert decision.context["filters"]["cost_edge"]["passed"] is True
+
+
+def test_strategy_entry_slippage_defaults_to_zero_when_env_values_are_unset(monkeypatch) -> None:
+    monkeypatch.delenv("STRATEGY_ENTRY_SLIPPAGE_BPS", raising=False)
+    monkeypatch.delenv("MAX_MARKET_SLIPPAGE_BPS", raising=False)
+    monkeypatch.delenv("SLIPPAGE_BPS", raising=False)
+    config_module = importlib.import_module("bithumb_bot.config")
+    config_module = importlib.reload(config_module)
+    try:
+        assert config_module.settings.STRATEGY_ENTRY_SLIPPAGE_BPS == 0.0
+    finally:
+        importlib.reload(config_module)

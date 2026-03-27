@@ -195,7 +195,10 @@ class SmaCrossStrategy:
     )
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
     exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+    slippage_bps: float = settings.STRATEGY_ENTRY_SLIPPAGE_BPS
     live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
+    entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
+    strategy_min_expected_edge_ratio: float = settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
 
     name: str = "sma_cross"
 
@@ -228,10 +231,26 @@ class SmaCrossStrategy:
         curr_l = _sma(closes, self.long_n, end_curr)
 
         base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
+        gap_ratio = abs(_safe_ratio(curr_s - curr_l, curr_l))
+        edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
+            base_signal=base_signal,
+            gap_ratio=gap_ratio,
+            slippage_bps=float(self.slippage_bps),
+            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+            strategy_min_expected_edge_ratio=float(self.strategy_min_expected_edge_ratio),
+        )
+        entry_signal = base_signal
+        entry_reason = base_reason
+        if edge_filter_triggered:
+            entry_signal = "HOLD"
+            entry_reason = "filtered entry: cost_edge"
         signal_context = {
             "strategy": self.name,
             "base_signal": base_signal,
             "base_reason": base_reason,
+            "entry_signal": entry_signal,
+            "entry_reason": entry_reason,
             "prev_s": prev_s,
             "prev_l": prev_l,
             "curr_s": curr_s,
@@ -258,11 +277,32 @@ class SmaCrossStrategy:
             "curr_l": curr_l,
             "last_close": float(closes[-1]),
             "strategy": self.name,
-            "entry": {"base_signal": base_signal, "base_reason": base_reason},
+            "gap_ratio": gap_ratio,
+            "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+            "blocked_by_cost_filter": bool(edge_filter_triggered),
+            "entry": {
+                "base_signal": base_signal,
+                "base_reason": base_reason,
+                "entry_signal": entry_signal,
+                "entry_reason": entry_reason,
+            },
+            "filters": {
+                "cost_edge": {
+                    "enabled": bool(edge_filter_details["enabled"]),
+                    "passed": not bool(edge_filter_details["blocked"]),
+                    "value": float(edge_filter_details["expected_edge_ratio"]),
+                    "threshold": float(edge_filter_details["required_edge_ratio"]),
+                    "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+                    "roundtrip_fee_ratio": float(edge_filter_details["roundtrip_fee_ratio"]),
+                    "slippage_ratio": float(edge_filter_details["slippage_ratio"]),
+                    "buffer_ratio": float(edge_filter_details["buffer_ratio"]),
+                    "min_expected_edge_ratio": float(edge_filter_details["min_expected_edge_ratio"]),
+                }
+            },
         }
         return _apply_entry_exit_policy(
-            base_signal=base_signal,
-            base_reason=base_reason,
+            base_signal=entry_signal,
+            base_reason=entry_reason,
             base_context=base_context,
             position=position,
             exit_rules=exit_rules,
@@ -280,7 +320,7 @@ class SmaWithFilterStrategy:
     min_volatility_ratio: float = settings.SMA_FILTER_VOL_MIN_RANGE_RATIO
     overextended_lookback: int = settings.SMA_FILTER_OVEREXT_LOOKBACK
     overextended_max_return_ratio: float = settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO
-    slippage_bps: float = settings.SLIPPAGE_BPS
+    slippage_bps: float = settings.STRATEGY_ENTRY_SLIPPAGE_BPS
     live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
     entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
     strategy_min_expected_edge_ratio: float = settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
@@ -456,6 +496,9 @@ class SmaWithFilterStrategy:
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
             "blocked_filters": blocked_filters,
+            "gap_ratio": gap_ratio,
+            "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+            "blocked_by_cost_filter": bool(should_filter_entry and edge_filter_triggered),
             "entry": {"base_signal": base_signal, "base_reason": base_reason},
         }
 
@@ -477,6 +520,9 @@ def create_sma_strategy(
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
+    slippage_bps: float | None = None,
+    entry_edge_buffer_ratio: float | None = None,
+    strategy_min_expected_edge_ratio: float | None = None,
     live_fee_rate_estimate: float | None = None,
 ) -> SmaCrossStrategy:
     return SmaCrossStrategy(
@@ -498,6 +544,19 @@ def create_sma_strategy(
             settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
             if exit_min_take_profit_ratio is None
             else exit_min_take_profit_ratio
+        ),
+        slippage_bps=float(
+            settings.STRATEGY_ENTRY_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
+        ),
+        entry_edge_buffer_ratio=float(
+            settings.ENTRY_EDGE_BUFFER_RATIO
+            if entry_edge_buffer_ratio is None
+            else entry_edge_buffer_ratio
+        ),
+        strategy_min_expected_edge_ratio=float(
+            settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
+            if strategy_min_expected_edge_ratio is None
+            else strategy_min_expected_edge_ratio
         ),
         live_fee_rate_estimate=float(
             settings.LIVE_FEE_RATE_ESTIMATE
@@ -552,7 +611,9 @@ def create_sma_with_filter_strategy(
             if overextended_max_return_ratio is None
             else overextended_max_return_ratio
         ),
-        slippage_bps=float(settings.SLIPPAGE_BPS if slippage_bps is None else slippage_bps),
+        slippage_bps=float(
+            settings.STRATEGY_ENTRY_SLIPPAGE_BPS if slippage_bps is None else slippage_bps
+        ),
         live_fee_rate_estimate=float(
             settings.LIVE_FEE_RATE_ESTIMATE
             if live_fee_rate_estimate is None
