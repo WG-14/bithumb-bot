@@ -234,7 +234,11 @@ def validate_pretrade(
 
     buffer_mult = 1.0 + max(0.0, float(settings.PRETRADE_BALANCE_BUFFER_BPS)) / 10_000.0
     if side == "BUY":
-        fee_mult = 1.0 + max(0.0, float(settings.FEE_RATE))
+        # NOTE:
+        # - LIVE_FEE_RATE_ESTIMATE: live pretrade 현금/잔고 보호용 보수적 추정치
+        # - FEE_RATE: paper 체결 시뮬레이션 및 실체결 정산 기록과 관련된 기존 fee rate
+        # 두 값의 역할을 분리해 live pretrade 계산이 낙관적으로 과소추정되지 않게 한다.
+        fee_mult = 1.0 + max(0.0, float(settings.LIVE_FEE_RATE_ESTIMATE))
         required_cash = notional * fee_mult * buffer_mult
         if float(balance.cash_available) + POSITION_EPSILON < required_cash:
             raise ValueError(

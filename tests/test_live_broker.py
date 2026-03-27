@@ -344,6 +344,7 @@ def _reset_pretrade_guards():
         "START_CASH_KRW": settings.START_CASH_KRW,
         "BUY_FRACTION": settings.BUY_FRACTION,
         "FEE_RATE": settings.FEE_RATE,
+        "LIVE_FEE_RATE_ESTIMATE": settings.LIVE_FEE_RATE_ESTIMATE,
         "MAX_ORDERBOOK_SPREAD_BPS": settings.MAX_ORDERBOOK_SPREAD_BPS,
         "MAX_MARKET_SLIPPAGE_BPS": settings.MAX_MARKET_SLIPPAGE_BPS,
         "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
@@ -366,6 +367,7 @@ def _reset_pretrade_guards():
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
     object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 0.0)
     object.__setattr__(settings, "FEE_RATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 0.0)
     object.__setattr__(settings, "KILL_SWITCH", False)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
@@ -1558,7 +1560,8 @@ def test_live_insufficient_available_balance_rejected(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "insufficient_balance.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
     object.__setattr__(settings, "BUY_FRACTION", 0.99)
-    object.__setattr__(settings, "FEE_RATE", 0.001)
+    object.__setattr__(settings, "FEE_RATE", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.001)
     object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 10.0)
 
     broker = _FakeBroker()
@@ -1572,6 +1575,28 @@ def test_live_insufficient_available_balance_rejected(monkeypatch, tmp_path):
 
     assert trade is None
     assert broker.place_order_calls == 0
+
+
+def test_validate_pretrade_buy_uses_live_fee_rate_estimate_not_fee_rate() -> None:
+    object.__setattr__(settings, "FEE_RATE", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.10)
+    broker = _FakeBroker()
+    broker.get_balance = lambda: BrokerBalance(  # type: ignore[method-assign]
+        cash_available=109.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+    )
+
+    with pytest.raises(ValueError, match="insufficient available cash"):
+        validate_pretrade(
+            broker=broker,
+            side="BUY",
+            qty=1.0,
+            market_price=100.0,
+            reference_bid=99.9,
+            reference_ask=100.1,
+        )
 
 
 def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):
