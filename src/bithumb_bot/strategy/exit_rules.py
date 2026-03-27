@@ -28,6 +28,8 @@ class ExitRule(Protocol):
 
 @dataclass(frozen=True)
 class OppositeCrossExitRule:
+    min_take_profit_ratio: float = 0.0
+    live_fee_rate_estimate: float = 0.0
     name: str = "opposite_cross"
 
     def evaluate(
@@ -39,13 +41,35 @@ class OppositeCrossExitRule:
         signal_context: dict[str, object],
     ) -> ExitRuleDecision:
         base_signal = str(signal_context.get("base_signal", "HOLD"))
-        should_exit = position.in_position and base_signal == "SELL"
+        opposite_cross_triggered = bool(position.in_position and base_signal == "SELL")
+        required_take_profit_ratio = max(
+            max(0.0, float(self.min_take_profit_ratio)),
+            2.0 * max(0.0, float(self.live_fee_rate_estimate)),
+        )
+        unrealized_pnl_ratio = float(position.unrealized_pnl_ratio)
+        in_micro_pnl_band = (-required_take_profit_ratio) <= unrealized_pnl_ratio < required_take_profit_ratio
+
+        should_exit = bool(opposite_cross_triggered and not in_micro_pnl_band)
+        if should_exit:
+            reason = "exit by opposite cross"
+        elif opposite_cross_triggered and in_micro_pnl_band:
+            reason = "opposite cross deferred: minimum take-profit floor not met"
+        else:
+            reason = "opposite cross not triggered"
         return ExitRuleDecision(
-            should_exit=bool(should_exit),
-            reason="exit by opposite cross" if should_exit else "opposite cross not triggered",
+            should_exit=should_exit,
+            reason=reason,
             context={
                 "rule": self.name,
                 "base_signal": base_signal,
+                "opposite_cross_triggered": opposite_cross_triggered,
+                "deferred_by_min_take_profit_floor": bool(
+                    opposite_cross_triggered and in_micro_pnl_band
+                ),
+                "unrealized_pnl_ratio": unrealized_pnl_ratio,
+                "required_take_profit_ratio": required_take_profit_ratio,
+                "configured_min_take_profit_ratio": max(0.0, float(self.min_take_profit_ratio)),
+                "roundtrip_fee_ratio": 2.0 * max(0.0, float(self.live_fee_rate_estimate)),
                 "candle_ts": int(candle_ts),
                 "market_price": float(market_price),
             },
@@ -84,17 +108,27 @@ class MaxHoldingTimeExitRule:
         )
 
 
-def create_exit_rules(*, rule_names: list[str], max_holding_sec: float) -> list[ExitRule]:
+def create_exit_rules(
+    *,
+    rule_names: list[str],
+    max_holding_sec: float,
+    min_take_profit_ratio: float,
+    live_fee_rate_estimate: float,
+) -> list[ExitRule]:
     rules: list[ExitRule] = []
     for raw_name in rule_names:
         name = str(raw_name).strip().lower()
         if not name:
             continue
         if name == "opposite_cross":
-            rules.append(OppositeCrossExitRule())
+            rules.append(
+                OppositeCrossExitRule(
+                    min_take_profit_ratio=float(min_take_profit_ratio),
+                    live_fee_rate_estimate=float(live_fee_rate_estimate),
+                )
+            )
         elif name == "max_holding_time":
             rules.append(MaxHoldingTimeExitRule(max_holding_sec=float(max_holding_sec)))
         else:
             raise ValueError(f"unknown exit rule={raw_name!r}")
     return rules
-

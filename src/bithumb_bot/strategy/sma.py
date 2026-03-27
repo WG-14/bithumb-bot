@@ -194,6 +194,8 @@ class SmaCrossStrategy:
         default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
     )
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
+    exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+    live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
 
     name: str = "sma_cross"
 
@@ -245,6 +247,8 @@ class SmaCrossStrategy:
         exit_rules = create_exit_rules(
             rule_names=self.exit_rule_names,
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
+            min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
+            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
         )
         base_context = {
             "ts": ts_list[-1],
@@ -284,6 +288,7 @@ class SmaWithFilterStrategy:
         default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
     )
     exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
+    exit_min_take_profit_ratio: float = settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
 
     name: str = "sma_with_filter"
 
@@ -393,6 +398,8 @@ class SmaWithFilterStrategy:
         exit_rules = create_exit_rules(
             rule_names=self.exit_rule_names,
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
+            min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
+            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
         )
 
         base_context = {
@@ -469,6 +476,8 @@ def create_sma_strategy(
     interval: str | None = None,
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
+    exit_min_take_profit_ratio: float | None = None,
+    live_fee_rate_estimate: float | None = None,
 ) -> SmaCrossStrategy:
     return SmaCrossStrategy(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
@@ -484,6 +493,16 @@ def create_sma_strategy(
             settings.STRATEGY_EXIT_MAX_HOLDING_MIN
             if exit_max_holding_min is None
             else exit_max_holding_min
+        ),
+        exit_min_take_profit_ratio=float(
+            settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+            if exit_min_take_profit_ratio is None
+            else exit_min_take_profit_ratio
+        ),
+        live_fee_rate_estimate=float(
+            settings.LIVE_FEE_RATE_ESTIMATE
+            if live_fee_rate_estimate is None
+            else live_fee_rate_estimate
         ),
     )
 
@@ -505,6 +524,7 @@ def create_sma_with_filter_strategy(
     strategy_min_expected_edge_ratio: float | None = None,
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
+    exit_min_take_profit_ratio: float | None = None,
 ) -> SmaWithFilterStrategy:
     return SmaWithFilterStrategy(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
@@ -557,6 +577,11 @@ def create_sma_with_filter_strategy(
             settings.STRATEGY_EXIT_MAX_HOLDING_MIN
             if exit_max_holding_min is None
             else exit_max_holding_min
+        ),
+        exit_min_take_profit_ratio=float(
+            settings.STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO
+            if exit_min_take_profit_ratio is None
+            else exit_min_take_profit_ratio
         ),
     )
 
