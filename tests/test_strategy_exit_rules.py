@@ -186,11 +186,29 @@ def test_opposite_cross_reason_context_include_expected_fields() -> None:
         signal_context={"base_signal": "SELL"},
     )
 
-    assert decision.reason == "opposite cross deferred: pnl in small loss/gain noise band"
+    assert decision.reason == "opposite cross deferred: pnl in small_loss noise band"
     assert decision.context["base_signal"] == "SELL"
     assert decision.context["unrealized_pnl_ratio"] == -0.001
     assert decision.context["min_profit_floor"] == 0.002
     assert decision.context["filter_applied"] is True
+    assert decision.context["filter_zone"] == "small_loss"
+    assert decision.context["profit_floor_basis"]["effective_min_profit_floor_ratio"] == 0.002
+
+
+def test_opposite_cross_deferred_reason_marks_small_gain_zone() -> None:
+    rule = OppositeCrossExitRule(min_take_profit_ratio=0.002, live_fee_rate_estimate=0.0004)
+    position = PositionContext(in_position=True, entry_price=100.0, qty_open=1.0, unrealized_pnl_ratio=0.001)
+
+    decision = rule.evaluate(
+        position=position,
+        candle_ts=1_700_000_000_000,
+        market_price=100.1,
+        signal_context={"base_signal": "SELL"},
+    )
+
+    assert decision.should_exit is False
+    assert decision.reason == "opposite cross deferred: pnl in small_gain noise band"
+    assert decision.context["filter_zone"] == "small_gain"
 
 
 def test_max_holding_exit_is_not_blocked_by_take_profit_floor_when_opposite_cross_deferred(tmp_path) -> None:

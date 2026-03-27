@@ -55,12 +55,13 @@ class OppositeCrossExitRule:
         is_small_loss = (-resolved_small_loss_tolerance) <= unrealized_pnl_ratio < 0.0
         is_small_gain = 0.0 <= unrealized_pnl_ratio < min_profit_floor
         filtered_by_pnl_floor = bool(opposite_cross_triggered and (is_small_loss or is_small_gain))
+        filter_zone = "small_loss" if is_small_loss else "small_gain" if is_small_gain else "outside"
 
         should_exit = bool(opposite_cross_triggered and not filtered_by_pnl_floor)
         if should_exit:
             reason = "exit by opposite cross"
         elif filtered_by_pnl_floor:
-            reason = "opposite cross deferred: pnl in small loss/gain noise band"
+            reason = f"opposite cross deferred: pnl in {filter_zone} noise band"
         else:
             reason = "opposite cross not triggered"
         return ExitRuleDecision(
@@ -83,6 +84,12 @@ class OppositeCrossExitRule:
                 ),
                 "small_loss_zone": is_small_loss,
                 "small_gain_zone": is_small_gain,
+                "filter_zone": filter_zone,
+                "profit_floor_basis": {
+                    "configured_min_take_profit_ratio": max(0.0, float(self.min_take_profit_ratio)),
+                    "roundtrip_fee_ratio": 2.0 * max(0.0, float(self.live_fee_rate_estimate)),
+                    "effective_min_profit_floor_ratio": min_profit_floor,
+                },
                 "candle_ts": int(candle_ts),
                 "market_price": float(market_price),
             },
