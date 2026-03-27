@@ -620,12 +620,45 @@ def test_get_fills_fee_key_regression_parses_numeric_string(monkeypatch, fee_key
     assert fills[0].fee == pytest.approx(25.03)
 
 
+@pytest.mark.parametrize("fee_key", ["fee", "paid_fee", "commission", "trade_fee"])
+def test_get_fills_fee_key_regression_parses_numeric_type(monkeypatch, fee_key):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-fee-number",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        fee_key: 25.03,
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-fee-number",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-fee-number", exchange_order_id="filled-fee-number")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(25.03)
+
+
 @pytest.mark.parametrize(
     ("fee_value", "expected_warning"),
     [
         ("", "empty fee value"),
         (None, "empty fee value"),
         ("not-a-number", "invalid fee value"),
+        ("nan", "invalid fee value"),
+        ("inf", "invalid fee value"),
     ],
 )
 def test_get_fills_fee_parsing_regression_defaults_to_zero_for_invalid_values(monkeypatch, caplog, fee_value, expected_warning):
@@ -658,6 +691,72 @@ def test_get_fills_fee_parsing_regression_defaults_to_zero_for_invalid_values(mo
     assert len(fills) == 1
     assert fills[0].fee == pytest.approx(0.0)
     assert any(expected_warning in rec.message for rec in caplog.records)
+
+
+def test_get_fills_fee_key_regression_prioritizes_fee_over_other_fee_keys(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-fee-priority",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "fee": "1.11",
+        "paid_fee": "2.22",
+        "commission": "3.33",
+        "trade_fee": "4.44",
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-fee-priority",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-fee-priority", exchange_order_id="filled-fee-priority")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(1.11)
+
+
+def test_get_fills_fee_key_regression_falls_back_to_next_fee_key_when_higher_priority_invalid(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-fee-fallback",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "fee": "not-a-number",
+        "paid_fee": "2.22",
+        "commission": "3.33",
+        "trade_fee": "4.44",
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-fee-fallback",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-fee-fallback", exchange_order_id="filled-fee-fallback")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(2.22)
 
 
 def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
