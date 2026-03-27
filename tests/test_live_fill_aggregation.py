@@ -202,6 +202,119 @@ def test_aggregate_fills_strict_mode_blocks_high_notional_invalid_fee() -> None:
         object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", original_strict_min_notional)
 
 
+@pytest.mark.parametrize(
+    ("invalid_fee_raw", "strict_mode", "strict_min_notional", "expect_block"),
+    [
+        (None, False, 10_000.0, False),
+        ("", False, 10_000.0, False),
+        ("bad-fee", True, 1_000_000.0, False),
+        (-1.0, True, 10_000.0, True),
+        (float("nan"), True, 10_000.0, True),
+    ],
+)
+def test_aggregate_fills_strict_mode_enforcement_by_invalid_fee_types_and_threshold(
+    invalid_fee_raw: object,
+    strict_mode: bool,
+    strict_min_notional: float,
+    expect_block: bool,
+) -> None:
+    original_alert_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    original_strict_mode = settings.LIVE_FILL_FEE_STRICT_MODE
+    original_strict_min_notional = settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", strict_mode)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", strict_min_notional)
+
+    fills = [
+        BrokerFill(
+            client_order_id="cid-6",
+            fill_id="f1",
+            fill_ts=1000,
+            price=5_000.0,
+            qty=1.0,
+            fee=1.0,
+            exchange_order_id="ex-6",
+        ),
+        BrokerFill(
+            client_order_id="cid-6",
+            fill_id="f2",
+            fill_ts=1010,
+            price=6_000.0,
+            qty=1.0,
+            fee=invalid_fee_raw,
+            exchange_order_id="ex-6",
+        ),
+    ]
+
+    try:
+        if expect_block:
+            with pytest.raises(FillFeeStrictModeError):
+                _aggregate_fills_for_apply(
+                    fills=fills,
+                    client_order_id="cid-6",
+                    exchange_order_id="ex-6",
+                    side="BUY",
+                    context="test",
+                )
+        else:
+            aggregated = _aggregate_fills_for_apply(
+                fills=fills,
+                client_order_id="cid-6",
+                exchange_order_id="ex-6",
+                side="BUY",
+                context="test",
+            )
+            assert len(aggregated) == 1
+    finally:
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_alert_min_notional)
+        object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", original_strict_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", original_strict_min_notional)
+
+
+def test_aggregate_fills_strict_mode_blocks_on_aggregate_notional_boundary_even_when_invalid_fill_notional_is_lower() -> None:
+    original_alert_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    original_strict_mode = settings.LIVE_FILL_FEE_STRICT_MODE
+    original_strict_min_notional = settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", True)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    fills = [
+        BrokerFill(
+            client_order_id="cid-7",
+            fill_id="f1",
+            fill_ts=1000,
+            price=9_000.0,
+            qty=1.0,
+            fee=1.0,
+            exchange_order_id="ex-7",
+        ),
+        BrokerFill(
+            client_order_id="cid-7",
+            fill_id="f2",
+            fill_ts=1010,
+            price=1_000.0,
+            qty=1.0,
+            fee="",
+            exchange_order_id="ex-7",
+        ),
+    ]
+
+    try:
+        with pytest.raises(FillFeeStrictModeError, match="aggregate_notional=10000"):
+            _aggregate_fills_for_apply(
+                fills=fills,
+                client_order_id="cid-7",
+                exchange_order_id="ex-7",
+                side="BUY",
+                context="test",
+            )
+    finally:
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_alert_min_notional)
+        object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", original_strict_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", original_strict_min_notional)
+
+
 def test_aggregate_fills_returns_empty_when_no_valid_fills(caplog: pytest.LogCaptureFixture) -> None:
     fills = [
         BrokerFill(

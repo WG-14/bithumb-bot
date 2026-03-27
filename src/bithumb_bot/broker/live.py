@@ -48,6 +48,18 @@ class FillFeeStrictModeError(RuntimeError):
     """Raised when strict fee validation blocks fill aggregation."""
 
 
+def _parse_fill_fee(*, fill_fee_raw: object) -> tuple[bool, float]:
+    if fill_fee_raw is None:
+        return False, 0.0
+    try:
+        fill_fee = float(fill_fee_raw)
+    except (TypeError, ValueError):
+        return False, 0.0
+    if not math.isfinite(fill_fee) or fill_fee < 0:
+        return False, 0.0
+    return True, fill_fee
+
+
 def _aggregate_fills_for_apply(
     *,
     fills: list[BrokerFill],
@@ -65,6 +77,8 @@ def _aggregate_fills_for_apply(
     aggregate_fill_ts = 0
     invalid_fee_count = 0
     invalid_fee_notional = 0.0
+    aggregate_notional = 0.0
+    max_invalid_fill_notional = 0.0
     for fill in fills:
         fill_qty = float(fill.qty)
         fill_price = float(fill.price)
@@ -97,25 +111,28 @@ def _aggregate_fills_for_apply(
             )
             continue
 
-        fill_fee = 0.0
-        if fill_fee_raw is None or not math.isfinite(float(fill_fee_raw)) or float(fill_fee_raw) < 0:
+        fill_notional = fill_price * fill_qty
+        fee_valid, fill_fee = _parse_fill_fee(fill_fee_raw=fill_fee_raw)
+        if not fee_valid:
             invalid_fee_count += 1
-            invalid_fee_notional += fill_price * fill_qty
+            invalid_fee_notional += fill_notional
+            max_invalid_fill_notional = max(max_invalid_fill_notional, fill_notional)
             RUN_LOG.warning(
                 format_log_kv(
                     "[FILL_AGG] missing_or_invalid fill fee; defaulting to 0",
                     context=context,
+                    symbol=settings.PAIR,
                     client_order_id=client_order_id,
                     exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
                     side=side,
                     fill_id=fill.fill_id,
                     fee=fill_fee_raw,
+                    fill_notional=fill_notional,
                 )
             )
-        else:
-            fill_fee = float(fill_fee_raw)
 
-        weighted_notional += fill_price * fill_qty
+        weighted_notional += fill_notional
+        aggregate_notional += fill_notional
         total_qty += fill_qty
         total_fee += fill_fee
         aggregate_fill_ts = max(aggregate_fill_ts, int(fill.fill_ts))
@@ -152,27 +169,42 @@ def _aggregate_fills_for_apply(
                 threshold_notional=f"{hard_alert_min_notional:.12g}",
                 strict_mode_enabled=strict_mode_enabled,
                 strict_min_notional=f"{strict_min_notional:.12g}",
+                aggregate_notional=f"{aggregate_notional:.12g}",
+                max_invalid_fill_notional=f"{max_invalid_fill_notional:.12g}",
             )
             RUN_LOG.error(
                 format_log_kv(
                     "[FILL_AGG_HARD_ALERT] invalid fee encountered in high-notional aggregate",
                     context=context,
+                    symbol=settings.PAIR,
                     client_order_id=client_order_id,
                     exchange_order_id=exchange_order_id or UNSET_EVENT_FIELD,
                     side=side,
                     invalid_fee_count=invalid_fee_count,
                     invalid_fee_notional=invalid_fee_notional,
+                    aggregate_notional=aggregate_notional,
+                    max_invalid_fill_notional=max_invalid_fill_notional,
                     threshold_notional=hard_alert_min_notional,
                     strict_mode_enabled=strict_mode_enabled,
                 )
             )
             notify(alert_message)
 
-        if strict_mode_enabled and invalid_fee_notional >= strict_min_notional:
+        strict_violation = (
+            strict_mode_enabled
+            and (
+                invalid_fee_notional >= strict_min_notional
+                or aggregate_notional >= strict_min_notional
+                or max_invalid_fill_notional >= strict_min_notional
+            )
+        )
+        if strict_violation:
             raise FillFeeStrictModeError(
                 "strict fee validation blocked fill aggregation: "
                 f"context={context} invalid_fee_count={invalid_fee_count} "
                 f"invalid_fee_notional={invalid_fee_notional:.12g} "
+                f"aggregate_notional={aggregate_notional:.12g} "
+                f"max_invalid_fill_notional={max_invalid_fill_notional:.12g} "
                 f"strict_min_notional={strict_min_notional:.12g}"
             )
 
