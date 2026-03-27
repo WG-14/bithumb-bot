@@ -333,7 +333,7 @@ def validate_pretrade(
     if side == "BUY":
         # NOTE:
         # - LIVE_FEE_RATE_ESTIMATE: live pretrade 현금/잔고 보호용 보수적 추정치
-        # - FEE_RATE: paper 체결 시뮬레이션 및 실체결 정산 기록과 관련된 기존 fee rate
+        # - PAPER_FEE_RATE/FEE_RATE: paper 체결 시뮬레이션 및 기존 하위호환 fee rate
         # 두 값의 역할을 분리해 live pretrade 계산이 낙관적으로 과소추정되지 않게 한다.
         fee_mult = 1.0 + max(0.0, float(settings.LIVE_FEE_RATE_ESTIMATE))
         required_cash = notional * fee_mult * buffer_mult

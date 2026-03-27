@@ -106,7 +106,7 @@ sudo systemctl enable --now bithumb-bot-backup.timer
 6. `KILL_SWITCH_LIQUIDATE`는 필요 시 비상 flatten 시도용으로만 사용
 7. `.env.example` 복사본을 그대로 쓰지 말고 live 필수값을 명시적으로 덮어쓴다
    - 기본/공유 DB 경로(`data/bithumb_1m.sqlite`) 금지
-   - paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`)는 live에서 unset
+   - paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`)는 live에서 unset
 8. API 키 권한 확인 (수동 점검)
    - 조회 + 주문(현물) 권한이 있는지 확인
    - 출금 권한은 비활성화 권장
@@ -425,7 +425,7 @@ python3 tools/verify_sqlite_restore.py backups/bithumb_1m.sqlite.20260101_120000
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
 - `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
-- live preflight는 paper/test 성격 혼합 설정을 차단한다(예: `START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`가 설정된 경우 거부)
+- live preflight는 paper/test 성격 혼합 설정을 차단한다(예: `START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`가 설정된 경우 거부)
 - `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`는 live에서 `>0` 유한값 필수
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
 - `LIVE_DRY_RUN=false`인 경우 `LIVE_REAL_ORDER_ARMED=true`를 명시해야 실주문 허용

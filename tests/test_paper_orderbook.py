@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, set_portfolio
+from bithumb_bot.db_core import ensure_db, get_portfolio, set_portfolio
 from bithumb_bot.broker import paper
 
 
@@ -16,7 +16,8 @@ def _set(attr: str, value):
 def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch):
     old_db = _set("DB_PATH", str(tmp_path / "paper.sqlite"))
     old_slip = _set("SLIPPAGE_BPS", 10.0)
-    old_paper_fee = _set("PAPER_FEE_RATE_ESTIMATE", 0.0025)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0025)
     try:
         conn = ensure_db()
         set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
@@ -46,7 +47,53 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
     finally:
         _set("DB_PATH", old_db)
         _set("SLIPPAGE_BPS", old_slip)
-        _set("PAPER_FEE_RATE_ESTIMATE", old_paper_fee)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+
+
+def test_paper_execute_pnl_changes_when_paper_fee_rate_changes(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_fee_compare.sqlite"))
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_buy_fraction = _set("BUY_FRACTION", 1.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
+    try:
+        monkeypatch.setattr(paper, "fetch_orderbook_top", lambda _: (100.0, 100.0))
+
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
+        conn.close()
+
+        object.__setattr__(settings, "PAPER_FEE_RATE", 0.0)
+        buy_trade_no_fee = paper.paper_execute("BUY", ts=1, price=100.0)
+        sell_trade_no_fee = paper.paper_execute("SELL", ts=2, price=100.0)
+        assert buy_trade_no_fee is not None
+        assert sell_trade_no_fee is not None
+        conn = ensure_db()
+        cash_no_fee, _ = get_portfolio(conn)
+        conn.close()
+
+        object.__setattr__(settings, "DB_PATH", str(tmp_path / "paper_fee_compare_2.sqlite"))
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
+        conn.close()
+
+        object.__setattr__(settings, "PAPER_FEE_RATE", 0.005)
+        buy_trade_fee = paper.paper_execute("BUY", ts=3, price=100.0)
+        sell_trade_fee = paper.paper_execute("SELL", ts=4, price=100.0)
+        assert buy_trade_fee is not None
+        assert sell_trade_fee is not None
+        conn = ensure_db()
+        cash_with_fee, _ = get_portfolio(conn)
+        conn.close()
+
+        assert cash_with_fee < cash_no_fee
+    finally:
+        _set("DB_PATH", old_db)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("BUY_FRACTION", old_buy_fraction)
+        _set("PAPER_FEE_RATE", old_paper_fee)
 
 
 def test_paper_execute_blocks_on_abnormal_spread(tmp_path: Path, monkeypatch):

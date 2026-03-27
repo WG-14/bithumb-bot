@@ -36,7 +36,7 @@ uv run python bot.py recovery-report
 주의:
 
 - `.env.example` 복사만으로는 live preflight를 통과하지 못할 수 있다. live에서 `DB_PATH` 명시, `MAX_ORDER_KRW/MAX_DAILY_LOSS_KRW/MAX_DAILY_ORDER_COUNT > 0`, `MAX_ORDERBOOK_SPREAD_BPS/MAX_MARKET_SLIPPAGE_BPS/LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS > 0`(유한값), notifier 설정이 필요하다.
-- live에서는 paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `SLIPPAGE_BPS`)가 설정되어 있으면 preflight가 거부된다.
+- live에서는 paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`)가 설정되어 있으면 preflight가 거부된다.
 - API 키 권한/출금 비활성/IP whitelist 상태는 코드 자동 검증이 아니라 수동 점검 항목이다.
 
 ## 3) API 키/권한 + notifier 체크

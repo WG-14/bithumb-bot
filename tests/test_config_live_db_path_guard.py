@@ -91,10 +91,34 @@ def test_config_live_fee_rate_estimate_supports_env_override() -> None:
     assert float(proc.stdout.strip()) == 0.0031
 
 
-def test_config_paper_fee_rate_estimate_reuses_live_estimate_by_default() -> None:
+def test_config_live_fee_rate_estimate_falls_back_to_legacy_fee_rate() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["FEE_RATE"] = "0.0017"
+    env.pop("LIVE_FEE_RATE_ESTIMATE", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.LIVE_FEE_RATE_ESTIMATE)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert float(proc.stdout.strip()) == 0.0017
+
+
+def test_config_paper_fee_rate_reuses_live_estimate_by_default() -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"
     env["LIVE_FEE_RATE_ESTIMATE"] = "0.0031"
+    env.pop("PAPER_FEE_RATE", None)
     env.pop("PAPER_FEE_RATE_ESTIMATE", None)
     env["PYTHONPATH"] = "src"
 
@@ -102,7 +126,7 @@ def test_config_paper_fee_rate_estimate_reuses_live_estimate_by_default() -> Non
         [
             sys.executable,
             "-c",
-            "import bithumb_bot.config as c; print(c.settings.PAPER_FEE_RATE_ESTIMATE)",
+            "import bithumb_bot.config as c; print(c.settings.PAPER_FEE_RATE)",
         ],
         env=env,
         capture_output=True,
@@ -114,18 +138,18 @@ def test_config_paper_fee_rate_estimate_reuses_live_estimate_by_default() -> Non
     assert float(proc.stdout.strip()) == 0.0031
 
 
-def test_config_paper_fee_rate_estimate_supports_env_override() -> None:
+def test_config_paper_fee_rate_supports_env_override() -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"
     env["LIVE_FEE_RATE_ESTIMATE"] = "0.0031"
-    env["PAPER_FEE_RATE_ESTIMATE"] = "0.0018"
+    env["PAPER_FEE_RATE"] = "0.0018"
     env["PYTHONPATH"] = "src"
 
     proc = subprocess.run(
         [
             sys.executable,
             "-c",
-            "import bithumb_bot.config as c; print(c.settings.PAPER_FEE_RATE_ESTIMATE)",
+            "import bithumb_bot.config as c; print(c.settings.PAPER_FEE_RATE)",
         ],
         env=env,
         capture_output=True,
@@ -135,3 +159,28 @@ def test_config_paper_fee_rate_estimate_supports_env_override() -> None:
 
     assert proc.returncode == 0
     assert float(proc.stdout.strip()) == 0.0018
+
+
+def test_config_paper_fee_rate_falls_back_to_legacy_fee_rate() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["FEE_RATE"] = "0.0044"
+    env.pop("PAPER_FEE_RATE", None)
+    env.pop("PAPER_FEE_RATE_ESTIMATE", None)
+    env.pop("LIVE_FEE_RATE_ESTIMATE", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.PAPER_FEE_RATE)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert float(proc.stdout.strip()) == 0.0044

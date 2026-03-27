@@ -1599,6 +1599,39 @@ def test_validate_pretrade_buy_uses_live_fee_rate_estimate_not_fee_rate() -> Non
         )
 
 
+def test_validate_pretrade_buy_becomes_more_conservative_when_live_fee_increases() -> None:
+    object.__setattr__(settings, "PRETRADE_BALANCE_BUFFER_BPS", 0.0)
+    object.__setattr__(settings, "FEE_RATE", 0.0)
+    broker = _FakeBroker()
+    broker.get_balance = lambda: BrokerBalance(  # type: ignore[method-assign]
+        cash_available=105.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+    )
+
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.01)
+    validate_pretrade(
+        broker=broker,
+        side="BUY",
+        qty=1.0,
+        market_price=100.0,
+        reference_bid=99.9,
+        reference_ask=100.1,
+    )
+
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.06)
+    with pytest.raises(ValueError, match="insufficient available cash"):
+        validate_pretrade(
+            broker=broker,
+            side="BUY",
+            qty=1.0,
+            market_price=100.0,
+            reference_bid=99.9,
+            reference_ask=100.1,
+        )
+
+
 def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "spread_guard.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)

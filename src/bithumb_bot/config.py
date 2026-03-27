@@ -17,6 +17,7 @@ PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
     "FEE_RATE",
+    "PAPER_FEE_RATE",
     "PAPER_FEE_RATE_ESTIMATE",
     "SLIPPAGE_BPS",
 )
@@ -105,14 +106,28 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
-    FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))  # 기본값은 너 코드와 다를 수 있음
-    # live pretrade 잔고/현금 검증에서만 사용하는 보수적 fee 추정치 (실체결 fee 정산과 분리)
-    LIVE_FEE_RATE_ESTIMATE: float = float(os.getenv("LIVE_FEE_RATE_ESTIMATE", "0.0025"))
-    # paper 체결 시뮬레이션 전용 추정 수수료율.
-    # 별도 지정이 없으면 LIVE_FEE_RATE_ESTIMATE 값을 재사용해 과도한 낙관을 방지한다.
-    PAPER_FEE_RATE_ESTIMATE: float = float(
-        os.getenv("PAPER_FEE_RATE_ESTIMATE", os.getenv("LIVE_FEE_RATE_ESTIMATE", "0.0025"))
+    # 레거시 공통 수수료율(하위호환 전용).
+    # 신규 배포에서는 LIVE_FEE_RATE_ESTIMATE / PAPER_FEE_RATE를 개별 설정하는 것을 권장한다.
+    FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
+    # live pretrade 잔고/현금 검증 전용 보수적 추정 수수료율.
+    # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE(legacy) > 0.0025(default)
+    LIVE_FEE_RATE_ESTIMATE: float = float(
+        os.getenv("LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025"))
     )
+    # paper 체결/손익 시뮬레이션 전용 수수료율.
+    # 우선순위:
+    #   PAPER_FEE_RATE > PAPER_FEE_RATE_ESTIMATE(legacy alias) > FEE_RATE(legacy) > LIVE_FEE_RATE_ESTIMATE > 0.0025
+    PAPER_FEE_RATE: float = float(
+        os.getenv(
+            "PAPER_FEE_RATE",
+            os.getenv(
+                "PAPER_FEE_RATE_ESTIMATE",
+                os.getenv("FEE_RATE", os.getenv("LIVE_FEE_RATE_ESTIMATE", "0.0025")),
+            ),
+        )
+    )
+    # 하위호환 alias: 구버전 코드/테스트가 참조해도 동일 값 사용.
+    PAPER_FEE_RATE_ESTIMATE: float = PAPER_FEE_RATE
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
     MAX_ORDERBOOK_SPREAD_BPS: float = float(os.getenv("MAX_ORDERBOOK_SPREAD_BPS", "100"))
     MAX_MARKET_SLIPPAGE_BPS: float = float(os.getenv("MAX_MARKET_SLIPPAGE_BPS", "0"))

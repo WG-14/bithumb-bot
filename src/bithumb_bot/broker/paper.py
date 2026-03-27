@@ -54,7 +54,7 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
     fill_price = _get_fill_price(signal)
     if fill_price is None:
         return None
-    fee_rate = max(0.0, float(settings.PAPER_FEE_RATE_ESTIMATE))
+    fee_rate = max(0.0, float(settings.PAPER_FEE_RATE))
 
     conn = ensure_db()
     client_order_id = ""
