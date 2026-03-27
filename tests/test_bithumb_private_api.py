@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from urllib.parse import urlencode
 
 import httpx
@@ -506,6 +507,86 @@ def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     assert [fill.fill_id for fill in fills] == ["t1", "t2"]
     assert fills[0].qty == pytest.approx(0.02)
     assert fills[1].fee == pytest.approx(12.0)
+
+
+@pytest.mark.parametrize(
+    ("trade_row", "expected_fee"),
+    [
+        ({"fee": "0.1234"}, 0.1234),
+        ({"paid_fee": "0.1234"}, 0.1234),
+        ({"commission": 0.1234}, 0.1234),
+        ({"trade_fee": "1,234.56"}, 1234.56),
+    ],
+)
+def test_get_fills_normalizes_fee_from_supported_keys(monkeypatch, trade_row, expected_fee):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t1",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        **trade_row,
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-1",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(expected_fee)
+
+
+@pytest.mark.parametrize(
+    ("trade_row", "expected_message"),
+    [
+        ({"fee": ""}, "empty fee value"),
+        ({"fee": None}, "empty fee value"),
+        ({}, "missing fee key"),
+        ({"fee": "0"}, "resolved zero fee"),
+    ],
+)
+def test_get_fills_warns_for_missing_or_zero_fee(monkeypatch, caplog, trade_row, expected_message):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t1",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        **trade_row,
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-1",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
+        fills = broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(0.0)
+    assert any(expected_message in rec.message for rec in caplog.records)
 
 
 def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):

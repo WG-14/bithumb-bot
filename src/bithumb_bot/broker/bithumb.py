@@ -9,6 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+import math
 from urllib.parse import urlencode
 from typing import TypedDict
 
@@ -543,6 +544,64 @@ class BithumbBroker:
                 continue
         return None
 
+    @staticmethod
+    def _to_float(value: object, *, default: float | None = 0.0) -> float | None:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() in {"null", "none", "nan", "inf", "-inf", "+inf"}:
+                return default
+            normalized = text.replace(",", "")
+        else:
+            normalized = value
+        try:
+            parsed = float(normalized)
+        except (TypeError, ValueError):
+            return default
+        if not math.isfinite(parsed):
+            return default
+        return parsed
+
+    def _extract_fill_fee(
+        self,
+        row: dict[str, object],
+        *,
+        context: str,
+        qty: float | None,
+        price: float | None,
+    ) -> float:
+        fee_keys = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+        present_keys = [key for key in fee_keys if key in row]
+        log_payload = self._sanitize_debug_value(
+            {
+                "context": context,
+                "fill_hint_id": row.get("uuid") or row.get("id") or row.get("order_id"),
+                "present_fee_keys": present_keys,
+                "fee_values": {key: row.get(key) for key in present_keys},
+            }
+        )
+        if not present_keys:
+            RUN_LOG.warning(format_log_kv("[FILL_FEE] missing fee key", payload=log_payload))
+            return 0.0
+
+        for key in present_keys:
+            raw = row.get(key)
+            parsed = self._to_float(raw, default=None)
+            if parsed is None:
+                if raw in (None, "") or (isinstance(raw, str) and raw.strip().lower() in {"null", "none"}):
+                    RUN_LOG.warning(format_log_kv("[FILL_FEE] empty fee value", payload=log_payload, fee_key=key))
+                else:
+                    RUN_LOG.warning(format_log_kv("[FILL_FEE] invalid fee value", payload=log_payload, fee_key=key))
+                continue
+            fee = float(parsed)
+            if fee == 0.0 and (qty or 0.0) > 0 and price is not None and price > 0:
+                RUN_LOG.warning(format_log_kv("[FILL_FEE] resolved zero fee", payload=log_payload, fee_key=key))
+            return fee
+
+        RUN_LOG.warning(format_log_kv("[FILL_FEE] unable to parse any fee value", payload=log_payload))
+        return 0.0
+
     def _resolve_fill_price(
         self,
         payload: dict[str, object],
@@ -745,9 +804,14 @@ class BithumbBroker:
                         continue
                     qty = self._number(trade, "volume", "qty", "units_traded")
                     price = self._resolve_fill_price(trade, normalized_row=normalized)
-                    fee = self._number(trade, "fee")
                     if qty <= 0 or price is None:
                         continue
+                    fee = self._extract_fill_fee(
+                        trade,
+                        context="trade",
+                        qty=qty,
+                        price=price,
+                    )
                     ts = self._parse_ts(trade.get("created_at") or trade.get("timestamp") or normalized["updated_ts"])
                     fills.append(
                         BrokerFill(
@@ -769,6 +833,12 @@ class BithumbBroker:
             if price is None:
                 continue
             ts = int(normalized["updated_ts"])
+            fee = self._extract_fill_fee(
+                row,
+                context="aggregate",
+                qty=qty_filled,
+                price=price,
+            )
             fills.append(
                 BrokerFill(
                     client_order_id=client_order_id or "",
@@ -776,7 +846,7 @@ class BithumbBroker:
                     fill_ts=ts,
                     price=float(price),
                     qty=qty_filled,
-                    fee=0.0,
+                    fee=fee,
                     exchange_order_id=str(normalized["uuid"]),
                 )
             )
