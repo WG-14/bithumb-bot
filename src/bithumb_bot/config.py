@@ -271,6 +271,27 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             "(live price protection cannot be disabled)"
         )
 
+    strict_min_notional_raw = cfg.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW
+    strict_min_notional_value: float | None = None
+    try:
+        strict_min_notional_value = float(strict_min_notional_raw)
+    except (TypeError, ValueError):
+        strict_min_notional_value = None
+
+    if bool(cfg.LIVE_FILL_FEE_STRICT_MODE):
+        if strict_min_notional_value is None:
+            issues.append(
+                "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW must be a float-compatible value > 0 "
+                "when LIVE_FILL_FEE_STRICT_MODE=true "
+                f"(got {strict_min_notional_raw!r})"
+            )
+        elif not math.isfinite(strict_min_notional_value) or strict_min_notional_value <= 0:
+            issues.append(
+                "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW must be a finite value > 0 "
+                "when LIVE_FILL_FEE_STRICT_MODE=true "
+                f"(got {strict_min_notional_raw!r})"
+            )
+
     if not cfg.LIVE_DRY_RUN:
         if not cfg.LIVE_REAL_ORDER_ARMED:
             issues.append(

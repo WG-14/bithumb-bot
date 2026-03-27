@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from bithumb_bot import config
@@ -27,6 +29,8 @@ def _restore_settings():
         "MAX_ORDERBOOK_SPREAD_BPS": settings.MAX_ORDERBOOK_SPREAD_BPS,
         "MAX_MARKET_SLIPPAGE_BPS": settings.MAX_MARKET_SLIPPAGE_BPS,
         "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
+        "LIVE_FILL_FEE_STRICT_MODE": settings.LIVE_FILL_FEE_STRICT_MODE,
+        "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -61,6 +65,8 @@ def _set_valid_live_defaults(monkeypatch: pytest.MonkeyPatch, *, db_path: str = 
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", False)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 100000.0)
 
 
 
@@ -440,3 +446,43 @@ def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: p
     )
 
     config.validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_allows_non_positive_strict_threshold_when_strict_mode_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", False)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 0.0)
+
+    config.validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_accepts_positive_strict_threshold_when_strict_mode_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", True)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 10000.0)
+
+    config.validate_live_mode_preflight(settings)
+
+
+@pytest.mark.parametrize(
+    "invalid_threshold",
+    [0.0, -1.0, math.nan, math.inf, -math.inf, "abc"],
+)
+def test_live_preflight_rejects_invalid_strict_threshold_when_strict_mode_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_threshold: object,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", True)
+    object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", invalid_threshold)
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW" in msg
+    assert "LIVE_FILL_FEE_STRICT_MODE=true" in msg
