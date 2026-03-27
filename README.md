@@ -42,8 +42,11 @@ uv run bithumb-bot signal --short 7 --long 30
 uv run bithumb-bot explain --short 7 --long 30
 uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
+uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot run --short 7 --long 30
 ```
+
+- 운영자 전략/손익 검증 절차: `docs/OPERATOR_REPORTING.md`
 
 ## 경로 해석 기준 (프로젝트 루트)
 

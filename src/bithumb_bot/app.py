@@ -35,6 +35,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
+from .reporting import cmd_ops_report
 
 import httpx
 
@@ -2135,6 +2136,9 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("trades")
     t.add_argument("--limit", type=int, default=20)
 
+    ops = sub.add_parser("ops-report", help="operator observability report")
+    ops.add_argument("--limit", type=int, default=20)
+
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
@@ -2169,6 +2173,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_orders(args.limit)
     elif args.cmd == "fills":
         cmd_fills(args.limit)
+    elif args.cmd == "ops-report":
+        cmd_ops_report(limit=max(1, int(args.limit)))
     elif args.cmd == "report":
         cmd_report(max(1, int(args.days)))
     elif args.cmd == "audit-ledger":
