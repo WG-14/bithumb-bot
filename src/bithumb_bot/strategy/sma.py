@@ -1,12 +1,150 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Any
 
 from ..config import settings
-from .base import StrategyDecision
+from .base import PositionContext, StrategyDecision
+from .exit_rules import ExitRule, create_exit_rules
+
+
+def _load_signal_rows(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    interval: str,
+    through_ts_ms: int | None,
+) -> list[sqlite3.Row | tuple[Any, ...]]:
+    query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
+    params: list[object] = [pair, interval]
+    if through_ts_ms is not None:
+        query += " AND ts <= ?"
+        params.append(int(through_ts_ms))
+    query += " ORDER BY ts ASC"
+    return conn.execute(query, tuple(params)).fetchall()
+
+
+def _sma(values: list[float], n: int, end: int) -> float:
+    return sum(values[end - n : end]) / n
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
+
+def _base_signal(*, prev_s: float, prev_l: float, curr_s: float, curr_l: float) -> tuple[str, str]:
+    if prev_s <= prev_l and curr_s > curr_l:
+        return "BUY", "sma golden cross"
+    if prev_s >= prev_l and curr_s < curr_l:
+        return "SELL", "sma dead cross"
+    return "HOLD", "sma no crossover"
+
+
+def _resolve_exit_rule_names(raw: str) -> list[str]:
+    return [token.strip().lower() for token in str(raw or "").split(",") if token.strip()]
+
+
+def _load_position_context(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    candle_ts: int,
+    market_price: float,
+    signal_context: dict[str, Any],
+) -> PositionContext:
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                MIN(entry_ts) AS entry_ts,
+                SUM(entry_price * qty_open) / NULLIF(SUM(qty_open), 0.0) AS avg_entry_price,
+                SUM(qty_open) AS qty_open
+            FROM open_position_lots
+            WHERE pair=? AND qty_open > 1e-12
+            """,
+            (pair,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+
+    if row is None or row["entry_ts"] is None or row["qty_open"] is None:
+        return PositionContext(in_position=False, recent_signal_context=dict(signal_context))
+
+    entry_ts = int(row["entry_ts"])
+    entry_price = float(row["avg_entry_price"])
+    qty_open = float(row["qty_open"])
+    holding_time_sec = max(0.0, (int(candle_ts) - entry_ts) / 1000.0)
+    unrealized_pnl = (float(market_price) - entry_price) * qty_open
+    unrealized_pnl_ratio = _safe_ratio(float(market_price) - entry_price, entry_price)
+
+    return PositionContext(
+        in_position=qty_open > 1e-12,
+        entry_ts=entry_ts,
+        entry_price=entry_price,
+        qty_open=qty_open,
+        holding_time_sec=holding_time_sec,
+        unrealized_pnl=unrealized_pnl,
+        unrealized_pnl_ratio=unrealized_pnl_ratio,
+        recent_signal_context=dict(signal_context),
+    )
+
+
+def _apply_entry_exit_policy(
+    *,
+    base_signal: str,
+    base_reason: str,
+    base_context: dict[str, Any],
+    position: PositionContext,
+    exit_rules: list[ExitRule],
+) -> StrategyDecision:
+    if not position.in_position:
+        return StrategyDecision(signal=base_signal, reason=base_reason, context=base_context)
+
+    exit_results: list[dict[str, Any]] = []
+    for rule in exit_rules:
+        rule_result = rule.evaluate(
+            position=position,
+            candle_ts=int(base_context["ts"]),
+            market_price=float(base_context["last_close"]),
+            signal_context={
+                "base_signal": base_signal,
+                "base_reason": base_reason,
+                "curr_s": base_context["curr_s"],
+                "curr_l": base_context["curr_l"],
+            },
+        )
+        exit_results.append(
+            {
+                "rule": rule.name,
+                "triggered": bool(rule_result.should_exit),
+                "reason": rule_result.reason,
+                "context": rule_result.context,
+            }
+        )
+        if rule_result.should_exit:
+            context = dict(base_context)
+            context["position"] = position.as_dict()
+            context["exit"] = {
+                "triggered": True,
+                "rule": rule.name,
+                "reason": rule_result.reason,
+                "evaluations": exit_results,
+            }
+            return StrategyDecision(signal="SELL", reason=rule_result.reason, context=context)
+
+    context = dict(base_context)
+    context["position"] = position.as_dict()
+    context["exit"] = {
+        "triggered": False,
+        "rule": None,
+        "reason": "no exit rule triggered",
+        "evaluations": exit_results,
+    }
+    return StrategyDecision(signal="HOLD", reason="position held: no exit rule triggered", context=context)
 
 
 @dataclass(frozen=True)
@@ -15,6 +153,10 @@ class SmaCrossStrategy:
     long_n: int
     pair: str = settings.PAIR
     interval: str = settings.INTERVAL
+    exit_rule_names: list[str] = field(
+        default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
+    )
+    exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
 
     name: str = "sma_cross"
 
@@ -27,55 +169,62 @@ class SmaCrossStrategy:
         if self.short_n >= self.long_n:
             raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
-        need = self.long_n + 2
-        query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
-        params: list[object] = [self.pair, self.interval]
-        if through_ts_ms is not None:
-            query += " AND ts <= ?"
-            params.append(int(through_ts_ms))
-        query += " ORDER BY ts ASC"
-
-        rows = conn.execute(query, tuple(params)).fetchall()
-
-        if len(rows) < need:
+        rows = _load_signal_rows(
+            conn,
+            pair=self.pair,
+            interval=self.interval,
+            through_ts_ms=through_ts_ms,
+        )
+        if len(rows) < self.long_n + 2:
             return None
 
         closes = [float(r[1]) for r in rows]
         ts_list = [int(r[0]) for r in rows]
-
-        def sma(values: list[float], n: int, end: int) -> float:
-            w = values[end - n : end]
-            return sum(w) / n
-
         end_prev = len(closes) - 1
         end_curr = len(closes)
 
-        prev_s = sma(closes, self.short_n, end_prev)
-        prev_l = sma(closes, self.long_n, end_prev)
-        curr_s = sma(closes, self.short_n, end_curr)
-        curr_l = sma(closes, self.long_n, end_curr)
+        prev_s = _sma(closes, self.short_n, end_prev)
+        prev_l = _sma(closes, self.long_n, end_prev)
+        curr_s = _sma(closes, self.short_n, end_curr)
+        curr_l = _sma(closes, self.long_n, end_curr)
 
-        signal = "HOLD"
-        reason = "sma no crossover"
-        if prev_s <= prev_l and curr_s > curr_l:
-            signal = "BUY"
-            reason = "sma golden cross"
-        elif prev_s >= prev_l and curr_s < curr_l:
-            signal = "SELL"
-            reason = "sma dead cross"
-
-        return StrategyDecision(
-            signal=signal,
-            reason=reason,
-            context={
-                "ts": ts_list[-1],
-                "prev_s": prev_s,
-                "prev_l": prev_l,
-                "curr_s": curr_s,
-                "curr_l": curr_l,
-                "last_close": float(closes[-1]),
-                "strategy": self.name,
-            },
+        base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
+        signal_context = {
+            "strategy": self.name,
+            "base_signal": base_signal,
+            "base_reason": base_reason,
+            "prev_s": prev_s,
+            "prev_l": prev_l,
+            "curr_s": curr_s,
+            "curr_l": curr_l,
+        }
+        position = _load_position_context(
+            conn,
+            pair=self.pair,
+            candle_ts=ts_list[-1],
+            market_price=float(closes[-1]),
+            signal_context=signal_context,
+        )
+        exit_rules = create_exit_rules(
+            rule_names=self.exit_rule_names,
+            max_holding_sec=float(self.exit_max_holding_min) * 60.0,
+        )
+        base_context = {
+            "ts": ts_list[-1],
+            "prev_s": prev_s,
+            "prev_l": prev_l,
+            "curr_s": curr_s,
+            "curr_l": curr_l,
+            "last_close": float(closes[-1]),
+            "strategy": self.name,
+            "entry": {"base_signal": base_signal, "base_reason": base_reason},
+        }
+        return _apply_entry_exit_policy(
+            base_signal=base_signal,
+            base_reason=base_reason,
+            base_context=base_context,
+            position=position,
+            exit_rules=exit_rules,
         )
 
 
@@ -90,6 +239,10 @@ class SmaWithFilterStrategy:
     min_volatility_ratio: float = settings.SMA_FILTER_VOL_MIN_RANGE_RATIO
     overextended_lookback: int = settings.SMA_FILTER_OVEREXT_LOOKBACK
     overextended_max_return_ratio: float = settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO
+    exit_rule_names: list[str] = field(
+        default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
+    )
+    exit_max_holding_min: int = settings.STRATEGY_EXIT_MAX_HOLDING_MIN
 
     name: str = "sma_with_filter"
 
@@ -107,56 +260,38 @@ class SmaWithFilterStrategy:
             int(self.volatility_window),
             int(self.overextended_lookback) + 1,
         )
-        query = "SELECT ts, close FROM candles WHERE pair=? AND interval=?"
-        params: list[object] = [self.pair, self.interval]
-        if through_ts_ms is not None:
-            query += " AND ts <= ?"
-            params.append(int(through_ts_ms))
-        query += " ORDER BY ts ASC"
-
-        rows = conn.execute(query, tuple(params)).fetchall()
+        rows = _load_signal_rows(
+            conn,
+            pair=self.pair,
+            interval=self.interval,
+            through_ts_ms=through_ts_ms,
+        )
         if len(rows) < min_rows:
             return None
 
         closes = [float(r[1]) for r in rows]
         ts_list = [int(r[0]) for r in rows]
 
-        def sma(values: list[float], n: int, end: int) -> float:
-            w = values[end - n : end]
-            return sum(w) / n
-
-        def safe_ratio(numerator: float, denominator: float) -> float:
-            if denominator == 0:
-                return 0.0
-            return numerator / denominator
-
         end_prev = len(closes) - 1
         end_curr = len(closes)
 
-        prev_s = sma(closes, self.short_n, end_prev)
-        prev_l = sma(closes, self.long_n, end_prev)
-        curr_s = sma(closes, self.short_n, end_curr)
-        curr_l = sma(closes, self.long_n, end_curr)
+        prev_s = _sma(closes, self.short_n, end_prev)
+        prev_l = _sma(closes, self.long_n, end_prev)
+        curr_s = _sma(closes, self.short_n, end_curr)
+        curr_l = _sma(closes, self.long_n, end_curr)
 
-        base_signal = "HOLD"
-        base_reason = "sma no crossover"
-        if prev_s <= prev_l and curr_s > curr_l:
-            base_signal = "BUY"
-            base_reason = "sma golden cross"
-        elif prev_s >= prev_l and curr_s < curr_l:
-            base_signal = "SELL"
-            base_reason = "sma dead cross"
+        base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
 
-        gap_ratio = abs(safe_ratio(curr_s - curr_l, curr_l))
+        gap_ratio = abs(_safe_ratio(curr_s - curr_l, curr_l))
 
         vol_window = max(1, int(self.volatility_window))
         vol_closes = closes[-vol_window:]
         vol_mean = fmean(vol_closes)
-        volatility_ratio = safe_ratio((max(vol_closes) - min(vol_closes)), vol_mean)
+        volatility_ratio = _safe_ratio((max(vol_closes) - min(vol_closes)), vol_mean)
 
         overext_lookback = max(1, int(self.overextended_lookback))
         base_close = closes[-1 - overext_lookback]
-        overextended_ratio = abs(safe_ratio(closes[-1] - base_close, base_close))
+        overextended_ratio = abs(_safe_ratio(closes[-1] - base_close, base_close))
 
         gap_filter_enabled = float(self.min_gap_ratio) > 0
         volatility_filter_enabled = float(self.min_volatility_ratio) > 0
@@ -179,17 +314,44 @@ class SmaWithFilterStrategy:
         if overextended_triggered:
             blocked_filters.append("overextended")
 
-        decision_signal = base_signal
-        decision_reason = base_reason
         should_filter_entry = base_signal in ("BUY", "SELL")
+        entry_signal = base_signal
+        entry_reason = base_reason
         if should_filter_entry and blocked_filters:
-            decision_signal = "HOLD"
-            decision_reason = f"filtered entry: {', '.join(blocked_filters)}"
+            entry_signal = "HOLD"
+            entry_reason = f"filtered entry: {', '.join(blocked_filters)}"
 
-        context = {
+        signal_context = {
+            "strategy": self.name,
+            "base_signal": base_signal,
+            "base_reason": base_reason,
+            "entry_signal": entry_signal,
+            "entry_reason": entry_reason,
+            "prev_s": prev_s,
+            "prev_l": prev_l,
+            "curr_s": curr_s,
+            "curr_l": curr_l,
+        }
+        position = _load_position_context(
+            conn,
+            pair=self.pair,
+            candle_ts=ts_list[-1],
+            market_price=float(closes[-1]),
+            signal_context=signal_context,
+        )
+        exit_rules = create_exit_rules(
+            rule_names=self.exit_rule_names,
+            max_holding_sec=float(self.exit_max_holding_min) * 60.0,
+        )
+
+        base_context = {
             "ts": ts_list[-1],
             "last_close": float(closes[-1]),
             "strategy": self.name,
+            "prev_s": prev_s,
+            "prev_l": prev_l,
+            "curr_s": curr_s,
+            "curr_l": curr_l,
             "features": {
                 "prev_s": prev_s,
                 "prev_l": prev_l,
@@ -225,12 +387,15 @@ class SmaWithFilterStrategy:
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
             "blocked_filters": blocked_filters,
+            "entry": {"base_signal": base_signal, "base_reason": base_reason},
         }
 
-        return StrategyDecision(
-            signal=decision_signal,
-            reason=decision_reason,
-            context=context,
+        return _apply_entry_exit_policy(
+            base_signal=entry_signal,
+            base_reason=entry_reason,
+            base_context=base_context,
+            position=position,
+            exit_rules=exit_rules,
         )
 
 
@@ -240,12 +405,24 @@ def create_sma_strategy(
     long_n: int | None = None,
     pair: str | None = None,
     interval: str | None = None,
+    exit_rule_names: list[str] | None = None,
+    exit_max_holding_min: int | None = None,
 ) -> SmaCrossStrategy:
     return SmaCrossStrategy(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
         long_n=int(settings.SMA_LONG if long_n is None else long_n),
         pair=settings.PAIR if pair is None else str(pair),
         interval=settings.INTERVAL if interval is None else str(interval),
+        exit_rule_names=(
+            _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
+            if exit_rule_names is None
+            else [str(name).strip().lower() for name in exit_rule_names if str(name).strip()]
+        ),
+        exit_max_holding_min=int(
+            settings.STRATEGY_EXIT_MAX_HOLDING_MIN
+            if exit_max_holding_min is None
+            else exit_max_holding_min
+        ),
     )
 
 
@@ -260,6 +437,8 @@ def create_sma_with_filter_strategy(
     min_volatility_ratio: float | None = None,
     overextended_lookback: int | None = None,
     overextended_max_return_ratio: float | None = None,
+    exit_rule_names: list[str] | None = None,
+    exit_max_holding_min: int | None = None,
 ) -> SmaWithFilterStrategy:
     return SmaWithFilterStrategy(
         short_n=int(settings.SMA_SHORT if short_n is None else short_n),
@@ -286,6 +465,16 @@ def create_sma_with_filter_strategy(
             settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO
             if overextended_max_return_ratio is None
             else overextended_max_return_ratio
+        ),
+        exit_rule_names=(
+            _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
+            if exit_rule_names is None
+            else [str(name).strip().lower() for name in exit_rule_names if str(name).strip()]
+        ),
+        exit_max_holding_min=int(
+            settings.STRATEGY_EXIT_MAX_HOLDING_MIN
+            if exit_max_holding_min is None
+            else exit_max_holding_min
         ),
     )
 

@@ -86,6 +86,11 @@ class Settings:
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
         os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.03")
     )
+    STRATEGY_EXIT_RULES: str = os.getenv("STRATEGY_EXIT_RULES", "opposite_cross,max_holding_time")
+    STRATEGY_EXIT_MAX_HOLDING_MIN: int = int(os.getenv("STRATEGY_EXIT_MAX_HOLDING_MIN", "0"))
+    STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO: float = float(
+        os.getenv("STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO", "0")
+    )
 
     # storage
     DB_PATH: str = resolve_db_path_from_env(os.getenv("MODE", "paper"))
