@@ -72,6 +72,7 @@ class Settings:
     EVERY: int = int(os.getenv("EVERY", "60"))  # seconds
 
     # strategy
+    STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "sma_cross")
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))

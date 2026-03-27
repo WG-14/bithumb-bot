@@ -7,7 +7,6 @@ from .config import (
 )
 from .risk import evaluate_buy_guardrails
 from .broker.paper import paper_execute
-from .strategy.sma import compute_signal
 import os
 import time
 import argparse
@@ -19,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
 from .utils_time import kst_str, parse_interval_sec
-from .engine import evaluate_resume_eligibility, get_health_status, maybe_clear_stale_initial_reconcile_halt
+from .engine import compute_signal, evaluate_resume_eligibility, get_health_status, maybe_clear_stale_initial_reconcile_halt
 from .recovery import (
     cancel_open_orders_with_broker,
     load_recent_order_lifecycle,

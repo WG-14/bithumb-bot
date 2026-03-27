@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .config import settings, validate_live_mode_preflight
 from .marketdata import cmd_sync
-from .strategy.sma import compute_signal
+from .strategy import create_strategy
 from .broker.paper import paper_execute
 from .broker.live import live_execute_signal
 from .broker.bithumb import BithumbBroker
@@ -29,6 +29,28 @@ STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+
+
+def compute_signal(
+    conn,
+    short_n: int,
+    long_n: int,
+    *,
+    through_ts_ms: int | None = None,
+    strategy_name: str | None = None,
+):
+    selected_strategy_name = (strategy_name or settings.STRATEGY_NAME)
+    strategy = create_strategy(
+        selected_strategy_name,
+        short_n=short_n,
+        long_n=long_n,
+        pair=settings.PAIR,
+        interval=settings.INTERVAL,
+    )
+    decision = strategy.decide(conn, through_ts_ms=through_ts_ms)
+    if decision is None:
+        return None
+    return decision.as_dict()
 
 
 @dataclass(frozen=True)
@@ -951,6 +973,7 @@ def run_loop(short_n: int, long_n: int) -> None:
         symbol=settings.PAIR,
         interval=settings.INTERVAL,
         every_sec=sec,
+        strategy=settings.STRATEGY_NAME,
         sma_short=short_n,
         sma_long=long_n,
     )
@@ -1318,13 +1341,31 @@ def run_loop(short_n: int, long_n: int) -> None:
             conn = ensure_db()
             try:
                 try:
-                    r = compute_signal(conn, short_n, long_n, through_ts_ms=closed_candle_ts_ms)
+                    r = compute_signal(
+                        conn,
+                        short_n,
+                        long_n,
+                        through_ts_ms=closed_candle_ts_ms,
+                        strategy_name=settings.STRATEGY_NAME,
+                    )
                 except TypeError as exc:
-                    if "through_ts_ms" not in str(exc):
+                    err = str(exc)
+                    if ("through_ts_ms" not in err) and ("strategy_name" not in err):
                         raise
-                    # Compatibility path for tests/mocks still patching the older
-                    # compute_signal(conn, short_n, long_n) signature.
-                    r = compute_signal(conn, short_n, long_n)
+                    try:
+                        r = compute_signal(
+                            conn,
+                            short_n,
+                            long_n,
+                            through_ts_ms=closed_candle_ts_ms,
+                        )
+                    except TypeError as compat_exc:
+                        compat_err = str(compat_exc)
+                        if "through_ts_ms" not in compat_err:
+                            raise
+                        # Compatibility path for tests/mocks still patching the older
+                        # compute_signal(conn, short_n, long_n) signature.
+                        r = compute_signal(conn, short_n, long_n)
             finally:
                 conn.close()
 
