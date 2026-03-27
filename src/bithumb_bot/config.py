@@ -88,6 +88,10 @@ class Settings:
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
         os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.03")
     )
+    ENTRY_EDGE_BUFFER_RATIO: float = float(os.getenv("ENTRY_EDGE_BUFFER_RATIO", "0.0005"))
+    STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = float(
+        os.getenv("STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0")
+    )
     STRATEGY_EXIT_RULES: str = os.getenv("STRATEGY_EXIT_RULES", "opposite_cross,max_holding_time")
     STRATEGY_EXIT_MAX_HOLDING_MIN: int = int(os.getenv("STRATEGY_EXIT_MAX_HOLDING_MIN", "0"))
     STRATEGY_EXIT_MIN_TAKE_PROFIT_RATIO: float = float(

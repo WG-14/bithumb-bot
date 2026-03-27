@@ -48,6 +48,43 @@ def _resolve_exit_rule_names(raw: str) -> list[str]:
     return [token.strip().lower() for token in str(raw or "").split(",") if token.strip()]
 
 
+def _compute_entry_cost_floor_ratio(*, slippage_bps: float, live_fee_rate_estimate: float, buffer_ratio: float) -> float:
+    slippage_ratio = max(0.0, float(slippage_bps)) / 10_000.0
+    roundtrip_fee_ratio = 2.0 * max(0.0, float(live_fee_rate_estimate))
+    return roundtrip_fee_ratio + slippage_ratio + max(0.0, float(buffer_ratio))
+
+
+def _evaluate_entry_edge_filter(
+    *,
+    base_signal: str,
+    gap_ratio: float,
+    slippage_bps: float,
+    live_fee_rate_estimate: float,
+    edge_buffer_ratio: float,
+    strategy_min_expected_edge_ratio: float,
+) -> tuple[bool, dict[str, float | bool]]:
+    cost_floor_ratio = _compute_entry_cost_floor_ratio(
+        slippage_bps=slippage_bps,
+        live_fee_rate_estimate=live_fee_rate_estimate,
+        buffer_ratio=edge_buffer_ratio,
+    )
+    required_edge_ratio = max(cost_floor_ratio, max(0.0, float(strategy_min_expected_edge_ratio)))
+    expected_edge_ratio = max(0.0, float(gap_ratio))
+    enabled = base_signal in ("BUY", "SELL")
+    blocked = enabled and expected_edge_ratio < required_edge_ratio
+    return blocked, {
+        "enabled": enabled,
+        "blocked": blocked,
+        "expected_edge_ratio": expected_edge_ratio,
+        "required_edge_ratio": required_edge_ratio,
+        "cost_floor_ratio": cost_floor_ratio,
+        "roundtrip_fee_ratio": 2.0 * max(0.0, float(live_fee_rate_estimate)),
+        "slippage_ratio": max(0.0, float(slippage_bps)) / 10_000.0,
+        "buffer_ratio": max(0.0, float(edge_buffer_ratio)),
+        "min_expected_edge_ratio": max(0.0, float(strategy_min_expected_edge_ratio)),
+    }
+
+
 def _load_position_context(
     conn: sqlite3.Connection,
     *,
@@ -239,6 +276,10 @@ class SmaWithFilterStrategy:
     min_volatility_ratio: float = settings.SMA_FILTER_VOL_MIN_RANGE_RATIO
     overextended_lookback: int = settings.SMA_FILTER_OVEREXT_LOOKBACK
     overextended_max_return_ratio: float = settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO
+    slippage_bps: float = settings.SLIPPAGE_BPS
+    live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
+    entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
+    strategy_min_expected_edge_ratio: float = settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
     exit_rule_names: list[str] = field(
         default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
     )
@@ -305,6 +346,14 @@ class SmaWithFilterStrategy:
             overextended_filter_enabled
             and overextended_ratio > float(self.overextended_max_return_ratio)
         )
+        edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
+            base_signal=base_signal,
+            gap_ratio=gap_ratio,
+            slippage_bps=float(self.slippage_bps),
+            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
+            strategy_min_expected_edge_ratio=float(self.strategy_min_expected_edge_ratio),
+        )
 
         blocked_filters = []
         if gap_triggered:
@@ -313,6 +362,8 @@ class SmaWithFilterStrategy:
             blocked_filters.append("volatility")
         if overextended_triggered:
             blocked_filters.append("overextended")
+        if edge_filter_triggered:
+            blocked_filters.append("cost_edge")
 
         should_filter_entry = base_signal in ("BUY", "SELL")
         entry_signal = base_signal
@@ -384,6 +435,17 @@ class SmaWithFilterStrategy:
                     "threshold": float(self.overextended_max_return_ratio),
                     "value": overextended_ratio,
                 },
+                "cost_edge": {
+                    "enabled": bool(edge_filter_details["enabled"]),
+                    "passed": not bool(edge_filter_details["blocked"]),
+                    "value": float(edge_filter_details["expected_edge_ratio"]),
+                    "threshold": float(edge_filter_details["required_edge_ratio"]),
+                    "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
+                    "roundtrip_fee_ratio": float(edge_filter_details["roundtrip_fee_ratio"]),
+                    "slippage_ratio": float(edge_filter_details["slippage_ratio"]),
+                    "buffer_ratio": float(edge_filter_details["buffer_ratio"]),
+                    "min_expected_edge_ratio": float(edge_filter_details["min_expected_edge_ratio"]),
+                },
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
             "blocked_filters": blocked_filters,
@@ -437,6 +499,10 @@ def create_sma_with_filter_strategy(
     min_volatility_ratio: float | None = None,
     overextended_lookback: int | None = None,
     overextended_max_return_ratio: float | None = None,
+    slippage_bps: float | None = None,
+    live_fee_rate_estimate: float | None = None,
+    entry_edge_buffer_ratio: float | None = None,
+    strategy_min_expected_edge_ratio: float | None = None,
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
 ) -> SmaWithFilterStrategy:
@@ -465,6 +531,22 @@ def create_sma_with_filter_strategy(
             settings.SMA_FILTER_OVEREXT_MAX_RETURN_RATIO
             if overextended_max_return_ratio is None
             else overextended_max_return_ratio
+        ),
+        slippage_bps=float(settings.SLIPPAGE_BPS if slippage_bps is None else slippage_bps),
+        live_fee_rate_estimate=float(
+            settings.LIVE_FEE_RATE_ESTIMATE
+            if live_fee_rate_estimate is None
+            else live_fee_rate_estimate
+        ),
+        entry_edge_buffer_ratio=float(
+            settings.ENTRY_EDGE_BUFFER_RATIO
+            if entry_edge_buffer_ratio is None
+            else entry_edge_buffer_ratio
+        ),
+        strategy_min_expected_edge_ratio=float(
+            settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
+            if strategy_min_expected_edge_ratio is None
+            else strategy_min_expected_edge_ratio
         ),
         exit_rule_names=(
             _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
