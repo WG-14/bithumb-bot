@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from typing import Any
 
@@ -8,6 +9,7 @@ from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .lifecycle import apply_fill_lifecycle
 from .notifier import format_event, notify
+from .observability import record_fill_fee_anomaly
 from .oms import add_fill, create_order, set_exchange_order_id, set_status
 
 _LOG = logging.getLogger(__name__)
@@ -142,19 +144,55 @@ def apply_fill_and_trade(
     qty_value = float(qty)
     fee_value = float(fee)
     fill_id_value = fill_id or "-"
-    if (
+    notional_value = price_value * qty_value if math.isfinite(price_value) and math.isfinite(qty_value) else 0.0
+    fee_ratio_value: float | None = None
+    if notional_value > eps and math.isfinite(fee_value):
+        fee_ratio_value = fee_value / notional_value
+
+    min_notional = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    min_fee_ratio = max(0.0, float(settings.LIVE_FILL_FEE_RATIO_MIN))
+    max_fee_ratio = max(min_fee_ratio, float(settings.LIVE_FILL_FEE_RATIO_MAX))
+    should_check_live_fee_anomaly = (
         settings.MODE == "live"
-        and price_value > eps
-        and qty_value > eps
-        and abs(fee_value) <= eps
+        and math.isfinite(notional_value)
+        and notional_value >= min_notional
+    )
+    if should_check_live_fee_anomaly and abs(fee_value) <= eps:
+        record_fill_fee_anomaly(
+            anomaly_type="zero_fee",
+            mode=settings.MODE,
+            client_order_id=client_order_id,
+            fill_id=fill_id_value,
+            side=side,
+            price=price_value,
+            qty=qty_value,
+            notional=notional_value,
+            fee=fee_value,
+            fee_ratio=fee_ratio_value,
+            min_notional=min_notional,
+            min_fee_ratio=min_fee_ratio,
+            max_fee_ratio=max_fee_ratio,
+        )
+    elif (
+        should_check_live_fee_anomaly
+        and fee_ratio_value is not None
+        and math.isfinite(fee_ratio_value)
+        and (fee_ratio_value < min_fee_ratio or fee_ratio_value > max_fee_ratio)
     ):
-        _LOG.warning(
-            "live_fill_zero_fee_detected client_order_id=%s fill_id=%s side=%s price=%.12g qty=%.12g",
-            client_order_id,
-            fill_id_value,
-            side,
-            price_value,
-            qty_value,
+        record_fill_fee_anomaly(
+            anomaly_type="fee_ratio_outlier",
+            mode=settings.MODE,
+            client_order_id=client_order_id,
+            fill_id=fill_id_value,
+            side=side,
+            price=price_value,
+            qty=qty_value,
+            notional=notional_value,
+            fee=fee_value,
+            fee_ratio=fee_ratio_value,
+            min_notional=min_notional,
+            min_fee_ratio=min_fee_ratio,
+            max_fee_ratio=max_fee_ratio,
         )
 
     init_portfolio(conn)

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 import time
 from typing import Any
 
 from .config import settings
-from .notifier import AlertSeverity, format_event
+from .notifier import AlertSeverity, format_event, notify
 
 
 _STDOUT_HANDLER_NAME = "bithumb_bot_stdout"
@@ -21,6 +22,7 @@ _CRITICAL_EVENT_NAMES = {
     "recovery_required_transition",
     "order_submit_unknown",
 }
+_FILL_FEE_ANOMALY_COUNTS: dict[str, int] = {}
 
 
 def _infer_severity(*, event: str, reason_code: str | None, state_to: str | None, alert_kind: str | None) -> AlertSeverity:
@@ -135,3 +137,66 @@ def format_log_kv(prefix: str, /, **fields: Any) -> str:
             rendered = json.dumps(rendered, ensure_ascii=False)
         parts.append(f"{key}={rendered}")
     return " ".join(parts)
+
+
+def record_fill_fee_anomaly(
+    *,
+    anomaly_type: str,
+    mode: str,
+    client_order_id: str,
+    fill_id: str | None,
+    side: str,
+    price: float,
+    qty: float,
+    notional: float,
+    fee: float,
+    fee_ratio: float | None,
+    min_notional: float,
+    min_fee_ratio: float,
+    max_fee_ratio: float,
+) -> None:
+    key = str(anomaly_type or "unknown")
+    _FILL_FEE_ANOMALY_COUNTS[key] = int(_FILL_FEE_ANOMALY_COUNTS.get(key, 0)) + 1
+    anomaly_count = _FILL_FEE_ANOMALY_COUNTS[key]
+    ratio_text = f"{fee_ratio:.12g}" if fee_ratio is not None and math.isfinite(fee_ratio) else "na"
+    fill_id_value = fill_id or "-"
+    _message = format_event(
+        "live_fill_fee_anomaly",
+        severity=AlertSeverity.WARN,
+        mode=mode,
+        anomaly_type=key,
+        anomaly_count=anomaly_count,
+        client_order_id=client_order_id,
+        fill_id=fill_id_value,
+        side=side,
+        price=f"{price:.12g}",
+        qty=f"{qty:.12g}",
+        notional=f"{notional:.12g}",
+        fee=f"{fee:.12g}",
+        fee_ratio=ratio_text,
+        min_notional=f"{float(min_notional):.12g}",
+        min_fee_ratio=f"{float(min_fee_ratio):.12g}",
+        max_fee_ratio=f"{float(max_fee_ratio):.12g}",
+        pair=settings.PAIR,
+    )
+    logging.getLogger(__name__).warning(
+        format_log_kv(
+            "[FILL_FEE_ANOMALY]",
+            event="live_fill_fee_anomaly",
+            mode=mode,
+            anomaly_type=key,
+            anomaly_count=anomaly_count,
+            client_order_id=client_order_id,
+            fill_id=fill_id_value,
+            side=side,
+            price=price,
+            qty=qty,
+            notional=notional,
+            fee=fee,
+            fee_ratio=ratio_text,
+            min_notional=min_notional,
+            min_fee_ratio=min_fee_ratio,
+            max_fee_ratio=max_fee_ratio,
+        )
+    )
+    notify(_message, severity=AlertSeverity.WARN)

@@ -6,6 +6,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 import bithumb_bot.execution as execution_module
+import bithumb_bot.observability as observability_module
 
 
 def test_apply_fill_dedupes_by_fill_id_and_notifies_once(tmp_path, monkeypatch):
@@ -213,7 +214,12 @@ def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
     object.__setattr__(settings, "DB_PATH", str(db_path))
     object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
     original_mode = settings.MODE
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+    alerts: list[str] = []
+    original_notify = observability_module.notify
+    observability_module.notify = lambda msg, severity=None: alerts.append(msg)
 
     conn = ensure_db(str(db_path))
     try:
@@ -240,11 +246,15 @@ def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
     finally:
         conn.close()
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
+        observability_module.notify = original_notify
 
-    assert "live_fill_zero_fee_detected" in caplog.text
+    assert "live_fill_fee_anomaly" in caplog.text
+    assert "anomaly_type=zero_fee" in caplog.text
     assert "client_order_id=o-live-zero-fee" in caplog.text
     assert "fill_id=fill-live-zero-fee" in caplog.text
     assert "side=BUY" in caplog.text
+    assert any("event=live_fill_fee_anomaly" in msg for msg in alerts)
 
 
 def test_apply_fill_does_not_warn_for_live_positive_fee(tmp_path, caplog):
@@ -280,7 +290,7 @@ def test_apply_fill_does_not_warn_for_live_positive_fee(tmp_path, caplog):
         conn.close()
         object.__setattr__(settings, "MODE", original_mode)
 
-    assert "live_fill_zero_fee_detected" not in caplog.text
+    assert "live_fill_fee_anomaly" not in caplog.text
 
 
 def test_apply_fill_does_not_warn_for_paper_zero_fee(tmp_path, caplog):
@@ -316,4 +326,93 @@ def test_apply_fill_does_not_warn_for_paper_zero_fee(tmp_path, caplog):
         conn.close()
         object.__setattr__(settings, "MODE", original_mode)
 
-    assert "live_fill_zero_fee_detected" not in caplog.text
+    assert "live_fill_fee_anomaly" not in caplog.text
+
+
+def test_apply_fill_warns_for_live_fee_ratio_outlier(tmp_path, caplog):
+    db_path = tmp_path / "fill_live_ratio_outlier.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    original_min_ratio = settings.LIVE_FILL_FEE_RATIO_MIN
+    original_max_ratio = settings.LIVE_FILL_FEE_RATIO_MAX
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_RATIO_MIN", 0.0001)
+    object.__setattr__(settings, "LIVE_FILL_FEE_RATIO_MAX", 0.001)
+    alerts: list[str] = []
+    original_notify = observability_module.notify
+    observability_module.notify = lambda msg, severity=None: alerts.append(msg)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-live-ratio-outlier",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+        with caplog.at_level("WARNING", logger="bithumb_bot.observability"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-live-ratio-outlier",
+                side="BUY",
+                fill_id="fill-live-ratio-outlier",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.02,
+                fee=10_000.0,
+            )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
+        object.__setattr__(settings, "LIVE_FILL_FEE_RATIO_MIN", original_min_ratio)
+        object.__setattr__(settings, "LIVE_FILL_FEE_RATIO_MAX", original_max_ratio)
+        observability_module.notify = original_notify
+
+    assert "live_fill_fee_anomaly" in caplog.text
+    assert "anomaly_type=fee_ratio_outlier" in caplog.text
+    assert any("anomaly_type=fee_ratio_outlier" in msg for msg in alerts)
+
+
+def test_apply_fill_fee_ratio_anomaly_check_is_division_safe(tmp_path, caplog):
+    db_path = tmp_path / "fill_live_ratio_division_safe.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-live-ratio-safe",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+        with caplog.at_level("WARNING", logger="bithumb_bot.observability"):
+            with pytest.raises(RuntimeError):
+                apply_fill_and_trade(
+                    conn,
+                    client_order_id="o-live-ratio-safe",
+                    side="BUY",
+                    fill_id="fill-live-ratio-safe",
+                    fill_ts=1001,
+                    price=100000000.0,
+                    qty=0.0,
+                    fee=0.0,
+                )
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
+
+    assert "live_fill_fee_anomaly" not in caplog.text
