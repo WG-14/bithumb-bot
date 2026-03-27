@@ -94,6 +94,41 @@ def test_compute_signal_allows_strategy_override_for_backtest_compatibility(tmp_
     assert "reason" in result
 
 
+def test_compute_signal_normalizes_strategy_override_name(tmp_path) -> None:
+    old_db_path = settings.DB_PATH
+    old_env_db_path = os.environ.get("DB_PATH")
+
+    db_path = str(tmp_path / "strategy_override_normalized.sqlite")
+    os.environ["DB_PATH"] = db_path
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    base_ts = 1_700_000_200_000
+    try:
+        for idx, close in enumerate([10.0, 11.0, 12.0, 13.0, 14.0]):
+            ts = base_ts + idx * 60_000
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ts, settings.PAIR, settings.INTERVAL, close, close, close, close, 1.0),
+            )
+        conn.commit()
+
+        result = compute_signal(conn, 2, 3, strategy_name="  SMA_CROSS ")
+    finally:
+        conn.close()
+        object.__setattr__(settings, "DB_PATH", old_db_path)
+        if old_env_db_path is None:
+            os.environ.pop("DB_PATH", None)
+        else:
+            os.environ["DB_PATH"] = old_env_db_path
+
+    assert result is not None
+    assert result["strategy"] == "sma_cross"
+
+
 def test_registry_rejects_unknown_strategy_name() -> None:
     with pytest.raises(ValueError, match="unknown strategy"):
         create_strategy("does_not_exist")

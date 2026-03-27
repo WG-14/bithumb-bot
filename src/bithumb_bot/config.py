@@ -22,6 +22,7 @@ PAPER_ONLY_ENV_KEYS = (
     "SLIPPAGE_BPS",
 )
 ALLOWED_RUNTIME_MODES = ("paper", "live")
+DEFAULT_RUNTIME_STRATEGY = "sma_with_filter"
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -62,6 +63,12 @@ def resolve_db_path_from_env(mode: str) -> str:
     return resolve_db_path(selected_db_path)
 
 
+def resolve_strategy_name_from_env() -> str:
+    raw = os.getenv("STRATEGY_NAME")
+    normalized = str(raw or "").strip().lower()
+    return normalized or DEFAULT_RUNTIME_STRATEGY
+
+
 def default_run_lock_path(mode: str) -> str:
     normalized_mode = (mode or "paper").strip().lower() or "paper"
     return f"data/locks/bithumb-bot-run-{normalized_mode}.lock"
@@ -85,7 +92,7 @@ class Settings:
     # strategy
     # 운영 기본 전략은 필터 포함 sma_with_filter를 권장.
     # Backward compatibility: STRATEGY_NAME 환경변수로 언제든 sma_cross 등으로 즉시 전환 가능.
-    STRATEGY_NAME: str = os.getenv("STRATEGY_NAME", "sma_with_filter")
+    STRATEGY_NAME: str = resolve_strategy_name_from_env()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))

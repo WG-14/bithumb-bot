@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import dataclass
 
-from .config import settings, validate_live_mode_preflight
+from .config import DEFAULT_RUNTIME_STRATEGY, settings, validate_live_mode_preflight
 from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.paper import paper_execute
@@ -41,7 +41,7 @@ def compute_signal(
     through_ts_ms: int | None = None,
     strategy_name: str | None = None,
 ):
-    selected_strategy_name = (strategy_name or settings.STRATEGY_NAME)
+    selected_strategy_name = str(strategy_name or settings.STRATEGY_NAME).strip().lower()
     strategy = create_strategy(
         selected_strategy_name,
         short_n=short_n,
@@ -981,7 +981,7 @@ def run_loop(short_n: int, long_n: int) -> None:
         strategy_source=(
             "env:STRATEGY_NAME"
             if os.getenv("STRATEGY_NAME") not in (None, "")
-            else "default:sma_with_filter"
+            else f"default:{DEFAULT_RUNTIME_STRATEGY}"
         ),
         sma_short=short_n,
         sma_long=long_n,

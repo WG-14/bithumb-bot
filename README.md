@@ -83,7 +83,17 @@ uv run bithumb-bot run --short 7 --long 30
 
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
 
-전략 선택은 전부 환경변수 주입(`STRATEGY_NAME`) 기반이며, 런타임/배포 환경(AWS EC2/ECS/Lambda 등)에서 파일 경로 하드코딩 없이 동일하게 동작합니다. 운영 기본값은 체결 비용/노이즈를 고려한 `sma_with_filter`이며, 백테스트/비교가 필요하면 `STRATEGY_NAME=sma_cross`로 즉시 override할 수 있습니다.
+전략 선택은 전부 환경변수 주입(`STRATEGY_NAME`) 기반이며, 런타임/배포 환경(AWS EC2/ECS/Lambda 등)에서 파일 경로 하드코딩 없이 동일하게 동작합니다. 운영 기본값은 체결 비용/노이즈를 고려한 `sma_with_filter`이며, 백테스트/비교가 필요하면 `STRATEGY_NAME=sma_cross`로 즉시 override할 수 있습니다(대소문자/공백 입력도 정규화되어 동작).
+
+예시(AWS 배포 환경변수만으로 전략 전환):
+
+```bash
+# 운영 기본(코드 수정 없음)
+STRATEGY_NAME=sma_with_filter
+
+# 비교/백테스트 호환 모드
+STRATEGY_NAME=sma_cross
+```
 
 ## Live 모드(실거래)
 

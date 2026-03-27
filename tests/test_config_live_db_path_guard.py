@@ -230,6 +230,28 @@ def test_config_strategy_name_supports_legacy_override_to_sma_cross() -> None:
     assert proc.stdout.strip() == "sma_cross"
 
 
+def test_config_strategy_name_normalizes_case_and_whitespace() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["STRATEGY_NAME"] = "  SMA_WITH_FILTER  "
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.STRATEGY_NAME)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "sma_with_filter"
+
+
 def test_config_entry_edge_buffer_ratio_defaults_when_unset() -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"
