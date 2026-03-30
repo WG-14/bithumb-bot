@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 
 import pytest
 
@@ -41,21 +43,30 @@ def _restore_settings():
 
 
 @pytest.fixture(autouse=True)
-def _set_live_roots_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ENV_ROOT", "/var/lib/bithumb-bot/env")
-    monkeypatch.setenv("RUN_ROOT", "/var/lib/bithumb-bot/run")
-    monkeypatch.setenv("DATA_ROOT", "/var/lib/bithumb-bot/data")
-    monkeypatch.setenv("LOG_ROOT", "/var/lib/bithumb-bot/logs")
-    monkeypatch.setenv("BACKUP_ROOT", "/var/lib/bithumb-bot/backup")
+def _set_live_roots_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    roots = {
+        "ENV_ROOT": tmp_path / "env",
+        "RUN_ROOT": tmp_path / "run",
+        "DATA_ROOT": tmp_path / "data",
+        "LOG_ROOT": tmp_path / "logs",
+        "BACKUP_ROOT": tmp_path / "backup",
+    }
+    for key, value in roots.items():
+        monkeypatch.setenv(key, str(value.resolve()))
 
 
-def _set_valid_live_defaults(monkeypatch: pytest.MonkeyPatch, *, db_path: str = "/var/lib/bithumb-bot/data/live/trades/live.sqlite") -> None:
-    monkeypatch.setenv("ENV_ROOT", "/var/lib/bithumb-bot/env")
-    monkeypatch.setenv("RUN_ROOT", "/var/lib/bithumb-bot/run")
-    monkeypatch.setenv("DATA_ROOT", "/var/lib/bithumb-bot/data")
-    monkeypatch.setenv("LOG_ROOT", "/var/lib/bithumb-bot/logs")
-    monkeypatch.setenv("BACKUP_ROOT", "/var/lib/bithumb-bot/backup")
-    monkeypatch.setenv("DB_PATH", db_path)
+def _set_valid_live_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    db_path: str | None = None,
+) -> None:
+    data_root = Path(os.environ["DATA_ROOT"])
+    run_root = Path(os.environ["RUN_ROOT"])
+    resolved_db_path = str(
+        Path(db_path).resolve() if db_path is not None else (data_root / "live" / "trades" / "live.sqlite").resolve()
+    )
+    monkeypatch.setenv("DB_PATH", resolved_db_path)
+    monkeypatch.setenv("RUN_LOCK_PATH", str((run_root / "live" / "bithumb-bot.lock").resolve()))
     monkeypatch.setenv("NOTIFIER_ENABLED", "true")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     monkeypatch.delenv("START_CASH_KRW", raising=False)
@@ -64,7 +75,7 @@ def _set_valid_live_defaults(monkeypatch: pytest.MonkeyPatch, *, db_path: str = 
     monkeypatch.delenv("SLIPPAGE_BPS", raising=False)
 
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", resolved_db_path)
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -141,24 +152,11 @@ def test_live_preflight_requires_explicit_arming_for_real_live_orders(
 def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
+    _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     config.validate_live_mode_preflight(settings)
 
@@ -177,62 +175,20 @@ def test_live_preflight_requires_meaningful_live_price_protection(monkeypatch: p
 
 
 def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    _set_valid_live_defaults(monkeypatch)
 
     config.validate_live_mode_preflight(settings)
 
 def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
 
     config.validate_live_mode_preflight(settings)
 
 def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     config.validate_live_mode_preflight(settings)
 
@@ -268,41 +224,15 @@ def test_live_preflight_rejects_normalized_default_db_path_alias(monkeypatch: py
 
 
 def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live-prod.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live-prod.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    custom_live_db = str((Path(os.environ["DATA_ROOT"]) / "live" / "trades" / "live-prod.sqlite").resolve())
+    _set_valid_live_defaults(monkeypatch, db_path=custom_live_db)
 
     config.validate_live_mode_preflight(settings)
 
 
 def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live_trading.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live_trading.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    custom_live_db = str((Path(os.environ["DATA_ROOT"]) / "live" / "trades" / "live_trading.sqlite").resolve())
+    _set_valid_live_defaults(monkeypatch, db_path=custom_live_db)
 
     config.validate_live_mode_preflight(settings)
 
@@ -334,26 +264,11 @@ def test_live_preflight_rejects_paper_only_env_keys_in_live(
 def test_live_preflight_accepts_clean_live_env_without_paper_only_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    _set_valid_live_defaults(monkeypatch)
     monkeypatch.delenv("START_CASH_KRW", raising=False)
     monkeypatch.delenv("BUY_FRACTION", raising=False)
     monkeypatch.delenv("FEE_RATE", raising=False)
     monkeypatch.delenv("SLIPPAGE_BPS", raising=False)
-
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     config.validate_live_mode_preflight(settings)
 
@@ -372,23 +287,9 @@ def test_live_preflight_requires_notifier_configuration(monkeypatch: pytest.Monk
 
 
 def test_live_preflight_accepts_notifier_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
+    _set_valid_live_defaults(monkeypatch)
     monkeypatch.setenv("NOTIFIER_ENABLED", "true")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/abc")
-
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
-    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
-    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
-    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
 
     config.validate_live_mode_preflight(settings)
 
@@ -435,17 +336,7 @@ def test_live_preflight_fails_when_order_rule_sync_fails_and_manual_rules_invali
 
 
 def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
-    object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
-    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
-    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
-    object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
-    object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 100.0)
-    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 50.0)
-    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
+    _set_valid_live_defaults(monkeypatch)
     order_rules._cached_rules.clear()
 
     monkeypatch.setattr(

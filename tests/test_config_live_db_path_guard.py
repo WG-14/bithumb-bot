@@ -6,14 +6,18 @@ import subprocess
 import sys
 
 
-def test_config_fail_fast_when_live_mode_missing_db_path() -> None:
+def _apply_root_env(env: dict[str, str], tmp_path: Path) -> None:
+    env["ENV_ROOT"] = str((tmp_path / "env").resolve())
+    env["RUN_ROOT"] = str((tmp_path / "run").resolve())
+    env["DATA_ROOT"] = str((tmp_path / "data").resolve())
+    env["LOG_ROOT"] = str((tmp_path / "logs").resolve())
+    env["BACKUP_ROOT"] = str((tmp_path / "backup").resolve())
+
+
+def test_config_fail_fast_when_live_mode_missing_db_path(tmp_path: Path) -> None:
     env = dict(os.environ)
     env["MODE"] = "live"
-    env["ENV_ROOT"] = "/var/lib/bithumb-bot/env"
-    env["RUN_ROOT"] = "/var/lib/bithumb-bot/run"
-    env["DATA_ROOT"] = "/var/lib/bithumb-bot/data"
-    env["LOG_ROOT"] = "/var/lib/bithumb-bot/logs"
-    env["BACKUP_ROOT"] = "/var/lib/bithumb-bot/backup"
+    _apply_root_env(env, tmp_path)
     env.pop("DB_PATH", None)
     env["PYTHONPATH"] = "src"
 
@@ -29,9 +33,10 @@ def test_config_fail_fast_when_live_mode_missing_db_path() -> None:
     assert "live env 파일에 DB_PATH를 명시하라" in (proc.stderr + proc.stdout)
 
 
-def test_config_keeps_paper_default_db_path_when_unset() -> None:
+def test_config_keeps_paper_default_db_path_when_unset(tmp_path: Path) -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"
+    _apply_root_env(env, tmp_path)
     env.pop("DB_PATH", None)
     env["PYTHONPATH"] = "src"
 
@@ -48,7 +53,7 @@ def test_config_keeps_paper_default_db_path_when_unset() -> None:
     )
 
     assert proc.returncode == 0
-    assert proc.stdout.strip().endswith("/data/paper/trades/paper.sqlite")
+    assert Path(proc.stdout.strip()) == Path(env["DATA_ROOT"]) / "paper" / "trades" / "paper.sqlite"
 
 
 def test_config_live_fee_rate_estimate_defaults_when_unset() -> None:
