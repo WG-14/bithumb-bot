@@ -194,9 +194,9 @@ def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.M
 
 
 def test_live_preflight_requires_explicit_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_valid_live_defaults(monkeypatch, db_path="data/bithumb_1m.sqlite")
+    _set_valid_live_defaults(monkeypatch)
     monkeypatch.delenv("DB_PATH", raising=False)
-    object.__setattr__(settings, "DB_PATH", "data/bithumb_1m.sqlite")
+    object.__setattr__(settings, "DB_PATH", str((Path(os.environ["DATA_ROOT"]) / "live" / "trades" / "live.sqlite").resolve()))
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
@@ -204,23 +204,14 @@ def test_live_preflight_requires_explicit_db_path_for_live_mode(monkeypatch: pyt
     assert "DB_PATH must be explicitly set when MODE=live" in str(exc.value)
 
 
-def test_live_preflight_rejects_default_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_valid_live_defaults(monkeypatch, db_path="data/bithumb_1m.sqlite")
+def test_live_preflight_rejects_paper_scoped_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    paper_db = str((Path(os.environ["DATA_ROOT"]) / "paper" / "trades" / "paper.sqlite").resolve())
+    _set_valid_live_defaults(monkeypatch, db_path=paper_db)
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "DB_PATH must not point to the default paper/shared DB path" in str(exc.value)
-
-
-def test_live_preflight_rejects_normalized_default_db_path_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    aliased_default = "data/../data/bithumb_1m.sqlite"
-    _set_valid_live_defaults(monkeypatch, db_path=aliased_default)
-
-    with pytest.raises(config.LiveModeValidationError) as exc:
-        config.validate_live_mode_preflight(settings)
-
-    assert "DB_PATH must not point to the default paper/shared DB path" in str(exc.value)
+    assert "DB_PATH must not point to a paper-scoped path when MODE=live" in str(exc.value)
 
 
 def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.MonkeyPatch) -> None:

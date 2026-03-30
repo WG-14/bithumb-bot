@@ -8,7 +8,7 @@
 - [ ] `LIVE_DRY_RUN=true`
 - [ ] `LIVE_REAL_ORDER_ARMED=false`
 - [ ] notifier 설정이 정상이다
-- [ ] `data/live.sqlite` 백업이 가능하다
+- [ ] `/var/lib/bithumb-bot/data/live/trades/live.sqlite` 백업이 가능하다
 - [ ] `bithumb-bot.service`가 정상 기동된다
 - [ ] `bithumb-bot-healthcheck.timer`가 활성화되어 있다
 - [ ] `bithumb-bot-backup.timer`가 활성화되어 있다

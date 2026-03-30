@@ -1,14 +1,30 @@
 import os
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from bithumb_bot.paths import PathManager
+
 load_dotenv(Path(__file__).with_name(".env"))
 
-DB_PATH = os.getenv("DB_PATH", "data/bithumb.sqlite")
+path_manager = PathManager.from_env(PROJECT_ROOT)
+_db_path_env = os.getenv("DB_PATH", "")
+if _db_path_env.strip():
+    _db_candidate = Path(_db_path_env).expanduser()
+    if not _db_candidate.is_absolute():
+        raise ValueError(f"DB_PATH must be absolute for backtest2.py (got relative path: {_db_path_env!r})")
+    DB_PATH = str(_db_candidate.resolve())
+else:
+    DB_PATH = str(path_manager.primary_db_path())
 PAIR = os.getenv("PAIR", "BTC_KRW")
 INTERVAL = os.getenv("INTERVAL", "1m")  # DB에 저장된 interval (보통 1m)
 
@@ -215,8 +231,8 @@ def main():
 
     ap.add_argument("--resample", type=int, default=1, help="n분봉으로 묶기(1=그대로, 5=5분봉)")
     ap.add_argument("--cooldown", type=int, default=0, help="거래 후 N봉 동안 재거래 금지")
-    ap.add_argument("--min-gap", type=float, default=0.0, help="SMA 간격 최소 비율(예: 0.0005=0.05%)")
-    ap.add_argument("--slippage-bps", type=float, default=0.0, help="슬리피지 bps(예: 5=0.05%)")
+    ap.add_argument("--min-gap", type=float, default=0.0, help="SMA 간격 최소 비율(예: 0.0005=0.05%%)")
+    ap.add_argument("--slippage-bps", type=float, default=0.0, help="슬리피지 bps(예: 5=0.05%%)")
     ap.add_argument("--show-trades", type=int, default=10)
 
     args = ap.parse_args()

@@ -119,7 +119,7 @@ STRATEGY_NAME=sma_cross
 ## Live 모드(실거래)
 
 - `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
-- `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, 기본값 `data/bithumb_1m.sqlite`(paper와 공유될 수 있는 경로)는 사용할 수 없습니다.
+- `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, **반드시 절대경로**여야 합니다(상대경로 금지).
 - `MODE=live` preflight는 paper/test 성격의 혼합 설정을 거부합니다. 예: 기본/공유 DB 경로, paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`)가 설정된 경우, 또는 live 보호값(`MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`)이 유효한 값(> 0, 유한값)으로 설정되지 않은 경우 기동 전에 fail-fast로 차단됩니다.
 - `MODE=live`에서는 notifier가 반드시 활성/설정되어 있어야 합니다 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`). 미설정 시 기동이 실패합니다.
 - `LIVE_DRY_RUN=true`를 켜면 주문 API 호출 없이 동일 경로로 주문/로그 처리만 수행합니다.

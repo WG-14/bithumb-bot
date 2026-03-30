@@ -13,8 +13,8 @@
 빠른 확인 예시:
 
 ```bash
-MODE=paper DB_PATH=data/paper.safe.sqlite uv run python bot.py health
-MODE=live DB_PATH=data/live.safe.sqlite LIVE_DRY_RUN=true uv run python bot.py health
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.safe.sqlite uv run python bot.py health
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.safe.sqlite LIVE_DRY_RUN=true uv run python bot.py health
 ```
 
 ## 2) live preflight (실주문 전 고정 순서)

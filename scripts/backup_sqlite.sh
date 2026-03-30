@@ -23,7 +23,8 @@ resolve_path() {
   if [[ "$path" = /* ]]; then
     printf '%s\n' "$path"
   else
-    printf '%s\n' "$PROJECT_ROOT/$path"
+    echo "[BACKUP] relative path is not allowed: $path" >&2
+    exit 1
   fi
 }
 

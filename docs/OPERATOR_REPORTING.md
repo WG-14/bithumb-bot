@@ -27,7 +27,7 @@
 ### 로컬
 
 ```bash
-MODE=paper DB_PATH=data/paper.small.safe.sqlite uv run bithumb-bot ops-report --limit 20
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.small.safe.sqlite uv run bithumb-bot ops-report --limit 20
 ```
 
 ### AWS (EC2/systemd 운영 환경)
@@ -152,10 +152,10 @@ LIMIT 50;
 
 ```bash
 # 기본: 전략명 + 청산 규칙 기준 집계
-MODE=paper DB_PATH=data/paper.sqlite uv run bithumb-bot strategy-report
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite uv run bithumb-bot strategy-report
 
 # 기간 + 마켓 필터 + JSON 출력
-MODE=paper DB_PATH=data/paper.sqlite \
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite \
   uv run bithumb-bot strategy-report \
   --from-date 2026-03-01 --to-date 2026-03-27 \
   --pair BTC_KRW \

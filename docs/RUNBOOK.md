@@ -400,7 +400,7 @@ uv run bithumb-bot resume
 
 ## 12) 백업 정책
 
-- 기본 경로: `backups/`
+- 기본 경로: `/var/lib/bithumb-bot/backup/<mode>/db/`
 - 기본 보관: 7일, 최대 30개
 - 환경변수:
   - `BACKUP_DIR`
@@ -411,10 +411,10 @@ uv run bithumb-bot resume
 복구 예시:
 
 ```bash
-sqlite3 data/bithumb_1m.sqlite ".restore backups/bithumb_1m.sqlite.20260101_120000.sqlite"
+sqlite3 /var/lib/bithumb-bot/data/live/trades/live.sqlite ".restore /var/lib/bithumb-bot/backup/live/db/live.sqlite.20260101_120000.sqlite"
 
 # 백업 파일 복구 검증(권장)
-python3 tools/verify_sqlite_restore.py backups/bithumb_1m.sqlite.20260101_120000.sqlite
+python3 tools/verify_sqlite_restore.py /var/lib/bithumb-bot/backup/live/db/live.sqlite.20260101_120000.sqlite
 ```
 
 ## 13) Live 모드 사전 점검 (fail-fast)
@@ -424,7 +424,7 @@ python3 tools/verify_sqlite_restore.py backups/bithumb_1m.sqlite.20260101_120000
 - `MAX_ORDER_KRW > 0`
 - `MAX_DAILY_LOSS_KRW > 0`
 - `MAX_DAILY_ORDER_COUNT > 0`
-- `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 기본 경로 `data/bithumb_1m.sqlite` 사용 금지
+- `DB_PATH`는 `MODE=live`에서 반드시 명시해야 하며, 상대경로 사용 금지(절대경로 필수)
 - live preflight는 paper/test 성격 혼합 설정을 차단한다(예: `START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`가 설정된 경우 거부)
 - `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`는 live에서 `>0` 유한값 필수
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
@@ -443,19 +443,19 @@ Live 보수 preset 예시(소액 계정 + 알림 포함):
 
 ```bash
 # 1) paper에서 먼저 검증 (DB 분리)
-MODE=paper DB_PATH=data/paper.small.safe.sqlite \
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.small.safe.sqlite \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 uv run bithumb-bot run
 
 # 2) live dry-run (실주문 API 미호출)
-MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 uv run bithumb-bot run
 
 # 3) 실주문 arming (운영자 명시 승인 후 직전에만)
-MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
 NOTIFIER_ENABLED=true SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \

@@ -65,6 +65,21 @@ def test_db_path_keeps_explicit_override(tmp_path: Path) -> None:
     assert Path(out.stdout.strip()) == Path(env["DB_PATH"])
 
 
+def test_db_path_rejects_relative_override(tmp_path: Path) -> None:
+    env = _base_env(tmp_path)
+    env["MODE"] = "paper"
+    env["DB_PATH"] = "data/paper.sqlite"
+    out = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c; print(c.settings.DB_PATH)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode != 0
+    assert "DB_PATH must be an absolute path" in (out.stderr + out.stdout)
+
+
 def test_run_lock_uses_path_manager_when_unset(tmp_path: Path) -> None:
     env = _base_env(tmp_path)
     env["MODE"] = "live"

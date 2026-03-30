@@ -9,7 +9,6 @@ from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError
 
 
-DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 try:
     PATH_MANAGER = PathManager.from_env(PROJECT_ROOT)
@@ -46,9 +45,14 @@ def parse_float_env(key: str, default: str) -> float:
 
 def resolve_db_path(path: str) -> str:
     p = Path(path)
-    if str(p) == ":memory:" or p.is_absolute():
+    if str(p) == ":memory:":
         return str(p)
-    return str((PROJECT_ROOT / p).resolve())
+    if p.is_absolute():
+        return str(p.resolve())
+    raise ValueError(
+        f"DB_PATH must be an absolute path (got relative path: {path!r}); "
+        "use PathManager-managed absolute DATA_ROOT path"
+    )
 
 
 class LiveModeValidationError(ValueError):
@@ -261,12 +265,6 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append(LIVE_DB_PATH_REQUIRED_MSG)
     else:
         configured_db_path = resolve_db_path(cfg.DB_PATH)
-        default_db_path = resolve_db_path(DEFAULT_DB_PATH)
-        if configured_db_path == default_db_path:
-            issues.append(
-                "DB_PATH must not point to the default paper/shared DB path "
-                f"({DEFAULT_DB_PATH}) when MODE=live"
-            )
         if "/paper/" in configured_db_path.replace("\\", "/"):
             issues.append("DB_PATH must not point to a paper-scoped path when MODE=live")
         try:
