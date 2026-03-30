@@ -62,7 +62,16 @@ uv run bithumb-bot run --short 7 --long 30
 - 운영 산출물 기본 위치:
   - run lock / pid / runtime state: `RUN_ROOT/<mode>/`
   - DB: `DATA_ROOT/<mode>/trades/`
-  - ops report: `DATA_ROOT/<mode>/reports/ops/`
+  - ops/strategy/fee/recovery report: `DATA_ROOT/<mode>/reports/<topic>/`
+    - `ops_report_YYYY-MM-DD.json`
+    - `strategy_validation_YYYY-MM-DD.json`
+    - `fee_diagnostics_YYYY-MM-DD.json`
+    - `recovery_report_YYYY-MM-DD.json`
+  - trade ledger artifact(JSONL): `DATA_ROOT/<mode>/trades/<topic>/`
+  - derived artifact(JSONL): `DATA_ROOT/<mode>/derived/<topic>/`
+  - raw artifact(JSONL): `DATA_ROOT/<mode>/raw/<topic>/`
+  - 파일 로그(필요 시): `LOG_ROOT/<mode>/<kind>/`
+    - `kind ∈ {app, strategy, orders, fills, errors, audit}`
   - snapshot archive: `BACKUP_ROOT/<mode>/snapshots/`
   - DB backup: `BACKUP_ROOT/<mode>/db/`
 - `MODE=live`에서는 위 루트 변수들이 필수이며, repo 내부 경로/상대경로는 fail-fast로 차단됩니다.

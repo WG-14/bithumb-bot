@@ -48,6 +48,10 @@ def test_paths_cli_keeps_mode_scoped_directories(tmp_path: Path) -> None:
     live_snapshot = _run_path_cli(tmp_path, env, "backup-snapshots-dir", "live")
     paper_report = _run_path_cli(tmp_path, env, "reports-ops-dir", "paper")
     live_report = _run_path_cli(tmp_path, env, "reports-ops-dir", "live")
+    paper_log_app = _run_path_cli(tmp_path, env, "log-app-dir", "paper")
+    live_log_errors = _run_path_cli(tmp_path, env, "log-errors-dir", "live")
+    paper_trades = _run_path_cli(tmp_path, env, "trades-dir", "paper")
+    live_derived = _run_path_cli(tmp_path, env, "derived-dir", "live")
 
     assert paper_db == Path(env["DATA_ROOT"]) / "paper" / "trades" / "paper.sqlite"
     assert live_db == Path(env["DATA_ROOT"]) / "live" / "trades" / "live.sqlite"
@@ -55,6 +59,10 @@ def test_paths_cli_keeps_mode_scoped_directories(tmp_path: Path) -> None:
     assert live_snapshot == Path(env["BACKUP_ROOT"]) / "live" / "snapshots"
     assert paper_report == Path(env["DATA_ROOT"]) / "paper" / "reports" / "ops"
     assert live_report == Path(env["DATA_ROOT"]) / "live" / "reports" / "ops"
+    assert paper_log_app == Path(env["LOG_ROOT"]) / "paper" / "app"
+    assert live_log_errors == Path(env["LOG_ROOT"]) / "live" / "errors"
+    assert paper_trades == Path(env["DATA_ROOT"]) / "paper" / "trades"
+    assert live_derived == Path(env["DATA_ROOT"]) / "live" / "derived"
 
 
 def test_operational_scripts_use_path_manager_queries() -> None:

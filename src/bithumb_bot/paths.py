@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 ALLOWED_MODES = {"paper", "live"}
+ALLOWED_LOG_KINDS = {"app", "strategy", "orders", "fills", "errors", "audit"}
 
 
 class PathPolicyError(ValueError):
@@ -151,8 +152,63 @@ class PathManager:
         return self.data_dir() / "reports" / topic / f"{topic}_{d}.{ext}"
 
     def log_path(self, kind: str, day: str | None = None, ext: str = "log") -> Path:
+        normalized_kind = str(kind or "").strip().lower()
+        if normalized_kind not in ALLOWED_LOG_KINDS:
+            allowed = ", ".join(sorted(ALLOWED_LOG_KINDS))
+            raise PathPolicyError(f"invalid log kind={kind!r}; allowed values: {allowed}")
         d = self._day_or_today(day)
-        return self.log_dir() / kind / f"{kind}_{d}.{ext}"
+        return self.log_dir() / normalized_kind / f"{normalized_kind}_{d}.{ext}"
+
+    def app_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("app", day=day, ext=ext)
+
+    def strategy_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("strategy", day=day, ext=ext)
+
+    def orders_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("orders", day=day, ext=ext)
+
+    def fills_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("fills", day=day, ext=ext)
+
+    def error_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("errors", day=day, ext=ext)
+
+    def audit_log_path(self, day: str | None = None, ext: str = "log") -> Path:
+        return self.log_path("audit", day=day, ext=ext)
+
+    def orders_artifact_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.trade_data_path("orders", day=day, ext=ext)
+
+    def fills_artifact_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.trade_data_path("fills", day=day, ext=ext)
+
+    def balance_snapshot_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.trade_data_path("balance_snapshots", day=day, ext=ext)
+
+    def portfolio_snapshot_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.trade_data_path("portfolio_snapshots", day=day, ext=ext)
+
+    def reconcile_event_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.trade_data_path("reconcile_events", day=day, ext=ext)
+
+    def ops_report_path(self, day: str | None = None, ext: str = "json") -> Path:
+        return self.report_path("ops_report", day=day, ext=ext)
+
+    def strategy_validation_report_path(self, day: str | None = None, ext: str = "json") -> Path:
+        return self.report_path("strategy_validation", day=day, ext=ext)
+
+    def fee_diagnostics_report_path(self, day: str | None = None, ext: str = "json") -> Path:
+        return self.report_path("fee_diagnostics", day=day, ext=ext)
+
+    def recovery_report_path(self, day: str | None = None, ext: str = "json") -> Path:
+        return self.report_path("recovery_report", day=day, ext=ext)
+
+    def feature_snapshot_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.derived_path("feature_snapshot", day=day, ext=ext)
+
+    def signal_trace_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
+        return self.derived_path("signal_trace", day=day, ext=ext)
 
     def backup_db_path(self, timestamp: str | None = None) -> Path:
         ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -169,10 +225,20 @@ def resolve_managed_path(kind: str, manager: PathManager) -> Path:
         "data-dir": manager.data_dir(),
         "primary-db": manager.primary_db_path(),
         "reports-ops-dir": manager.data_dir() / "reports" / "ops",
+        "reports-dir": manager.data_dir() / "reports",
+        "trades-dir": manager.data_dir() / "trades",
+        "derived-dir": manager.data_dir() / "derived",
+        "raw-dir": manager.data_dir() / "raw",
         "backup-mode-dir": manager.config.backup_root / manager.config.mode,
         "backup-db-dir": manager.config.backup_root / manager.config.mode / "db",
         "backup-snapshots-dir": manager.config.backup_root / manager.config.mode / "snapshots",
         "log-dir": manager.log_dir(),
+        "log-app-dir": manager.log_dir() / "app",
+        "log-strategy-dir": manager.log_dir() / "strategy",
+        "log-orders-dir": manager.log_dir() / "orders",
+        "log-fills-dir": manager.log_dir() / "fills",
+        "log-errors-dir": manager.log_dir() / "errors",
+        "log-audit-dir": manager.log_dir() / "audit",
     }
     try:
         return mapping[normalized]
@@ -190,8 +256,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "path kind to print: run-dir, run-lock, pid, runtime-state, data-dir, "
-            "primary-db, reports-ops-dir, backup-mode-dir, backup-db-dir, "
-            "backup-snapshots-dir, log-dir"
+            "primary-db, reports-ops-dir, reports-dir, trades-dir, derived-dir, raw-dir, "
+            "backup-mode-dir, backup-db-dir, backup-snapshots-dir, log-dir, "
+            "log-app-dir, log-strategy-dir, log-orders-dir, log-fills-dir, "
+            "log-errors-dir, log-audit-dir"
         ),
     )
     return p

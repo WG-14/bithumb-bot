@@ -49,6 +49,40 @@ def test_path_manager_uses_topic_paths(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert pm.log_path("errors", day="2026-03-30") == tmp_path / "logs" / "live" / "errors" / "errors_2026-03-30.log"
 
 
+def test_log_path_kinds_are_strictly_partitioned(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_roots(monkeypatch, tmp_path, "paper")
+    pm = PathManager.from_env(project_root=tmp_path / "repo")
+
+    assert pm.app_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "app" / "app_2026-03-30.log"
+    assert pm.strategy_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "strategy" / "strategy_2026-03-30.log"
+    assert pm.orders_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "orders" / "orders_2026-03-30.log"
+    assert pm.fills_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "fills" / "fills_2026-03-30.log"
+    assert pm.error_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "errors" / "errors_2026-03-30.log"
+    assert pm.audit_log_path(day="2026-03-30") == tmp_path / "logs" / "paper" / "audit" / "audit_2026-03-30.log"
+
+    with pytest.raises(PathPolicyError):
+        pm.log_path("unknown", day="2026-03-30")
+
+
+def test_trade_report_derived_entrypoints_match_storage_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_roots(monkeypatch, tmp_path, "live")
+    pm = PathManager.from_env(project_root=tmp_path / "repo")
+
+    assert pm.orders_artifact_path(day="2026-03-30") == tmp_path / "data" / "live" / "trades" / "orders" / "orders_2026-03-30.jsonl"
+    assert pm.fills_artifact_path(day="2026-03-30") == tmp_path / "data" / "live" / "trades" / "fills" / "fills_2026-03-30.jsonl"
+    assert pm.balance_snapshot_path(day="2026-03-30") == tmp_path / "data" / "live" / "trades" / "balance_snapshots" / "balance_snapshots_2026-03-30.jsonl"
+    assert pm.portfolio_snapshot_path(day="2026-03-30") == tmp_path / "data" / "live" / "trades" / "portfolio_snapshots" / "portfolio_snapshots_2026-03-30.jsonl"
+    assert pm.reconcile_event_path(day="2026-03-30") == tmp_path / "data" / "live" / "trades" / "reconcile_events" / "reconcile_events_2026-03-30.jsonl"
+    assert pm.ops_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "ops_report" / "ops_report_2026-03-30.json"
+    assert pm.strategy_validation_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "strategy_validation" / "strategy_validation_2026-03-30.json"
+    assert pm.fee_diagnostics_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "fee_diagnostics" / "fee_diagnostics_2026-03-30.json"
+    assert pm.recovery_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "recovery_report" / "recovery_report_2026-03-30.json"
+    assert pm.feature_snapshot_path(day="2026-03-30") == tmp_path / "data" / "live" / "derived" / "feature_snapshot" / "feature_snapshot_2026-03-30.jsonl"
+    assert pm.signal_trace_path(day="2026-03-30") == tmp_path / "data" / "live" / "derived" / "signal_trace" / "signal_trace_2026-03-30.jsonl"
+
+
 def test_live_blocks_repo_relative_roots(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

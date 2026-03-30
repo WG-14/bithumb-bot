@@ -1,6 +1,7 @@
 from .config import (
     LiveModeValidationError,
     ModeValidationError,
+    PATH_MANAGER,
     settings,
     validate_live_mode_preflight,
     validate_mode_or_raise,
@@ -35,6 +36,7 @@ from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .reporting import cmd_fee_diagnostics, cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
+from .storage_io import write_json_atomic
 
 import httpx
 
@@ -1518,6 +1520,7 @@ def _load_recovery_report(
 
 def cmd_recovery_report(*, as_json: bool = False) -> None:
     report = _load_recovery_report()
+    write_json_atomic(PATH_MANAGER.recovery_report_path(), report)
     if as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return

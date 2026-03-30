@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from statistics import median
 
-from .config import settings
+from .config import PATH_MANAGER, settings
 from .db_core import ensure_db
+from .storage_io import write_json_atomic
 from .utils_time import kst_str
 
 
@@ -304,6 +305,8 @@ def cmd_fee_diagnostics(
         "notes": summary.notes,
     }
 
+    write_json_atomic(PATH_MANAGER.fee_diagnostics_report_path(), payload)
+
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
@@ -552,38 +555,40 @@ def cmd_strategy_report(
 
     normalized_group_by = _normalize_group_by(group_by)
 
+    payload = {
+        "group_by": list(normalized_group_by),
+        "filters": {
+            "strategy_name": strategy_name,
+            "exit_rule_name": exit_rule_name,
+            "pair": pair,
+            "from_ts_ms": from_ts_ms,
+            "to_ts_ms": to_ts_ms,
+        },
+        "rows": [
+            {
+                "strategy_name": stat.strategy_name,
+                "exit_rule_name": stat.exit_rule_name,
+                "pair": stat.pair,
+                "trade_count": stat.trade_count,
+                "win_rate": stat.win_rate,
+                "average_gain": stat.avg_gain,
+                "average_loss": stat.avg_loss,
+                "net_pnl": stat.net_pnl,
+                "expectancy_per_trade": stat.expectancy_per_trade,
+                "fee_total": stat.fee_total,
+                "holding_time": {
+                    "avg_sec": stat.holding_time_avg_sec,
+                    "min_sec": stat.holding_time_min_sec,
+                    "max_sec": stat.holding_time_max_sec,
+                },
+            }
+            for stat in stats
+        ],
+        "notes": [] if stats else ["no trade_lifecycles rows matched the given filters"],
+    }
+    write_json_atomic(PATH_MANAGER.strategy_validation_report_path(), payload)
+
     if as_json:
-        payload = {
-            "group_by": list(normalized_group_by),
-            "filters": {
-                "strategy_name": strategy_name,
-                "exit_rule_name": exit_rule_name,
-                "pair": pair,
-                "from_ts_ms": from_ts_ms,
-                "to_ts_ms": to_ts_ms,
-            },
-            "rows": [
-                {
-                    "strategy_name": stat.strategy_name,
-                    "exit_rule_name": stat.exit_rule_name,
-                    "pair": stat.pair,
-                    "trade_count": stat.trade_count,
-                    "win_rate": stat.win_rate,
-                    "average_gain": stat.avg_gain,
-                    "average_loss": stat.avg_loss,
-                    "net_pnl": stat.net_pnl,
-                    "expectancy_per_trade": stat.expectancy_per_trade,
-                    "fee_total": stat.fee_total,
-                    "holding_time": {
-                        "avg_sec": stat.holding_time_avg_sec,
-                        "min_sec": stat.holding_time_min_sec,
-                        "max_sec": stat.holding_time_max_sec,
-                    },
-                }
-                for stat in stats
-            ],
-            "notes": [] if stats else ["no trade_lifecycles rows matched the given filters"],
-        }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
 
@@ -634,6 +639,40 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         )
     finally:
         conn.close()
+
+    payload = {
+        "mode": settings.MODE,
+        "pair": settings.PAIR,
+        "interval": settings.INTERVAL,
+        "db_path": settings.DB_PATH,
+        "strategy_summary": [
+            {
+                "strategy_context": stat.strategy_context,
+                "order_count": stat.order_count,
+                "fill_count": stat.fill_count,
+                "buy_notional": stat.buy_notional,
+                "sell_notional": stat.sell_notional,
+                "fee_total": stat.fee_total,
+                "pnl_proxy": stat.pnl_proxy,
+            }
+            for stat in strategy_stats
+        ],
+        "recent_flow": [dict(row) for row in recent_flow],
+        "recent_trades": [dict(row) for row in recent_trades],
+        "fee_diagnostics_snapshot": {
+            "fill_count": fee_summary.fill_count,
+            "fee_zero_count": fee_summary.fee_zero_count,
+            "fee_zero_ratio": fee_summary.fee_zero_ratio,
+            "average_fee_bps": fee_summary.average_fee_bps,
+            "median_fee_bps": fee_summary.median_fee_bps,
+            "estimated_minus_actual_bps": fee_summary.estimated_minus_actual_bps,
+            "roundtrip_count": fee_summary.roundtrip_count,
+            "roundtrip_fee_total": fee_summary.roundtrip_fee_total,
+            "pnl_before_fee_total": fee_summary.pnl_before_fee_total,
+            "pnl_after_fee_total": fee_summary.pnl_after_fee_total,
+        },
+    }
+    write_json_atomic(PATH_MANAGER.ops_report_path(), payload)
 
     print("[OPS-REPORT]")
     print(f"  mode={settings.MODE} pair={settings.PAIR} interval={settings.INTERVAL} db_path={settings.DB_PATH}")
