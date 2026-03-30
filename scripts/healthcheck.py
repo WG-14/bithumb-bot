@@ -72,8 +72,9 @@ def main() -> int:
         print(f"[HEALTHCHECK] FAIL {env_error}")
         return 1
 
-    from bithumb_bot.config import settings
+    from bithumb_bot.config import PROJECT_ROOT, settings
     from bithumb_bot.notifier import notify
+    from bithumb_bot.paths import PathManager
     from bithumb_bot.run_lock import read_run_lock_status
     from bithumb_bot.runtime_state import refresh_open_order_health, snapshot
 
@@ -82,10 +83,19 @@ def main() -> int:
 
     reconcile_stale_threshold_sec = float(os.getenv("HEALTH_MAX_RECONCILE_AGE_SEC", "900"))
     unresolved_age_threshold_sec = float(os.getenv("HEALTH_MAX_UNRESOLVED_ORDER_AGE_SEC", "900"))
+    pm = PathManager.from_env(PROJECT_ROOT)
 
     refresh_open_order_health()
     lock_status = read_run_lock_status(Path(settings.RUN_LOCK_PATH))
     print(f"[HEALTHCHECK] RUN_LOCK {lock_status.to_human_text()}")
+    print(
+        "[HEALTHCHECK] PATHS "
+        f"mode={pm.config.mode} "
+        f"db={settings.DB_PATH} "
+        f"run_lock={settings.RUN_LOCK_PATH} "
+        f"runtime_state={pm.runtime_state_path()} "
+        f"backup_db_dir={pm.config.backup_root / pm.config.mode / 'db'}"
+    )
 
     state = snapshot()
     health = {

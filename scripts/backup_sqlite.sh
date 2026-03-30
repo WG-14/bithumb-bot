@@ -27,10 +27,18 @@ resolve_path() {
   fi
 }
 
+path_query() {
+  local kind="$1"
+  PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" \
+  ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" \
+  LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" \
+  python3 -m bithumb_bot.paths --project-root "$PROJECT_ROOT" --kind "$kind"
+}
+
 if [[ -n "${DB_PATH:-}" ]]; then
   DB_PATH="$(resolve_path "$DB_PATH")"
 else
-  DB_PATH="$(PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" python3 -c 'import os; from pathlib import Path; from bithumb_bot.paths import PathManager; print(PathManager.from_env(Path(os.environ["PROJECT_ROOT"])).primary_db_path())')"
+  DB_PATH="$(path_query primary-db)"
 fi
 
 if [[ -n "${BACKUP_DIR:-}" ]]; then
@@ -38,7 +46,7 @@ if [[ -n "${BACKUP_DIR:-}" ]]; then
 elif [[ -n "${BACKUP_ROOT:-}" ]]; then
   BACKUP_DIR="$(resolve_path "$BACKUP_ROOT")/$MODE/db"
 else
-  BACKUP_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" python3 -c 'import os; from pathlib import Path; from bithumb_bot.paths import PathManager; print(PathManager.from_env(Path(os.environ["PROJECT_ROOT"])).backup_db_path("19700101_000000").parent)')"
+  BACKUP_DIR="$(path_query backup-db-dir)"
 fi
 
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"

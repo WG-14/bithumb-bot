@@ -58,6 +58,13 @@ uv run bithumb-bot run --short 7 --long 30
   - `DB_PATH` 미설정 시: `DATA_ROOT/<mode>/trades/<mode>.sqlite`
   - `RUN_LOCK_PATH` 미설정 시: `RUN_ROOT/<mode>/bithumb-bot.lock`
   - `BACKUP_DIR` 미설정 시: `BACKUP_ROOT/<mode>/db`
+- 운영 보조 스크립트(`scripts/check_live_runtime.sh`, `scripts/collect_live_snapshot.sh`, `scripts/backup_sqlite.sh`)도 PathManager 조회(`python -m bithumb_bot.paths --kind ...`)를 사용해 동일 경로 계약을 따릅니다.
+- 운영 산출물 기본 위치:
+  - run lock / pid / runtime state: `RUN_ROOT/<mode>/`
+  - DB: `DATA_ROOT/<mode>/trades/`
+  - ops report: `DATA_ROOT/<mode>/reports/ops/`
+  - snapshot archive: `BACKUP_ROOT/<mode>/snapshots/`
+  - DB backup: `BACKUP_ROOT/<mode>/db/`
 - `MODE=live`에서는 위 루트 변수들이 필수이며, repo 내부 경로/상대경로는 fail-fast로 차단됩니다.
 - `MODE=paper`에서는 로컬 개발 편의를 위해 상대경로 루트를 허용하되, 운영 배포에서는 live와 동일하게 절대경로를 권장합니다.
 
@@ -81,7 +88,7 @@ uv run bithumb-bot run --short 7 --long 30
 - `SMA_LONG` (기본: `30`)
 - `COOLDOWN_MIN` (기본: `1`)
 - `MIN_GAP` (기본: `0.0003`)
-- `DB_PATH` (기본: `data/bithumb_1m.sqlite`)
+- `DB_PATH` (점진적 호환 override. 미설정 시 `DATA_ROOT/<mode>/trades/<mode>.sqlite`)
 - `LIVE_MIN_ORDER_QTY` (기본: `0`, 0이면 비활성)
 - `LIVE_ORDER_QTY_STEP` (기본: `0`, 0이면 비활성)
 - `LIVE_ORDER_MAX_QTY_DECIMALS` (기본: `0`, 0이면 비활성)
@@ -138,14 +145,19 @@ BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
 uv run bithumb-bot run
 ```
 
-paper/live DB 분리 예시:
+paper/live DB 분리 예시(PathManager 기본 경로 사용):
 
 ```bash
 # paper 검증
-MODE=paper DB_PATH=data/paper.small.safe.sqlite uv run bithumb-bot run
+MODE=paper \
+RUN_ROOT=/var/lib/bithumb-bot/run DATA_ROOT=/var/lib/bithumb-bot/data LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
+uv run bithumb-bot run
 
 # live 검증/운영
-MODE=live DB_PATH=data/live.small.safe.sqlite uv run bithumb-bot run
+MODE=live \
+RUN_ROOT=/var/lib/bithumb-bot/run DATA_ROOT=/var/lib/bithumb-bot/data LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
+DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.sqlite \
+uv run bithumb-bot run
 ```
 - 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
 - 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.

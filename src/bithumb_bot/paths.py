@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,3 +157,57 @@ class PathManager:
     def backup_db_path(self, timestamp: str | None = None) -> Path:
         ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         return self.config.backup_root / self.config.mode / "db" / f"{self.config.mode}.sqlite.{ts}.sqlite"
+
+
+def resolve_managed_path(kind: str, manager: PathManager) -> Path:
+    normalized = str(kind or "").strip().lower()
+    mapping = {
+        "run-dir": manager.run_dir(),
+        "run-lock": manager.run_lock_path(),
+        "pid": manager.pid_path(),
+        "runtime-state": manager.runtime_state_path(),
+        "data-dir": manager.data_dir(),
+        "primary-db": manager.primary_db_path(),
+        "reports-ops-dir": manager.data_dir() / "reports" / "ops",
+        "backup-mode-dir": manager.config.backup_root / manager.config.mode,
+        "backup-db-dir": manager.config.backup_root / manager.config.mode / "db",
+        "backup-snapshots-dir": manager.config.backup_root / manager.config.mode / "snapshots",
+        "log-dir": manager.log_dir(),
+    }
+    try:
+        return mapping[normalized]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(mapping.keys()))
+        raise PathPolicyError(f"invalid kind={kind!r}; allowed values: {allowed}") from exc
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Print PathManager-managed paths")
+    p.add_argument("--project-root", default=".", help="repository root directory (default: .)")
+    p.add_argument("--mode", choices=sorted(ALLOWED_MODES), help="override MODE for this command")
+    p.add_argument(
+        "--kind",
+        required=True,
+        help=(
+            "path kind to print: run-dir, run-lock, pid, runtime-state, data-dir, "
+            "primary-db, reports-ops-dir, backup-mode-dir, backup-db-dir, "
+            "backup-snapshots-dir, log-dir"
+        ),
+    )
+    return p
+
+
+def main() -> int:
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.mode:
+        os.environ["MODE"] = args.mode
+    project_root = Path(args.project_root).expanduser().resolve()
+    manager = PathManager.from_env(project_root)
+    print(resolve_managed_path(args.kind, manager))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
