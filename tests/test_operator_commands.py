@@ -41,12 +41,30 @@ def _default_operator_mode(monkeypatch: pytest.MonkeyPatch):
 
 
 def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
-    db_path = str(tmp_path / "operator.sqlite")
+    db_path = str((tmp_path / "operator.sqlite").resolve())
     if monkeypatch is not None:
         monkeypatch.setenv("DB_PATH", db_path)
     else:
         os.environ["DB_PATH"] = db_path
+    roots = {
+        "ENV_ROOT": (tmp_path / "env").resolve(),
+        "RUN_ROOT": (tmp_path / "run").resolve(),
+        "DATA_ROOT": (tmp_path / "data").resolve(),
+        "LOG_ROOT": (tmp_path / "logs").resolve(),
+        "BACKUP_ROOT": (tmp_path / "backup").resolve(),
+    }
+    for key, value in roots.items():
+        if monkeypatch is not None:
+            monkeypatch.setenv(key, str(value))
+        else:
+            os.environ[key] = str(value)
+    run_lock_path = str((roots["RUN_ROOT"] / "live" / "bithumb-bot.lock").resolve())
+    if monkeypatch is not None:
+        monkeypatch.setenv("RUN_LOCK_PATH", run_lock_path)
+    else:
+        os.environ["RUN_LOCK_PATH"] = run_lock_path
     object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(app_module.settings, "DB_PATH", db_path)
 
 
 def _insert_order(

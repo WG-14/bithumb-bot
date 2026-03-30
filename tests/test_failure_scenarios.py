@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from bithumb_bot import runtime_state
@@ -10,7 +12,7 @@ from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.recovery import reconcile_with_broker
-from tests.test_failsafe import _prepare_run_loop
+from tests.test_failsafe import _prepare_run_loop, _set_live_runtime_paths
 
 
 @pytest.fixture
@@ -94,6 +96,7 @@ class _CancelThenLateFillBroker(_NoopBroker):
 
 def _patch_single_tick_live_loop(monkeypatch) -> None:
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
+    _set_live_runtime_paths(monkeypatch, base_dir=Path(settings.DB_PATH).resolve().parent)
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "KILL_SWITCH", False)
     object.__setattr__(settings, "INTERVAL", "1m")

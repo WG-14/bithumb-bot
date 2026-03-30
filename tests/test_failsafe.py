@@ -72,6 +72,19 @@ def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
     return db_path
 
 
+def _set_live_runtime_paths(monkeypatch: pytest.MonkeyPatch, *, base_dir: Path) -> None:
+    roots = {
+        "ENV_ROOT": (base_dir / "env").resolve(),
+        "RUN_ROOT": (base_dir / "run").resolve(),
+        "DATA_ROOT": (base_dir / "data").resolve(),
+        "LOG_ROOT": (base_dir / "logs").resolve(),
+        "BACKUP_ROOT": (base_dir / "backup").resolve(),
+    }
+    for key, value in roots.items():
+        monkeypatch.setenv(key, str(value))
+    monkeypatch.setenv("RUN_LOCK_PATH", str((roots["RUN_ROOT"] / "live" / "bithumb-bot.lock").resolve()))
+
+
 def _insert_order(*, status: str, client_order_id: str, created_ts: int) -> None:
     conn = ensure_db()
     try:
@@ -221,7 +234,10 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     runtime_state.set_last_candle_age_sec(None)
     runtime_state.set_startup_gate_reason(None)
 
-    monkeypatch.setenv("DB_PATH", settings.DB_PATH)
+    resolved_db_path = str(Path(settings.DB_PATH).resolve())
+    monkeypatch.setenv("DB_PATH", resolved_db_path)
+    object.__setattr__(settings, "DB_PATH", resolved_db_path)
+    _set_live_runtime_paths(monkeypatch, base_dir=Path(resolved_db_path).parent)
 
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
