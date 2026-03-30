@@ -45,6 +45,10 @@ def test_services_use_consistent_explicit_env_source_rule() -> None:
         service = unit["Service"]
         assert "Environment" in service
         assert "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_" in service["Environment"]
+        assert "RUN_ROOT=@BITHUMB_RUN_ROOT@" in service["Environment"]
+        assert "DATA_ROOT=@BITHUMB_DATA_ROOT@" in service["Environment"]
+        assert "LOG_ROOT=@BITHUMB_LOG_ROOT@" in service["Environment"]
+        assert "BACKUP_ROOT=@BITHUMB_BACKUP_ROOT@" in service["Environment"]
         if path.name in {"bithumb-bot.service", "bithumb-bot-paper.service"}:
             assert "PYTHONUNBUFFERED=1" in service["Environment"]
         assert "EnvironmentFile" not in service
@@ -86,7 +90,7 @@ def test_healthcheck_service_uses_templated_runtime_user_and_uv_binary() -> None
     assert service["Type"] == "oneshot"
     assert service["User"] == "@BITHUMB_RUN_USER@"
     assert service["WorkingDirectory"] == "@BITHUMB_BOT_ROOT@"
-    assert service["Environment"] == "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@"
+    assert "BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" in service["Environment"]
     assert service["SyslogIdentifier"] == "bithumb-bot-healthcheck"
     assert service["ExecStart"] == "@BITHUMB_UV_BIN@ run python @BITHUMB_BOT_ROOT@/scripts/healthcheck.py"
     assert "/usr/bin/env uv" not in service["ExecStart"]

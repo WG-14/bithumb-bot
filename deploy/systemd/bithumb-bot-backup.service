@@ -4,5 +4,5 @@ Description=Backup Bithumb bot SQLite database
 [Service]
 Type=oneshot
 WorkingDirectory=@BITHUMB_BOT_ROOT@
-Environment=BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@
+Environment="BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" "ENV_ROOT=@BITHUMB_ENV_ROOT@" "RUN_ROOT=@BITHUMB_RUN_ROOT@" "DATA_ROOT=@BITHUMB_DATA_ROOT@" "LOG_ROOT=@BITHUMB_LOG_ROOT@" "BACKUP_ROOT=@BITHUMB_BACKUP_ROOT@"
 ExecStart=/usr/bin/env bash @BITHUMB_BOT_ROOT@/scripts/backup_sqlite.sh

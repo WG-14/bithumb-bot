@@ -6,10 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .notifier import is_configured as notifier_is_configured
+from .paths import PathManager, PathPolicyError
 
 
 DEFAULT_DB_PATH = "data/bithumb_1m.sqlite"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+try:
+    PATH_MANAGER = PathManager.from_env(PROJECT_ROOT)
+except PathPolicyError as exc:
+    raise ValueError(str(exc)) from exc
 LIVE_DB_PATH_REQUIRED_MSG = (
     "DB_PATH must be explicitly set when MODE=live; live env 파일에 DB_PATH를 명시하라"
 )
@@ -59,8 +64,9 @@ def resolve_db_path_from_env(mode: str) -> str:
     normalized_mode = str(mode or "").strip().lower()
     if normalized_mode == "live" and (raw_db_path is None or not raw_db_path.strip()):
         raise LiveModeValidationError(LIVE_DB_PATH_REQUIRED_MSG)
-    selected_db_path = raw_db_path if raw_db_path and raw_db_path.strip() else DEFAULT_DB_PATH
-    return resolve_db_path(selected_db_path)
+    if raw_db_path and raw_db_path.strip():
+        return resolve_db_path(raw_db_path)
+    return str(PATH_MANAGER.primary_db_path())
 
 
 def resolve_strategy_name_from_env() -> str:
@@ -71,7 +77,7 @@ def resolve_strategy_name_from_env() -> str:
 
 def default_run_lock_path(mode: str) -> str:
     normalized_mode = (mode or "paper").strip().lower() or "paper"
-    return f"data/locks/bithumb-bot-run-{normalized_mode}.lock"
+    return str(PATH_MANAGER.config.run_root / normalized_mode / "bithumb-bot.lock")
 
 
 def resolve_run_lock_path(path: str) -> str:
@@ -79,6 +85,13 @@ def resolve_run_lock_path(path: str) -> str:
     if p.is_absolute():
         return str(p)
     return str((PROJECT_ROOT / p).resolve())
+
+
+def resolve_run_lock_path_from_env(mode: str) -> str:
+    raw = os.getenv("RUN_LOCK_PATH")
+    if raw and raw.strip():
+        return resolve_run_lock_path(raw)
+    return default_run_lock_path(mode)
 
 
 @dataclass(frozen=True)
@@ -121,10 +134,14 @@ class Settings:
     )
 
     # storage
+    ENV_ROOT: str = str(PATH_MANAGER.config.env_root)
+    RUN_ROOT: str = str(PATH_MANAGER.config.run_root)
+    DATA_ROOT: str = str(PATH_MANAGER.config.data_root)
+    LOG_ROOT: str = str(PATH_MANAGER.config.log_root)
+    BACKUP_ROOT: str = str(PATH_MANAGER.config.backup_root)
+    ARCHIVE_ROOT: str = str(PATH_MANAGER.config.archive_root) if PATH_MANAGER.config.archive_root else ""
     DB_PATH: str = resolve_db_path_from_env(os.getenv("MODE", "paper"))
-    RUN_LOCK_PATH: str = resolve_run_lock_path(
-        os.getenv("RUN_LOCK_PATH", default_run_lock_path(os.getenv("MODE", "paper")))
-    )
+    RUN_LOCK_PATH: str = resolve_run_lock_path_from_env(os.getenv("MODE", "paper"))
     DB_BUSY_TIMEOUT_MS: int = int(os.getenv("DB_BUSY_TIMEOUT_MS", "5000"))
     DB_LOCK_RETRY_COUNT: int = int(os.getenv("DB_LOCK_RETRY_COUNT", "2"))
     DB_LOCK_RETRY_BACKOFF_MS: int = int(os.getenv("DB_LOCK_RETRY_BACKOFF_MS", "50"))
@@ -223,6 +240,22 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         return
 
     issues: list[str] = []
+    for root_key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT"):
+        root_raw = os.getenv(root_key)
+        if root_raw is None or not root_raw.strip():
+            issues.append(f"{root_key} must be explicitly set when MODE=live")
+            continue
+        root_path = Path(root_raw).expanduser()
+        if not root_path.is_absolute():
+            issues.append(f"{root_key} must be an absolute path when MODE=live")
+            continue
+        resolved_root = root_path.resolve()
+        try:
+            resolved_root.relative_to(PROJECT_ROOT.resolve())
+            issues.append(f"{root_key} must be outside repository when MODE=live ({resolved_root})")
+        except ValueError:
+            pass
+
     db_path_env = os.getenv("DB_PATH")
     if db_path_env is None or not db_path_env.strip():
         issues.append(LIVE_DB_PATH_REQUIRED_MSG)
@@ -234,6 +267,22 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 "DB_PATH must not point to the default paper/shared DB path "
                 f"({DEFAULT_DB_PATH}) when MODE=live"
             )
+        if "/paper/" in configured_db_path.replace("\\", "/"):
+            issues.append("DB_PATH must not point to a paper-scoped path when MODE=live")
+        try:
+            Path(configured_db_path).resolve().relative_to(PROJECT_ROOT.resolve())
+            issues.append("DB_PATH must be outside repository when MODE=live")
+        except ValueError:
+            pass
+
+    lock_path = resolve_run_lock_path_from_env(cfg.MODE)
+    if "/paper/" in lock_path.replace("\\", "/"):
+        issues.append("RUN_LOCK_PATH must not point to a paper-scoped path when MODE=live")
+    try:
+        Path(lock_path).resolve().relative_to(PROJECT_ROOT.resolve())
+        issues.append("RUN_LOCK_PATH must be outside repository when MODE=live")
+    except ValueError:
+        pass
 
     explicitly_set_paper_keys = [
         key for key in PAPER_ONLY_ENV_KEYS if os.getenv(key) not in (None, "")

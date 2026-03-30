@@ -79,11 +79,13 @@ def test_relative_run_lock_path_is_project_root_based(tmp_path, monkeypatch):
     project_root.mkdir()
     monkeypatch.setattr(config, "PROJECT_ROOT", project_root)
 
-    resolved = config.resolve_run_lock_path("data/locks/instance-a.lock")
+    resolved = config.resolve_run_lock_path("run/paper/instance-a.lock")
 
-    assert resolved == str((project_root / "data" / "locks" / "instance-a.lock").resolve())
+    assert resolved == str((project_root / "run" / "paper" / "instance-a.lock").resolve())
 
 
 def test_default_run_lock_path_is_mode_scoped():
-    assert config.default_run_lock_path("paper") == "data/locks/bithumb-bot-run-paper.lock"
-    assert config.default_run_lock_path("live") == "data/locks/bithumb-bot-run-live.lock"
+    paper_lock = config.default_run_lock_path("paper")
+    live_lock = config.default_run_lock_path("live")
+    assert "/paper/" in paper_lock.replace("\\", "/")
+    assert "/live/" in live_lock.replace("\\", "/")

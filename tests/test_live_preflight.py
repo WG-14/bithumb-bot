@@ -40,7 +40,21 @@ def _restore_settings():
     order_rules._cached_rules.update(old_cache)
 
 
-def _set_valid_live_defaults(monkeypatch: pytest.MonkeyPatch, *, db_path: str = "data/live.sqlite") -> None:
+@pytest.fixture(autouse=True)
+def _set_live_roots_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ENV_ROOT", "/var/lib/bithumb-bot/env")
+    monkeypatch.setenv("RUN_ROOT", "/var/lib/bithumb-bot/run")
+    monkeypatch.setenv("DATA_ROOT", "/var/lib/bithumb-bot/data")
+    monkeypatch.setenv("LOG_ROOT", "/var/lib/bithumb-bot/logs")
+    monkeypatch.setenv("BACKUP_ROOT", "/var/lib/bithumb-bot/backup")
+
+
+def _set_valid_live_defaults(monkeypatch: pytest.MonkeyPatch, *, db_path: str = "/var/lib/bithumb-bot/data/live/trades/live.sqlite") -> None:
+    monkeypatch.setenv("ENV_ROOT", "/var/lib/bithumb-bot/env")
+    monkeypatch.setenv("RUN_ROOT", "/var/lib/bithumb-bot/run")
+    monkeypatch.setenv("DATA_ROOT", "/var/lib/bithumb-bot/data")
+    monkeypatch.setenv("LOG_ROOT", "/var/lib/bithumb-bot/logs")
+    monkeypatch.setenv("BACKUP_ROOT", "/var/lib/bithumb-bot/backup")
     monkeypatch.setenv("DB_PATH", db_path)
     monkeypatch.setenv("NOTIFIER_ENABLED", "true")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
@@ -127,10 +141,10 @@ def test_live_preflight_requires_explicit_arming_for_real_live_orders(
 def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -163,10 +177,10 @@ def test_live_preflight_requires_meaningful_live_price_protection(monkeypatch: p
 
 
 def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -182,10 +196,10 @@ def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: py
     config.validate_live_mode_preflight(settings)
 
 def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -202,10 +216,10 @@ def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.Mo
     config.validate_live_mode_preflight(settings)
 
 def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -254,10 +268,10 @@ def test_live_preflight_rejects_normalized_default_db_path_alias(monkeypatch: py
 
 
 def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live-prod.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live-prod.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live-prod.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live-prod.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -274,10 +288,10 @@ def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.Mon
 
 
 def test_live_preflight_accepts_explicit_non_default_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live_trading.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live_trading.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live_trading.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live_trading.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -320,7 +334,7 @@ def test_live_preflight_rejects_paper_only_env_keys_in_live(
 def test_live_preflight_accepts_clean_live_env_without_paper_only_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     monkeypatch.delenv("START_CASH_KRW", raising=False)
     monkeypatch.delenv("BUY_FRACTION", raising=False)
@@ -328,7 +342,7 @@ def test_live_preflight_accepts_clean_live_env_without_paper_only_keys(
     monkeypatch.delenv("SLIPPAGE_BPS", raising=False)
 
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -358,12 +372,12 @@ def test_live_preflight_requires_notifier_configuration(monkeypatch: pytest.Monk
 
 
 def test_live_preflight_accepts_notifier_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("NOTIFIER_ENABLED", "true")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/abc")
 
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
@@ -421,10 +435,10 @@ def test_live_preflight_fails_when_order_rule_sync_fails_and_manual_rules_invali
 
 
 def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DB_PATH", "data/live.sqlite")
+    monkeypatch.setenv("DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
     object.__setattr__(settings, "MODE", "live")
-    object.__setattr__(settings, "DB_PATH", "data/live.sqlite")
+    object.__setattr__(settings, "DB_PATH", "/var/lib/bithumb-bot/data/live/trades/live.sqlite")
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000.0)
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)

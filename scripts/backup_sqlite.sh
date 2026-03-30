@@ -4,8 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 
-# systemd backup service passes BITHUMB_ENV_FILE; load it so DB_PATH and related
-# variables match the runtime environment instead of falling back to defaults.
 if [[ -n "${BITHUMB_ENV_FILE:-}" ]]; then
   if [[ ! -f "$BITHUMB_ENV_FILE" ]]; then
     echo "[BACKUP] env file not found: $BITHUMB_ENV_FILE" >&2
@@ -18,6 +16,8 @@ if [[ -n "${BITHUMB_ENV_FILE:-}" ]]; then
   set +a
 fi
 
+MODE="${MODE:-paper}"
+
 resolve_path() {
   local path="$1"
   if [[ "$path" = /* ]]; then
@@ -27,11 +27,22 @@ resolve_path() {
   fi
 }
 
-DB_PATH="$(resolve_path "${DB_PATH:-data/bithumb_1m.sqlite}")"
-BACKUP_DIR="$(resolve_path "${BACKUP_DIR:-backups}")"
+if [[ -n "${DB_PATH:-}" ]]; then
+  DB_PATH="$(resolve_path "$DB_PATH")"
+else
+  DB_PATH="$(PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" python3 -c 'import os; from pathlib import Path; from bithumb_bot.paths import PathManager; print(PathManager.from_env(Path(os.environ["PROJECT_ROOT"])).primary_db_path())')"
+fi
+
+if [[ -n "${BACKUP_DIR:-}" ]]; then
+  BACKUP_DIR="$(resolve_path "$BACKUP_DIR")"
+elif [[ -n "${BACKUP_ROOT:-}" ]]; then
+  BACKUP_DIR="$(resolve_path "$BACKUP_ROOT")/$MODE/db"
+else
+  BACKUP_DIR="$(PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" python3 -c 'import os; from pathlib import Path; from bithumb_bot.paths import PathManager; print(PathManager.from_env(Path(os.environ["PROJECT_ROOT"])).backup_db_path("19700101_000000").parent)')"
+fi
+
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-30}"
-
 VERIFY_RESTORE="${BACKUP_VERIFY_RESTORE:-0}"
 
 mkdir -p "$BACKUP_DIR"
@@ -64,7 +75,6 @@ if (( ${#backups[@]} > RETENTION_COUNT )); then
     rm -f "$old_file"
   done
 fi
-
 
 if [[ "$VERIFY_RESTORE" == "1" ]]; then
   python3 "$PROJECT_ROOT/tools/verify_sqlite_restore.py" "$backup_path"

@@ -48,18 +48,23 @@ uv run bithumb-bot run --short 7 --long 30
 
 - 운영자 전략/손익 검증 절차: `docs/OPERATOR_REPORTING.md`
 
-## 경로 해석 기준 (프로젝트 루트)
+## 경로 정책 (PathManager 기준)
 
-- `DB_PATH`, `RUN_LOCK_PATH`가 상대경로이면 **프로젝트 루트 기준**으로 절대경로 변환됩니다.
-- 기본값:
-  - `DB_PATH=data/bithumb_1m.sqlite`
-  - `RUN_LOCK_PATH=data/locks/bithumb-bot-run-<mode>.lock`
-- 따라서 systemd/cron처럼 작업 디렉터리가 바뀔 수 있는 환경에서도, 상대경로 사용 시 기준은 프로젝트 루트로 고정됩니다.
+- 저장 규칙 기준 문서:
+  - `docs/storage-layout.md`
+  - `docs/runtime-data-policy.md`
+- 경로는 env(`ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, `BACKUP_ROOT`, `ARCHIVE_ROOT`)로 주입하고, 하위 구조(`run/<mode>`, `data/<mode>/*`, `logs/<mode>/*`, `backup/<mode>/*`)는 코드(PathManager)가 강제합니다.
+- `DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`는 **점진적 호환용 override**로 유지됩니다.
+  - `DB_PATH` 미설정 시: `DATA_ROOT/<mode>/trades/<mode>.sqlite`
+  - `RUN_LOCK_PATH` 미설정 시: `RUN_ROOT/<mode>/bithumb-bot.lock`
+  - `BACKUP_DIR` 미설정 시: `BACKUP_ROOT/<mode>/db`
+- `MODE=live`에서는 위 루트 변수들이 필수이며, repo 내부 경로/상대경로는 fail-fast로 차단됩니다.
+- `MODE=paper`에서는 로컬 개발 편의를 위해 상대경로 루트를 허용하되, 운영 배포에서는 live와 동일하게 절대경로를 권장합니다.
 
 ## run lock 동작
 
 - `run` 명령은 시작 시 run lock을 획득하며, 이미 다른 run loop가 실행 중이면 즉시 실패합니다.
-- lock 경로는 `RUN_LOCK_PATH`(미설정 시 mode별 기본 경로)입니다.
+- lock 경로는 `RUN_LOCK_PATH`(미설정 시 `RUN_ROOT/<mode>/bithumb-bot.lock`)입니다.
 - lock 충돌 시 현재 owner PID/host/생성시각/lock age 정보를 포함해 에러를 출력합니다.
 - native Windows에서는 `fcntl` 미지원으로 run lock이 동작하지 않으며, 에러 메시지대로 WSL/Linux에서 실행해야 합니다.
 
@@ -115,7 +120,8 @@ STRATEGY_NAME=sma_cross
 예시(보수적 소액 계정 live dry-run + notifier):
 
 ```bash
-MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
+MODE=live DATA_ROOT=/var/lib/bithumb-bot/data RUN_ROOT=/var/lib/bithumb-bot/run LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
+DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 uv run bithumb-bot run
@@ -124,7 +130,8 @@ uv run bithumb-bot run
 실주문 전환(운영자 명시 승인 후에만):
 
 ```bash
-MODE=live DB_PATH=data/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
+MODE=live DATA_ROOT=/var/lib/bithumb-bot/data RUN_ROOT=/var/lib/bithumb-bot/run LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
+DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
 MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
 BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \

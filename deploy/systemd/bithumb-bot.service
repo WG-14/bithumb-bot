@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@BITHUMB_BOT_ROOT@
-Environment="BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" "PYTHONUNBUFFERED=1"
+Environment="BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" "PYTHONUNBUFFERED=1" "ENV_ROOT=@BITHUMB_ENV_ROOT@" "RUN_ROOT=@BITHUMB_RUN_ROOT@" "DATA_ROOT=@BITHUMB_DATA_ROOT@" "LOG_ROOT=@BITHUMB_LOG_ROOT@" "BACKUP_ROOT=@BITHUMB_BACKUP_ROOT@"
 ExecStart=/usr/bin/env bash -lc 'exec @BITHUMB_UV_BIN@ run python -u -m bithumb_bot run --mode live --short ${SMA_SHORT:-7} --long ${SMA_LONG:-30}'
 Restart=always
 RestartSec=5

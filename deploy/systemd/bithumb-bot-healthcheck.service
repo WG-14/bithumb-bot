@@ -6,6 +6,6 @@ After=bithumb-bot.service
 Type=oneshot
 User=@BITHUMB_RUN_USER@
 WorkingDirectory=@BITHUMB_BOT_ROOT@
-Environment=BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@
+Environment="BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@" "ENV_ROOT=@BITHUMB_ENV_ROOT@" "RUN_ROOT=@BITHUMB_RUN_ROOT@" "DATA_ROOT=@BITHUMB_DATA_ROOT@" "LOG_ROOT=@BITHUMB_LOG_ROOT@" "BACKUP_ROOT=@BITHUMB_BACKUP_ROOT@"
 SyslogIdentifier=bithumb-bot-healthcheck
 ExecStart=@BITHUMB_UV_BIN@ run python @BITHUMB_BOT_ROOT@/scripts/healthcheck.py

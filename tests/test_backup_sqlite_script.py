@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.mark.skipif(shutil.which("sqlite3") is None, reason="sqlite3 CLI is required")
-def test_backup_script_resolves_relative_paths_from_project_root(tmp_path: Path) -> None:
+def test_backup_script_uses_backup_root_mode_scoped_directory(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     scripts_dir = project_root / "scripts"
     data_dir = project_root / "data"
@@ -37,7 +37,8 @@ def test_backup_script_resolves_relative_paths_from_project_root(tmp_path: Path)
 
     env = {
         "DB_PATH": "data/sample.sqlite",
-        "BACKUP_DIR": "backups",
+        "BACKUP_ROOT": "backup-root",
+        "MODE": "paper",
     }
 
     first = subprocess.run(
@@ -62,12 +63,12 @@ def test_backup_script_resolves_relative_paths_from_project_root(tmp_path: Path)
     assert "$'\\r'" not in first.stderr
     assert "$'\\r'" not in second.stderr
 
-    backup_dir = project_root / "backups"
+    backup_dir = project_root / "backup-root" / "paper" / "db"
     backups = sorted(backup_dir.glob("sample.sqlite.*.sqlite"))
     assert backups
     first_backup = first.stdout.strip().split()[-1]
     second_backup = second.stdout.strip().split()[-1]
     assert first_backup.startswith(str(backup_dir))
     assert second_backup.startswith(str(backup_dir))
-    assert not (first_cwd / "backups").exists()
-    assert not (second_cwd / "backups").exists()
+    assert not (first_cwd / "backup-root").exists()
+    assert not (second_cwd / "backup-root").exists()

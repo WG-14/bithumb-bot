@@ -22,17 +22,17 @@ from bithumb_bot.run_lock import (
 def test_default_lock_path_is_mode_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUN_LOCK_PATH", raising=False)
     monkeypatch.setenv("MODE", "paper")
-    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/bithumb-bot-run-paper.lock"))
+    assert "/paper/" in str(run_lock._default_lock_path()).replace("\\", "/")
 
     monkeypatch.setenv("MODE", "live")
-    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/bithumb-bot-run-live.lock"))
+    assert "/live/" in str(run_lock._default_lock_path()).replace("\\", "/")
 
 
 def test_default_lock_path_prefers_run_lock_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RUN_LOCK_PATH", "data/locks/custom-run.lock")
+    monkeypatch.setenv("RUN_LOCK_PATH", "run/live/custom-run.lock")
     monkeypatch.setenv("MODE", "live")
 
-    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("data/locks/custom-run.lock"))
+    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("run/live/custom-run.lock"))
 
 
 def test_second_acquire_fails_while_first_is_held(tmp_path: Path) -> None:

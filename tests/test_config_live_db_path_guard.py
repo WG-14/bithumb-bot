@@ -9,6 +9,11 @@ import sys
 def test_config_fail_fast_when_live_mode_missing_db_path() -> None:
     env = dict(os.environ)
     env["MODE"] = "live"
+    env["ENV_ROOT"] = "/var/lib/bithumb-bot/env"
+    env["RUN_ROOT"] = "/var/lib/bithumb-bot/run"
+    env["DATA_ROOT"] = "/var/lib/bithumb-bot/data"
+    env["LOG_ROOT"] = "/var/lib/bithumb-bot/logs"
+    env["BACKUP_ROOT"] = "/var/lib/bithumb-bot/backup"
     env.pop("DB_PATH", None)
     env["PYTHONPATH"] = "src"
 
@@ -43,8 +48,7 @@ def test_config_keeps_paper_default_db_path_when_unset() -> None:
     )
 
     assert proc.returncode == 0
-    expected = (Path.cwd() / "data" / "bithumb_1m.sqlite").resolve()
-    assert Path(proc.stdout.strip()) == expected
+    assert proc.stdout.strip().endswith("/data/paper/trades/paper.sqlite")
 
 
 def test_config_live_fee_rate_estimate_defaults_when_unset() -> None:
