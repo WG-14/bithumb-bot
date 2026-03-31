@@ -70,7 +70,12 @@ class Broker(Protocol):
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         ...
 
-    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+    def get_order(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> BrokerOrder:
         ...
 
     def get_open_orders(self) -> list[BrokerOrder]:

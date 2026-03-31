@@ -644,13 +644,20 @@ class BithumbBroker:
         }
 
     @staticmethod
-    def _raw_order_fields(row: dict[str, object], *, fallback_client_order_id: str | None = None) -> dict[str, object]:
+    def _raw_order_fields(
+        row: dict[str, object],
+        *,
+        fallback_client_order_id: str | None = None,
+        fallback_exchange_order_id: str | None = None,
+    ) -> dict[str, object]:
         raw: dict[str, object] = {}
         for key in ("market", "ord_type", "client_order_id"):
             if row.get(key) not in (None, ""):
                 raw[key] = row[key]
         if "client_order_id" not in raw and fallback_client_order_id:
             raw["client_order_id"] = fallback_client_order_id
+        if "uuid" not in raw and fallback_exchange_order_id:
+            raw["uuid"] = fallback_exchange_order_id
         return raw
 
     def _order_from_v2_row(self, row: dict[str, object], *, client_order_id: str) -> BrokerOrder:
@@ -862,17 +869,62 @@ class BithumbBroker:
             response_raw,
         )
 
-    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+    def get_order(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> BrokerOrder:
         now = int(time.time() * 1000)
-        exid = exchange_order_id or f"dry_{client_order_id}"
-        if self.dry_run:
-            return BrokerOrder(client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
+        requested_client_order_id = str(client_order_id or "").strip()
+        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        if not requested_client_order_id and not requested_exchange_order_id:
+            raise ValueError("order lookup requires exchange_order_id(uuid) or client_order_id")
 
-        data = self._get_private("/v1/order", {"uuid": str(exid)}, retry_safe=True)
+        exid = requested_exchange_order_id or f"dry_{requested_client_order_id}"
+        if self.dry_run:
+            return BrokerOrder(requested_client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
+
+        params: dict[str, object] = {}
+        if requested_exchange_order_id:
+            params["uuid"] = requested_exchange_order_id
+        else:
+            params["client_order_id"] = requested_client_order_id
+        data = self._get_private("/v1/order", params, retry_safe=True)
         if not isinstance(data, dict):
-            raise BrokerRejectError(f"unexpected /v1/order payload type: {type(data).__name__}")
+            raise BrokerRejectError(
+                "order lookup response schema mismatch: "
+                f"unexpected /v1/order payload type={type(data).__name__}"
+            )
         self._journal_read_summary(path="/v1/order", data=data)
-        return self._order_from_v2_row(data, client_order_id=client_order_id)
+        resolved_exchange_order_id = str(data.get("uuid") or data.get("order_id") or "")
+        resolved_client_order_id = str(data.get("client_order_id") or requested_client_order_id)
+        response_client_order_id = str(data.get("client_order_id") or "")
+        if not resolved_exchange_order_id and not response_client_order_id:
+            raise BrokerRejectError(
+                "order lookup response schema mismatch: "
+                "missing both uuid/order_id and client_order_id in response"
+            )
+        order = self._order_from_v2_row(data, client_order_id=resolved_client_order_id)
+        order_raw = self._raw_order_fields(
+            data,
+            fallback_client_order_id=resolved_client_order_id,
+            fallback_exchange_order_id=resolved_exchange_order_id,
+        )
+        if data.get("order_id") not in (None, ""):
+            order_raw["order_id"] = data["order_id"]
+        return BrokerOrder(
+            client_order_id=resolved_client_order_id,
+            exchange_order_id=resolved_exchange_order_id or order.exchange_order_id,
+            side=order.side,
+            status=order.status,
+            price=order.price,
+            qty_req=order.qty_req,
+            qty_filled=order.qty_filled,
+            created_ts=order.created_ts,
+            updated_ts=order.updated_ts,
+            raw=order_raw,
+        )
 
     def get_open_orders(self) -> list[BrokerOrder]:
         if self.dry_run:

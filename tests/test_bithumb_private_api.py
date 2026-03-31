@@ -700,6 +700,95 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
         "market": "KRW-BTC",
         "ord_type": "limit",
         "client_order_id": "exchange-cid-3",
+        "uuid": "filled-1",
+    }
+
+
+def test_get_order_supports_client_order_id_lookup(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        return {
+            "uuid": "filled-by-client-1",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "client_order_id": "cid-client-only",
+            "side": "ask",
+            "price": "150000000",
+            "volume": "0.02",
+            "remaining_volume": "0.01",
+            "executed_volume": "0.01",
+            "state": "wait",
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    order = broker.get_order(client_order_id="cid-client-only")
+
+    assert call == {"endpoint": "/v1/order", "params": {"client_order_id": "cid-client-only"}}
+    assert order.exchange_order_id == "filled-by-client-1"
+    assert order.client_order_id == "cid-client-only"
+    assert order.raw == {
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "client_order_id": "cid-client-only",
+        "uuid": "filled-by-client-1",
+    }
+
+
+def test_get_order_requires_at_least_one_identifier():
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(ValueError, match="requires exchange_order_id\\(uuid\\) or client_order_id"):
+        broker.get_order(client_order_id=None, exchange_order_id=None)
+
+
+def test_get_order_raises_on_response_identifier_mismatch(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {"state": "wait", "side": "bid", "volume": "0.1"},
+    )
+
+    with pytest.raises(BrokerRejectError, match="response schema mismatch"):
+        broker.get_order(client_order_id="cid-identifier-missing", exchange_order_id="ex-identifier-missing")
+
+
+def test_get_order_preserves_order_id_when_uuid_missing(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "order_id": "order-id-only-1",
+            "client_order_id": "cid-order-id-only",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.03",
+            "remaining_volume": "0.03",
+            "state": "wait",
+        },
+    )
+
+    order = broker.get_order(client_order_id="cid-order-id-only")
+
+    assert order.exchange_order_id == "order-id-only-1"
+    assert order.raw == {
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "client_order_id": "cid-order-id-only",
+        "uuid": "order-id-only-1",
+        "order_id": "order-id-only-1",
     }
 
 
