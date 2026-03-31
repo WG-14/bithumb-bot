@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from .markets import normalize_market_id
 from .public_api import PublicApiSchemaError, get_public_json
 
 
@@ -122,6 +123,32 @@ def parse_orderbook_top(payload: object) -> list[OrderbookTop]:
     return extract_top_quotes(parse_orderbook_snapshots(payload))
 
 
+def _canonicalize_market_set(markets: list[str]) -> set[str]:
+    return {normalize_market_id(market) for market in markets}
+
+
+def _validate_single_market_response(
+    *,
+    requested_market: str,
+    snapshots: list[OrderbookSnapshot],
+    endpoint: str,
+) -> OrderbookSnapshot:
+    requested_market_set = _canonicalize_market_set([requested_market])
+    returned_markets = [snapshot.market for snapshot in snapshots]
+    returned_market_set = _canonicalize_market_set(returned_markets)
+
+    if len(snapshots) != 1 or returned_market_set != requested_market_set:
+        raise PublicApiSchemaError(
+            "orderbook response market mismatch "
+            f"endpoint={endpoint} "
+            f"requested_markets={sorted(requested_market_set)} "
+            f"returned_markets={sorted(returned_market_set)} "
+            f"returned_count={len(snapshots)}"
+        )
+
+    return snapshots[0]
+
+
 def fetch_orderbook_snapshots(
     client: httpx.Client,
     *,
@@ -130,9 +157,16 @@ def fetch_orderbook_snapshots(
     market_text = str(market).strip()
     if not market_text:
         raise ValueError("market must not be empty")
-    params = {"markets": market_text}
+    requested_market = normalize_market_id(market_text)
+    params = {"markets": requested_market}
     payload = get_public_json(client, "/v1/orderbook", params=params)
-    return parse_orderbook_snapshots(payload)
+    snapshots = parse_orderbook_snapshots(payload)
+    validated_snapshot = _validate_single_market_response(
+        requested_market=requested_market,
+        snapshots=snapshots,
+        endpoint="/v1/orderbook",
+    )
+    return [validated_snapshot]
 
 
 def fetch_orderbook_top(
