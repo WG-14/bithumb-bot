@@ -868,7 +868,7 @@ class _DummyClient:
 
 
 def _response(status_code: int) -> httpx.Response:
-    req = httpx.Request("GET", "https://api.bithumb.com/public/test")
+    req = httpx.Request("GET", "https://api.bithumb.com/v1/test")
     return httpx.Response(status_code=status_code, request=req, json={"ok": True})
 
 
@@ -878,7 +878,7 @@ def test_get_with_retry_retries_on_429(monkeypatch):
     monkeypatch.setattr("bithumb_bot.marketdata.random.uniform", lambda a, b: 0.0)
 
     client = _DummyClient([_response(429), _response(503), _response(200)])
-    result = _get_with_retry(client, "/public/test")
+    result = _get_with_retry(client, "/v1/test")
 
     assert result.status_code == 200
     assert len(sleeps) == 2

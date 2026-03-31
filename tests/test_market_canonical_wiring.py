@@ -25,7 +25,7 @@ class _OrderbookClient:
         req = httpx.Request("GET", f"https://api.bithumb.com{path}")
         return httpx.Response(
             200,
-            json=[{"orderbook_units": [{"bid_price": "100.0", "ask_price": "101.0"}]}],
+            json=[{"market": "KRW-BTC", "orderbook_units": [{"bid_price": "100.0", "ask_price": "101.0"}]}],
             request=req,
         )
 

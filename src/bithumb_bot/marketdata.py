@@ -3,7 +3,6 @@ from __future__ import annotations
 import random
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 import httpx
 
@@ -16,6 +15,7 @@ from .public_api_minute_candles import (
     fetch_minute_candles,
     interval_to_minute_unit,
 )
+from .public_api_orderbook import fetch_orderbook_top as fetch_public_orderbook_top
 from .public_api_ticker import fetch_ticker
 
 
@@ -35,11 +35,7 @@ def _sleep_backoff(attempt: int) -> None:
     time.sleep(backoff)
 
 
-def _get_with_retry(
-    client: httpx.Client,
-    path: str,
-    params: dict[str, Any] | None = None,
-) -> httpx.Response:
+def _get_with_retry(client: httpx.Client, path: str, params: dict[str, object] | None = None) -> httpx.Response:
     last_error: Exception | None = None
 
     for attempt in range(MAX_HTTP_RETRIES + 1):
@@ -95,20 +91,11 @@ def to_v1_market(pair: str) -> str:
 def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:
     market = to_v1_market(pair or settings.PAIR)
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as c:
-        r = _get_with_retry(c, "/v1/orderbook", params={"markets": market})
-        payload = r.json()
-
-    if not isinstance(payload, list) or not payload:
-        raise RuntimeError(f"empty orderbook payload: {payload}")
-
-    units = payload[0].get("orderbook_units")
-    if not isinstance(units, list) or not units:
-        raise RuntimeError(f"orderbook_units missing: {payload[0]}")
-
-    best = units[0]
-    bid = float(best.get("bid_price", 0.0))
-    ask = float(best.get("ask_price", 0.0))
-    return bid, ask
+        snapshots = fetch_public_orderbook_top(c, market=market)
+    if not snapshots:
+        raise RuntimeError(f"orderbook payload is empty for markets={market!r}")
+    top = snapshots[0]
+    return top.bid_price, top.ask_price
 
 
 def _candle_key_ts_ms(candle: MinuteCandle) -> int:
