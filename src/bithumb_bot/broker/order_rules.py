@@ -28,6 +28,10 @@ class RuleResolution:
     source: dict[str, str]
 
 
+class OrderChanceSchemaError(RuntimeError):
+    """Raised when /v1/orders/chance response violates documented schema."""
+
+
 def required_rule_issues(rules: OrderRules) -> list[str]:
     issues: list[str] = []
     if not math.isfinite(float(rules.min_qty)) or float(rules.min_qty) <= 0:
@@ -50,41 +54,62 @@ def _manual_rules() -> OrderRules:
     )
 
 
-def _lookup(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
-    cur: Any = payload
-    for key in path:
-        if not isinstance(cur, dict) or key not in cur:
-            return None
-        cur = cur[key]
-    return cur
+def _require_dict(payload: dict[str, Any], key: str, *, where: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be object")
+    return value
 
 
-def _pick_float(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> float | None:
-    for path in paths:
-        raw = _lookup(payload, path)
-        if raw is None or raw == "":
-            continue
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value) and value > 0:
-            return value
-    return None
+def _require_non_empty_str(payload: dict[str, Any], key: str, *, where: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be non-empty string")
+    return value.strip()
 
 
-def _pick_int(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> int | None:
-    for path in paths:
-        raw = _lookup(payload, path)
-        if raw is None or raw == "":
-            continue
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
+def _require_non_empty_list(payload: dict[str, Any], key: str, *, where: str) -> list[Any]:
+    value = payload.get(key)
+    if not isinstance(value, list) or len(value) == 0:
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be non-empty array")
+    return value
+
+
+def _require_positive_number(payload: dict[str, Any], key: str, *, where: str) -> float:
+    raw = payload.get(key)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be numeric") from None
+    if not math.isfinite(value) or value <= 0:
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be > 0")
+    return value
+
+
+def _validate_order_chance_payload(payload: dict[str, Any], *, requested_market: str) -> float:
+    for fee_field in ("bid_fee", "ask_fee", "maker_bid_fee", "maker_ask_fee"):
+        _require_non_empty_str(payload, fee_field, where="response")
+
+    market = _require_dict(payload, "market", where="response")
+    market_id = _require_non_empty_str(market, "id", where="response.market")
+    if canonical_market_id(market_id) != canonical_market_id(requested_market):
+        raise OrderChanceSchemaError(
+            "/v1/orders/chance response.market.id mismatch: "
+            f"requested={canonical_market_id(requested_market)} response={canonical_market_id(market_id)}"
+        )
+
+    _require_non_empty_list(market, "order_types", where="response.market")
+    _require_non_empty_list(market, "order_sides", where="response.market")
+
+    bid = _require_dict(market, "bid", where="response.market")
+    ask = _require_dict(market, "ask", where="response.market")
+
+    _require_positive_number(bid, "price_unit", where="response.market.bid")
+    bid_min_total = _require_positive_number(bid, "min_total", where="response.market.bid")
+    _require_positive_number(ask, "price_unit", where="response.market.ask")
+    _require_positive_number(ask, "min_total", where="response.market.ask")
+
+    return bid_min_total
 
 
 def build_order_rules_market(pair: str) -> str:
@@ -98,60 +123,13 @@ def fetch_exchange_order_rules(pair: str) -> OrderRules:
     if not isinstance(payload, dict):
         raise RuntimeError(f"unexpected order rules payload type: {type(payload).__name__}")
 
-    min_qty = _pick_float(
-        payload,
-        (
-            ("market", "ask", "min_volume"),
-            ("market", "bid", "min_volume"),
-            ("market", "min_volume"),
-            ("ask", "min_volume"),
-            ("bid", "min_volume"),
-            ("min_order_quantity",),
-            ("min_qty",),
-        ),
-    ) or 0.0
-    qty_step = _pick_float(
-        payload,
-        (
-            ("market", "ask", "volume_step"),
-            ("market", "bid", "volume_step"),
-            ("market", "volume_step"),
-            ("ask", "volume_step"),
-            ("bid", "volume_step"),
-            ("order_sizing", "step"),
-            ("qty_step",),
-        ),
-    ) or 0.0
-    min_notional_krw = _pick_float(
-        payload,
-        (
-            ("market", "ask", "min_total"),
-            ("market", "bid", "min_total"),
-            ("market", "min_total"),
-            ("ask", "min_total"),
-            ("bid", "min_total"),
-            ("min_order_amount",),
-            ("min_notional",),
-        ),
-    ) or 0.0
-    max_qty_decimals = _pick_int(
-        payload,
-        (
-            ("market", "ask", "max_decimal_places"),
-            ("market", "bid", "max_decimal_places"),
-            ("market", "max_decimal_places"),
-            ("ask", "max_decimal_places"),
-            ("bid", "max_decimal_places"),
-            ("qty_unit_scale",),
-            ("max_qty_decimals",),
-        ),
-    ) or 0
+    min_notional_krw = _validate_order_chance_payload(payload, requested_market=market)
 
     return OrderRules(
-        min_qty=min_qty,
-        qty_step=qty_step,
+        min_qty=0.0,
+        qty_step=0.0,
         min_notional_krw=min_notional_krw,
-        max_qty_decimals=max_qty_decimals,
+        max_qty_decimals=0,
     )
 
 
