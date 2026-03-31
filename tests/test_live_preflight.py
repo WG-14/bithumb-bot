@@ -400,6 +400,34 @@ def test_live_preflight_fails_when_order_rule_sync_fails_and_manual_rules_invali
     assert "max_qty_decimals must be > 0" in msg
 
 
+def test_live_preflight_surfaces_document_schema_violation_when_manual_rules_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
+    order_rules._cached_rules.clear()
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: (_ for _ in ()).throw(order_rules.OrderChanceSchemaError("/v1/orders/chance response.market.bid.min_total must be numeric")),
+    )
+    warnings: list[str] = []
+    monkeypatch.setattr(order_rules, "notify", lambda msg: warnings.append(msg))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "min_qty must be > 0" in msg
+    assert warnings
+    assert "OrderChanceSchemaError" in warnings[0]
+    assert "response.market.bid.min_total must be numeric" in warnings[0]
+
+
 def test_live_preflight_passes_with_valid_auto_synced_order_rules(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
     order_rules._cached_rules.clear()

@@ -43,11 +43,43 @@ def _doc_order_chance_payload(*, market: str = "KRW-BTC") -> dict[str, object]:
     }
 
 
-def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monkeypatch):
+@pytest.fixture
+def valid_doc_shaped_response() -> dict[str, object]:
+    return _doc_order_chance_payload()
+
+
+@pytest.fixture
+def missing_required_field_response() -> dict[str, object]:
+    payload = _doc_order_chance_payload()
+    del payload["market"]["bid"]["min_total"]
+    return payload
+
+
+@pytest.fixture
+def market_mismatch_response() -> dict[str, object]:
+    return _doc_order_chance_payload(market="KRW-ETH")
+
+
+@pytest.fixture
+def malformed_decimal_field_response() -> dict[str, object]:
+    payload = _doc_order_chance_payload()
+    payload["market"]["ask"]["price_unit"] = "not-a-decimal"
+    return payload
+
+
+@pytest.fixture
+def extra_undocumented_field_response() -> dict[str, object]:
+    payload = _doc_order_chance_payload()
+    payload["legacy_guess_min_qty"] = "0.001"
+    payload["market"]["legacy_guess_qty_step"] = "0.0001"
+    return payload
+
+
+def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monkeypatch, valid_doc_shaped_response):
     monkeypatch.setattr(
         order_rules,
         "BithumbBroker",
-        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: _doc_order_chance_payload(market=market)})(),
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: valid_doc_shaped_response | {"market": valid_doc_shaped_response["market"] | {"id": market}}})(),
     )
 
     rules = order_rules.fetch_exchange_order_rules("BTC_KRW")
@@ -69,8 +101,8 @@ def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monk
     assert rules.max_qty_decimals == 0
 
 
-def test_parse_order_chance_response_transforms_raw_payload():
-    parsed = order_rules.parse_order_chance_response(_doc_order_chance_payload(), requested_market="KRW-BTC")
+def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_response):
+    parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="KRW-BTC")
 
     assert parsed.market_id == "KRW-BTC"
     assert parsed.bid.price_unit == 1.0
@@ -98,54 +130,77 @@ def test_derive_order_rules_from_chance_preserves_bid_ask_split():
     assert rules.min_notional_krw == 5100.0
 
 
-def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch):
+def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch, market_mismatch_response):
     monkeypatch.setattr(
         order_rules,
         "BithumbBroker",
-        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: _doc_order_chance_payload(market="KRW-ETH")})(),
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: market_mismatch_response})(),
     )
 
     with pytest.raises(order_rules.OrderChanceSchemaError, match="market.id mismatch"):
         order_rules.fetch_exchange_order_rules("KRW-BTC")
 
 
-def test_fetch_exchange_order_rules_fails_when_bid_min_total_missing(monkeypatch):
-    payload = _doc_order_chance_payload()
-    del payload["market"]["bid"]["min_total"]
+def test_fetch_exchange_order_rules_fails_when_required_field_is_missing(monkeypatch, missing_required_field_response):
     monkeypatch.setattr(
         order_rules,
         "BithumbBroker",
-        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: payload})(),
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: missing_required_field_response})(),
     )
 
     with pytest.raises(order_rules.OrderChanceSchemaError, match="response.market.bid.min_total"):
         order_rules.fetch_exchange_order_rules("KRW-BTC")
 
 
-def test_fetch_exchange_order_rules_fails_when_ask_price_unit_missing(monkeypatch):
-    payload = _doc_order_chance_payload()
-    del payload["market"]["ask"]["price_unit"]
+def test_fetch_exchange_order_rules_fails_when_decimal_field_is_malformed(monkeypatch, malformed_decimal_field_response):
     monkeypatch.setattr(
         order_rules,
         "BithumbBroker",
-        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: payload})(),
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: malformed_decimal_field_response})(),
     )
 
-    with pytest.raises(order_rules.OrderChanceSchemaError, match="response.market.ask.price_unit"):
+    with pytest.raises(order_rules.OrderChanceSchemaError, match="response.market.ask.price_unit must be numeric"):
         order_rules.fetch_exchange_order_rules("KRW-BTC")
 
 
-def test_fetch_exchange_order_rules_works_without_undocumented_guess_fields(monkeypatch):
-    payload = _doc_order_chance_payload()
+def test_fetch_exchange_order_rules_ignores_extra_undocumented_fields(monkeypatch, extra_undocumented_field_response):
     monkeypatch.setattr(
         order_rules,
         "BithumbBroker",
-        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: payload})(),
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: extra_undocumented_field_response})(),
     )
 
     rules = order_rules.fetch_exchange_order_rules("KRW-BTC")
 
     assert rules.min_notional_krw == 5000.0
+    assert rules.min_qty == 0.0
+    assert rules.qty_step == 0.0
+
+
+def test_get_effective_order_rules_reports_schema_violation_even_with_manual_fallback(monkeypatch, missing_required_field_response):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0002)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0005)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 6000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 5)
+
+    monkeypatch.setattr(
+        order_rules,
+        "BithumbBroker",
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: missing_required_field_response})(),
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(order_rules, "notify", lambda msg: warnings.append(msg))
+
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved.rules.min_notional_krw == 6000.0
+    assert resolved.source["min_notional_krw"] == "manual_config"
+    assert warnings
+    assert "OrderChanceSchemaError" in warnings[0]
+    assert "response.market.bid.min_total" in warnings[0]
 
 
 def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monkeypatch):

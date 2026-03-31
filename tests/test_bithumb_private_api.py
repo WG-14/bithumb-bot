@@ -285,6 +285,26 @@ def test_order_chance_uses_private_v1_endpoint(monkeypatch):
     }
 
 
+def test_order_chance_keeps_market_param_and_auth_query_hash(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"market": {"id": "KRW-BTC"}})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    broker.get_order_chance(market="KRW-BTC")
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+
+    assert call["endpoint"] == "/v1/orders/chance"
+    assert call["params"] == {"market": "KRW-BTC"}
+    assert claims["query_hash"] == hashlib.sha512(b"market=KRW-BTC").hexdigest()
+    assert claims["query_hash_alg"] == "SHA512"
+
+
 
 def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     _configure_live()
