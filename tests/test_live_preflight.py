@@ -40,6 +40,8 @@ def _restore_settings():
         "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR": settings.MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR,
         "MARKET_PREFLIGHT_BLOCK_ON_WARNING": settings.MARKET_PREFLIGHT_BLOCK_ON_WARNING,
         "MARKET_PREFLIGHT_WARNING_STATES": settings.MARKET_PREFLIGHT_WARNING_STATES,
+        "MARKET_REGISTRY_CACHE_TTL_SEC": settings.MARKET_REGISTRY_CACHE_TTL_SEC,
+        "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH": settings.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -107,11 +109,14 @@ def _set_valid_live_defaults(
     monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", raising=False)
     monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_WARNING", raising=False)
     monkeypatch.delenv("MARKET_PREFLIGHT_WARNING_STATES", raising=False)
+    monkeypatch.delenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", raising=False)
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
     )
+    object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", 900.0)
+    object.__setattr__(settings, "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", False)
     if stub_order_rules:
         monkeypatch.setattr(
             order_rules,
@@ -565,7 +570,7 @@ def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
     )
 
     with pytest.raises(config.LiveModeValidationError) as exc:
@@ -582,7 +587,7 @@ def test_market_preflight_accepts_supported_legacy_alias_when_catalog_has_canoni
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
     )
 
     config.validate_live_mode_preflight(settings)
@@ -597,7 +602,7 @@ def test_market_preflight_blocks_warning_state_in_live_real_mode(monkeypatch: py
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
     )
 
     with pytest.raises(config.LiveModeValidationError) as exc:
@@ -615,7 +620,7 @@ def test_market_preflight_allows_warning_state_in_dry_run_live_mode(
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
     )
 
     with caplog.at_level("WARNING"):
@@ -633,7 +638,7 @@ def test_market_preflight_blocks_on_catalog_fetch_failure_in_live_real_mode(monk
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
+        lambda **_kwargs: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
     )
 
     with pytest.raises(config.LiveModeValidationError) as exc:
@@ -651,7 +656,7 @@ def test_market_preflight_allows_catalog_fetch_failure_in_dry_run_with_warning(
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
+        lambda **_kwargs: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
     )
 
     with caplog.at_level("WARNING"):
@@ -669,7 +674,7 @@ def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(
     monkeypatch.setattr(
         config,
         "_fetch_market_registry_for_preflight",
-        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
     )
 
     with caplog.at_level("WARNING"):
@@ -689,9 +694,64 @@ def test_market_preflight_rejects_registry_inconsistency_when_market_lookup_is_m
             return None
 
     _set_valid_live_defaults(monkeypatch)
-    monkeypatch.setattr(config, "_fetch_market_registry_for_preflight", lambda: _InconsistentRegistry())
+    monkeypatch.setattr(config, "_fetch_market_registry_for_preflight", lambda **_kwargs: _InconsistentRegistry())
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
     assert "registry inconsistency" in str(exc.value)
+
+
+def test_market_preflight_live_defaults_to_forced_registry_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    calls: list[tuple[bool, float]] = []
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", 123.0)
+    monkeypatch.delenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", raising=False)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **kwargs: (
+            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]))),
+            MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        )[1],
+    )
+
+    config.validate_market_preflight(settings)
+
+    assert calls == [(True, 123.0)]
+
+
+def test_market_preflight_paper_defaults_to_cache_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    calls: list[tuple[bool, float]] = []
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", 456.0)
+    monkeypatch.delenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", raising=False)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **kwargs: (
+            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]))),
+            MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        )[1],
+    )
+
+    config.validate_market_preflight(settings)
+
+    assert calls == [(False, 456.0)]
+
+
+def test_market_preflight_rejects_negative_cache_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", -1.0)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **_kwargs: pytest.fail("market registry fetch should not run when ttl is invalid"),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "MARKET_REGISTRY_CACHE_TTL_SEC must be >= 0" in str(exc.value)

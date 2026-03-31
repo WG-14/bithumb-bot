@@ -254,3 +254,73 @@ def test_get_market_registry_uses_cache(monkeypatch) -> None:
 
     assert first is second
     assert len(_FakeClient.requests) == 1
+
+
+def test_get_market_registry_refreshes_when_ttl_expires(monkeypatch) -> None:
+    import bithumb_bot.markets as markets_mod
+
+    calls = {"count": 0}
+    monotonic = {"value": 100.0}
+
+    def _fake_from_catalog(*, client=None, is_details=False):
+        del client, is_details
+        calls["count"] += 1
+        suffix = "BTC" if calls["count"] == 1 else "ETH"
+        return MarketRegistry([MarketInfo(market=f"KRW-{suffix}")])
+
+    monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
+    monkeypatch.setattr(markets_mod.time, "monotonic", lambda: monotonic["value"])
+    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+
+    first = get_market_registry(ttl_seconds=10)
+    monotonic["value"] = 109.0
+    second = get_market_registry(ttl_seconds=10)
+    monotonic["value"] = 120.0
+    third = get_market_registry(ttl_seconds=10)
+
+    assert first is second
+    assert third is not second
+    assert calls["count"] == 2
+
+
+def test_get_market_registry_forces_refresh_when_requested(monkeypatch) -> None:
+    import bithumb_bot.markets as markets_mod
+
+    calls = {"count": 0}
+
+    def _fake_from_catalog(*, client=None, is_details=False):
+        del client, is_details
+        calls["count"] += 1
+        return MarketRegistry([MarketInfo(market=f"KRW-FAKE{calls['count']}")])
+
+    monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+
+    first = get_market_registry(ttl_seconds=300)
+    second = get_market_registry(refresh=True, ttl_seconds=300)
+
+    assert second is not first
+    assert calls["count"] == 2
+
+
+def test_get_market_registry_ttl_zero_disables_reuse(monkeypatch) -> None:
+    import bithumb_bot.markets as markets_mod
+
+    calls = {"count": 0}
+
+    def _fake_from_catalog(*, client=None, is_details=False):
+        del client, is_details
+        calls["count"] += 1
+        return MarketRegistry([MarketInfo(market=f"KRW-FAKE{calls['count']}")])
+
+    monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+
+    first = get_market_registry(ttl_seconds=0)
+    second = get_market_registry(ttl_seconds=0)
+
+    assert second is not first
+    assert calls["count"] == 2

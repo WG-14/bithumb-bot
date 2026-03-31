@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from threading import Lock
+import time
 import httpx
 
 from .public_api import PublicApiSchemaError, get_public_json
@@ -100,26 +101,50 @@ class MarketRegistry:
 
 _market_registry_lock = Lock()
 _market_registry_cache: MarketRegistry | None = None
+_market_registry_cached_at_monotonic: float | None = None
 
 
-def get_market_registry(*, refresh: bool = False, client: MarketCatalogClient | None = None) -> MarketRegistry:
+def _cache_is_fresh(*, now_monotonic: float, ttl_seconds: float | None) -> bool:
+    if _market_registry_cache is None:
+        return False
+    if ttl_seconds is None:
+        return True
+    if ttl_seconds <= 0:
+        return False
+    if _market_registry_cached_at_monotonic is None:
+        return False
+    return (now_monotonic - _market_registry_cached_at_monotonic) < ttl_seconds
+
+
+def get_market_registry(
+    *,
+    refresh: bool = False,
+    client: MarketCatalogClient | None = None,
+    ttl_seconds: float | None = 900.0,
+) -> MarketRegistry:
     """Return cached market registry loaded from /v1/market/all."""
-    global _market_registry_cache
+    global _market_registry_cache, _market_registry_cached_at_monotonic
+    now_monotonic = time.monotonic()
     if refresh:
         registry = MarketRegistry.from_catalog(client=client)
         with _market_registry_lock:
             _market_registry_cache = registry
+            _market_registry_cached_at_monotonic = now_monotonic
         return registry
 
     with _market_registry_lock:
-        cached = _market_registry_cache
-    if cached is not None:
-        return cached
+        if _cache_is_fresh(now_monotonic=now_monotonic, ttl_seconds=ttl_seconds):
+            assert _market_registry_cache is not None
+            return _market_registry_cache
 
     registry = MarketRegistry.from_catalog(client=client)
     with _market_registry_lock:
-        if _market_registry_cache is None:
+        if refresh or not _cache_is_fresh(now_monotonic=now_monotonic, ttl_seconds=ttl_seconds):
             _market_registry_cache = registry
+            _market_registry_cached_at_monotonic = now_monotonic
+        elif _market_registry_cache is None:
+            _market_registry_cache = registry
+            _market_registry_cached_at_monotonic = now_monotonic
         return _market_registry_cache
 
 

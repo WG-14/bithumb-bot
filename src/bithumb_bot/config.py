@@ -7,7 +7,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .markets import MarketCatalogError, MarketRegistry, UnsupportedMarketError, normalize_market_id
+from .markets import (
+    MarketCatalogError,
+    MarketRegistry,
+    UnsupportedMarketError,
+    get_market_registry,
+    normalize_market_id,
+)
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError
 
@@ -292,6 +298,10 @@ class Settings:
     )
     MARKET_PREFLIGHT_BLOCK_ON_WARNING: bool = parse_bool_env("MARKET_PREFLIGHT_BLOCK_ON_WARNING", "")
     MARKET_PREFLIGHT_WARNING_STATES: str = os.getenv("MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
+    MARKET_REGISTRY_CACHE_TTL_SEC: float = parse_float_env("MARKET_REGISTRY_CACHE_TTL_SEC", "900")
+    MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH: bool = parse_bool_env(
+        "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", ""
+    )
 
 settings = Settings()
 
@@ -306,8 +316,12 @@ def validate_mode_or_raise(mode: str) -> None:
     )
 
 
-def _fetch_market_registry_for_preflight() -> MarketRegistry:
-    return MarketRegistry.from_catalog(is_details=True)
+def _fetch_market_registry_for_preflight(*, refresh: bool, ttl_seconds: float) -> MarketRegistry:
+    return get_market_registry(
+        refresh=refresh,
+        client=None,
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def _warning_state_set(raw_states: str) -> set[str]:
@@ -336,9 +350,21 @@ def validate_market_preflight(cfg: Settings) -> None:
     configured_market = str(cfg.PAIR or "")
     canonical_market = normalize_market_id(configured_market)
     warning_block_states = _warning_state_set(cfg.MARKET_PREFLIGHT_WARNING_STATES)
+    if cfg.MARKET_REGISTRY_CACHE_TTL_SEC < 0:
+        raise MarketPreflightValidationError(
+            "MARKET_REGISTRY_CACHE_TTL_SEC must be >= 0"
+        )
+    force_refresh = (
+        bool(cfg.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH)
+        if os.getenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH") not in (None, "")
+        else normalized_mode == "live"
+    )
 
     try:
-        registry = _fetch_market_registry_for_preflight()
+        registry = _fetch_market_registry_for_preflight(
+            refresh=force_refresh,
+            ttl_seconds=cfg.MARKET_REGISTRY_CACHE_TTL_SEC,
+        )
     except Exception as exc:
         msg = (
             "market preflight catalog fetch failed: "
