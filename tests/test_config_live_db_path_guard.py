@@ -113,6 +113,25 @@ def test_config_market_prefers_market_over_pair_when_both_match() -> None:
     assert proc.stdout.strip() == "KRW-BTC"
 
 
+def test_config_market_rejects_flipped_legacy_alias_against_canonical_pair() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["MARKET"] = "KRW_BTC"
+    env["PAIR"] = "KRW-BTC"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "MARKET and PAIR resolve to different canonical markets" in (proc.stderr + proc.stdout)
+
+
 def test_config_market_rejects_invalid_market_format_at_startup() -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"

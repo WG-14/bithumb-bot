@@ -473,6 +473,20 @@ def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyP
     assert "unsupported pair" in str(exc.value)
 
 
+def test_market_preflight_accepts_supported_legacy_alias_when_catalog_has_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "PAIR", "btc_krw")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+    )
+
+    config.validate_live_mode_preflight(settings)
+
+
 def test_market_preflight_blocks_warning_state_in_live_real_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)

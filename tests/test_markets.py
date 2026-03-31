@@ -8,6 +8,7 @@ import pytest
 from bithumb_bot.markets import (
     MarketCatalogClient,
     MarketCatalogError,
+    MarketInfo,
     MarketRegistry,
     UnsupportedMarketError,
     canonical_market_with_raw,
@@ -74,6 +75,12 @@ def test_normalize_market_id_aliases() -> None:
     assert normalize_market_id("KRW-BTC") == "KRW-BTC"
     assert normalize_market_id(" BTC_KRW ") == "KRW-BTC"
     assert normalize_market_id("BTC") == "KRW-BTC"
+
+
+def test_normalize_market_id_is_not_naive_string_reverse() -> None:
+    # 회귀 계약: canonical 형태(QUOTE-BASE)는 추가 뒤집기 없이 그대로 유지한다.
+    assert normalize_market_id("BTC-KRW") == "BTC-KRW"
+    assert normalize_market_id("USDT-ETH") == "USDT-ETH"
 
 
 def test_normalize_market_id_with_registry_rejects_unsupported() -> None:
@@ -185,6 +192,14 @@ def test_canonical_market_id_requires_catalog_membership(monkeypatch) -> None:
 
     with pytest.raises(UnsupportedMarketError, match="unsupported market"):
         canonical_market_id("BTC_KRW")
+
+
+def test_canonical_market_id_rejects_flipped_legacy_alias_even_when_tokens_look_valid(monkeypatch) -> None:
+    registry = MarketRegistry([MarketInfo(market="KRW-BTC")])
+    monkeypatch.setattr("bithumb_bot.markets.get_market_registry", lambda: registry)
+
+    with pytest.raises(UnsupportedMarketError, match="canonical=BTC-KRW"):
+        canonical_market_id("KRW_BTC")
 
 
 def test_get_market_registry_uses_cache(monkeypatch) -> None:

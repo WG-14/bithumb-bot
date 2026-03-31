@@ -110,3 +110,23 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "BITHUMB_API_KEY", original_key)
         object.__setattr__(settings, "BITHUMB_API_SECRET", original_secret)
+
+
+def test_broker_pair_and_market_share_canonical_source(monkeypatch):
+    original_pair = settings.PAIR
+    object.__setattr__(settings, "PAIR", "btc_krw")
+    seen: list[str] = []
+
+    def _fake_canonical(market: str) -> str:
+        seen.append(market)
+        return "KRW-BTC"
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", _fake_canonical)
+    broker = BithumbBroker()
+
+    try:
+        assert broker._market() == "KRW-BTC"
+        assert broker._pair() == ("BTC", "KRW")
+        assert seen == ["btc_krw", "btc_krw"]
+    finally:
+        object.__setattr__(settings, "PAIR", original_pair)
