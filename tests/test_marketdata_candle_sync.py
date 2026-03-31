@@ -7,7 +7,9 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.marketdata import cmd_candles, cmd_sync
+from bithumb_bot.marketdata import fetch_orderbook_top as fetch_marketdata_orderbook_top
 from bithumb_bot.public_api import PublicApiSchemaError
+from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.public_api_minute_candles import MinuteCandle
 
 
@@ -144,3 +146,23 @@ def test_cmd_candles_uses_minute_candle_layer(monkeypatch, capsys, _settings_gua
     captured = capsys.readouterr()
     assert "[CANDLES KRW-BTC 1m] last 1" in captured.out
     assert "MinuteCandle" in captured.out
+
+
+def test_marketdata_orderbook_fetch_uses_public_retry_path(monkeypatch, _settings_guard) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_orderbook_fetch(client, *, market: str, max_retries: int):
+        captured["client_timeout"] = client.timeout
+        captured["market"] = market
+        captured["max_retries"] = max_retries
+        return [BestQuote(market=market, bid_price=100.0, ask_price=101.0)]
+
+    monkeypatch.setattr("bithumb_bot.marketdata.fetch_public_orderbook_top", _fake_orderbook_fetch)
+    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+
+    bid, ask = fetch_marketdata_orderbook_top("BTC_KRW")
+    assert bid == 100.0
+    assert ask == 101.0
+    assert captured["market"] == "KRW-BTC"
+    assert int(float(captured["client_timeout"].connect)) == 10
+    assert captured["max_retries"] == 3

@@ -26,6 +26,8 @@ MAX_HTTP_RETRIES = 4
 BASE_BACKOFF_SEC = 1.0
 MAX_BACKOFF_SEC = 10.0
 JITTER_SEC = 0.5
+ORDERBOOK_FETCH_TIMEOUT_SEC = 10.0
+ORDERBOOK_FETCH_MAX_RETRIES = 3
 
 
 def _sleep_backoff(attempt: int) -> None:
@@ -90,8 +92,8 @@ def to_v1_market(pair: str) -> str:
 
 def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:
     market = to_v1_market(pair or settings.PAIR)
-    with httpx.Client(base_url=BASE_URL, timeout=10.0) as c:
-        snapshots = fetch_public_orderbook_top(c, market=market)
+    with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
+        snapshots = fetch_public_orderbook_top(c, market=market, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
     if not snapshots:
         raise RuntimeError(f"orderbook payload is empty for markets={market!r}")
     top = snapshots[0]

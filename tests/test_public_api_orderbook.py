@@ -85,12 +85,13 @@ def test_parse_orderbook_top_compatibility_wrapper() -> None:
 def test_fetch_orderbook_snapshot_and_top_compatibility(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = [{"market": "KRW-BTC", "orderbook_units": [{"ask_price": "101.0", "bid_price": "100.0"}]}]
 
-    def _fake_get_public_json(_client, path, params):
+    def _fake_get_public_json_with_retry(_client, path, params, max_retries):
         assert path == "/v1/orderbook"
         assert params == {"markets": "KRW-BTC"}
+        assert max_retries == 3
         return payload
 
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", _fake_get_public_json)
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", _fake_get_public_json_with_retry)
     assert fetch_orderbook_snapshots(client=object(), market="KRW-BTC") == [
         OrderbookSnapshot(
             market="KRW-BTC",
@@ -105,7 +106,7 @@ def test_fetch_orderbook_snapshot_and_top_compatibility(monkeypatch: pytest.Monk
 def test_fetch_orderbook_snapshots_accepts_canonical_market_match(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = [{"market": "KRW-BTC", "orderbook_units": [{"ask_price": "101.0", "bid_price": "100.0"}]}]
 
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
     assert fetch_orderbook_snapshots(client=object(), market="btc_krw") == [
         OrderbookSnapshot(
@@ -120,7 +121,7 @@ def test_fetch_orderbook_snapshots_rejects_when_requested_market_is_missing(
 ) -> None:
     payload = [{"market": "KRW-ETH", "orderbook_units": [{"ask_price": "101.0", "bid_price": "100.0"}]}]
 
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
     with pytest.raises(PublicApiSchemaError, match="orderbook response market mismatch") as exc:
         fetch_orderbook_snapshots(client=object(), market="KRW-BTC")
@@ -137,7 +138,7 @@ def test_fetch_orderbook_snapshots_rejects_multiple_returned_markets(monkeypatch
         {"market": "KRW-ETH", "orderbook_units": [{"ask_price": "201.0", "bid_price": "200.0"}]},
     ]
 
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
     with pytest.raises(PublicApiSchemaError, match="orderbook response market mismatch") as exc:
         fetch_orderbook_snapshots(client=object(), market="KRW-BTC")
@@ -146,7 +147,7 @@ def test_fetch_orderbook_snapshots_rejects_multiple_returned_markets(monkeypatch
 
 
 def test_fetch_orderbook_snapshots_rejects_empty_response_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: [])
 
     with pytest.raises(PublicApiSchemaError, match="expected=non-empty list where=root"):
         fetch_orderbook_snapshots(client=object(), market="KRW-BTC")
@@ -157,7 +158,17 @@ def test_fetch_orderbook_top_rejects_mixed_market_response(monkeypatch: pytest.M
         {"market": "KRW-BTC", "orderbook_units": [{"ask_price": "101.0", "bid_price": "100.0"}]},
         {"market": "KRW-XRP", "orderbook_units": [{"ask_price": "51.0", "bid_price": "50.0"}]},
     ]
-    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
     with pytest.raises(PublicApiSchemaError, match="orderbook response market mismatch"):
         fetch_orderbook_top(client=object(), market="KRW-BTC")
+
+
+def test_fetch_orderbook_snapshots_includes_context_in_schema_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: [])
+
+    with pytest.raises(PublicApiSchemaError, match="endpoint=/v1/orderbook") as exc:
+        fetch_orderbook_snapshots(client=object(), market="KRW-BTC")
+
+    message = str(exc.value)
+    assert "requested_market=KRW-BTC" in message

@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from .markets import normalize_market_id
-from .public_api import PublicApiSchemaError, get_public_json
+from .public_api import PublicApiSchemaError, get_public_json_with_retry
 
 
 @dataclass(frozen=True)
@@ -153,19 +153,33 @@ def fetch_orderbook_snapshots(
     client: httpx.Client,
     *,
     market: str,
+    max_retries: int = 3,
 ) -> list[OrderbookSnapshot]:
     market_text = str(market).strip()
     if not market_text:
         raise ValueError("market must not be empty")
     requested_market = normalize_market_id(market_text)
     params = {"markets": requested_market}
-    payload = get_public_json(client, "/v1/orderbook", params=params)
-    snapshots = parse_orderbook_snapshots(payload)
-    validated_snapshot = _validate_single_market_response(
-        requested_market=requested_market,
-        snapshots=snapshots,
-        endpoint="/v1/orderbook",
+    endpoint = "/v1/orderbook"
+    payload = get_public_json_with_retry(
+        client,
+        endpoint,
+        params=params,
+        max_retries=max_retries,
     )
+    try:
+        snapshots = parse_orderbook_snapshots(payload)
+        validated_snapshot = _validate_single_market_response(
+            requested_market=requested_market,
+            snapshots=snapshots,
+            endpoint=endpoint,
+        )
+    except PublicApiSchemaError as exc:
+        raise PublicApiSchemaError(
+            "orderbook schema validation failed "
+            f"endpoint={endpoint} requested_market={requested_market} params={params} "
+            f"detail={exc}"
+        ) from exc
     return [validated_snapshot]
 
 
@@ -173,5 +187,6 @@ def fetch_orderbook_top(
     client: httpx.Client,
     *,
     market: str,
+    max_retries: int = 3,
 ) -> list[OrderbookTop]:
-    return extract_top_quotes(fetch_orderbook_snapshots(client, market=market))
+    return extract_top_quotes(fetch_orderbook_snapshots(client, market=market, max_retries=max_retries))

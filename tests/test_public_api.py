@@ -6,8 +6,10 @@ import pytest
 from bithumb_bot.public_api import (
     PublicApiRequestError,
     PublicApiResponseError,
+    PublicApiTransientError,
     decode_json_response,
     get_public_json,
+    get_public_json_with_retry,
     mask_params,
     raise_for_http_error,
 )
@@ -60,3 +62,45 @@ def test_get_public_json_wraps_network_failures() -> None:
     with httpx.Client(transport=transport, base_url="https://api.bithumb.com", timeout=1.0) as client:
         with pytest.raises(PublicApiRequestError, match="request failed"):
             get_public_json(client, "/v1/market/all")
+
+
+def test_get_public_json_with_retry_succeeds_after_transient_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+
+    responses = iter(
+        [
+            _httpx_response(status_code=503, payload={"error": {"name": "temporary", "message": "retry"}}),
+            _httpx_response(status_code=200, payload=[{"ok": True}]),
+        ]
+    )
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    transport = httpx.MockTransport(_handler)
+    with httpx.Client(transport=transport, base_url="https://api.bithumb.com", timeout=1.0) as client:
+        payload = get_public_json_with_retry(
+            client,
+            "/v1/market/all",
+            params={"market": "KRW-BTC"},
+            max_retries=2,
+            sleep_fn=lambda sec: sleeps.append(sec),
+            random_fn=lambda _a, _b: 0.0,
+        )
+
+    assert payload == [{"ok": True}]
+    assert len(sleeps) == 1
+
+
+def test_get_public_json_with_retry_raises_transient_error_after_retry_budget() -> None:
+    transport = httpx.MockTransport(lambda _request: _httpx_response(status_code=503, payload={"error": "busy"}))
+    with httpx.Client(transport=transport, base_url="https://api.bithumb.com", timeout=1.0) as client:
+        with pytest.raises(PublicApiTransientError, match="transient failure after retries"):
+            get_public_json_with_retry(
+                client,
+                "/v1/market/all",
+                params={"market": "KRW-BTC"},
+                max_retries=1,
+                sleep_fn=lambda _sec: None,
+                random_fn=lambda _a, _b: 0.0,
+            )
