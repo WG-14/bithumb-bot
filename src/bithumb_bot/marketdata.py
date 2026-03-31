@@ -111,16 +111,17 @@ def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:
     return bid, ask
 
 
-def _candle_start_ts_ms(candle: MinuteCandle) -> int:
+def _candle_key_ts_ms(candle: MinuteCandle) -> int:
     """
-    Normalize candle timestamp to candle-start epoch milliseconds (UTC).
+    Build canonical DB candle key timestamp (candle bucket start, UTC epoch ms).
 
     Bithumb minute candle payload includes both:
     - `timestamp`: trade-tick millisecond timestamp within candle window
     - `candle_date_time_utc`: canonical candle bucket time
 
-    We persist candle bucket time to keep deterministic bar identity in DB PK
-    `(ts, pair, interval)` and to avoid per-trade timestamp drift.
+    The engine and strategy logic treat `candles.ts` as candle bucket start,
+    so we must persist `candle_date_time_utc` as the DB key and never the raw
+    trade snapshot `timestamp`.
     """
     dt = datetime.fromisoformat(candle.candle_date_time_utc)
     if dt.tzinfo is None:
@@ -132,7 +133,7 @@ def _candle_start_ts_ms(candle: MinuteCandle) -> int:
 
 def _minute_candle_to_db_row(candle: MinuteCandle) -> tuple[int, str, str, float, float, float, float, float]:
     return (
-        _candle_start_ts_ms(candle),
+        _candle_key_ts_ms(candle),
         candle.market,
         settings.INTERVAL,
         candle.opening_price,

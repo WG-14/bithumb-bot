@@ -134,9 +134,25 @@ def _close_guard_ms(interval_sec: int) -> int:
     return max(2_000, min(30_000, interval_ms // 20))
 
 
-def _is_closed_candle(*, candle_ts_ms: int, now_ms: int, interval_sec: int) -> bool:
+def _candle_close_ts_ms(*, candle_start_ts_ms: int, interval_sec: int) -> int:
     interval_ms = max(1, int(interval_sec)) * 1000
-    close_ready_ts_ms = candle_ts_ms + interval_ms + _close_guard_ms(interval_sec)
+    return int(candle_start_ts_ms) + interval_ms
+
+
+def _is_closed_candle(*, candle_ts_ms: int, now_ms: int, interval_sec: int) -> bool:
+    """
+    Return True when candle identified by DB key `candles.ts` is safely closed.
+
+    `candles.ts` is the candle bucket start timestamp (UTC epoch ms), not the
+    exchange payload's per-trade snapshot timestamp. Closedness is therefore
+    judged from candle-start + interval (+ guard), not from raw payload
+    `timestamp`.
+    """
+    interval_ms = max(1, int(interval_sec)) * 1000
+    close_ready_ts_ms = _candle_close_ts_ms(
+        candle_start_ts_ms=candle_ts_ms,
+        interval_sec=interval_sec,
+    ) + _close_guard_ms(interval_sec)
     return now_ms >= close_ready_ts_ms
 
 

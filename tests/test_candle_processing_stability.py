@@ -7,7 +7,7 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.engine import _select_latest_closed_candle, run_loop
+from bithumb_bot.engine import _close_guard_ms, _is_closed_candle, _select_latest_closed_candle, run_loop
 from bithumb_bot.strategy.sma import compute_signal
 
 
@@ -115,6 +115,53 @@ def test_select_latest_closed_candle_skips_open_tail() -> None:
     assert closed_row is not None
     assert int(closed_row["ts"]) == 0
     assert incomplete_ts == 60_000
+
+
+def test_is_closed_candle_boundary_before_and_after_close_guard() -> None:
+    interval_sec = 60
+    candle_start_ts_ms = 0
+    guard_ms = _close_guard_ms(interval_sec)
+    close_ready_ts_ms = candle_start_ts_ms + interval_sec * 1000 + guard_ms
+
+    assert _is_closed_candle(
+        candle_ts_ms=candle_start_ts_ms,
+        now_ms=close_ready_ts_ms - 1,
+        interval_sec=interval_sec,
+    ) is False
+    assert _is_closed_candle(
+        candle_ts_ms=candle_start_ts_ms,
+        now_ms=close_ready_ts_ms,
+        interval_sec=interval_sec,
+    ) is True
+
+
+def test_select_latest_closed_candle_consistent_with_to_exclusive_snapshot_cutoff() -> None:
+    # to=00:02:00 fetches candles strictly before the candle containing "to".
+    # For 1m bars, a candle is eligible only if start + 1m <= to.
+    _insert_candle(0, 100.0)  # [00:00, 00:01)
+    _insert_candle(60_000, 101.0)  # [00:01, 00:02)
+    _insert_candle(120_000, 102.0)  # [00:02, 00:03) -> excluded by to=00:02:00
+
+    interval_sec = 60
+    to_ms = 120_000
+    guard_ms = _close_guard_ms(interval_sec)
+    now_ms = to_ms + guard_ms
+
+    conn = ensure_db()
+    try:
+        closed_row, incomplete_ts = _select_latest_closed_candle(
+            conn,
+            pair=settings.PAIR,
+            interval=settings.INTERVAL,
+            interval_sec=interval_sec,
+            now_ms=now_ms,
+        )
+    finally:
+        conn.close()
+
+    assert closed_row is not None
+    assert int(closed_row["ts"]) == 60_000
+    assert incomplete_ts == 120_000
 
 
 def test_run_loop_logs_duplicate_and_incomplete_candle_and_skips_reprocessing(monkeypatch, capsys):
