@@ -24,6 +24,7 @@ def build_order_payload(
     ord_type: str,
     volume: str | None = None,
     price: str | None = None,
+    client_order_id: str | None = None,
 ) -> dict[str, str]:
     normalized_side = normalize_order_side(side)
     ord_type_token = str(ord_type).strip().lower()
@@ -35,6 +36,11 @@ def build_order_payload(
         "side": normalized_side,
         "ord_type": ord_type_token,
     }
+    if client_order_id is not None:
+        normalized_client_order_id = str(client_order_id).strip()
+        if not normalized_client_order_id:
+            raise BrokerRejectError("client_order_id must be a non-empty string")
+        payload["client_order_id"] = normalized_client_order_id
     if ord_type_token == "limit":
         if not volume or not price:
             raise BrokerRejectError("limit order requires both volume and price")

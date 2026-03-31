@@ -737,6 +737,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="price",
                     price=self._format_krw_amount(notional),
+                    client_order_id=client_order_id,
                 )
             else:
                 payload = build_order_payload(
@@ -744,6 +745,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="market",
                     volume=volume_text,
+                    client_order_id=client_order_id,
                 )
         else:
             requested_limit_price = self._decimal_from_value(price)
@@ -774,6 +776,7 @@ class BithumbBroker:
                 ord_type="limit",
                 volume=volume_text,
                 price=self._format_krw_amount(requested_limit_price),
+                client_order_id=client_order_id,
             )
 
         RUN_LOG.info(
@@ -796,6 +799,16 @@ class BithumbBroker:
         if not exchange_order_id:
             raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
         response_row = data.get("data") if isinstance(data.get("data"), dict) else data
+        response_client_order_id = str(
+            response_row.get("client_order_id")
+            or data.get("client_order_id")
+            or ""
+        )
+        if response_client_order_id and response_client_order_id != str(client_order_id):
+            raise BrokerRejectError(
+                "order submit response client_order_id mismatch: "
+                f"requested={client_order_id} response={response_client_order_id}"
+            )
         raw = self._raw_order_fields(response_row, fallback_client_order_id=client_order_id)
         raw.setdefault("market", payload.get("market"))
         raw.setdefault("ord_type", payload.get("ord_type"))

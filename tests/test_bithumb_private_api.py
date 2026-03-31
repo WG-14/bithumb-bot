@@ -352,6 +352,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "side": "bid",
         "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
         "ord_type": "price",
+        "client_order_id": "cid-1",
     }
 
 
@@ -405,6 +406,7 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         "side": "ask",
         "volume": "0.4321",
         "ord_type": "market",
+        "client_order_id": "cid-2",
     }
 
 
@@ -423,7 +425,7 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
             "uuid": "lmt-2",
             "market": "KRW-BTC",
             "ord_type": "limit",
-            "client_order_id": "exchange-client-1",
+            "client_order_id": "cid-3",
         }
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
@@ -438,12 +440,61 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "volume": "0.4",
         "price": "149500000",
         "ord_type": "limit",
+        "client_order_id": "cid-3",
     }
     assert order.raw == {
         "market": "KRW-BTC",
         "ord_type": "limit",
-        "client_order_id": "exchange-client-1",
+        "client_order_id": "cid-3",
     }
+
+
+def test_place_order_preserves_local_client_order_id_when_response_omits_it(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    call: dict[str, object] = {}
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {
+            "uuid": "lmt-omit-client-id",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+        }
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-omit", side="BUY", qty=0.4, price=149500000)
+
+    assert order.exchange_order_id == "lmt-omit-client-id"
+    assert call["payload"]["client_order_id"] == "cid-omit"
+    assert order.raw == {
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "client_order_id": "cid-omit",
+    }
+
+
+def test_place_order_rejects_when_response_client_order_id_mismatches(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda *_args, **_kwargs: {
+            "uuid": "lmt-client-mismatch",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "client_order_id": "cid-other",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="order submit response client_order_id mismatch"):
+        broker.place_order(client_order_id="cid-local", side="BUY", qty=0.4, price=149500000)
 
 
 def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkeypatch):
