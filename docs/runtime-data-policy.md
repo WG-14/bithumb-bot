@@ -44,6 +44,9 @@
 - report output
 - audit / error logs
 
+`MODE=live`에서는 `DATA_ROOT`, `LOG_ROOT`, `BACKUP_ROOT`를 반드시 **레포 외부 절대경로**로 지정한다.
+상대경로, 레포 내부 경로, `paper` 세그먼트가 섞인 경로는 운영 정책 위반이다.
+
 ### 2.3 경로 주입 원칙
 실제 저장 위치는 환경변수나 env 파일에서 주입한다.
 코드가 절대경로를 하드코딩하지 않는다.

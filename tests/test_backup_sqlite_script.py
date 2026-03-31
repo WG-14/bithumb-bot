@@ -124,3 +124,63 @@ def test_backup_script_rejects_live_repo_internal_backup_override(tmp_path: Path
 
     assert out.returncode != 0
     assert "BACKUP_DIR must be outside repository when MODE=live" in (out.stderr + out.stdout)
+
+
+@pytest.mark.skipif(shutil.which("sqlite3") is None, reason="sqlite3 CLI is required")
+@pytest.mark.parametrize(
+    ("backup_dir", "expected_message"),
+    [
+        ("backup/live/db", "[BACKUP] relative path is not allowed"),
+        ("{runtime}/paper/db", "BACKUP_DIR must not contain a paper-scoped path segment when MODE=live"),
+    ],
+)
+def test_backup_script_rejects_live_invalid_backup_override_path(
+    tmp_path: Path,
+    backup_dir: str,
+    expected_message: str,
+) -> None:
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    runtime_root = tmp_path / "runtime"
+    data_dir = runtime_root / "data"
+    scripts_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True)
+
+    source_script = Path("scripts/backup_sqlite.sh").resolve()
+    script_path = scripts_dir / "backup_sqlite.sh"
+    script_path.write_text(source_script.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    source_path_query = Path("scripts/path_query.py").resolve()
+    path_query_script = scripts_dir / "path_query.py"
+    path_query_script.write_text(source_path_query.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+
+    db_path = data_dir / "live.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE t(x INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    env = {
+        "MODE": "live",
+        "ENV_ROOT": str((runtime_root / "env").resolve()),
+        "RUN_ROOT": str((runtime_root / "run").resolve()),
+        "DATA_ROOT": str(data_dir.resolve()),
+        "LOG_ROOT": str((runtime_root / "logs").resolve()),
+        "BACKUP_ROOT": str((runtime_root / "backup").resolve()),
+        "DB_PATH": str(db_path.resolve()),
+        "BACKUP_DIR": backup_dir.format(runtime=str(runtime_root.resolve())),
+        "PYTHONPATH": str(Path("src").resolve()),
+    }
+
+    out = subprocess.run(
+        ["bash", str(script_path)],
+        cwd=tmp_path,
+        env={**os.environ, **env},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert out.returncode != 0
+    assert expected_message in (out.stderr + out.stdout)

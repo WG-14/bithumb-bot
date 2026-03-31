@@ -84,7 +84,7 @@ sudo systemctl enable --now bithumb-bot-backup.timer
 - `bithumb-bot-healthcheck.service`는 `User=@BITHUMB_RUN_USER@`, `WorkingDirectory=@BITHUMB_BOT_ROOT@`, `ExecStart=@BITHUMB_UV_BIN@ run python @BITHUMB_BOT_ROOT@/scripts/healthcheck.py` 템플릿으로 렌더링한다.
 - healthcheck는 fail-fast 정책이다.
   - `BITHUMB_ENV_FILE`이 비어 있거나 파일이 없으면 즉시 실패
-  - env 파일 내 `DB_PATH`가 비어 있어도 실패(기본 DB fallback 금지)
+  - env 파일 내 `DB_PATH`가 비어 있어도 실패(기본 DB 자동 대체 금지)
 
 ## 4) 프리라이브(안전진입) 체크리스트
 
