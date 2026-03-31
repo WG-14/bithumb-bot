@@ -52,10 +52,50 @@ def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monk
 
     rules = order_rules.fetch_exchange_order_rules("BTC_KRW")
 
+    assert rules.market_id == "BTC-KRW"
+    assert rules.bid_min_total_krw == 5000.0
+    assert rules.ask_min_total_krw == 5000.0
+    assert rules.bid_price_unit == 1.0
+    assert rules.ask_price_unit == 1.0
+    assert rules.order_types == ("limit", "price", "market")
+    assert rules.order_sides == ("ask", "bid")
+    assert rules.bid_fee == 0.0025
+    assert rules.ask_fee == 0.0025
+    assert rules.maker_bid_fee == 0.0025
+    assert rules.maker_ask_fee == 0.0025
     assert rules.min_notional_krw == 5000.0
     assert rules.min_qty == 0.0
     assert rules.qty_step == 0.0
     assert rules.max_qty_decimals == 0
+
+
+def test_parse_order_chance_response_transforms_raw_payload():
+    parsed = order_rules.parse_order_chance_response(_doc_order_chance_payload(), requested_market="KRW-BTC")
+
+    assert parsed.market_id == "KRW-BTC"
+    assert parsed.bid.price_unit == 1.0
+    assert parsed.bid.min_total == 5000.0
+    assert parsed.ask.price_unit == 1.0
+    assert parsed.ask.min_total == 5000.0
+    assert parsed.bid_fee == 0.0025
+    assert parsed.ask_fee == 0.0025
+    assert parsed.maker_bid_fee == 0.0025
+    assert parsed.maker_ask_fee == 0.0025
+
+
+def test_derive_order_rules_from_chance_preserves_bid_ask_split():
+    response = order_rules.parse_order_chance_response(
+        _doc_order_chance_payload(market="KRW-BTC") | {"market": _doc_order_chance_payload()["market"] | {"bid": {"price_unit": "10", "min_total": "5100"}, "ask": {"price_unit": "1", "min_total": "5000"}}},
+        requested_market="KRW-BTC",
+    )
+
+    rules = order_rules.derive_order_rules_from_chance(response)
+
+    assert rules.bid_min_total_krw == 5100.0
+    assert rules.ask_min_total_krw == 5000.0
+    assert rules.bid_price_unit == 10.0
+    assert rules.ask_price_unit == 1.0
+    assert rules.min_notional_krw == 5100.0
 
 
 def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch):
@@ -120,6 +160,17 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
         order_rules,
         "fetch_exchange_order_rules",
         lambda _pair: order_rules.OrderRules(
+            market_id="KRW-BTC",
+            bid_min_total_krw=10000.0,
+            ask_min_total_krw=11000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            order_types=("limit", "price", "market"),
+            order_sides=("ask", "bid"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
             min_qty=0.001,
             qty_step=0.001,
             min_notional_krw=10000.0,
@@ -133,10 +184,20 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
     assert resolved.rules.qty_step == 0.001
     assert resolved.rules.min_notional_krw == 10000.0
     assert resolved.rules.max_qty_decimals == 3
-    assert resolved.source["min_qty"] == "auto"
-    assert resolved.source["qty_step"] == "auto"
-    assert resolved.source["min_notional_krw"] == "auto"
-    assert resolved.source["max_qty_decimals"] == "auto"
+    assert resolved.source["min_qty"] == "unsupported_by_doc"
+    assert resolved.source["qty_step"] == "unsupported_by_doc"
+    assert resolved.source["min_notional_krw"] == "chance_doc"
+    assert resolved.source["max_qty_decimals"] == "unsupported_by_doc"
+    assert resolved.source["bid_min_total_krw"] == "chance_doc"
+    assert resolved.source["ask_min_total_krw"] == "chance_doc"
+    assert resolved.source["bid_price_unit"] == "chance_doc"
+    assert resolved.source["ask_price_unit"] == "chance_doc"
+    assert resolved.source["order_types"] == "chance_doc"
+    assert resolved.source["order_sides"] == "chance_doc"
+    assert resolved.source["bid_fee"] == "chance_doc"
+    assert resolved.source["ask_fee"] == "chance_doc"
+    assert resolved.source["maker_bid_fee"] == "chance_doc"
+    assert resolved.source["maker_ask_fee"] == "chance_doc"
 
 
 def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fails(monkeypatch):
@@ -162,6 +223,10 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     assert resolved.rules.qty_step == 0.0005
     assert resolved.rules.min_notional_krw == 6000.0
     assert resolved.rules.max_qty_decimals == 5
-    assert all(source == "manual" for source in resolved.source.values())
+    assert resolved.source["min_qty"] == "manual_config"
+    assert resolved.source["qty_step"] == "manual_config"
+    assert resolved.source["min_notional_krw"] == "manual_config"
+    assert resolved.source["max_qty_decimals"] == "manual_config"
+    assert resolved.source["bid_min_total_krw"] == "unsupported_by_doc"
     assert warnings
     assert "auto-sync failed" in warnings[0]
