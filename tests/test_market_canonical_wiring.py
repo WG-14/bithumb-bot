@@ -6,6 +6,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.order_rules import build_order_rules_market
 from bithumb_bot.config import settings
 from bithumb_bot.marketdata import fetch_orderbook_top
+from bithumb_bot.public_api_orderbook import BestQuote
 
 
 class _OrderbookClient:
@@ -35,9 +36,11 @@ def test_fetch_orderbook_top_uses_canonical_market_source(monkeypatch):
     monkeypatch.setattr("httpx.Client", _OrderbookClient)
     monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda market: "KRW-BTC")
 
-    bid, ask = fetch_orderbook_top("btc_krw")
+    quote = fetch_orderbook_top("btc_krw")
 
-    assert (bid, ask) == (100.0, 101.0)
+    assert quote.bid_price == 100.0
+    assert quote.ask_price == 101.0
+    assert quote.market == "KRW-BTC"
     assert _OrderbookClient.requests == [{"path": "/v1/orderbook", "params": {"markets": "KRW-BTC"}}]
 
 
@@ -88,9 +91,9 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
     monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", _fake_canonical)
     orderbook_markets: list[str] = []
 
-    def _fake_orderbook(market: str) -> tuple[float, float]:
+    def _fake_orderbook(market: str) -> BestQuote:
         orderbook_markets.append(market)
-        return 100.0, 101.0
+        return BestQuote(market=market, bid_price=100.0, ask_price=101.0)
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.fetch_orderbook_top", _fake_orderbook)
     monkeypatch.setattr(broker, "_get_private", _fake_get)

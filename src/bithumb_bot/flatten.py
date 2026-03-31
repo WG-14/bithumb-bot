@@ -67,7 +67,11 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
     try:
-        bid, ask = fetch_orderbook_top(settings.PAIR)
+        quote = fetch_orderbook_top(settings.PAIR)
+        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
+            bid, ask = float(quote.bid_price), float(quote.ask_price)
+        else:
+            bid, ask = float(quote[0]), float(quote[1])
         market_price = float(bid)
         if market_price <= 0:
             raise ValueError(f"invalid best bid for flatten: {bid}")

@@ -259,7 +259,11 @@ def _format_epoch_ts(epoch_sec: float | None) -> str:
 
 def _load_live_reference_quote(*, pair: str) -> dict[str, float | str]:
     try:
-        bid, ask = fetch_orderbook_top(pair)
+        quote = fetch_orderbook_top(pair)
+        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
+            bid, ask = float(quote.bid_price), float(quote.ask_price)
+        else:
+            bid, ask = float(quote[0]), float(quote[1])
     except Exception as exc:
         raise ValueError(f"reference price unavailable: {type(exc).__name__}: {exc}") from exc
 

@@ -694,7 +694,8 @@ class BithumbBroker:
         volume_text = self._format_volume(qty)
         if price is None:
             if normalized_side == "buy":
-                _, ask = fetch_orderbook_top(self._market())
+                quote = fetch_orderbook_top(self._market())
+                ask = float(quote.ask_price) if hasattr(quote, "ask_price") else float(quote[1])
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 payload.update({
                     "price": self._format_krw_amount(notional),

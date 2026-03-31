@@ -24,7 +24,11 @@ RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 def _get_fill_price(signal: str) -> float | None:
     try:
-        bid, ask = fetch_orderbook_top(settings.PAIR)
+        quote = fetch_orderbook_top(settings.PAIR)
+        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
+            bid, ask = float(quote.bid_price), float(quote.ask_price)
+        else:
+            bid, ask = float(quote[0]), float(quote[1])
     except Exception as e:
         notify(f"paper_execute blocked: orderbook fetch failed ({e})")
         return None

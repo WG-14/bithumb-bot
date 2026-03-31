@@ -160,9 +160,23 @@ def test_marketdata_orderbook_fetch_uses_public_retry_path(monkeypatch, _setting
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_public_orderbook_top", _fake_orderbook_fetch)
     monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
 
-    bid, ask = fetch_marketdata_orderbook_top("BTC_KRW")
-    assert bid == 100.0
-    assert ask == 101.0
+    quote = fetch_marketdata_orderbook_top("BTC_KRW")
+    assert quote.market == "KRW-BTC"
+    assert quote.bid_price == 100.0
+    assert quote.ask_price == 101.0
+    assert quote.observed_at_epoch_sec is not None
+    assert quote.source == "bithumb_public_v1_orderbook"
     assert captured["market"] == "KRW-BTC"
     assert int(float(captured["client_timeout"].connect)) == 10
     assert captured["max_retries"] == 3
+
+
+def test_marketdata_orderbook_fetch_fails_when_public_quote_market_mismatch(monkeypatch, _settings_guard) -> None:
+    monkeypatch.setattr(
+        "bithumb_bot.marketdata.fetch_public_orderbook_top",
+        lambda *_args, **_kwargs: [BestQuote(market="KRW-ETH", bid_price=100.0, ask_price=101.0)],
+    )
+    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+
+    with pytest.raises(RuntimeError, match="market mismatch"):
+        fetch_marketdata_orderbook_top("BTC_KRW")

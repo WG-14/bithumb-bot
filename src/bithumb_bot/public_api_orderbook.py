@@ -26,6 +26,8 @@ class BestQuote:
     market: str
     bid_price: float
     ask_price: float
+    observed_at_epoch_sec: float | None = None
+    source: str | None = None
 
 
 OrderbookTop = BestQuote
