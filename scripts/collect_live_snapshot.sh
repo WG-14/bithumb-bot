@@ -19,10 +19,10 @@ fi
 
 path_query() {
   local kind="$1"
-  PROJECT_ROOT="$REPO_ROOT" PYTHONPATH="$REPO_ROOT/src" MODE="$MODE" \
+  MODE="$MODE" \
   ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" \
   LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" \
-  python3 -m bithumb_bot.paths --project-root "$REPO_ROOT" --kind "$kind"
+  python3 "$REPO_ROOT/scripts/path_query.py" --project-root "$REPO_ROOT" --kind "$kind"
 }
 
 TS="$(date +%Y%m%d_%H%M%S)"

@@ -20,6 +20,9 @@ def test_backup_script_uses_backup_root_mode_scoped_directory(tmp_path: Path) ->
     source_script = Path("scripts/backup_sqlite.sh").resolve()
     script_path = scripts_dir / "backup_sqlite.sh"
     script_path.write_text(source_script.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    source_path_query = Path("scripts/path_query.py").resolve()
+    path_query_script = scripts_dir / "path_query.py"
+    path_query_script.write_text(source_path_query.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
 
     db_path = data_dir / "sample.sqlite"
     conn = sqlite3.connect(db_path)
@@ -36,9 +39,10 @@ def test_backup_script_uses_backup_root_mode_scoped_directory(tmp_path: Path) ->
     second_cwd.mkdir()
 
     env = {
-        "DB_PATH": "data/sample.sqlite",
-        "BACKUP_ROOT": "backup-root",
+        "DB_PATH": str(db_path.resolve()),
+        "BACKUP_ROOT": str((project_root / "backup-root").resolve()),
         "MODE": "paper",
+        "PYTHONPATH": str(Path("src").resolve()),
     }
 
     first = subprocess.run(

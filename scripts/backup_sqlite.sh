@@ -30,10 +30,10 @@ resolve_path() {
 
 path_query() {
   local kind="$1"
-  PROJECT_ROOT="$PROJECT_ROOT" PYTHONPATH="$PROJECT_ROOT/src" MODE="$MODE" \
+  MODE="$MODE" \
   ENV_ROOT="${ENV_ROOT:-}" RUN_ROOT="${RUN_ROOT:-}" DATA_ROOT="${DATA_ROOT:-}" \
   LOG_ROOT="${LOG_ROOT:-}" BACKUP_ROOT="${BACKUP_ROOT:-}" ARCHIVE_ROOT="${ARCHIVE_ROOT:-}" \
-  python3 -m bithumb_bot.paths --project-root "$PROJECT_ROOT" --kind "$kind"
+  python3 "$PROJECT_ROOT/scripts/path_query.py" --project-root "$PROJECT_ROOT" --kind "$kind"
 }
 
 if [[ -n "${DB_PATH:-}" ]]; then
@@ -44,8 +44,6 @@ fi
 
 if [[ -n "${BACKUP_DIR:-}" ]]; then
   BACKUP_DIR="$(resolve_path "$BACKUP_DIR")"
-elif [[ -n "${BACKUP_ROOT:-}" ]]; then
-  BACKUP_DIR="$(resolve_path "$BACKUP_ROOT")/$MODE/db"
 else
   BACKUP_DIR="$(path_query backup-db-dir)"
 fi
