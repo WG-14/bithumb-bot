@@ -872,6 +872,41 @@ def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
         "ord_type": "price",
         "client_order_id": "exchange-open-1",
     }
+    assert rows[0].client_order_id == "exchange-open-1"
+
+
+def test_recent_orders_maps_exchange_and_client_identifiers_consistently(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        state = params["state"]
+        if state == "wait":
+            return [
+                {
+                    "uuid": "open-consistent-1",
+                    "client_order_id": "coid-open-1",
+                    "coid": "legacy-open-1",
+                    "side": "bid",
+                    "price": "100",
+                    "volume": "0.1",
+                    "remaining_volume": "0.1",
+                    "state": "wait",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    rows = broker.get_recent_orders(limit=5)
+
+    assert len(rows) == 1
+    assert rows[0].exchange_order_id == "open-consistent-1"
+    assert rows[0].client_order_id == "coid-open-1"
+    assert rows[0].raw == {
+        "client_order_id": "coid-open-1",
+        "coid": "legacy-open-1",
+    }
 
 
 
@@ -900,6 +935,58 @@ def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     assert [fill.fill_id for fill in fills] == ["t1", "t2"]
     assert fills[0].qty == pytest.approx(0.02)
     assert fills[1].fee == pytest.approx(12.0)
+
+
+def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-id-1",
+            "client_order_id": "cid-parent",
+            "price": "149000000",
+            "volume": "0.05",
+            "executed_volume": "0.05",
+            "state": "done",
+            "trades": [
+                {
+                    "uuid": "t-parent-1",
+                    "price": "149000000",
+                    "volume": "0.02",
+                    "fee": "10",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id=None, exchange_order_id="filled-id-1")
+
+    assert len(fills) == 1
+    assert fills[0].client_order_id == "cid-parent"
+    assert fills[0].exchange_order_id == "filled-id-1"
+
+
+def test_get_order_rejects_exchange_order_id_mismatch(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "different-exid",
+            "client_order_id": "cid-1",
+            "state": "wait",
+            "side": "bid",
+            "volume": "0.1",
+            "remaining_volume": "0.1",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="exchange_order_id mismatch"):
+        broker.get_order(client_order_id="cid-1", exchange_order_id="requested-exid")
 
 
 @pytest.mark.parametrize(
