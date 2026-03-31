@@ -1094,10 +1094,10 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
                     },
                 )(),
                 "source": {
-                    "min_qty": "manual_config",
-                    "qty_step": "manual_config",
-                    "min_notional_krw": "manual_config",
-                    "max_qty_decimals": "manual_config",
+                    "min_qty": "local_fallback",
+                    "qty_step": "local_fallback",
+                    "min_notional_krw": "local_fallback",
+                    "max_qty_decimals": "local_fallback",
                     "bid_min_total_krw": "chance_doc",
                     "ask_min_total_krw": "chance_doc",
                     "bid_price_unit": "chance_doc",
@@ -1139,7 +1139,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] symbol/order rule query" in out
     assert "bid_min_total_krw=0.0 (source=chance_doc)" in out
     assert "ask_price_unit=0.0 (source=chance_doc)" in out
-    assert "min_qty=0.0001 (source=manual_config)" in out
+    assert "min_qty=0.0001 (source=local_fallback)" in out
     assert "[PASS] DB writable" in out
 
 
@@ -1272,7 +1272,7 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
                         "ask_price_unit": 0.0,
                     },
                 )(),
-                "source": {"min_qty": "manual_config"},
+                "source": {"min_qty": "local_fallback"},
             },
         )(),
     )
@@ -1366,7 +1366,7 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
                         "ask_price_unit": 0.0,
                     },
                 )(),
-                "source": {"min_qty": "manual_config"},
+                "source": {"min_qty": "local_fallback"},
             },
         )(),
     )
@@ -1726,10 +1726,10 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
                     },
                 )(),
                 "source": {
-                    "min_qty": "manual_config",
-                    "qty_step": "manual_config",
-                    "min_notional_krw": "manual_config",
-                    "max_qty_decimals": "manual_config",
+                    "min_qty": "local_fallback",
+                    "qty_step": "local_fallback",
+                    "min_notional_krw": "local_fallback",
+                    "max_qty_decimals": "local_fallback",
                     "bid_min_total_krw": "chance_doc",
                     "ask_min_total_krw": "chance_doc",
                     "bid_price_unit": "chance_doc",

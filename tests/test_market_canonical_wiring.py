@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
-from bithumb_bot.broker.order_rules import build_order_rules_market
 from bithumb_bot.config import settings
 from bithumb_bot.marketdata import (
     fetch_orderbook_top,
@@ -63,19 +62,6 @@ def test_validated_best_quote_ask_price_rejects_non_positive_ask() -> None:
     quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=0.0)
     with pytest.raises(RuntimeError, match="invalid quote"):
         validated_best_quote_ask_price(quote, requested_market="KRW-BTC")
-
-
-def test_build_order_rules_market_uses_canonical_market_source(monkeypatch):
-    seen: list[str] = []
-
-    def _fake_canonical(market: str) -> str:
-        seen.append(market)
-        return "KRW-BTC"
-
-    monkeypatch.setattr("bithumb_bot.broker.order_rules.canonical_market_id", _fake_canonical)
-
-    assert build_order_rules_market("btc_krw") == "KRW-BTC"
-    assert seen == ["btc_krw"]
 
 
 def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):

@@ -10,7 +10,6 @@ import pytest
 @pytest.fixture(autouse=True)
 def _stub_market_canonicalization(monkeypatch):
     normalize = lambda pair: str(pair).replace("_", "-").upper()
-    monkeypatch.setattr(order_rules, "build_order_rules_market", normalize)
     monkeypatch.setattr(order_rules, "canonical_market_id", normalize)
 
 
@@ -359,7 +358,7 @@ def test_required_rule_source_issues_requires_chance_doc_for_side_constraints() 
             "bid_min_total_krw": "unsupported_by_doc",
             "ask_min_total_krw": "missing",
             "bid_price_unit": "chance_doc",
-            "ask_price_unit": "manual_config",
+            "ask_price_unit": "local_fallback",
         }
     )
     assert len(issues) == 3

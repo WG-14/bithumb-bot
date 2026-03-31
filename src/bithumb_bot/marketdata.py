@@ -87,15 +87,8 @@ def _get_with_retry(client: httpx.Client, path: str, params: dict[str, object] |
     raise RuntimeError(f"http request failed after retries: {path}") from last_error
 
 
-def to_v1_market(pair: str) -> str:
-    """Backward-compatible wrapper for canonical market normalization."""
-    return canonical_market_id(pair)
-
-
-
-
 def fetch_orderbook_tops(pairs: list[str]) -> list[BestQuote]:
-    markets = [to_v1_market(pair) for pair in pairs]
+    markets = [canonical_market_id(pair) for pair in pairs]
     with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
         quotes = fetch_public_orderbook_tops(c, markets=markets, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
 
@@ -130,7 +123,7 @@ def fetch_orderbook_tops(pairs: list[str]) -> list[BestQuote]:
 
 
 def fetch_orderbook_top(pair: str | None = None) -> BestQuote:
-    market = to_v1_market(pair or settings.PAIR)
+    market = canonical_market_id(pair or settings.PAIR)
     return fetch_orderbook_tops([market])[0]
 
 
@@ -158,12 +151,6 @@ def validated_best_quote_prices(
 def validated_best_quote_ask_price(quote: BestQuote, *, requested_market: str | None = None) -> float:
     _, ask = validated_best_quote_prices(quote, requested_market=requested_market)
     return ask
-
-
-def fetch_orderbook_top_tuple(pair: str | None = None) -> tuple[float, float]:
-    """Backward-compatible tuple wrapper while callers migrate to BestQuote."""
-    top = fetch_orderbook_top(pair)
-    return top.bid_price, top.ask_price
 
 
 def _candle_key_ts_ms(candle: MinuteCandle) -> int:
@@ -201,7 +188,7 @@ def _minute_candle_to_db_row(candle: MinuteCandle) -> tuple[int, str, str, float
 
 def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
     minute_unit = interval_to_minute_unit(settings.INTERVAL)
-    market = to_v1_market(settings.PAIR)
+    market = canonical_market_id(settings.PAIR)
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
         candles = fetch_minute_candles(
             client,
@@ -252,7 +239,7 @@ def cmd_ticker() -> None:
 
 def cmd_candles(limit: int = 5) -> None:
     minute_unit = interval_to_minute_unit(settings.INTERVAL)
-    market = to_v1_market(settings.PAIR)
+    market = canonical_market_id(settings.PAIR)
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
         rows = fetch_minute_candles(
             client,

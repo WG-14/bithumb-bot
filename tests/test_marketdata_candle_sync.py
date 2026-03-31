@@ -73,7 +73,7 @@ def test_cmd_sync_uses_minute_candle_layer_and_maps_db_fields(monkeypatch, _sett
         return candles
 
     monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda pair: "KRW-BTC")
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_minute_candles", fake_fetch)
 
     cmd_sync(quiet=True, limit=2)
@@ -109,7 +109,7 @@ def test_cmd_sync_uses_minute_candle_layer_and_maps_db_fields(monkeypatch, _sett
 
 def test_cmd_sync_handles_empty_candle_response(monkeypatch, _settings_guard) -> None:
     monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda pair: "KRW-BTC")
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_minute_candles", lambda *args, **kwargs: [])
 
     cmd_sync(quiet=True, limit=10)
@@ -119,7 +119,7 @@ def test_cmd_sync_handles_empty_candle_response(monkeypatch, _settings_guard) ->
 
 def test_cmd_sync_propagates_schema_mismatch(monkeypatch, _settings_guard) -> None:
     monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda pair: "KRW-BTC")
 
     def bad_schema(*args, **kwargs):
         raise PublicApiSchemaError("minute candle schema mismatch")
@@ -141,7 +141,7 @@ def test_cmd_candles_uses_minute_candle_layer(monkeypatch, capsys, _settings_gua
     candles = [_sample_candle(utc="2026-03-31T00:00:00")]
 
     monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda pair: "KRW-BTC")
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_minute_candles", lambda *args, **kwargs: candles)
 
     cmd_candles(limit=1)
@@ -161,7 +161,7 @@ def test_marketdata_orderbook_fetch_uses_public_retry_path(monkeypatch, _setting
         return [BestQuote(market=markets[0], bid_price=100.0, ask_price=101.0)]
 
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_public_orderbook_tops", _fake_orderbook_fetch)
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
 
     quote = fetch_marketdata_orderbook_top("BTC_KRW")
     assert quote.market == "KRW-BTC"
@@ -179,7 +179,7 @@ def test_marketdata_orderbook_fetch_fails_when_public_quote_market_mismatch(monk
         "bithumb_bot.marketdata.fetch_public_orderbook_tops",
         lambda *_args, **_kwargs: [BestQuote(market="KRW-ETH", bid_price=100.0, ask_price=101.0)],
     )
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
 
     with pytest.raises(RuntimeError, match="market mismatch"):
         fetch_marketdata_orderbook_top("BTC_KRW")
@@ -190,7 +190,7 @@ def test_marketdata_orderbook_fetch_fails_when_quote_crossed(monkeypatch, _setti
         "bithumb_bot.marketdata.fetch_public_orderbook_tops",
         lambda *_args, **_kwargs: [BestQuote(market="KRW-BTC", bid_price=101.0, ask_price=100.0)],
     )
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
 
     with pytest.raises(RuntimeError, match="invalid quote"):
         fetch_marketdata_orderbook_top("BTC_KRW")
@@ -201,7 +201,7 @@ def test_marketdata_orderbook_fetch_fails_when_quote_non_positive(monkeypatch, _
         "bithumb_bot.marketdata.fetch_public_orderbook_tops",
         lambda *_args, **_kwargs: [BestQuote(market="KRW-BTC", bid_price=0.0, ask_price=100.0)],
     )
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
 
     with pytest.raises(RuntimeError, match="invalid quote"):
         fetch_marketdata_orderbook_top("BTC_KRW")
@@ -219,7 +219,7 @@ def test_marketdata_orderbook_multi_market_fetch(monkeypatch, _settings_guard) -
         ]
 
     monkeypatch.setattr("bithumb_bot.marketdata.fetch_public_orderbook_tops", _fake_orderbook_fetch)
-    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda pair: "KRW-BTC" if pair == "BTC_KRW" else "KRW-ETH")
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda pair: "KRW-BTC" if pair == "BTC_KRW" else "KRW-ETH")
 
     quotes = fetch_marketdata_orderbook_tops(["BTC_KRW", "ETH_KRW"])
 

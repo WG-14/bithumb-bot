@@ -214,12 +214,6 @@ def test_order_submit_query_hash_matches_official_urlencode_sha512_rule():
     }
 
 
-def test_build_order_rules_market_uses_v1_symbol():
-    from bithumb_bot.broker.order_rules import build_order_rules_market
-
-    assert build_order_rules_market("BTC") == "KRW-BTC"
-
-
 def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, [])]

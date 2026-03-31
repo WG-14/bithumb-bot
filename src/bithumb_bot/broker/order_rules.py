@@ -16,7 +16,6 @@ KNOWN_RULE_SOURCES = frozenset(
     {
         "chance_doc",
         "local_fallback",
-        "manual_config",  # backward-compatible alias for local_fallback
         "merged",
         "unsupported_by_doc",
         "missing",
@@ -155,6 +154,9 @@ def rule_source_for(field: str, source: dict[str, str] | None) -> str:
     if not source:
         return "missing"
     normalized = str(source.get(field, "")).strip() or "missing"
+    if normalized == "manual_config":
+        # legacy source label -> canonical source label
+        normalized = "local_fallback"
     return normalized if normalized in KNOWN_RULE_SOURCES else "missing"
 
 
@@ -283,12 +285,8 @@ def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDer
     )
 
 
-def build_order_rules_market(pair: str) -> str:
-    return canonical_market_id(pair)
-
-
 def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
-    market = build_order_rules_market(pair)
+    market = canonical_market_id(pair)
     payload = BithumbBroker().get_order_chance(market=market)
 
     if not isinstance(payload, dict):
@@ -372,6 +370,4 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
     _cached_rules[pair] = (now, merged, fallback, source)
     return RuleResolution(rules=merged, source=source)
 
-
-# Backward-compatible alias for existing call sites.
 OrderRules = DerivedOrderConstraints
