@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -10,7 +11,11 @@ from .config import settings
 from .db_core import ensure_db
 from .markets import canonical_market_id
 from .notifier import notify
-from .public_api import PublicApiSchemaError, get_public_json
+from .public_api_minute_candles import (
+    MinuteCandle,
+    fetch_minute_candles,
+    interval_to_minute_unit,
+)
 from .public_api_ticker import fetch_ticker
 
 
@@ -82,16 +87,6 @@ def _get_with_retry(
     raise RuntimeError(f"http request failed after retries: {path}") from last_error
 
 
-def fetch_json(path: str) -> dict[str, Any]:
-    with httpx.Client(base_url=BASE_URL, timeout=10.0) as c:
-        payload = get_public_json(c, path)
-    if not isinstance(payload, dict):
-        raise PublicApiSchemaError(
-            f"public api schema mismatch endpoint={path} expected=dict actual={type(payload).__name__}"
-        )
-    return payload
-
-
 def to_v1_market(pair: str) -> str:
     """Backward-compatible wrapper for canonical market normalization."""
     return canonical_market_id(pair)
@@ -116,41 +111,66 @@ def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:
     return bid, ask
 
 
-def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
+def _candle_start_ts_ms(candle: MinuteCandle) -> int:
     """
-    Public candlestick -> DB(candles)
-    Bithumb public candlestick returns list rows:
-      [timestamp, open, close, high, low, volume] (strings)
-    """
-    data = fetch_json(f"/public/candlestick/{settings.PAIR}/{settings.INTERVAL}")
-    if str(data.get("status")) != "0000":
-        raise RuntimeError(data)
+    Normalize candle timestamp to candle-start epoch milliseconds (UTC).
 
-    rows = data.get("data", [])
-    if not rows:
+    Bithumb minute candle payload includes both:
+    - `timestamp`: trade-tick millisecond timestamp within candle window
+    - `candle_date_time_utc`: canonical candle bucket time
+
+    We persist candle bucket time to keep deterministic bar identity in DB PK
+    `(ts, pair, interval)` and to avoid per-trade timestamp drift.
+    """
+    dt = datetime.fromisoformat(candle.candle_date_time_utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return int(dt.timestamp() * 1000)
+
+
+def _minute_candle_to_db_row(candle: MinuteCandle) -> tuple[int, str, str, float, float, float, float, float]:
+    return (
+        _candle_start_ts_ms(candle),
+        candle.market,
+        settings.INTERVAL,
+        candle.opening_price,
+        candle.high_price,
+        candle.low_price,
+        candle.trade_price,
+        candle.candle_acc_trade_volume,
+    )
+
+
+def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
+    minute_unit = interval_to_minute_unit(settings.INTERVAL)
+    market = to_v1_market(settings.PAIR)
+    with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
+        candles = fetch_minute_candles(
+            client,
+            market=market,
+            minute_unit=minute_unit,
+            count=max(1, int(limit)),
+        )
+
+    if not candles:
         if not quiet:
             print("[SYNC] no data")
         return
 
-    rows = rows[-limit:]
+    rows = candles[-limit:]
 
     conn = ensure_db()
     try:
         inserted = 0
-        for r in rows:
-            ts = int(float(r[0]))  # ms
-            o = float(r[1])
-            c = float(r[2])
-            h = float(r[3])
-            l = float(r[4])
-            v = float(r[5])
-
+        for candle in rows:
             cur = conn.execute(
                 """
                 INSERT OR REPLACE INTO candles(ts, pair, interval, open, high, low, close, volume)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (ts, settings.PAIR, settings.INTERVAL, o, h, l, c, v),
+                _minute_candle_to_db_row(candle),
             )
             inserted += cur.rowcount
 
@@ -175,11 +195,15 @@ def cmd_ticker() -> None:
 
 
 def cmd_candles(limit: int = 5) -> None:
-    data = fetch_json(f"/public/candlestick/{settings.PAIR}/{settings.INTERVAL}")
-    if str(data.get("status")) != "0000":
-        raise RuntimeError(data)
-
-    rows = data.get("data", [])[-limit:]
-    print(f"[CANDLES {settings.PAIR} {settings.INTERVAL}] last {limit}")
-    for row in rows:
+    minute_unit = interval_to_minute_unit(settings.INTERVAL)
+    market = to_v1_market(settings.PAIR)
+    with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
+        rows = fetch_minute_candles(
+            client,
+            market=market,
+            minute_unit=minute_unit,
+            count=max(1, int(limit)),
+        )
+    print(f"[CANDLES {market} {settings.INTERVAL}] last {limit}")
+    for row in rows[-limit:]:
         print(row)
