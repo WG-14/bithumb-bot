@@ -1755,12 +1755,64 @@ def test_normalize_order_qty_rejects_when_collapses_to_zero():
         normalize_order_qty(qty=0.009, market_price=100.0)
 
 
-def test_normalize_order_qty_rejects_when_normalized_notional_below_minimum():
+def test_normalize_order_qty_does_not_apply_notional_guard():
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.1)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 100.0)
 
-    with pytest.raises(ValueError, match="normalized order notional below minimum"):
-        normalize_order_qty(qty=1.09, market_price=99.0)
+    normalized = normalize_order_qty(qty=1.09, market_price=99.0)
+    assert normalized == pytest.approx(1.0)
+
+
+def test_validate_pretrade_applies_side_specific_min_total():
+    from bithumb_bot.broker import live as live_module
+    from bithumb_bot.broker import order_rules
+
+    original_pair = settings.PAIR
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+
+    class _BalanceOnlyBroker:
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=1_000_000.0, asset_available=100.0, cash_locked=0.0, asset_locked=0.0)
+
+    broker = _BalanceOnlyBroker()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        live_module,
+        "get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                bid_min_total_krw=5100.0,
+                ask_min_total_krw=5000.0,
+                min_notional_krw=7000.0,
+                min_qty=0.0001,
+                qty_step=0.0001,
+                max_qty_decimals=8,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        live_module,
+        "_load_live_reference_quote",
+        lambda **_kwargs: {
+            "bid": 100.0,
+            "ask": 100.1,
+            "reference_price": 100.05,
+            "reference_ts_epoch_sec": 1_700_000_000.0,
+            "reference_source": "test",
+        },
+    )
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    try:
+        with pytest.raises(ValueError, match=r"order notional below minimum \(BUY\): 5050.00 < 5100.00"):
+            validate_pretrade(broker=broker, side="BUY", qty=50.5, market_price=100.0)
+
+        validate_pretrade(broker=broker, side="SELL", qty=50.5, market_price=100.0)
+    finally:
+        object.__setattr__(settings, "PAIR", original_pair)
+        monkeypatch.undo()
 
 def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path):
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)

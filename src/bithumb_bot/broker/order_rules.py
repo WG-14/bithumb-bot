@@ -62,6 +62,17 @@ class OrderChanceSchemaError(RuntimeError):
     """Raised when /v1/orders/chance response violates documented schema."""
 
 
+def side_min_total_krw(*, rules: DerivedOrderConstraints, side: str) -> float:
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "BUY":
+        if float(rules.bid_min_total_krw) > 0:
+            return float(rules.bid_min_total_krw)
+    elif normalized_side == "SELL":
+        if float(rules.ask_min_total_krw) > 0:
+            return float(rules.ask_min_total_krw)
+    return float(rules.min_notional_krw)
+
+
 def required_rule_issues(rules: DerivedOrderConstraints) -> list[str]:
     issues: list[str] = []
     if not math.isfinite(float(rules.min_qty)) or float(rules.min_qty) <= 0:
@@ -239,17 +250,17 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         )
 
     source: dict[str, str] = {}
-    min_qty = auto.min_qty if auto.min_qty > 0 else manual.min_qty
-    source["min_qty"] = "unsupported_by_doc" if auto.min_qty > 0 else "manual_config"
+    min_qty = manual.min_qty
+    source["min_qty"] = "manual_config"
 
-    qty_step = auto.qty_step if auto.qty_step > 0 else manual.qty_step
-    source["qty_step"] = "unsupported_by_doc" if auto.qty_step > 0 else "manual_config"
+    qty_step = manual.qty_step
+    source["qty_step"] = "manual_config"
 
-    min_notional = auto.min_notional_krw if auto.min_notional_krw > 0 else manual.min_notional_krw
-    source["min_notional_krw"] = "chance_doc" if auto.min_notional_krw > 0 else "manual_config"
+    min_notional = manual.min_notional_krw
+    source["min_notional_krw"] = "manual_config"
 
-    max_decimals = auto.max_qty_decimals if auto.max_qty_decimals > 0 else manual.max_qty_decimals
-    source["max_qty_decimals"] = "unsupported_by_doc" if auto.max_qty_decimals > 0 else "manual_config"
+    max_decimals = manual.max_qty_decimals
+    source["max_qty_decimals"] = "manual_config"
 
     merged = DerivedOrderConstraints(
         market_id=auto.market_id or manual.market_id,

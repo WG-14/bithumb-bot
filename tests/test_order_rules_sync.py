@@ -226,23 +226,23 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
             ask_fee=0.0025,
             maker_bid_fee=0.0020,
             maker_ask_fee=0.0020,
-            min_qty=0.001,
-            qty_step=0.001,
-            min_notional_krw=10000.0,
-            max_qty_decimals=3,
+            min_qty=0.001,  # undocumented field should never override manual config
+            qty_step=0.001,  # undocumented field should never override manual config
+            min_notional_krw=10000.0,  # documented constraints are side-specific bid/ask min_total
+            max_qty_decimals=3,  # undocumented field should never override manual config
         ),
     )
 
     resolved = order_rules.get_effective_order_rules("BTC_KRW")
 
-    assert resolved.rules.min_qty == 0.001
-    assert resolved.rules.qty_step == 0.001
-    assert resolved.rules.min_notional_krw == 10000.0
-    assert resolved.rules.max_qty_decimals == 3
-    assert resolved.source["min_qty"] == "unsupported_by_doc"
-    assert resolved.source["qty_step"] == "unsupported_by_doc"
-    assert resolved.source["min_notional_krw"] == "chance_doc"
-    assert resolved.source["max_qty_decimals"] == "unsupported_by_doc"
+    assert resolved.rules.min_qty == 0.0001
+    assert resolved.rules.qty_step == 0.0001
+    assert resolved.rules.min_notional_krw == 5000.0
+    assert resolved.rules.max_qty_decimals == 4
+    assert resolved.source["min_qty"] == "manual_config"
+    assert resolved.source["qty_step"] == "manual_config"
+    assert resolved.source["min_notional_krw"] == "manual_config"
+    assert resolved.source["max_qty_decimals"] == "manual_config"
     assert resolved.source["bid_min_total_krw"] == "chance_doc"
     assert resolved.source["ask_min_total_krw"] == "chance_doc"
     assert resolved.source["bid_price_unit"] == "chance_doc"
@@ -285,3 +285,15 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     assert resolved.source["bid_min_total_krw"] == "unsupported_by_doc"
     assert warnings
     assert "auto-sync failed" in warnings[0]
+
+
+def test_side_min_total_krw_prefers_bid_ask_from_doc() -> None:
+    rules = order_rules.OrderRules(
+        bid_min_total_krw=5500.0,
+        ask_min_total_krw=5000.0,
+        min_notional_krw=7000.0,
+    )
+
+    assert order_rules.side_min_total_krw(rules=rules, side="BUY") == 5500.0
+    assert order_rules.side_min_total_krw(rules=rules, side="SELL") == 5000.0
+    assert order_rules.side_min_total_krw(rules=rules, side="UNKNOWN") == 7000.0

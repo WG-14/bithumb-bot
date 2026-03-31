@@ -13,7 +13,7 @@ from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
 from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
-from .order_rules import get_effective_order_rules
+from .order_rules import get_effective_order_rules, side_min_total_krw
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
 from ..oms import (
@@ -330,12 +330,6 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
     if min_qty > 0 and normalized < min_qty:
         raise ValueError(f"order qty below minimum: {normalized:.12f} < {min_qty:.12f}")
 
-    min_notional = float(rules.min_notional_krw)
-    if min_notional > 0 and normalized * float(market_price) < min_notional:
-        raise ValueError(
-            f"normalized order notional below minimum: {normalized * float(market_price):.2f} < {min_notional:.2f}"
-        )
-
     return normalized
 
 
@@ -428,9 +422,9 @@ def validate_pretrade(
     rules = get_effective_order_rules(settings.PAIR).rules
 
     notional = float(qty) * float(market_price)
-    min_notional = float(rules.min_notional_krw)
+    min_notional = side_min_total_krw(rules=rules, side=side)
     if min_notional > 0 and notional < min_notional:
-        raise ValueError(f"order notional below minimum: {notional:.2f} < {min_notional:.2f}")
+        raise ValueError(f"order notional below minimum ({side}): {notional:.2f} < {min_notional:.2f}")
 
     balance = broker.get_balance()
     if not math.isfinite(float(balance.cash_available)) or not math.isfinite(float(balance.asset_available)):
