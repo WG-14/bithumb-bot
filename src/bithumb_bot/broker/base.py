@@ -31,6 +31,7 @@ class BrokerOrder:
     qty_filled: float
     created_ts: int
     updated_ts: int
+    raw: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

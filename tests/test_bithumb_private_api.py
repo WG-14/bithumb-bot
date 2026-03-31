@@ -425,7 +425,12 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         call["endpoint"] = endpoint
         call["payload"] = payload
         call["retry_safe"] = retry_safe
-        return {"uuid": "lmt-2"}
+        return {
+            "uuid": "lmt-2",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "client_order_id": "exchange-client-1",
+        }
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
@@ -439,6 +444,11 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "volume": "0.4",
         "price": "149500000",
         "ord_type": "limit",
+    }
+    assert order.raw == {
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "client_order_id": "exchange-client-1",
     }
 
 
@@ -602,6 +612,9 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
         call["params"] = params
         return {
             "uuid": "filled-1",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "client_order_id": "exchange-cid-3",
             "side": "bid",
             "price": "149000000",
             "volume": "0.05",
@@ -618,6 +631,42 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
     assert order.status == "FILLED"
     assert order.qty_req == pytest.approx(0.05)
     assert order.qty_filled == pytest.approx(0.05)
+    assert order.raw == {
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "client_order_id": "exchange-cid-3",
+    }
+
+
+def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {
+                "uuid": "open-raw-1",
+                "market": "KRW-BTC",
+                "ord_type": "price",
+                "client_order_id": "exchange-open-1",
+                "side": "bid",
+                "price": "150000000",
+                "volume": "0.02",
+                "remaining_volume": "0.02",
+                "state": "wait",
+            }
+        ],
+    )
+
+    rows = broker.get_open_orders()
+
+    assert len(rows) == 1
+    assert rows[0].raw == {
+        "market": "KRW-BTC",
+        "ord_type": "price",
+        "client_order_id": "exchange-open-1",
+    }
 
 
 

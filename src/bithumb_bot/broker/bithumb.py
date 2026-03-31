@@ -643,6 +643,16 @@ class BithumbBroker:
             "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
         }
 
+    @staticmethod
+    def _raw_order_fields(row: dict[str, object], *, fallback_client_order_id: str | None = None) -> dict[str, object]:
+        raw: dict[str, object] = {}
+        for key in ("market", "ord_type", "client_order_id"):
+            if row.get(key) not in (None, ""):
+                raw[key] = row[key]
+        if "client_order_id" not in raw and fallback_client_order_id:
+            raw["client_order_id"] = fallback_client_order_id
+        return raw
+
     def _order_from_v2_row(self, row: dict[str, object], *, client_order_id: str) -> BrokerOrder:
         normalized = self._normalize_order_row(row)
         state = str(normalized["state"])
@@ -666,6 +676,7 @@ class BithumbBroker:
             qty_filled,
             int(normalized["created_ts"]),
             int(normalized["updated_ts"]),
+            self._raw_order_fields(row, fallback_client_order_id=client_order_id),
         )
 
     def get_order_chance(self, *, market: str | None = None) -> dict[str, object]:
@@ -777,7 +788,11 @@ class BithumbBroker:
         exchange_order_id = str(data.get("uuid") or data.get("order_id") or data.get("data", {}).get("uuid") or data.get("data", {}).get("order_id") or "")
         if not exchange_order_id:
             raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
-        return BrokerOrder(client_order_id, exchange_order_id, side, "NEW", price, qty, 0.0, now, now)
+        response_row = data.get("data") if isinstance(data.get("data"), dict) else data
+        raw = self._raw_order_fields(response_row, fallback_client_order_id=client_order_id)
+        raw.setdefault("market", payload.get("market"))
+        raw.setdefault("ord_type", payload.get("ord_type"))
+        return BrokerOrder(client_order_id, exchange_order_id, side, "NEW", price, qty, 0.0, now, now, raw)
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         order = self.get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
@@ -962,6 +977,7 @@ class BithumbBroker:
             qty_filled=float(normalized["executed_volume"]),
             created_ts=int(normalized["created_ts"] or now_ts),
             updated_ts=int(normalized["updated_ts"] or now_ts),
+            raw=self._raw_order_fields(row),
         )
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
