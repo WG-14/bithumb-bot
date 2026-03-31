@@ -11,6 +11,7 @@ from .db_core import ensure_db
 from .markets import canonical_market_id
 from .notifier import notify
 from .public_api import PublicApiSchemaError, get_public_json
+from .public_api_ticker import fetch_ticker
 
 
 BASE_URL = "https://api.bithumb.com"
@@ -162,14 +163,14 @@ def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
 
 
 def cmd_ticker() -> None:
-    data = fetch_json(f"/public/ticker/{settings.PAIR}")
-    if str(data.get("status")) != "0000":
-        raise RuntimeError(data)
-
-    d = data["data"]
+    with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
+        snapshots = fetch_ticker(client, markets=settings.PAIR)
+    if not snapshots:
+        raise RuntimeError(f"ticker payload is empty for markets={settings.PAIR!r}")
+    d = snapshots[0]
     print(
-        f"[TICKER {settings.PAIR}] close={d.get('closing_price')} high={d.get('max_price')} "
-        f"low={d.get('min_price')} volume={d.get('units_traded')} at_raw={d.get('date')}"
+        f"[TICKER {d.market}] close={d.trade_price} high={d.high_price} "
+        f"low={d.low_price} volume_24h={d.acc_trade_volume_24h}"
     )
 
 
