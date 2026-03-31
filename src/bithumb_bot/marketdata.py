@@ -17,7 +17,7 @@ from .public_api_minute_candles import (
     fetch_minute_candles,
     interval_to_minute_unit,
 )
-from .public_api_orderbook import BestQuote, fetch_orderbook_top as fetch_public_orderbook_top
+from .public_api_orderbook import BestQuote, fetch_orderbook_tops as fetch_public_orderbook_tops
 from .public_api_ticker import fetch_ticker
 
 
@@ -92,32 +92,46 @@ def to_v1_market(pair: str) -> str:
     return canonical_market_id(pair)
 
 
+
+
+def fetch_orderbook_tops(pairs: list[str]) -> list[BestQuote]:
+    markets = [to_v1_market(pair) for pair in pairs]
+    with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
+        quotes = fetch_public_orderbook_tops(c, markets=markets, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
+
+    quote_by_market = {normalize_market_id(quote.market): quote for quote in quotes}
+    resolved: list[BestQuote] = []
+    for market in markets:
+        key = normalize_market_id(market)
+        if key not in quote_by_market:
+            returned_markets = sorted(quote_by_market.keys())
+            raise RuntimeError(
+                "orderbook top market mismatch "
+                f"requested_market={market!r} returned_markets={returned_markets!r}"
+            )
+        quote = quote_by_market[key]
+        bid = float(quote.bid_price)
+        ask = float(quote.ask_price)
+        if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or bid > ask:
+            raise RuntimeError(
+                "orderbook top invalid quote "
+                f"market={market!r} bid={bid!r} ask={ask!r}"
+            )
+        resolved.append(
+            replace(
+                quote,
+                bid_price=bid,
+                ask_price=ask,
+                observed_at_epoch_sec=time.time(),
+                source="bithumb_public_v1_orderbook",
+            )
+        )
+    return resolved
+
+
 def fetch_orderbook_top(pair: str | None = None) -> BestQuote:
     market = to_v1_market(pair or settings.PAIR)
-    with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
-        quotes = fetch_public_orderbook_top(c, market=market, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
-    if not quotes:
-        raise RuntimeError(f"orderbook payload is empty for markets={market!r}")
-    top = quotes[0]
-    if normalize_market_id(top.market) != normalize_market_id(market):
-        raise RuntimeError(
-            "orderbook top market mismatch "
-            f"requested_market={market!r} returned_market={top.market!r}"
-        )
-    bid = float(top.bid_price)
-    ask = float(top.ask_price)
-    if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or bid > ask:
-        raise RuntimeError(
-            "orderbook top invalid quote "
-            f"market={market!r} bid={bid!r} ask={ask!r}"
-        )
-    return replace(
-        top,
-        bid_price=bid,
-        ask_price=ask,
-        observed_at_epoch_sec=time.time(),
-        source="bithumb_public_v1_orderbook",
-    )
+    return fetch_orderbook_tops([market])[0]
 
 
 def validated_best_quote_prices(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import httpx
 
@@ -125,21 +125,40 @@ def parse_orderbook_top(payload: object) -> list[OrderbookTop]:
     return extract_top_quotes(parse_orderbook_snapshots(payload))
 
 
-def _canonicalize_market_set(markets: list[str]) -> set[str]:
+def _canonicalize_market_set(markets: Sequence[str]) -> set[str]:
     return {normalize_market_id(market) for market in markets}
 
 
-def _validate_single_market_response(
+def _canonicalize_requested_markets(markets: Sequence[str]) -> list[str]:
+    if isinstance(markets, str):
+        raise TypeError("markets must be a sequence of market identifiers, not a string")
+
+    canonicalized: list[str] = []
+    seen: set[str] = set()
+    for market in markets:
+        canonical = normalize_market_id(market)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        canonicalized.append(canonical)
+
+    if not canonicalized:
+        raise ValueError("markets must not be empty")
+
+    return canonicalized
+
+
+def _validate_batch_market_response(
     *,
-    requested_market: str,
+    requested_markets: Sequence[str],
     snapshots: list[OrderbookSnapshot],
     endpoint: str,
-) -> OrderbookSnapshot:
-    requested_market_set = _canonicalize_market_set([requested_market])
+) -> list[OrderbookSnapshot]:
+    requested_market_set = _canonicalize_market_set(requested_markets)
     returned_markets = [snapshot.market for snapshot in snapshots]
     returned_market_set = _canonicalize_market_set(returned_markets)
 
-    if len(snapshots) != 1 or returned_market_set != requested_market_set:
+    if len(snapshots) != len(requested_market_set) or returned_market_set != requested_market_set:
         raise PublicApiSchemaError(
             "orderbook response market mismatch "
             f"endpoint={endpoint} "
@@ -148,20 +167,17 @@ def _validate_single_market_response(
             f"returned_count={len(snapshots)}"
         )
 
-    return snapshots[0]
+    return snapshots
 
 
 def fetch_orderbook_snapshots(
     client: httpx.Client,
     *,
-    market: str,
+    markets: Sequence[str],
     max_retries: int = 3,
 ) -> list[OrderbookSnapshot]:
-    market_text = str(market).strip()
-    if not market_text:
-        raise ValueError("market must not be empty")
-    requested_market = normalize_market_id(market_text)
-    params = {"markets": requested_market}
+    requested_markets = _canonicalize_requested_markets(markets)
+    params = {"markets": ",".join(requested_markets)}
     endpoint = "/v1/orderbook"
     payload = get_public_json_with_retry(
         client,
@@ -171,18 +187,37 @@ def fetch_orderbook_snapshots(
     )
     try:
         snapshots = parse_orderbook_snapshots(payload)
-        validated_snapshot = _validate_single_market_response(
-            requested_market=requested_market,
+        validated_snapshots = _validate_batch_market_response(
+            requested_markets=requested_markets,
             snapshots=snapshots,
             endpoint=endpoint,
         )
     except PublicApiSchemaError as exc:
         raise PublicApiSchemaError(
             "orderbook schema validation failed "
-            f"endpoint={endpoint} requested_market={requested_market} params={params} "
+            f"endpoint={endpoint} requested_markets={requested_markets} params={params} "
             f"detail={exc}"
         ) from exc
-    return [validated_snapshot]
+    return validated_snapshots
+
+
+def fetch_orderbook_snapshot(
+    client: httpx.Client,
+    *,
+    market: str,
+    max_retries: int = 3,
+) -> OrderbookSnapshot:
+    snapshots = fetch_orderbook_snapshots(client, markets=[market], max_retries=max_retries)
+    return snapshots[0]
+
+
+def fetch_orderbook_tops(
+    client: httpx.Client,
+    *,
+    markets: Sequence[str],
+    max_retries: int = 3,
+) -> list[OrderbookTop]:
+    return extract_top_quotes(fetch_orderbook_snapshots(client, markets=markets, max_retries=max_retries))
 
 
 def fetch_orderbook_top(
@@ -191,4 +226,4 @@ def fetch_orderbook_top(
     market: str,
     max_retries: int = 3,
 ) -> list[OrderbookTop]:
-    return extract_top_quotes(fetch_orderbook_snapshots(client, market=market, max_retries=max_retries))
+    return fetch_orderbook_tops(client, markets=[market], max_retries=max_retries)
