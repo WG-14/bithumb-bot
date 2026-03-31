@@ -10,6 +10,7 @@ from .config import settings
 from .db_core import ensure_db
 from .markets import normalize_market_id
 from .notifier import notify
+from .public_api import PublicApiSchemaError, get_public_json
 
 
 BASE_URL = "https://api.bithumb.com"
@@ -82,8 +83,12 @@ def _get_with_retry(
 
 def fetch_json(path: str) -> dict[str, Any]:
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as c:
-        r = _get_with_retry(c, path)
-        return r.json()
+        payload = get_public_json(c, path)
+    if not isinstance(payload, dict):
+        raise PublicApiSchemaError(
+            f"public api schema mismatch endpoint={path} expected=dict actual={type(payload).__name__}"
+        )
+    return payload
 
 
 def to_v1_market(pair: str) -> str:

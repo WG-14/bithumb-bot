@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
-
 import httpx
+
+from .public_api import PublicApiSchemaError, get_public_json
 
 
 BASE_URL = "https://api.bithumb.com"
 
 
-class MarketCatalogError(RuntimeError):
+class MarketCatalogError(PublicApiSchemaError):
     """Raised when market catalog fetch/parsing fails."""
 
 
@@ -33,9 +33,7 @@ class MarketCatalogClient:
     def fetch_markets(self, *, is_details: bool = False) -> list[MarketInfo]:
         params = {"isDetails": "true" if is_details else "false"}
         with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
-            response = client.get("/v1/market/all", params=params)
-            response.raise_for_status()
-            payload = response.json()
+            payload = get_public_json(client, "/v1/market/all", params=params)
 
         if not isinstance(payload, list):
             raise MarketCatalogError(f"unexpected market catalog payload type: {type(payload).__name__}")
@@ -53,9 +51,9 @@ class MarketCatalogClient:
             items.append(
                 MarketInfo(
                     market=canonical,
-                    korean_name=_as_optional_str(row.get("korean_name")),
-                    english_name=_as_optional_str(row.get("english_name")),
-                    market_warning=_as_optional_str(row.get("market_warning")),
+                    korean_name=_as_optional_str(row.get("korean_name"), field="korean_name"),
+                    english_name=_as_optional_str(row.get("english_name"), field="english_name"),
+                    market_warning=_as_optional_str(row.get("market_warning"), field="market_warning"),
                 )
             )
         return items
@@ -81,10 +79,12 @@ class MarketRegistry:
         return canonical
 
 
-def _as_optional_str(value: object) -> str | None:
+def _as_optional_str(value: object, *, field: str) -> str | None:
     if value is None:
         return None
-    text = str(value).strip()
+    if not isinstance(value, str):
+        raise MarketCatalogError(f"market catalog field {field!r} must be string or null: type={type(value).__name__}")
+    text = value.strip()
     return text or None
 
 
