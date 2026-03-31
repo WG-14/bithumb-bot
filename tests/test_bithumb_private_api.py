@@ -64,6 +64,13 @@ def _configure_live():
 
 
 
+@pytest.fixture(autouse=True)
+def _stub_canonical_market(monkeypatch):
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.broker.order_rules.canonical_market_id", lambda _market: "KRW-BTC")
+
+
+
 def test_private_timeout_is_temporary_error(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_HTTPX_TIMEOUT("timeout")]

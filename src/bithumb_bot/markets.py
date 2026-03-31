@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 import httpx
 
 from .public_api import PublicApiSchemaError, get_public_json
@@ -77,6 +78,37 @@ class MarketRegistry:
         if canonical not in self._markets:
             raise UnsupportedMarketError(f"unsupported market: {market!r} (canonical={canonical})")
         return canonical
+
+
+_market_registry_lock = Lock()
+_market_registry_cache: MarketRegistry | None = None
+
+
+def get_market_registry(*, refresh: bool = False, client: MarketCatalogClient | None = None) -> MarketRegistry:
+    """Return cached market registry loaded from /v1/market/all."""
+    global _market_registry_cache
+    if refresh:
+        registry = MarketRegistry.from_catalog(client=client)
+        with _market_registry_lock:
+            _market_registry_cache = registry
+        return registry
+
+    with _market_registry_lock:
+        cached = _market_registry_cache
+    if cached is not None:
+        return cached
+
+    registry = MarketRegistry.from_catalog(client=client)
+    with _market_registry_lock:
+        if _market_registry_cache is None:
+            _market_registry_cache = registry
+        return _market_registry_cache
+
+
+def canonical_market_id(market: str, *, registry: MarketRegistry | None = None) -> str:
+    """Normalize and validate market against exchange catalog."""
+    active_registry = registry or get_market_registry()
+    return normalize_market_id_with_registry(market, registry=active_registry)
 
 
 def _as_optional_str(value: object, *, field: str) -> str | None:

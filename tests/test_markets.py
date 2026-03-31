@@ -13,6 +13,8 @@ from bithumb_bot.markets import (
     canonical_market_with_raw,
     normalize_market_id,
     normalize_market_id_with_registry,
+    canonical_market_id,
+    get_market_registry,
 )
 from bithumb_bot.public_api import (
     PublicApiRequestError,
@@ -175,3 +177,23 @@ def test_extract_api_error_parses_known_shape() -> None:
         "invalid_param",
         "bad request",
     )
+
+
+def test_canonical_market_id_requires_catalog_membership(monkeypatch) -> None:
+    registry = MarketRegistry([])
+    monkeypatch.setattr("bithumb_bot.markets.get_market_registry", lambda: registry)
+
+    with pytest.raises(UnsupportedMarketError, match="unsupported market"):
+        canonical_market_id("BTC_KRW")
+
+
+def test_get_market_registry_uses_cache(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "KRW-BTC"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    first = get_market_registry(refresh=True)
+    second = get_market_registry()
+
+    assert first is second
+    assert len(_FakeClient.requests) == 1

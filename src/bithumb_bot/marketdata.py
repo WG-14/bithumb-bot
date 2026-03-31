@@ -8,7 +8,7 @@ import httpx
 
 from .config import settings
 from .db_core import ensure_db
-from .markets import normalize_market_id
+from .markets import canonical_market_id
 from .notifier import notify
 from .public_api import PublicApiSchemaError, get_public_json
 
@@ -93,7 +93,7 @@ def fetch_json(path: str) -> dict[str, Any]:
 
 def to_v1_market(pair: str) -> str:
     """Backward-compatible wrapper for canonical market normalization."""
-    return normalize_market_id(pair)
+    return canonical_market_id(pair)
 
 
 def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:

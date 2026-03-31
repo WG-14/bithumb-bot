@@ -17,7 +17,7 @@ import httpx
 
 from ..config import settings
 from ..marketdata import fetch_orderbook_top
-from ..markets import normalize_market_id
+from ..markets import canonical_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 
@@ -465,11 +465,11 @@ class BithumbBroker:
         return self._request_private("DELETE", endpoint, params=params, retry_safe=retry_safe)
 
     def _pair(self) -> tuple[str, str]:
-        quote_currency, order_currency = normalize_market_id(settings.PAIR).split("-", 1)
+        quote_currency, order_currency = canonical_market_id(settings.PAIR).split("-", 1)
         return order_currency, quote_currency
 
     def _market(self) -> str:
-        return normalize_market_id(settings.PAIR)
+        return canonical_market_id(settings.PAIR)
 
     @staticmethod
     def _decimal_from_value(value: object) -> Decimal:
@@ -694,7 +694,7 @@ class BithumbBroker:
         volume_text = self._format_volume(qty)
         if price is None:
             if normalized_side == "buy":
-                _, ask = fetch_orderbook_top(settings.PAIR)
+                _, ask = fetch_orderbook_top(self._market())
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 payload.update({
                     "price": self._format_krw_amount(notional),

@@ -7,7 +7,7 @@ from typing import Any
 
 from ..config import settings
 from ..notifier import notify
-from ..markets import normalize_market_id
+from ..markets import canonical_market_id
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
@@ -88,7 +88,7 @@ def _pick_int(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> in
 
 
 def build_order_rules_market(pair: str) -> str:
-    return normalize_market_id(pair)
+    return canonical_market_id(pair)
 
 
 def fetch_exchange_order_rules(pair: str) -> OrderRules:
