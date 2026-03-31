@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
+from ..markets import canonical_market_id, normalize_market_id
 from ..notifier import notify
-from ..markets import canonical_market_id
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
@@ -61,6 +61,10 @@ class RuleResolution:
 
 class OrderChanceSchemaError(RuntimeError):
     """Raised when /v1/orders/chance response violates documented schema."""
+
+
+class OrderChanceMarketMismatchError(OrderChanceSchemaError):
+    """Raised when /v1/orders/chance response market does not match request market."""
 
 
 def side_min_total_krw(*, rules: DerivedOrderConstraints, side: str) -> float:
@@ -199,11 +203,12 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
     }
 
     market = _require_dict(payload, "market", where="response")
-    market_id = _require_non_empty_str(market, "id", where="response.market")
-    if canonical_market_id(market_id) != canonical_market_id(requested_market):
-        raise OrderChanceSchemaError(
+    market_id = normalize_market_id(_require_non_empty_str(market, "id", where="response.market"))
+    normalized_requested_market = normalize_market_id(requested_market)
+    if market_id != normalized_requested_market:
+        raise OrderChanceMarketMismatchError(
             "/v1/orders/chance response.market.id mismatch: "
-            f"requested={canonical_market_id(requested_market)} response={canonical_market_id(market_id)}"
+            f"requested={normalized_requested_market} response={market_id}"
         )
 
     _require_non_empty_list(market, "order_types", where="response.market")

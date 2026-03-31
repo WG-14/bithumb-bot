@@ -115,6 +115,24 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
     assert parsed.maker_ask_fee == 0.0025
 
 
+def test_parse_order_chance_response_matches_market_by_normalized_equivalence(valid_doc_shaped_response):
+    parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="BTC_KRW")
+
+    assert parsed.market_id == "KRW-BTC"
+
+
+def test_parse_order_chance_response_does_not_depend_on_public_market_registry(valid_doc_shaped_response, monkeypatch):
+    monkeypatch.setattr(
+        order_rules,
+        "canonical_market_id",
+        lambda _market: (_ for _ in ()).throw(RuntimeError("public registry unavailable")),
+    )
+
+    parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="KRW-BTC")
+
+    assert parsed.market_id == "KRW-BTC"
+
+
 def test_derive_order_rules_from_chance_preserves_bid_ask_split():
     response = order_rules.parse_order_chance_response(
         _doc_order_chance_payload(market="KRW-BTC") | {"market": _doc_order_chance_payload()["market"] | {"bid": {"price_unit": "10", "min_total": "5100"}, "ask": {"price_unit": "1", "min_total": "5000"}}},
@@ -137,7 +155,7 @@ def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch, mar
         lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: market_mismatch_response})(),
     )
 
-    with pytest.raises(order_rules.OrderChanceSchemaError, match="market.id mismatch"):
+    with pytest.raises(order_rules.OrderChanceMarketMismatchError, match="market.id mismatch"):
         order_rules.fetch_exchange_order_rules("KRW-BTC")
 
 
