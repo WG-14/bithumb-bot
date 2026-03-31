@@ -606,7 +606,7 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _FlattenFailBroker())
-    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
     monkeypatch.setattr(
         "bithumb_bot.broker.live.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
@@ -993,7 +993,7 @@ def test_run_loop_position_loss_breach_flatten_failure_marks_unresolved(monkeypa
     )
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.engine.BithumbBroker", lambda: _FlattenFailBroker())
-    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
     monkeypatch.setattr(
         "bithumb_bot.broker.live.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),

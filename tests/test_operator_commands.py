@@ -2716,7 +2716,7 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
             return broker
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
-    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
     monkeypatch.setattr(
         "bithumb_bot.broker.live.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
@@ -2764,7 +2764,7 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
             raise RuntimeError("submit boom")
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _FailBroker())
-    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
     monkeypatch.setattr(
         "bithumb_bot.broker.live.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
@@ -2814,7 +2814,7 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
 
     broker = _LowAssetBroker()
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
-    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
     monkeypatch.setattr(
         "bithumb_bot.broker.live.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
@@ -2827,6 +2827,46 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
     out = capsys.readouterr().out
     assert "failed: ValueError: insufficient available asset" in out
     assert broker.place_order_calls == 0
+
+
+def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.015, 1000000.0, 0.0, 0.015, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _NoSubmitBroker:
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
+
+        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+            raise AssertionError("place_order must not be called when best quote is invalid")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoSubmitBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_010_000.0, ask_price=100_000_000.0),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "failed: RuntimeError: orderbook top invalid quote" in out
 
 
 def test_flatten_position_blocks_on_live_preflight_failure(monkeypatch, tmp_path, capsys):

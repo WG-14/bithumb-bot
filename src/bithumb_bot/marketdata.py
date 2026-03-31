@@ -120,16 +120,29 @@ def fetch_orderbook_top(pair: str | None = None) -> BestQuote:
     )
 
 
-def validated_best_quote_ask_price(quote: BestQuote, *, requested_market: str | None = None) -> float:
+def validated_best_quote_prices(
+    quote: BestQuote,
+    *,
+    requested_market: str | None = None,
+) -> tuple[float, float]:
     requested = str(requested_market or quote.market)
     if normalize_market_id(quote.market) != normalize_market_id(requested):
         raise RuntimeError(
             "orderbook top market mismatch "
             f"requested_market={requested!r} returned_market={quote.market!r}"
         )
+    bid = float(quote.bid_price)
     ask = float(quote.ask_price)
-    if not math.isfinite(ask) or ask <= 0:
-        raise RuntimeError(f"orderbook top invalid ask market={requested!r} ask={ask!r}")
+    if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or bid > ask:
+        raise RuntimeError(
+            "orderbook top invalid quote "
+            f"market={requested!r} bid={bid!r} ask={ask!r}"
+        )
+    return bid, ask
+
+
+def validated_best_quote_ask_price(quote: BestQuote, *, requested_market: str | None = None) -> float:
+    _, ask = validated_best_quote_prices(quote, requested_market=requested_market)
     return ask
 
 

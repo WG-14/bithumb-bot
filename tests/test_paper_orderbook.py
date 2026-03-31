@@ -5,6 +5,7 @@ from pathlib import Path
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio, set_portfolio
 from bithumb_bot.broker import paper
+from bithumb_bot.public_api_orderbook import BestQuote
 
 
 def _set(attr: str, value):
@@ -23,7 +24,11 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
         set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
         conn.close()
 
-        monkeypatch.setattr(paper, "fetch_orderbook_top", lambda _: (104.0, 105.0))
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=104.0, ask_price=105.0),
+        )
         trade = paper.paper_execute("BUY", ts=1, price=999.0)
 
         assert trade is not None
@@ -58,7 +63,11 @@ def test_paper_execute_pnl_changes_when_paper_fee_rate_changes(tmp_path: Path, m
     old_buy_fraction = _set("BUY_FRACTION", 1.0)
     old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
     try:
-        monkeypatch.setattr(paper, "fetch_orderbook_top", lambda _: (100.0, 100.0))
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=100.0),
+        )
 
         conn = ensure_db()
         set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
@@ -104,7 +113,11 @@ def test_paper_execute_blocks_on_abnormal_spread(tmp_path: Path, monkeypatch):
         set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
         conn.close()
 
-        monkeypatch.setattr(paper, "fetch_orderbook_top", lambda _: (100.0, 150.0))
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=150.0),
+        )
         trade = paper.paper_execute("BUY", ts=1, price=101.0)
         assert trade is None
 
@@ -115,3 +128,21 @@ def test_paper_execute_blocks_on_abnormal_spread(tmp_path: Path, monkeypatch):
     finally:
         _set("DB_PATH", old_db)
         _set("MAX_ORDERBOOK_SPREAD_BPS", old_spread)
+
+
+def test_paper_execute_blocks_on_invalid_best_quote(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper-invalid-quote.sqlite"))
+    try:
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
+        conn.close()
+
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=101.0, ask_price=100.0),
+        )
+        trade = paper.paper_execute("BUY", ts=1, price=101.0)
+        assert trade is None
+    finally:
+        _set("DB_PATH", old_db)

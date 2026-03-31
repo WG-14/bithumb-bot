@@ -6,7 +6,7 @@ from . import runtime_state
 from .broker.live import normalize_order_qty, validate_order, validate_pretrade
 from .config import settings
 from .db_core import ensure_db, init_portfolio
-from .marketdata import fetch_orderbook_top
+from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
@@ -68,13 +68,8 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     client_order_id = f"flatten_{int(time.time() * 1000)}"
     try:
         quote = fetch_orderbook_top(settings.PAIR)
-        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
-            bid, ask = float(quote.bid_price), float(quote.ask_price)
-        else:
-            bid, ask = float(quote[0]), float(quote[1])
+        bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
         market_price = float(bid)
-        if market_price <= 0:
-            raise ValueError(f"invalid best bid for flatten: {bid}")
 
         normalized_qty = normalize_order_qty(qty=qty, market_price=market_price)
         validate_order(signal="SELL", side="SELL", qty=normalized_qty, market_price=market_price)

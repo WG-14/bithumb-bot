@@ -6,7 +6,11 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.order_rules import build_order_rules_market
 from bithumb_bot.config import settings
-from bithumb_bot.marketdata import fetch_orderbook_top, validated_best_quote_ask_price
+from bithumb_bot.marketdata import (
+    fetch_orderbook_top,
+    validated_best_quote_ask_price,
+    validated_best_quote_prices,
+)
 from bithumb_bot.public_api_orderbook import BestQuote
 
 
@@ -50,9 +54,14 @@ def test_validated_best_quote_ask_price_returns_ask_for_matching_market() -> Non
     assert validated_best_quote_ask_price(quote, requested_market="btc_krw") == 101.0
 
 
+def test_validated_best_quote_prices_returns_bid_ask_for_matching_market() -> None:
+    quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0)
+    assert validated_best_quote_prices(quote, requested_market="btc_krw") == (100.0, 101.0)
+
+
 def test_validated_best_quote_ask_price_rejects_non_positive_ask() -> None:
     quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=0.0)
-    with pytest.raises(RuntimeError, match="invalid ask"):
+    with pytest.raises(RuntimeError, match="invalid quote"):
         validated_best_quote_ask_price(quote, requested_market="KRW-BTC")
 
 

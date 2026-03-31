@@ -6,7 +6,7 @@ from typing import Any
 from ..config import settings
 from ..risk import evaluate_buy_guardrails
 from ..db_core import ensure_db, get_portfolio, init_portfolio
-from ..marketdata import fetch_orderbook_top
+from ..marketdata import fetch_orderbook_top, validated_best_quote_prices
 from ..notifier import notify
 from ..observability import format_log_kv
 from ..oms import (
@@ -25,16 +25,9 @@ RUN_LOG = logging.getLogger("bithumb_bot.run")
 def _get_fill_price(signal: str) -> float | None:
     try:
         quote = fetch_orderbook_top(settings.PAIR)
-        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
-            bid, ask = float(quote.bid_price), float(quote.ask_price)
-        else:
-            bid, ask = float(quote[0]), float(quote[1])
+        bid, ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
     except Exception as e:
         notify(f"paper_execute blocked: orderbook fetch failed ({e})")
-        return None
-
-    if bid <= 0 or ask <= 0 or ask < bid:
-        notify(f"paper_execute blocked: invalid orderbook bid={bid} ask={ask}")
         return None
 
     mid = (bid + ask) / 2
