@@ -150,3 +150,20 @@ def test_live_rejects_paper_scoped_root_segment(monkeypatch: pytest.MonkeyPatch,
         PathManager.from_env(project_root=repo_root)
 
     assert "DATA_ROOT must not contain a paper-scoped path segment when MODE=live" in str(exc.value)
+
+
+@pytest.mark.parametrize("env_key", ["LOG_ROOT", "BACKUP_ROOT"])
+def test_live_rejects_paper_scoped_log_and_backup_segments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_key: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _set_roots(monkeypatch, tmp_path, "live")
+    monkeypatch.setenv(env_key, str((tmp_path / "runtime" / "paper" / env_key.lower()).resolve()))
+
+    with pytest.raises(PathPolicyError) as exc:
+        PathManager.from_env(project_root=repo_root)
+
+    assert f"{env_key} must not contain a paper-scoped path segment when MODE=live" in str(exc.value)

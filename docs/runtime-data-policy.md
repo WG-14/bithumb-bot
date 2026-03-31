@@ -290,7 +290,7 @@ P2:
 - 설정으로 주입된 root 경로 사용
 - 공용 PathManager/StorageManager를 통한 경로 획득
 - paper/dryrun에서만 제한적 로컬 개발 경로 사용
-- live에서는 fallback 없이 명시적 절대경로만 허용
+- live에서는 우회 규칙 없이 명시적 절대경로만 허용
 
 ### 11.3 live 추가 규칙
 - `DB_PATH` 명시 필수

@@ -25,11 +25,37 @@ path_query() {
   python3 "$REPO_ROOT/scripts/path_query.py" --project-root "$REPO_ROOT" --kind "$kind"
 }
 
+validate_live_override_path() {
+  local key="$1"
+  local path="$2"
+  if [[ "${MODE}" != "live" ]]; then
+    return 0
+  fi
+  PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}" python3 - "$REPO_ROOT" "$key" "$path" <<'PY'
+from pathlib import Path
+import sys
+from bithumb_bot.paths import PathManager, PathPolicyError
+
+project_root = Path(sys.argv[1]).resolve()
+key = sys.argv[2]
+path = sys.argv[3]
+try:
+    PathManager._resolve_explicit_root(key, path, "live", project_root)
+except PathPolicyError as exc:
+    print(f"[CHECK] {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 RUN_LOCK_PATH="${RUN_LOCK_PATH:-$(path_query run-lock)}"
 RUNTIME_STATE_PATH="$(path_query runtime-state)"
 PRIMARY_DB_PATH="${DB_PATH:-$(path_query primary-db)}"
 BACKUP_DB_DIR="${BACKUP_DIR:-$(path_query backup-db-dir)}"
 BACKUP_SNAPSHOTS_DIR="$(path_query backup-snapshots-dir)"
+
+validate_live_override_path "RUN_LOCK_PATH" "$RUN_LOCK_PATH"
+validate_live_override_path "DB_PATH" "$PRIMARY_DB_PATH"
+validate_live_override_path "BACKUP_DIR" "$BACKUP_DB_DIR"
 
 echo "== systemd: bithumb-bot.service =="
 sudo systemctl status bithumb-bot.service --no-pager || true

@@ -28,6 +28,28 @@ resolve_path() {
   fi
 }
 
+validate_live_override_path() {
+  local key="$1"
+  local path="$2"
+  if [[ "$MODE" != "live" ]]; then
+    return 0
+  fi
+  PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}" python3 - "$PROJECT_ROOT" "$key" "$path" <<'PY'
+from pathlib import Path
+import sys
+from bithumb_bot.paths import PathManager, PathPolicyError
+
+project_root = Path(sys.argv[1]).resolve()
+key = sys.argv[2]
+path = sys.argv[3]
+try:
+    PathManager._resolve_explicit_root(key, path, "live", project_root)
+except PathPolicyError as exc:
+    print(f"[BACKUP] {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 path_query() {
   local kind="$1"
   MODE="$MODE" \
@@ -38,12 +60,14 @@ path_query() {
 
 if [[ -n "${DB_PATH:-}" ]]; then
   DB_PATH="$(resolve_path "$DB_PATH")"
+  validate_live_override_path "DB_PATH" "$DB_PATH"
 else
   DB_PATH="$(path_query primary-db)"
 fi
 
 if [[ -n "${BACKUP_DIR:-}" ]]; then
   BACKUP_DIR="$(resolve_path "$BACKUP_DIR")"
+  validate_live_override_path "BACKUP_DIR" "$BACKUP_DIR"
 else
   BACKUP_DIR="$(path_query backup-db-dir)"
 fi

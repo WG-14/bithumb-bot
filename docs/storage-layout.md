@@ -376,6 +376,7 @@ runtime_snapshot_YYYYMMDD_HHMMSS.tar.gz
 - 레포 상대 경로는 운영에서 허용하지 않는다.
 - live 운영 경로는 항상 외부 절대경로를 사용한다.
 - 보조 스크립트도 공용 경로 계층(path_query + PathManager)을 우회하지 않는다.
+- 보조 스크립트 override(`DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`, `SNAPSHOT_ROOT`)도 live에서는 절대경로 + 레포 외부 + mode 혼합 금지 규칙을 동일하게 강제한다.
 
 ---
 

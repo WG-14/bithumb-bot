@@ -108,7 +108,7 @@ class Settings:
 
     # strategy
     # 운영 기본 전략은 필터 포함 sma_with_filter를 권장.
-    # Backward compatibility: STRATEGY_NAME 환경변수로 언제든 sma_cross 등으로 즉시 전환 가능.
+    # STRATEGY_NAME 환경변수로 전략 이름을 명시적으로 선택한다.
     STRATEGY_NAME: str = resolve_strategy_name_from_env()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
@@ -153,17 +153,16 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
-    # 레거시 공통 수수료율(하위호환 전용).
-    # 신규 배포에서는 LIVE_FEE_RATE_ESTIMATE / PAPER_FEE_RATE를 개별 설정하는 것을 권장한다.
+    # 공통 기본 수수료율. 운영에서는 LIVE/PAPER 수수료율을 각각 명시한다.
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
     # live pretrade 잔고/현금 검증 전용 보수적 추정 수수료율.
-    # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE(legacy) > 0.0025(default)
+    # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE > 0.0025(default)
     LIVE_FEE_RATE_ESTIMATE: float = parse_float_env(
         "LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025")
     )
     # paper 체결/손익 시뮬레이션 전용 수수료율.
     # 우선순위:
-    #   PAPER_FEE_RATE > PAPER_FEE_RATE_ESTIMATE(legacy alias) > FEE_RATE(legacy) > LIVE_FEE_RATE_ESTIMATE > 0.0025
+    #   PAPER_FEE_RATE > PAPER_FEE_RATE_ESTIMATE > FEE_RATE > LIVE_FEE_RATE_ESTIMATE > 0.0025
     PAPER_FEE_RATE: float = float(
         os.getenv(
             "PAPER_FEE_RATE",
@@ -173,7 +172,7 @@ class Settings:
             ),
         )
     )
-    # 하위호환 alias: 구버전 코드/테스트가 참조해도 동일 값 사용.
+    # PAPER_FEE_RATE와 동일 값(기존 키 호환용).
     PAPER_FEE_RATE_ESTIMATE: float = PAPER_FEE_RATE
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
     # 전략 진입 비용 필터에서 기대 슬리피지를 추정할 때 사용하는 bps.

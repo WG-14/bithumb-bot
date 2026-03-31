@@ -86,5 +86,7 @@ def test_operational_scripts_use_path_manager_queries() -> None:
         content = Path(script_path).read_text(encoding="utf-8")
         assert "scripts/path_query.py" in content
         assert expected_kind in content
+        assert "validate_live_override_path" in content
+        assert "_resolve_explicit_root" in content
         for legacy in legacy_patterns:
             assert legacy not in content

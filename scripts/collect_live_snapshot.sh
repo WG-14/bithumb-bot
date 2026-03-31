@@ -25,11 +25,38 @@ path_query() {
   python3 "$REPO_ROOT/scripts/path_query.py" --project-root "$REPO_ROOT" --kind "$kind"
 }
 
+validate_live_override_path() {
+  local key="$1"
+  local path="$2"
+  if [[ "${MODE}" != "live" ]]; then
+    return 0
+  fi
+  PYTHONPATH="$REPO_ROOT/src:${PYTHONPATH:-}" python3 - "$REPO_ROOT" "$key" "$path" <<'PY'
+from pathlib import Path
+import sys
+from bithumb_bot.paths import PathManager, PathPolicyError
+
+project_root = Path(sys.argv[1]).resolve()
+key = sys.argv[2]
+path = sys.argv[3]
+try:
+    PathManager._resolve_explicit_root(key, path, "live", project_root)
+except PathPolicyError as exc:
+    print(f"[SNAPSHOT] {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 TS="$(date +%Y%m%d_%H%M%S)"
 SNAPSHOT_ROOT="${SNAPSHOT_ROOT:-$(path_query backup-snapshots-dir)}"
 PRIMARY_DB_PATH="${DB_PATH:-$(path_query primary-db)}"
 RUN_LOCK_PATH="${RUN_LOCK_PATH:-$(path_query run-lock)}"
 RUNTIME_STATE_PATH="$(path_query runtime-state)"
+
+validate_live_override_path "SNAPSHOT_ROOT" "$SNAPSHOT_ROOT"
+validate_live_override_path "DB_PATH" "$PRIMARY_DB_PATH"
+validate_live_override_path "RUN_LOCK_PATH" "$RUN_LOCK_PATH"
+
 OUT_DIR="${SNAPSHOT_ROOT}/live_${TS}"
 mkdir -p "${OUT_DIR}"
 
