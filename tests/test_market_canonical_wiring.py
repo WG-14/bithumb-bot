@@ -117,6 +117,26 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
         return BestQuote(market=market, bid_price=100.0, ask_price=101.0)
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.fetch_orderbook_top", _fake_orderbook)
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 100.0,
+                        "ask_min_total_krw": 100.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 100.0,
+                    },
+                )(),
+            },
+        )(),
+    )
     monkeypatch.setattr(broker, "_get_private", _fake_get)
     monkeypatch.setattr(broker, "_post_private", _fake_post)
 

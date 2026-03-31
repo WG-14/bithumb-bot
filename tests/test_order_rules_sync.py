@@ -315,3 +315,17 @@ def test_required_rule_source_issues_requires_chance_doc_for_side_constraints() 
     )
     assert len(issues) == 3
     assert "bid_min_total_krw source must be chance_doc" in issues[0]
+
+
+def test_side_price_unit_and_limit_price_normalization_are_side_aware() -> None:
+    rules = order_rules.OrderRules(
+        bid_price_unit=10.0,
+        ask_price_unit=0.5,
+    )
+
+    assert order_rules.side_price_unit(rules=rules, side="BUY") == 10.0
+    assert order_rules.side_price_unit(rules=rules, side="SELL") == 0.5
+    assert order_rules.side_price_unit(rules=rules, side="UNKNOWN") == 0.0
+
+    assert order_rules.normalize_limit_price_for_side(price=1003.0, side="BUY", rules=rules) == 1000.0
+    assert order_rules.normalize_limit_price_for_side(price=1003.0, side="SELL", rules=rules) == 1003.0

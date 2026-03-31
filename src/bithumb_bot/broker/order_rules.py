@@ -74,6 +74,34 @@ def side_min_total_krw(*, rules: DerivedOrderConstraints, side: str) -> float:
     return float(rules.min_notional_krw)
 
 
+def side_price_unit(*, rules: DerivedOrderConstraints, side: str) -> float:
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "BUY":
+        return float(rules.bid_price_unit)
+    if normalized_side == "SELL":
+        return float(rules.ask_price_unit)
+    return 0.0
+
+
+def normalize_limit_price_for_side(*, price: float, side: str, rules: DerivedOrderConstraints) -> float:
+    value = float(price)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"limit price must be > 0 (got {price})")
+
+    unit = side_price_unit(rules=rules, side=side)
+    if not math.isfinite(unit) or unit <= 0:
+        return value
+
+    steps = value / unit
+    epsilon = 1e-12
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "SELL":
+        aligned_steps = math.ceil(steps - epsilon)
+    else:
+        aligned_steps = math.floor(steps + epsilon)
+    return float(aligned_steps * unit)
+
+
 def required_rule_issues(rules: DerivedOrderConstraints) -> list[str]:
     issues: list[str] = []
     if not math.isfinite(float(rules.min_qty)) or float(rules.min_qty) <= 0:

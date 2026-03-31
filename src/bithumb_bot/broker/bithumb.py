@@ -691,6 +691,15 @@ class BithumbBroker:
             "market": self._market(),
             "side": "bid" if normalized_side == "buy" else "ask",
         }
+        from .order_rules import (
+            get_effective_order_rules,
+            normalize_limit_price_for_side,
+            side_min_total_krw,
+            side_price_unit,
+        )
+
+        rules = get_effective_order_rules(str(payload["market"])).rules
+        order_side = "BUY" if normalized_side == "buy" else "SELL"
         volume_text = self._format_volume(qty)
         if price is None:
             if normalized_side == "buy":
@@ -708,15 +717,43 @@ class BithumbBroker:
                     "price": self._format_krw_amount(notional),
                     "order_type": "price",
                 })
+                min_total = side_min_total_krw(rules=rules, side=order_side)
+                if min_total > 0 and notional < self._decimal_from_value(min_total):
+                    raise BrokerRejectError(
+                        "order notional below side minimum for market BUY: "
+                        f"side={order_side} notional={format(notional, 'f')} min_total={min_total:.8f}"
+                    )
             else:
                 payload.update({
                     "volume": volume_text,
                     "order_type": "market",
                 })
         else:
+            requested_limit_price = self._decimal_from_value(price)
+            if requested_limit_price <= 0:
+                raise BrokerRejectError(f"limit price must be > 0 (got {price})")
+
+            price_unit = side_price_unit(rules=rules, side=order_side)
+            normalized_limit_price = self._decimal_from_value(
+                normalize_limit_price_for_side(price=float(requested_limit_price), side=order_side, rules=rules)
+            )
+            if price_unit > 0 and normalized_limit_price != requested_limit_price:
+                raise BrokerRejectError(
+                    "limit price does not match side price_unit; explicit correction required: "
+                    f"side={order_side} requested={format(requested_limit_price, 'f')} "
+                    f"price_unit={price_unit:.8f} suggested={format(normalized_limit_price, 'f')}"
+                )
+
+            notional = requested_limit_price * self._decimal_from_value(qty)
+            min_total = side_min_total_krw(rules=rules, side=order_side)
+            if min_total > 0 and notional < self._decimal_from_value(min_total):
+                raise BrokerRejectError(
+                    "order notional below side minimum for limit order: "
+                    f"side={order_side} notional={format(notional, 'f')} min_total={min_total:.8f}"
+                )
             payload.update({
                 "volume": volume_text,
-                "price": self._format_krw_amount(price),
+                "price": self._format_krw_amount(requested_limit_price),
                 "order_type": "limit",
             })
 

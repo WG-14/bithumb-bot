@@ -71,6 +71,30 @@ def _stub_canonical_market(monkeypatch):
     monkeypatch.setattr("bithumb_bot.broker.order_rules.canonical_market_id", lambda _market: "KRW-BTC")
 
 
+@pytest.fixture(autouse=True)
+def _stub_order_rules(monkeypatch):
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+
+
 
 def test_private_timeout_is_temporary_error(monkeypatch):
     _configure_live()
@@ -416,6 +440,64 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "price": "149500000",
         "order_type": "limit",
     }
+
+
+def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 10.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    with pytest.raises(BrokerRejectError, match="limit price does not match side price_unit"):
+        broker.place_order(client_order_id="cid-lmt-unit", side="BUY", qty=0.01, price=149500001)
+
+
+def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 7000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    with pytest.raises(BrokerRejectError, match="order notional below side minimum for limit order"):
+        broker.place_order(client_order_id="cid-lmt-min", side="SELL", qty=0.00001, price=100000000)
 
 
 
