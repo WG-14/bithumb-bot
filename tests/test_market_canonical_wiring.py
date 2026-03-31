@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.order_rules import build_order_rules_market
 from bithumb_bot.config import settings
-from bithumb_bot.marketdata import fetch_orderbook_top
+from bithumb_bot.marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from bithumb_bot.public_api_orderbook import BestQuote
 
 
@@ -42,6 +43,17 @@ def test_fetch_orderbook_top_uses_canonical_market_source(monkeypatch):
     assert quote.ask_price == 101.0
     assert quote.market == "KRW-BTC"
     assert _OrderbookClient.requests == [{"path": "/v1/orderbook", "params": {"markets": "KRW-BTC"}}]
+
+
+def test_validated_best_quote_ask_price_returns_ask_for_matching_market() -> None:
+    quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0)
+    assert validated_best_quote_ask_price(quote, requested_market="btc_krw") == 101.0
+
+
+def test_validated_best_quote_ask_price_rejects_non_positive_ask() -> None:
+    quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=0.0)
+    with pytest.raises(RuntimeError, match="invalid ask"):
+        validated_best_quote_ask_price(quote, requested_market="KRW-BTC")
 
 
 def test_build_order_rules_market_uses_canonical_market_source(monkeypatch):
@@ -106,7 +118,7 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
         assert chance_call == {"endpoint": "/v1/orders/chance", "params": {"market": "KRW-BTC"}}
         assert submit_call["endpoint"] == "/v2/orders"
         assert submit_call["payload"]["market"] == "KRW-BTC"
-        assert seen == ["btc_krw", "btc_krw", "btc_krw"]
+        assert seen == ["btc_krw", "btc_krw"]
         assert orderbook_markets == ["KRW-BTC"]
     finally:
         object.__setattr__(settings, "PAIR", original_pair)

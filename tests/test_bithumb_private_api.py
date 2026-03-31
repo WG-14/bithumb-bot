@@ -12,6 +12,7 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
 from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.config import settings
+from bithumb_bot.public_api_orderbook import BestQuote
 from decimal import Decimal
 
 _HTTPX_TIMEOUT = getattr(httpx, "ReadTimeout", getattr(httpx, "RequestError"))
@@ -297,7 +298,10 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         call["retry_safe"] = retry_safe
         return {"uuid": "mkt-1"}
 
-    monkeypatch.setattr("bithumb_bot.broker.bithumb.fetch_orderbook_top", lambda _pair: (149_000_000.0, 150_000_000.0))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
+    )
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     order = broker.place_order(client_order_id="cid-1", side="BUY", qty=0.1234, price=None)
@@ -311,6 +315,32 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
         "order_type": "price",
     }
+
+
+def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=0.0),
+    )
+
+    with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
+        broker.place_order(client_order_id="cid-invalid-ask", side="BUY", qty=0.1234, price=None)
+
+
+def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("orderbook offline")),
+    )
+
+    with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
+        broker.place_order(client_order_id="cid-quote-fail", side="BUY", qty=0.1234, price=None)
 
 
 

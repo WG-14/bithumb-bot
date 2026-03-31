@@ -16,7 +16,7 @@ from typing import TypedDict
 import httpx
 
 from ..config import settings
-from ..marketdata import fetch_orderbook_top
+from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from ..markets import canonical_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
@@ -694,8 +694,15 @@ class BithumbBroker:
         volume_text = self._format_volume(qty)
         if price is None:
             if normalized_side == "buy":
-                quote = fetch_orderbook_top(self._market())
-                ask = float(quote.ask_price) if hasattr(quote, "ask_price") else float(quote[1])
+                market = str(payload["market"])
+                try:
+                    quote = fetch_orderbook_top(market)
+                    ask = validated_best_quote_ask_price(quote, requested_market=market)
+                except Exception as exc:
+                    raise BrokerTemporaryError(
+                        "market buy blocked: failed to load validated best ask "
+                        f"market={market} client_order_id={client_order_id} cause={type(exc).__name__}: {exc}"
+                    ) from exc
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 payload.update({
                     "price": self._format_krw_amount(notional),
