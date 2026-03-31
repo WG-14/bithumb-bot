@@ -7,7 +7,13 @@ import json
 import os
 from dataclasses import dataclass
 
-from .config import DEFAULT_RUNTIME_STRATEGY, settings, validate_live_mode_preflight
+from .config import (
+    DEFAULT_RUNTIME_STRATEGY,
+    MarketPreflightValidationError,
+    settings,
+    validate_live_mode_preflight,
+    validate_market_preflight,
+)
 from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.paper import paper_execute
@@ -875,6 +881,18 @@ def run_loop(short_n: int, long_n: int) -> None:
     from .recovery import reconcile_with_broker
 
     configure_runtime_logging()
+    if settings.MODE != "live":
+        try:
+            validate_market_preflight(settings)
+        except MarketPreflightValidationError as exc:
+            _log_loop_event(
+                logging.ERROR,
+                "[RUN] startup_blocked",
+                symbol=settings.PAIR,
+                interval=settings.INTERVAL,
+                reason=f"market preflight failed: {exc}",
+            )
+            raise
     validate_live_mode_preflight(settings)
 
     state = runtime_state.snapshot()

@@ -9,6 +9,7 @@ import pytest
 from bithumb_bot import config
 from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
+from bithumb_bot.markets import MarketInfo, MarketRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,10 @@ def _restore_settings():
         "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
         "LIVE_FILL_FEE_STRICT_MODE": settings.LIVE_FILL_FEE_STRICT_MODE,
         "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW": settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW,
+        "PAIR": settings.PAIR,
+        "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR": settings.MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR,
+        "MARKET_PREFLIGHT_BLOCK_ON_WARNING": settings.MARKET_PREFLIGHT_BLOCK_ON_WARNING,
+        "MARKET_PREFLIGHT_WARNING_STATES": settings.MARKET_PREFLIGHT_WARNING_STATES,
     }
     old_cache = dict(order_rules._cached_rules)
     yield
@@ -92,6 +97,18 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 25.0)
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", False)
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", 100000.0)
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", False)
+    object.__setattr__(settings, "MARKET_PREFLIGHT_BLOCK_ON_WARNING", False)
+    object.__setattr__(settings, "MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
+    monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", raising=False)
+    monkeypatch.delenv("MARKET_PREFLIGHT_BLOCK_ON_WARNING", raising=False)
+    monkeypatch.delenv("MARKET_PREFLIGHT_WARNING_STATES", raising=False)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+    )
 
 
 
@@ -439,3 +456,108 @@ def test_live_preflight_rejects_invalid_strict_threshold_when_strict_mode_is_on(
     msg = str(exc.value)
     assert "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW" in msg
     assert "LIVE_FILL_FEE_STRICT_MODE=true" in msg
+
+
+def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "PAIR", "KRW-ABC")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "unsupported pair" in str(exc.value)
+
+
+def test_market_preflight_blocks_warning_state_in_live_real_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "market_warning=CAUTION" in str(exc.value)
+
+
+def test_market_preflight_allows_warning_state_in_dry_run_live_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_live_mode_preflight(settings)
+
+    assert "market preflight detected warning state" in caplog.text
+
+
+def test_market_preflight_blocks_on_catalog_fetch_failure_in_live_real_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "catalog fetch failed" in str(exc.value)
+
+
+def test_market_preflight_allows_catalog_fetch_failure_in_dry_run_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: (_ for _ in ()).throw(config.MarketCatalogError("catalog down")),
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_live_mode_preflight(settings)
+
+    assert "catalog fetch failed" in caplog.text
+
+
+def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "MODE", "paper")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_market_preflight(settings)
+
+    assert "market preflight detected warning state" in caplog.text

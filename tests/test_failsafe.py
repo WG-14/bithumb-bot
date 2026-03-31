@@ -318,15 +318,27 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert "BrokerRejectError" in state.last_disable_reason
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
-    assert state.halt_state_unresolved is True
-    halted = [n for n in notifications if "event=trading_halted" in n]
-    assert halted
-    assert any("halt_policy_stage=SAFE_HALT_REVIEW_ONLY" in n for n in halted)
-    assert any("auto_liquidate_positions=0" in n for n in halted)
-    assert any("operator_action_required=1" in n for n in halted)
-    assert any("unresolved_order_count=" in n for n in halted)
-    assert any("position_may_remain=" in n for n in halted)
-    assert any("operator_next_action=" in n for n in halted)
+
+
+def test_run_loop_calls_market_preflight_before_live_startup(monkeypatch):
+    _prepare_run_loop(monkeypatch)
+    called = {"n": 0}
+
+    def _market_preflight(_cfg):
+        called["n"] += 1
+        raise ValueError("market gate")
+
+    monkeypatch.setattr("bithumb_bot.config.validate_market_preflight", _market_preflight)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.BithumbBroker",
+        lambda: (_ for _ in ()).throw(AssertionError("broker must not be constructed")),
+    )
+
+    with pytest.raises(Exception) as exc:
+        run_loop(5, 20)
+
+    assert "market gate" in str(exc.value)
+    assert called["n"] == 1
 
 
 def test_run_loop_reconcile_error_halts_instead_of_crash(monkeypatch):

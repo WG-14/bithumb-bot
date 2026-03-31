@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import math
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from .markets import MarketCatalogError, MarketRegistry, UnsupportedMarketError, normalize_market_id
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError
 
@@ -27,6 +29,7 @@ PAPER_ONLY_ENV_KEYS = (
 )
 ALLOWED_RUNTIME_MODES = ("paper", "live")
 DEFAULT_RUNTIME_STRATEGY = "sma_with_filter"
+LOG = logging.getLogger(__name__)
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -60,6 +63,10 @@ class LiveModeValidationError(ValueError):
 
 
 class ModeValidationError(ValueError):
+    pass
+
+
+class MarketPreflightValidationError(ValueError):
     pass
 
 
@@ -224,6 +231,11 @@ class Settings:
         os.getenv("OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", "30")
     )
     MAX_OPEN_ORDER_AGE_SEC: int = int(os.getenv("MAX_OPEN_ORDER_AGE_SEC", "900"))
+    MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR: bool = parse_bool_env(
+        "MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR", ""
+    )
+    MARKET_PREFLIGHT_BLOCK_ON_WARNING: bool = parse_bool_env("MARKET_PREFLIGHT_BLOCK_ON_WARNING", "")
+    MARKET_PREFLIGHT_WARNING_STATES: str = os.getenv("MARKET_PREFLIGHT_WARNING_STATES", "CAUTION")
 
 settings = Settings()
 
@@ -236,6 +248,68 @@ def validate_mode_or_raise(mode: str) -> None:
     raise ModeValidationError(
         f"invalid MODE={mode!r}; allowed values: {allowed}"
     )
+
+
+def _fetch_market_registry_for_preflight() -> MarketRegistry:
+    return MarketRegistry.from_catalog(is_details=True)
+
+
+def _warning_state_set(raw_states: str) -> set[str]:
+    states = {token.strip().upper() for token in str(raw_states or "").split(",")}
+    cleaned = {token for token in states if token}
+    return cleaned or {"CAUTION"}
+
+
+def validate_market_preflight(cfg: Settings) -> None:
+    normalized_mode = str(cfg.MODE or "").strip().lower()
+    is_dryrun = normalized_mode == "live" and bool(cfg.LIVE_DRY_RUN)
+    is_live_real = normalized_mode == "live" and not is_dryrun
+    block_on_catalog_error = (
+        bool(cfg.MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR)
+        if os.getenv("MARKET_PREFLIGHT_BLOCK_ON_CATALOG_ERROR") not in (None, "")
+        else is_live_real
+    )
+    block_on_warning = (
+        bool(cfg.MARKET_PREFLIGHT_BLOCK_ON_WARNING)
+        if os.getenv("MARKET_PREFLIGHT_BLOCK_ON_WARNING") not in (None, "")
+        else is_live_real
+    )
+
+    configured_market = str(cfg.PAIR or "")
+    canonical_market = normalize_market_id(configured_market)
+    warning_block_states = _warning_state_set(cfg.MARKET_PREFLIGHT_WARNING_STATES)
+
+    try:
+        registry = _fetch_market_registry_for_preflight()
+    except Exception as exc:
+        msg = (
+            "market preflight catalog fetch failed: "
+            f"pair={configured_market!r} canonical={canonical_market} "
+            f"error={type(exc).__name__}: {exc}"
+        )
+        if block_on_catalog_error:
+            raise MarketPreflightValidationError(msg) from exc
+        LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
+        return
+
+    try:
+        registry.require_supported(canonical_market)
+    except UnsupportedMarketError as exc:
+        raise MarketPreflightValidationError(
+            "market preflight rejected unsupported pair: "
+            f"pair={configured_market!r} canonical={canonical_market}"
+        ) from exc
+
+    market_info = registry.get(canonical_market)
+    market_warning = str((market_info.market_warning if market_info else "") or "").strip().upper()
+    if market_warning and market_warning in warning_block_states:
+        msg = (
+            "market preflight detected warning state: "
+            f"pair={configured_market!r} canonical={canonical_market} market_warning={market_warning}"
+        )
+        if block_on_warning:
+            raise MarketPreflightValidationError(msg)
+        LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
 
 
 def validate_live_mode_preflight(cfg: Settings) -> None:
@@ -364,6 +438,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.extend(required_rule_issues(resolved_rules))
     except Exception as exc:
         issues.append(f"failed to resolve order rules: {type(exc).__name__}: {exc}")
+
+    if not issues:
+        try:
+            validate_market_preflight(cfg)
+        except MarketPreflightValidationError as exc:
+            issues.append(str(exc))
 
     if issues:
         raise LiveModeValidationError(

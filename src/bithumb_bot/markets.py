@@ -79,6 +79,10 @@ class MarketRegistry:
             raise UnsupportedMarketError(f"unsupported market: {market!r} (canonical={canonical})")
         return canonical
 
+    def get(self, market: str) -> MarketInfo | None:
+        canonical = normalize_market_id(market)
+        return self._markets.get(canonical)
+
 
 _market_registry_lock = Lock()
 _market_registry_cache: MarketRegistry | None = None
