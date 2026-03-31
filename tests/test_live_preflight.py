@@ -214,6 +214,46 @@ def test_live_preflight_rejects_paper_scoped_db_path_for_live_mode(monkeypatch: 
     assert "DB_PATH must not point to a paper-scoped path when MODE=live" in str(exc.value)
 
 
+@pytest.mark.parametrize(("env_key", "env_value"), [("LOG_ROOT", "logs"), ("BACKUP_ROOT", "backup")])
+def test_live_preflight_rejects_relative_log_and_backup_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    env_value: str,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setenv(env_key, env_value)
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert f"{env_key} must be an absolute path when MODE=live" in str(exc.value)
+
+
+@pytest.mark.parametrize(("env_key", "child"), [("DATA_ROOT", "data"), ("LOG_ROOT", "logs"), ("BACKUP_ROOT", "backup")])
+def test_live_preflight_rejects_repo_internal_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    env_key: str,
+    child: str,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setenv(env_key, str((config.PROJECT_ROOT / child).resolve()))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert f"{env_key} must be outside repository when MODE=live" in str(exc.value)
+
+
+def test_live_preflight_rejects_paper_scoped_root_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setenv("DATA_ROOT", str((Path(os.environ["DATA_ROOT"]).parent / "paper" / "data").resolve()))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "DATA_ROOT must not contain a paper-scoped path segment when MODE=live" in str(exc.value)
+
+
 def test_live_preflight_accepts_non_default_live_db_path(monkeypatch: pytest.MonkeyPatch) -> None:
     custom_live_db = str((Path(os.environ["DATA_ROOT"]) / "live" / "trades" / "live-prod.sqlite").resolve())
     _set_valid_live_defaults(monkeypatch, db_path=custom_live_db)

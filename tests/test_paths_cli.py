@@ -78,9 +78,13 @@ def test_operational_scripts_use_path_manager_queries() -> None:
         "snapshots/live_",
     )
 
+    path_query_content = Path("scripts/path_query.py").read_text(encoding="utf-8")
+    assert "PathManager.from_env" in path_query_content
+    assert "resolve_managed_path" in path_query_content
+
     for script_path, expected_kind in scripts.items():
         content = Path(script_path).read_text(encoding="utf-8")
-        assert "python3 -m bithumb_bot.paths" in content
+        assert "scripts/path_query.py" in content
         assert expected_kind in content
         for legacy in legacy_patterns:
             assert legacy not in content

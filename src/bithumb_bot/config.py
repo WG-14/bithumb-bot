@@ -259,6 +259,8 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             issues.append(f"{root_key} must be outside repository when MODE=live ({resolved_root})")
         except ValueError:
             pass
+        if "paper" in {part.lower() for part in resolved_root.parts}:
+            issues.append(f"{root_key} must not contain a paper-scoped path segment when MODE=live")
 
     db_path_env = os.getenv("DB_PATH")
     if db_path_env is None or not db_path_env.strip():

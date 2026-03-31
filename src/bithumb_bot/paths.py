@@ -100,6 +100,10 @@ class PathManager:
             raise PathPolicyError(
                 f"{key} must be outside repository when MODE=live (got: {resolved})"
             )
+        if mode == "live" and PathManager._contains_segment(resolved, "paper"):
+            raise PathPolicyError(
+                f"{key} must not contain a paper-scoped path segment when MODE=live (got: {resolved})"
+            )
         return resolved
 
     @staticmethod
@@ -109,6 +113,13 @@ class PathManager:
             return True
         except ValueError:
             return False
+
+    @staticmethod
+    def _contains_segment(path: Path, segment: str) -> bool:
+        normalized = str(segment or "").strip().lower()
+        if not normalized:
+            return False
+        return normalized in {part.lower() for part in path.parts}
 
     @staticmethod
     def _day_or_today(day: str | None) -> str:

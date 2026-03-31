@@ -289,11 +289,13 @@ P2:
 ### 11.2 허용
 - 설정으로 주입된 root 경로 사용
 - 공용 PathManager/StorageManager를 통한 경로 획득
-- 로컬 개발 fallback을 별도로 두되, live에서는 명시적 설정 강제
+- paper/dryrun에서만 제한적 로컬 개발 경로 사용
+- live에서는 fallback 없이 명시적 절대경로만 허용
 
 ### 11.3 live 추가 규칙
 - `DB_PATH` 명시 필수
-- `RUN_LOCK_PATH` 명시 권장
+- `RUN_LOCK_PATH`는 `RUN_ROOT/live/` 하위 절대경로를 사용
+- `ENV_ROOT/RUN_ROOT/DATA_ROOT/LOG_ROOT/BACKUP_ROOT`는 모두 절대경로 + 레포 외부 + mode 혼합 금지
 - notifier 미설정 상태 live 실행 금지
 - live에서 paper 전용 env 키 사용 금지
 
@@ -336,21 +338,11 @@ P2:
 
 ## 14. 현재 코드베이스에 대한 적용 메모
 
-현재 코드베이스는 다음 장점이 있다.
-- live에서 `DB_PATH` 명시를 강제한다.
-- 상대경로를 프로젝트 루트 기준으로 해석한다.
-- systemd 유닛이 명시적 env 파일 주입 원칙을 사용한다.
-- `.gitignore`로 많은 런타임 파일을 제외하고 있다.
-
-하지만 다음 한계가 있다.
-- 기본 DB/백업 경로가 아직 레포 상대경로 중심이다.
-- 운영 자료 루트(`DATA_ROOT`, `LOG_ROOT`, `RUN_ROOT`, `BACKUP_ROOT`)가 아직 표준화되어 있지 않다.
-- 로그/리포트/원본/가공/운영기록이 AWS 구조 기준으로 완전히 분리되어 있지 않다.
-
-따라서 이 문서는 단순 권고가 아니라, 다음 리팩터링의 기준 문서로 사용한다.
-- 공용 경로 처리 계층 도입
-- repo 상대 운영 경로 제거
-- backup/log/report/raw/derived/trades 분류 명시화
+현재 코드베이스는 이 문서를 "권고"가 아닌 계약으로 취급해야 한다.
+- live에서 `DB_PATH` 명시가 강제되어야 한다.
+- live에서 운영 루트(`ENV_ROOT/RUN_ROOT/DATA_ROOT/LOG_ROOT/BACKUP_ROOT`)는 절대경로 + 레포 외부여야 한다.
+- live에서 `paper` 세그먼트가 섞인 경로는 거부해야 한다.
+- 스크립트/코드/테스트/문서는 동일한 PathManager 규칙을 사용해야 한다.
 
 ---
 

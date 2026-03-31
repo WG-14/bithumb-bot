@@ -96,3 +96,57 @@ def test_live_blocks_repo_relative_roots(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     with pytest.raises(PathPolicyError):
         PathManager.from_env(project_root=repo_root)
+
+
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        ("LOG_ROOT", "logs"),
+        ("BACKUP_ROOT", "backup"),
+    ],
+)
+def test_live_rejects_relative_log_and_backup_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_key: str,
+    env_value: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _set_roots(monkeypatch, tmp_path, "live")
+    monkeypatch.setenv(env_key, env_value)
+
+    with pytest.raises(PathPolicyError) as exc:
+        PathManager.from_env(project_root=repo_root)
+
+    assert f"{env_key} must be an absolute path when MODE=live" in str(exc.value)
+
+
+@pytest.mark.parametrize(("env_key", "child"), [("DATA_ROOT", "data"), ("LOG_ROOT", "logs"), ("BACKUP_ROOT", "backup")])
+def test_live_rejects_repo_internal_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    env_key: str,
+    child: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _set_roots(monkeypatch, tmp_path, "live")
+    monkeypatch.setenv(env_key, str((repo_root / child).resolve()))
+
+    with pytest.raises(PathPolicyError) as exc:
+        PathManager.from_env(project_root=repo_root)
+
+    assert f"{env_key} must be outside repository when MODE=live" in str(exc.value)
+
+
+def test_live_rejects_paper_scoped_root_segment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _set_roots(monkeypatch, tmp_path, "live")
+    monkeypatch.setenv("DATA_ROOT", str((tmp_path / "runtime" / "paper" / "data").resolve()))
+
+    with pytest.raises(PathPolicyError) as exc:
+        PathManager.from_env(project_root=repo_root)
+
+    assert "DATA_ROOT must not contain a paper-scoped path segment when MODE=live" in str(exc.value)

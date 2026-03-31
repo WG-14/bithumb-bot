@@ -178,7 +178,7 @@ RUNTIME_ROOT/run/live/heartbeat.json
 ```
 
 - `RUN_LOCK_PATH`는 반드시 `run/<mode>/` 아래에 둔다.
-- lock 파일을 `data/locks/`에 두는 기존 방식은 중간 단계로는 괜찮지만, 최종 구조로는 `run/`으로 이동하는 것을 권장한다.
+- lock 파일은 반드시 `run/<mode>/` 아래에 둔다. `data/locks/` 같은 과거 경로는 운영에서 금지한다.
 
 ### 4.3 DB
 ```text
@@ -366,17 +366,16 @@ runtime_snapshot_YYYYMMDD_HHMMSS.tar.gz
 
 ## 10. 현재 레포 기준 적용 메모
 
-현재 코드베이스에는 다음 중간 상태가 보인다.
-- `DB_PATH` 기본값이 `data/bithumb_1m.sqlite`
-- `RUN_LOCK_PATH` 기본값이 `data/locks/...`
-- `BACKUP_DIR` 기본값이 `backups`
-- `.gitignore`로 `data/`, `tmp/`, `*.sqlite`, `*.log` 등을 제외하고 있음
-- systemd는 명시적 `BITHUMB_ENV_FILE` 주입 구조를 이미 사용 중임
+현재 기준은 다음과 같다.
+- 경로 해석은 PathManager를 단일 진입점으로 사용한다.
+- `MODE=live`에서는 `ENV_ROOT/RUN_ROOT/DATA_ROOT/LOG_ROOT/BACKUP_ROOT`를 모두 절대경로로 명시해야 한다.
+- `MODE=live`에서는 레포 내부 경로가 즉시 거부되어야 한다.
+- `MODE=live`에서는 `paper` 세그먼트가 섞인 경로를 허용하지 않는다.
 
-따라서 다음 방향으로 전환한다.
-- 레포 상대 기본 경로는 로컬 개발 전용 fallback으로만 유지
-- AWS 운영에서는 절대경로 env를 필수로 사용
-- 이후 PathManager/StorageManager 도입 시 이 문서의 구조를 표준으로 삼는다.
+운영 정책:
+- 레포 상대 경로는 운영에서 허용하지 않는다.
+- live 운영 경로는 항상 외부 절대경로를 사용한다.
+- 보조 스크립트도 공용 경로 계층(path_query + PathManager)을 우회하지 않는다.
 
 ---
 
