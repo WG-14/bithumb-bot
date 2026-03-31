@@ -800,13 +800,67 @@ class BithumbBroker:
             now = int(time.time() * 1000)
             return BrokerOrder(order.client_order_id, order.exchange_order_id, order.side, "CANCELED", order.price, order.qty_req, order.qty_filled, order.created_ts, now)
 
-        self._delete_private(
-            "/v2/order",
-            {"order_id": str(order.exchange_order_id)},
-            retry_safe=False,
+        cancel_payload: dict[str, object] = {}
+        if order.exchange_order_id:
+            cancel_payload["order_id"] = str(order.exchange_order_id)
+        if order.client_order_id:
+            cancel_payload["client_order_id"] = str(order.client_order_id)
+        if not cancel_payload:
+            raise BrokerRejectError("cancel requires order_id or client_order_id")
+
+        response = self._post_private("/v2/orders/cancel", cancel_payload, retry_safe=False)
+        if not isinstance(response, dict):
+            raise BrokerRejectError(f"unexpected /v2/orders/cancel payload type: {type(response).__name__}")
+        response_row = response.get("data") if isinstance(response.get("data"), dict) else response
+        response_order_id = str(
+            response_row.get("order_id")
+            or response_row.get("uuid")
+            or response.get("order_id")
+            or response.get("uuid")
+            or ""
         )
+        response_client_order_id = str(
+            response_row.get("client_order_id")
+            or response.get("client_order_id")
+            or ""
+        )
+        requested_order_id = str(cancel_payload.get("order_id") or "")
+        requested_client_order_id = str(cancel_payload.get("client_order_id") or "")
+        if requested_order_id and response_order_id and response_order_id != requested_order_id:
+            raise BrokerRejectError(
+                "cancel response order_id mismatch: "
+                f"requested={requested_order_id} response={response_order_id}"
+            )
+        if (
+            requested_client_order_id
+            and response_client_order_id
+            and response_client_order_id != requested_client_order_id
+            and not (requested_order_id and response_order_id)
+        ):
+            raise BrokerRejectError(
+                "cancel response client_order_id mismatch: "
+                f"requested={requested_client_order_id} response={response_client_order_id}"
+            )
+
+        if isinstance(response_row, dict) and str(response_row.get("state") or ""):
+            return self._order_from_v2_row(response_row, client_order_id=order.client_order_id)
+
         now = int(time.time() * 1000)
-        return BrokerOrder(order.client_order_id, order.exchange_order_id, order.side, "CANCELED", order.price, order.qty_req, order.qty_filled, order.created_ts, now)
+        response_raw = self._raw_order_fields(response_row, fallback_client_order_id=order.client_order_id)
+        if response_order_id:
+            response_raw["order_id"] = response_order_id
+        return BrokerOrder(
+            order.client_order_id,
+            response_order_id or order.exchange_order_id,
+            order.side,
+            "CANCELED",
+            order.price,
+            order.qty_req,
+            order.qty_filled,
+            order.created_ts,
+            now,
+            response_raw,
+        )
 
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         now = int(time.time() * 1000)

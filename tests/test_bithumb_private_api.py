@@ -556,7 +556,7 @@ def test_get_open_orders_uses_wait_state(monkeypatch):
 
 
 
-def test_cancel_order_uses_v2_order_id_query_param(monkeypatch):
+def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     call: dict[str, object] = {}
@@ -577,23 +577,94 @@ def test_cancel_order_uses_v2_order_id_query_param(monkeypatch):
         ),
     )
 
-    def _fake_delete(endpoint, params, retry_safe=False):
+    def _fake_post(endpoint, payload, retry_safe=False):
         call["endpoint"] = endpoint
-        call["params"] = params
+        call["payload"] = payload
         call["retry_safe"] = retry_safe
-        return {"order_id": params["order_id"]}
+        return {"order_id": payload["order_id"], "client_order_id": payload["client_order_id"]}
 
-    monkeypatch.setattr(broker, "_delete_private", _fake_delete)
+    monkeypatch.setattr(broker, "_post_private", _fake_post)
 
     order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
 
     assert order.exchange_order_id == "cancel-1"
     assert order.status == "CANCELED"
     assert call == {
-        "endpoint": "/v2/order",
-        "params": {"order_id": "cancel-1"},
+        "endpoint": "/v2/orders/cancel",
+        "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
         "retry_safe": False,
     }
+
+
+def test_cancel_order_accepts_client_order_id_only_response(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+
+    def _fake_post(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        return {"client_order_id": payload["client_order_id"]}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post)
+
+    order = broker.cancel_order(client_order_id="cid-cancel-only", exchange_order_id=None)
+
+    assert call == {
+        "endpoint": "/v2/orders/cancel",
+        "payload": {"client_order_id": "cid-cancel-only"},
+    }
+    assert order.client_order_id == "cid-cancel-only"
+    assert order.exchange_order_id in ("", None, "dry_cid-cancel-only")
+    assert order.status == "CANCELED"
+
+
+def test_cancel_order_raises_on_order_id_mismatch(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "order_id": "different-order-id",
+            "client_order_id": payload["client_order_id"],
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="cancel response order_id mismatch"):
+        broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
 
 
 def test_get_order_uses_v1_order_lookup(monkeypatch):
