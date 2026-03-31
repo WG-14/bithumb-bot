@@ -297,3 +297,21 @@ def test_side_min_total_krw_prefers_bid_ask_from_doc() -> None:
     assert order_rules.side_min_total_krw(rules=rules, side="BUY") == 5500.0
     assert order_rules.side_min_total_krw(rules=rules, side="SELL") == 5000.0
     assert order_rules.side_min_total_krw(rules=rules, side="UNKNOWN") == 7000.0
+
+
+def test_rule_source_for_defaults_to_missing_for_unknown_values() -> None:
+    assert order_rules.rule_source_for("bid_min_total_krw", None) == "missing"
+    assert order_rules.rule_source_for("bid_min_total_krw", {"bid_min_total_krw": "auto"}) == "missing"
+
+
+def test_required_rule_source_issues_requires_chance_doc_for_side_constraints() -> None:
+    issues = order_rules.required_rule_source_issues(
+        {
+            "bid_min_total_krw": "unsupported_by_doc",
+            "ask_min_total_krw": "missing",
+            "bid_price_unit": "chance_doc",
+            "ask_price_unit": "manual_config",
+        }
+    )
+    assert len(issues) == 3
+    assert "bid_min_total_krw source must be chance_doc" in issues[0]

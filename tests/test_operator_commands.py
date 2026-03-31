@@ -1054,6 +1054,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagBroker:
         def get_balance(self):
@@ -1086,9 +1087,22 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
                         "qty_step": 0.0001,
                         "min_notional_krw": 5000.0,
                         "max_qty_decimals": 8,
+                        "bid_min_total_krw": 0.0,
+                        "ask_min_total_krw": 0.0,
+                        "bid_price_unit": 0.0,
+                        "ask_price_unit": 0.0,
                     },
                 )(),
-                "source": {"min_qty": "auto", "qty_step": "auto"},
+                "source": {
+                    "min_qty": "manual_config",
+                    "qty_step": "manual_config",
+                    "min_notional_krw": "manual_config",
+                    "max_qty_decimals": "manual_config",
+                    "bid_min_total_krw": "chance_doc",
+                    "ask_min_total_krw": "chance_doc",
+                    "bid_price_unit": "chance_doc",
+                    "ask_price_unit": "chance_doc",
+                },
             },
         )(),
     )
@@ -1123,6 +1137,9 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] order lookup path: get_order reads /v1/order directly; open/recent snapshots use /v1/orders" in out
     assert "[PASS] open order query: count=2" in out
     assert "[PASS] symbol/order rule query" in out
+    assert "bid_min_total_krw=0.0 (source=chance_doc)" in out
+    assert "ask_price_unit=0.0 (source=chance_doc)" in out
+    assert "min_qty=0.0001 (source=manual_config)" in out
     assert "[PASS] DB writable" in out
 
 
@@ -1153,6 +1170,7 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
 
     class _DiagPartialBroker:
         def get_balance(self):
@@ -1248,9 +1266,13 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
                         "qty_step": 0.0001,
                         "min_notional_krw": 5000.0,
                         "max_qty_decimals": 8,
+                        "bid_min_total_krw": 0.0,
+                        "ask_min_total_krw": 0.0,
+                        "bid_price_unit": 0.0,
+                        "ask_price_unit": 0.0,
                     },
                 )(),
-                "source": {"min_qty": "auto"},
+                "source": {"min_qty": "manual_config"},
             },
         )(),
     )
@@ -1306,6 +1328,7 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
     place_calls = {"n": 0}
 
     class _NoTradeBroker:
@@ -1337,9 +1360,13 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
                         "qty_step": 0.0001,
                         "min_notional_krw": 5000.0,
                         "max_qty_decimals": 8,
+                        "bid_min_total_krw": 0.0,
+                        "ask_min_total_krw": 0.0,
+                        "bid_price_unit": 0.0,
+                        "ask_price_unit": 0.0,
                     },
                 )(),
-                "source": {"min_qty": "auto"},
+                "source": {"min_qty": "manual_config"},
             },
         )(),
     )
@@ -1679,6 +1706,39 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     _set_tmp_db(tmp_path)
     monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
     monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "max_qty_decimals": 8,
+                        "bid_min_total_krw": 5500.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 10.0,
+                        "ask_price_unit": 1.0,
+                    },
+                )(),
+                "source": {
+                    "min_qty": "manual_config",
+                    "qty_step": "manual_config",
+                    "min_notional_krw": "manual_config",
+                    "max_qty_decimals": "manual_config",
+                    "bid_min_total_krw": "chance_doc",
+                    "ask_min_total_krw": "chance_doc",
+                    "bid_price_unit": "chance_doc",
+                    "ask_price_unit": "chance_doc",
+                },
+            },
+        )(),
+    )
+    monkeypatch.setattr(
         "bithumb_bot.app.get_health_status",
         lambda: {
             "last_candle_age_sec": 2.0,
@@ -1723,6 +1783,8 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "open_order_count=0" in out
     assert "position=flat" in out
     assert "next_commands=uv run python bot.py recover-order --client-order-id <id> | uv run python bot.py recovery-report" in out
+    assert "[ORDER-RULE-SNAPSHOT]" in out
+    assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
 
 
 def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):

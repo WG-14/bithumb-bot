@@ -495,11 +495,25 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
         )
 
-    from .broker.order_rules import get_effective_order_rules, required_rule_issues
+    from .broker.order_rules import (
+        get_effective_order_rules,
+        required_rule_issues,
+        required_rule_source_issues,
+    )
 
     try:
-        resolved_rules = get_effective_order_rules(cfg.PAIR).rules
+        resolved = get_effective_order_rules(cfg.PAIR)
+        resolved_rules = resolved.rules
         issues.extend(required_rule_issues(resolved_rules))
+        rule_source_issues = required_rule_source_issues(resolved.source)
+        if rule_source_issues:
+            if cfg.LIVE_DRY_RUN:
+                LOG.warning(
+                    "live dry-run preflight surfaced documented order-rule source gaps: %s",
+                    "; ".join(rule_source_issues),
+                )
+            else:
+                issues.extend(rule_source_issues)
     except Exception as exc:
         issues.append(f"failed to resolve order rules: {type(exc).__name__}: {exc}")
 

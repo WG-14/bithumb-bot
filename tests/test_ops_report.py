@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from bithumb_bot.config import settings
+from bithumb_bot.broker import order_rules
 from bithumb_bot.db_core import ensure_db, init_portfolio
 from bithumb_bot.reporting import cmd_ops_report
 
@@ -11,6 +12,31 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "ops-report.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={
+                "min_qty": "manual_config",
+                "qty_step": "manual_config",
+                "min_notional_krw": "manual_config",
+                "max_qty_decimals": "manual_config",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+        ),
+    )
 
     conn = ensure_db()
     try:
@@ -79,12 +105,18 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "paper:sma_cross:1m,1,1,100000.00,0.00,50.00,-100050.00" in out
     assert "event=submit_attempt_recorded" in out
     assert "note=paper fill" in out
+    assert "[ORDER-RULE-SNAPSHOT]" in out
+    assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "env-db.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("rules unavailable")),
+    )
 
     conn = ensure_db()
     conn.close()
@@ -95,3 +127,4 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     assert "market=KRW-BTC" in out
     assert f"db_path={db_path}" in out
     assert "no strategy_context rows" in out
+    assert "failed_to_load=RuntimeError: rules unavailable" in out

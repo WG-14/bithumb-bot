@@ -11,6 +11,8 @@ from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
 from bithumb_bot.markets import MarketInfo, MarketRegistry
 
+_REAL_GET_EFFECTIVE_ORDER_RULES = order_rules.get_effective_order_rules
+
 
 @pytest.fixture(autouse=True)
 def _restore_settings():
@@ -64,6 +66,7 @@ def _set_valid_live_defaults(
     monkeypatch: pytest.MonkeyPatch,
     *,
     db_path: str | None = None,
+    stub_order_rules: bool = True,
 ) -> None:
     data_root = Path(os.environ["DATA_ROOT"])
     run_root = Path(os.environ["RUN_ROOT"])
@@ -109,6 +112,34 @@ def _set_valid_live_defaults(
         "_fetch_market_registry_for_preflight",
         lambda: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
     )
+    if stub_order_rules:
+        monkeypatch.setattr(
+            order_rules,
+            "get_effective_order_rules",
+            lambda _pair: order_rules.RuleResolution(
+                rules=order_rules.OrderRules(
+                    market_id="KRW-BTC",
+                    bid_min_total_krw=5000.0,
+                    ask_min_total_krw=5000.0,
+                    bid_price_unit=1.0,
+                    ask_price_unit=1.0,
+                    min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+                    qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+                    min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+                    max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+                ),
+                source={
+                    "min_qty": "manual_config",
+                    "qty_step": "manual_config",
+                    "min_notional_krw": "manual_config",
+                    "max_qty_decimals": "manual_config",
+                    "bid_min_total_krw": "chance_doc",
+                    "ask_min_total_krw": "chance_doc",
+                    "bid_price_unit": "chance_doc",
+                    "ask_price_unit": "chance_doc",
+                },
+            ),
+        )
 
 
 
@@ -134,6 +165,47 @@ def test_live_preflight_requires_live_risk_limits(monkeypatch: pytest.MonkeyPatc
     assert "MAX_ORDER_KRW must be > 0" in msg
     assert "MAX_DAILY_LOSS_KRW must be > 0" in msg
     assert "MAX_DAILY_ORDER_COUNT must be > 0" in msg
+
+
+def test_live_preflight_requires_chance_doc_side_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        order_rules,
+        "get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=0.0,
+                ask_price_unit=0.0,
+                min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+                qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+                min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+                max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+            ),
+            source={
+                "min_qty": "manual_config",
+                "qty_step": "manual_config",
+                "min_notional_krw": "manual_config",
+                "max_qty_decimals": "manual_config",
+                "bid_min_total_krw": "unsupported_by_doc",
+                "ask_min_total_krw": "missing",
+                "bid_price_unit": "unsupported_by_doc",
+                "ask_price_unit": "missing",
+            },
+        ),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "bid_min_total_krw source must be chance_doc for MODE=live" in msg
+    assert "ask_min_total_krw source must be chance_doc for MODE=live" in msg
 
 
 def test_live_preflight_requires_credentials_when_not_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -403,7 +475,8 @@ def test_live_preflight_fails_when_order_rule_sync_fails_and_manual_rules_invali
 def test_live_preflight_surfaces_document_schema_violation_when_manual_rules_are_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_valid_live_defaults(monkeypatch)
+    _set_valid_live_defaults(monkeypatch, stub_order_rules=False)
+    monkeypatch.setattr(order_rules, "get_effective_order_rules", _REAL_GET_EFFECTIVE_ORDER_RULES)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)

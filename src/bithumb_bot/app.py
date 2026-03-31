@@ -29,7 +29,7 @@ from .recovery import (
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
-from .broker.order_rules import get_effective_order_rules
+from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .broker import bithumb as bithumb_broker_module
 from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
@@ -62,6 +62,10 @@ MAX_OPEN_POSITIONS = settings.MAX_OPEN_POSITIONS
 KILL_SWITCH = settings.KILL_SWITCH
 KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
 DEFAULT_BITHUMB_BROKER_CLASS = bithumb_broker_module.BithumbBroker
+
+
+def _format_rule_value_with_source(*, field: str, value: object, source: dict[str, str] | None) -> str:
+    return f"{value} (source={rule_source_for(field, source)})"
 
 
 def load_recent(conn: sqlite3.Connection, need: int):
@@ -524,6 +528,27 @@ def cmd_health() -> None:
             f"position={position_summary}"
         )
         print(f"    next_commands={recommended_commands}")
+    print("  [ORDER-RULE-SNAPSHOT]")
+    try:
+        resolved_rules = get_effective_order_rules(PAIR)
+        rules = resolved_rules.rules
+        source = resolved_rules.source or {}
+        print(
+            "    "
+            f"min_qty={_format_rule_value_with_source(field='min_qty', value=rules.min_qty, source=source)} "
+            f"qty_step={_format_rule_value_with_source(field='qty_step', value=rules.qty_step, source=source)} "
+            f"min_notional_krw={_format_rule_value_with_source(field='min_notional_krw', value=rules.min_notional_krw, source=source)} "
+            f"max_qty_decimals={_format_rule_value_with_source(field='max_qty_decimals', value=rules.max_qty_decimals, source=source)}"
+        )
+        print(
+            "    "
+            f"BUY(min_total_krw={_format_rule_value_with_source(field='bid_min_total_krw', value=rules.bid_min_total_krw, source=source)}, "
+            f"price_unit={_format_rule_value_with_source(field='bid_price_unit', value=rules.bid_price_unit, source=source)}) "
+            f"SELL(min_total_krw={_format_rule_value_with_source(field='ask_min_total_krw', value=rules.ask_min_total_krw, source=source)}, "
+            f"price_unit={_format_rule_value_with_source(field='ask_price_unit', value=rules.ask_price_unit, source=source)})"
+        )
+    except Exception as exc:
+        print(f"    failed_to_load={type(exc).__name__}: {exc}")
     print(
         "  "
         f"last_candle_age_sec={candle_age} "
@@ -911,9 +936,14 @@ def cmd_broker_diagnose() -> None:
             "symbol/order rule query",
             "PASS",
             (
-                f"min_qty={rules.min_qty} qty_step={rules.qty_step} "
-                f"min_notional_krw={rules.min_notional_krw} max_qty_decimals={rules.max_qty_decimals} "
-                f"source={source or {'all': 'cache'}}"
+                f"min_qty={_format_rule_value_with_source(field='min_qty', value=rules.min_qty, source=source)} "
+                f"qty_step={_format_rule_value_with_source(field='qty_step', value=rules.qty_step, source=source)} "
+                f"min_notional_krw={_format_rule_value_with_source(field='min_notional_krw', value=rules.min_notional_krw, source=source)} "
+                f"max_qty_decimals={_format_rule_value_with_source(field='max_qty_decimals', value=rules.max_qty_decimals, source=source)} "
+                f"bid_min_total_krw={_format_rule_value_with_source(field='bid_min_total_krw', value=rules.bid_min_total_krw, source=source)} "
+                f"ask_min_total_krw={_format_rule_value_with_source(field='ask_min_total_krw', value=rules.ask_min_total_krw, source=source)} "
+                f"bid_price_unit={_format_rule_value_with_source(field='bid_price_unit', value=rules.bid_price_unit, source=source)} "
+                f"ask_price_unit={_format_rule_value_with_source(field='ask_price_unit', value=rules.ask_price_unit, source=source)}"
             ),
             critical=False,
         )

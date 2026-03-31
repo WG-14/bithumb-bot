@@ -7,6 +7,7 @@ from datetime import datetime, time, timedelta, timezone
 from statistics import median
 
 from .config import PATH_MANAGER, settings
+from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
@@ -645,6 +646,48 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     finally:
         conn.close()
 
+    order_rule_snapshot: dict[str, object]
+    try:
+        resolved_rules = get_effective_order_rules(settings.PAIR)
+        rules = resolved_rules.rules
+        source = resolved_rules.source or {}
+        order_rule_snapshot = {
+            "min_qty": {"value": rules.min_qty, "source": rule_source_for("min_qty", source)},
+            "qty_step": {"value": rules.qty_step, "source": rule_source_for("qty_step", source)},
+            "min_notional_krw": {
+                "value": rules.min_notional_krw,
+                "source": rule_source_for("min_notional_krw", source),
+            },
+            "max_qty_decimals": {
+                "value": rules.max_qty_decimals,
+                "source": rule_source_for("max_qty_decimals", source),
+            },
+            "buy": {
+                "min_total_krw": {
+                    "value": rules.bid_min_total_krw,
+                    "source": rule_source_for("bid_min_total_krw", source),
+                },
+                "price_unit": {
+                    "value": rules.bid_price_unit,
+                    "source": rule_source_for("bid_price_unit", source),
+                },
+            },
+            "sell": {
+                "min_total_krw": {
+                    "value": rules.ask_min_total_krw,
+                    "source": rule_source_for("ask_min_total_krw", source),
+                },
+                "price_unit": {
+                    "value": rules.ask_price_unit,
+                    "source": rule_source_for("ask_price_unit", source),
+                },
+            },
+        }
+    except Exception as exc:
+        order_rule_snapshot = {
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     payload = {
         "mode": settings.MODE,
         "market": market,
@@ -665,6 +708,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         ],
         "recent_flow": [dict(row) for row in recent_flow],
         "recent_trades": [dict(row) for row in recent_trades],
+        "order_rule_snapshot": order_rule_snapshot,
         "fee_diagnostics_snapshot": {
             "fill_count": fee_summary.fill_count,
             "fee_zero_count": fee_summary.fee_zero_count,
@@ -685,6 +729,24 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print(
         f"  mode={settings.MODE} market={market}{raw_symbol_info} interval={settings.INTERVAL} db_path={settings.DB_PATH}"
     )
+    print("\n[ORDER-RULE-SNAPSHOT]")
+    if "error" in order_rule_snapshot:
+        print(f"  failed_to_load={order_rule_snapshot['error']}")
+    else:
+        print(
+            "  "
+            f"min_qty={order_rule_snapshot['min_qty']['value']} (source={order_rule_snapshot['min_qty']['source']}) "
+            f"qty_step={order_rule_snapshot['qty_step']['value']} (source={order_rule_snapshot['qty_step']['source']}) "
+            f"min_notional_krw={order_rule_snapshot['min_notional_krw']['value']} (source={order_rule_snapshot['min_notional_krw']['source']}) "
+            f"max_qty_decimals={order_rule_snapshot['max_qty_decimals']['value']} (source={order_rule_snapshot['max_qty_decimals']['source']})"
+        )
+        print(
+            "  "
+            f"BUY(min_total_krw={order_rule_snapshot['buy']['min_total_krw']['value']} (source={order_rule_snapshot['buy']['min_total_krw']['source']}), "
+            f"price_unit={order_rule_snapshot['buy']['price_unit']['value']} (source={order_rule_snapshot['buy']['price_unit']['source']})) "
+            f"SELL(min_total_krw={order_rule_snapshot['sell']['min_total_krw']['value']} (source={order_rule_snapshot['sell']['min_total_krw']['source']}), "
+            f"price_unit={order_rule_snapshot['sell']['price_unit']['value']} (source={order_rule_snapshot['sell']['price_unit']['source']}))"
+        )
 
     print("\n[STRATEGY-SUMMARY]")
     if not strategy_stats:

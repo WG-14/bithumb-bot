@@ -12,6 +12,7 @@ from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
 _cached_rules: dict[str, tuple[float, "DerivedOrderConstraints", "DerivedOrderConstraints"]] = {}
+KNOWN_RULE_SOURCES = frozenset({"chance_doc", "manual_config", "unsupported_by_doc", "missing"})
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,31 @@ def required_rule_issues(rules: DerivedOrderConstraints) -> list[str]:
         issues.append(f"min_notional_krw must be > 0 (got {rules.min_notional_krw})")
     if int(rules.max_qty_decimals) <= 0:
         issues.append(f"max_qty_decimals must be > 0 (got {rules.max_qty_decimals})")
+    return issues
+
+
+def rule_source_for(field: str, source: dict[str, str] | None) -> str:
+    if not source:
+        return "missing"
+    normalized = str(source.get(field, "")).strip() or "missing"
+    return normalized if normalized in KNOWN_RULE_SOURCES else "missing"
+
+
+def required_rule_source_issues(source: dict[str, str] | None) -> list[str]:
+    issues: list[str] = []
+    doc_required_fields = (
+        "bid_min_total_krw",
+        "ask_min_total_krw",
+        "bid_price_unit",
+        "ask_price_unit",
+    )
+    for field in doc_required_fields:
+        field_source = rule_source_for(field, source)
+        if field_source != "chance_doc":
+            issues.append(
+                f"{field} source must be chance_doc for MODE=live "
+                f"(got {field_source})"
+            )
     return issues
 
 
