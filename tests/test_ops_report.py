@@ -74,6 +74,7 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
 
     assert "[OPS-REPORT]" in out
+    assert "market=KRW-BTC raw_symbol=BTC_KRW" in out
     assert f"db_path={db_path}" in out
     assert "paper:sma_cross:1m,1,1,100000.00,0.00,50.00,-100050.00" in out
     assert "event=submit_attempt_recorded" in out
@@ -91,5 +92,6 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     assert os.path.exists(db_path)
     cmd_ops_report(limit=1)
     out = capsys.readouterr().out
+    assert "market=KRW-BTC raw_symbol=BTC_KRW" in out
     assert f"db_path={db_path}" in out
     assert "no strategy_context rows" in out

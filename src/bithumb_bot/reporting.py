@@ -8,6 +8,7 @@ from statistics import median
 
 from .config import PATH_MANAGER, settings
 from .db_core import ensure_db
+from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str
 
@@ -258,6 +259,7 @@ def cmd_fee_diagnostics(
     estimated_fee_rate: float | None = None,
     as_json: bool = False,
 ) -> None:
+    market, raw_symbol = canonical_market_with_raw(settings.PAIR)
     estimate = (
         settings.LIVE_FEE_RATE_ESTIMATE
         if estimated_fee_rate is None and settings.MODE == "live"
@@ -279,7 +281,8 @@ def cmd_fee_diagnostics(
     payload = {
         "db_path": settings.DB_PATH,
         "mode": settings.MODE,
-        "pair": settings.PAIR,
+        "market": market,
+        "raw_symbol": raw_symbol,
         "fill_window": {"limit": max(1, int(fill_limit)), "count": summary.fill_count},
         "roundtrip_window": {"limit": max(1, int(roundtrip_limit)), "count": summary.roundtrip_count},
         "fills": {
@@ -314,7 +317,8 @@ def cmd_fee_diagnostics(
     print("[FEE-DIAGNOSTICS]")
     print(
         "  "
-        f"mode={settings.MODE} pair={settings.PAIR} db_path={settings.DB_PATH} "
+        f"mode={settings.MODE} market={market} "
+        f"{f'raw_symbol={raw_symbol} ' if raw_symbol else ''}db_path={settings.DB_PATH} "
         f"fills(last={max(1, int(fill_limit))}) roundtrips(last={max(1, int(roundtrip_limit))})"
     )
     print("\n[FILL-FEE-SUMMARY]")
@@ -626,6 +630,7 @@ def cmd_strategy_report(
 
 
 def cmd_ops_report(*, limit: int = 20) -> None:
+    market, raw_symbol = canonical_market_with_raw(settings.PAIR)
     conn = ensure_db()
     try:
         strategy_stats = _fetch_strategy_stats(conn)
@@ -642,7 +647,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
 
     payload = {
         "mode": settings.MODE,
-        "pair": settings.PAIR,
+        "market": market,
+        "raw_symbol": raw_symbol,
         "interval": settings.INTERVAL,
         "db_path": settings.DB_PATH,
         "strategy_summary": [
@@ -675,7 +681,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     write_json_atomic(PATH_MANAGER.ops_report_path(), payload)
 
     print("[OPS-REPORT]")
-    print(f"  mode={settings.MODE} pair={settings.PAIR} interval={settings.INTERVAL} db_path={settings.DB_PATH}")
+    raw_symbol_info = f" raw_symbol={raw_symbol}" if raw_symbol else ""
+    print(
+        f"  mode={settings.MODE} market={market}{raw_symbol_info} interval={settings.INTERVAL} db_path={settings.DB_PATH}"
+    )
 
     print("\n[STRATEGY-SUMMARY]")
     if not strategy_stats:

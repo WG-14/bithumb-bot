@@ -35,6 +35,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
+from .markets import canonical_market_with_raw
 from .reporting import cmd_fee_diagnostics, cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
 from .storage_io import write_json_atomic
 
@@ -42,6 +43,7 @@ import httpx
 
 MODE = settings.MODE
 PAIR = settings.PAIR
+MARKET, RAW_SYMBOL = canonical_market_with_raw(PAIR)
 INTERVAL = settings.INTERVAL
 EVERY = settings.EVERY
 
@@ -94,7 +96,8 @@ def cmd_signal(short_n: int, long_n: int):
         print(f"[SIGNAL] 데이터가 부족해. 먼저 sync를 실행해줘.")
         return
 
-    print(f"[SIGNAL {PAIR} {INTERVAL}] at {kst_str(r['ts'])}")
+    raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
+    print(f"[SIGNAL {MARKET} {INTERVAL}{raw_suffix}] at {kst_str(r['ts'])}")
     print(f"  SMA(short={short_n}) prev={r['prev_s']:.2f} curr={r['curr_s']:.2f}")
     print(f"  SMA(long ={long_n}) prev={r['prev_l']:.2f} curr={r['curr_l']:.2f}")
     print(f"  last_close={r['last_close']:.2f}")
@@ -113,7 +116,8 @@ def cmd_explain(short_n: int, long_n: int):
         return
 
     rows, closes = rows_closes
-    print(f"[EXPLAIN {PAIR} {INTERVAL}] last {need} closes (시간순)")
+    raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
+    print(f"[EXPLAIN {MARKET} {INTERVAL}{raw_suffix}] last {need} closes (시간순)")
     for (ts, close) in rows:
         print(f"  {kst_str(int(ts))}  close={float(close):.2f}")
 
@@ -153,7 +157,8 @@ def cmd_status():
     ts = int(row[1])
 
     equity = cash + qty * last_close
-    print(f"[STATUS {PAIR} {INTERVAL}] at {kst_str(ts)}")
+    raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
+    print(f"[STATUS {MARKET} {INTERVAL}{raw_suffix}] at {kst_str(ts)}")
     print(f"  cash_krw={cash:,.0f} (available={cash_available:,.0f}, locked={cash_locked:,.0f})")
     print(f"  asset_qty={qty:.8f} (available={asset_available:.8f}, locked={asset_locked:.8f})")
     print(f"  last_close={last_close:,.0f}")
@@ -761,7 +766,8 @@ def cmd_report(days: int) -> None:
     finally:
         conn.close()
 
-    print(f"[REPORT] days={days} pair={PAIR} interval={INTERVAL}")
+    raw_symbol_detail = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
+    print(f"[REPORT] days={days} market={MARKET}{raw_symbol_detail} interval={INTERVAL}")
     print("day,start_equity,end_equity,realized,unrealized,fee,slippage_est")
     for day, start_eq, end_eq, realized, unrealized, fee_total, slip in rows:
         print(f"{day},{start_eq:.2f},{end_eq:.2f},{realized:.2f},{unrealized:.2f},{fee_total:.2f},{slip:.2f}")
@@ -962,7 +968,9 @@ def cmd_broker_diagnose() -> None:
     overall_status = "FAIL" if fail_count else ("WARN" if warn_count else "PASS")
 
     print("[BROKER-READINESS]")
-    print(f"  pair={PAIR}")
+    print(f"  market={MARKET}")
+    if RAW_SYMBOL:
+        print(f"  raw_symbol={RAW_SYMBOL}")
     print(f"  summary: pass={pass_count} warn={warn_count} fail={fail_count} overall={overall_status}")
     for check in checks:
         print(f"  - [{check['status']}] {check['name']}: {check['detail']}")

@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .config import settings
+from .markets import canonical_market_with_raw
 from .notifier import AlertSeverity, format_event, notify
 
 
@@ -66,9 +67,13 @@ def safety_event(
         )
     )
 
+    canonical_market, inferred_raw_symbol = canonical_market_with_raw(symbol or settings.PAIR)
+
     payload: dict[str, Any] = {
         "timestamp": int(time.time() * 1000),
-        "symbol": symbol if symbol is not None else settings.PAIR,
+        "market": canonical_market,
+        "symbol": canonical_market,
+        "raw_symbol": inferred_raw_symbol,
         "client_order_id": client_order_id,
         "exchange_order_id": exchange_order_id,
         "submit_attempt_id": submit_attempt_id,
@@ -121,6 +126,19 @@ def configure_runtime_logging(level: int = logging.INFO) -> None:
 
 
 def format_log_kv(prefix: str, /, **fields: Any) -> str:
+    raw_market_input = fields.get("market")
+    if raw_market_input is None:
+        raw_market_input = fields.get("symbol")
+    if raw_market_input is None:
+        raw_market_input = fields.get("pair")
+    if raw_market_input is not None:
+        canonical_market, raw_symbol = canonical_market_with_raw(str(raw_market_input))
+        fields["market"] = canonical_market
+        fields["symbol"] = canonical_market
+        if raw_symbol and fields.get("raw_symbol") is None:
+            fields["raw_symbol"] = raw_symbol
+        fields.pop("pair", None)
+
     parts = [prefix]
     for key, value in fields.items():
         if value is None:
@@ -155,6 +173,7 @@ def record_fill_fee_anomaly(
     min_fee_ratio: float,
     max_fee_ratio: float,
 ) -> None:
+    canonical_market, raw_symbol = canonical_market_with_raw(settings.PAIR)
     key = str(anomaly_type or "unknown")
     _FILL_FEE_ANOMALY_COUNTS[key] = int(_FILL_FEE_ANOMALY_COUNTS.get(key, 0)) + 1
     anomaly_count = _FILL_FEE_ANOMALY_COUNTS[key]
@@ -177,7 +196,8 @@ def record_fill_fee_anomaly(
         min_notional=f"{float(min_notional):.12g}",
         min_fee_ratio=f"{float(min_fee_ratio):.12g}",
         max_fee_ratio=f"{float(max_fee_ratio):.12g}",
-        pair=settings.PAIR,
+        market=canonical_market,
+        raw_symbol=raw_symbol,
     )
     logging.getLogger(__name__).warning(
         format_log_kv(

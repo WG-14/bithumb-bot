@@ -160,6 +160,7 @@ def test_notify_does_not_suppress_identical_info_duplicates(monkeypatch: pytest.
 def test_safety_event_keeps_common_operator_fields_in_payload():
     message = safety_event(
         "order_submit_unknown",
+        symbol="BTC_KRW",
         client_order_id="live_1000_buy_attempt1",
         submit_attempt_id="attempt1",
         exchange_order_id="-",
@@ -169,7 +170,9 @@ def test_safety_event_keeps_common_operator_fields_in_payload():
     )
 
     assert "event=order_submit_unknown" in message
-    assert "symbol=" in message
+    assert "market=KRW-BTC" in message
+    assert "symbol=KRW-BTC" in message
+    assert "raw_symbol=BTC_KRW" in message
     assert "client_order_id=live_1000_buy_attempt1" in message
     assert "submit_attempt_id=attempt1" in message
     assert "exchange_order_id=-" in message

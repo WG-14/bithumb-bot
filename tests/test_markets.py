@@ -10,6 +10,7 @@ from bithumb_bot.markets import (
     MarketCatalogError,
     MarketRegistry,
     UnsupportedMarketError,
+    canonical_market_with_raw,
     normalize_market_id,
     normalize_market_id_with_registry,
 )
@@ -77,6 +78,16 @@ def test_normalize_market_id_with_registry_rejects_unsupported() -> None:
     registry = MarketRegistry([])
     with pytest.raises(UnsupportedMarketError, match="unsupported market"):
         normalize_market_id_with_registry("ETH_KRW", registry=registry)
+
+
+def test_canonical_market_with_raw_tracks_noncanonical_input() -> None:
+    canonical, raw_symbol = canonical_market_with_raw("BTC_KRW")
+    assert canonical == "KRW-BTC"
+    assert raw_symbol == "BTC_KRW"
+
+    canonical2, raw_symbol2 = canonical_market_with_raw("KRW-BTC")
+    assert canonical2 == "KRW-BTC"
+    assert raw_symbol2 is None
 
 
 def test_catalog_fetch_parses_market_all(monkeypatch) -> None:

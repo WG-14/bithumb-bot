@@ -125,3 +125,13 @@ def _split_pair(token: str, separator: str) -> tuple[str, str]:
 def canonical_to_legacy_pair(market: str) -> str:
     quote, base = _split_pair(normalize_market_id(market), "-")
     return f"{base}_{quote}"
+
+
+def canonical_market_with_raw(market: str) -> tuple[str, str | None]:
+    raw = str(market).strip()
+    canonical = normalize_market_id(raw)
+    if not raw:
+        return canonical, None
+    if raw.upper() == canonical:
+        return canonical, None
+    return canonical, raw
