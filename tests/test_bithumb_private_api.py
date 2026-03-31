@@ -639,7 +639,7 @@ def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(mo
     order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
 
     assert order.exchange_order_id == "cancel-1"
-    assert order.status == "CANCELED"
+    assert order.status == "CANCEL_REQUESTED"
     assert call == {
         "endpoint": "/v2/orders/cancel",
         "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
@@ -683,6 +683,34 @@ def test_cancel_order_accepts_client_order_id_only_response(monkeypatch):
     }
     assert order.client_order_id == "cid-cancel-only"
     assert order.exchange_order_id in ("", None, "dry_cid-cancel-only")
+    assert order.status == "CANCEL_REQUESTED"
+
+
+def test_cancel_order_maps_already_canceled_reject_to_canceled(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+
+    def _reject(*_args, **_kwargs):
+        raise BrokerRejectError("order already canceled")
+
+    monkeypatch.setattr(broker, "_post_private", _reject)
+    order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
     assert order.status == "CANCELED"
 
 

@@ -851,7 +851,9 @@ def cmd_cancel_open_orders() -> None:
 
     print("[CANCEL-OPEN-ORDERS]")
     print(f"  remote_open_count={summary['remote_open_count']}")
+    print(f"  cancel_accepted_count={summary['cancel_accepted_count']}")
     print(f"  canceled_count={summary['canceled_count']}")
+    print(f"  cancel_confirm_pending_count={summary['cancel_confirm_pending_count']}")
     print(f"  matched_local_count={summary['matched_local_count']}")
     print(f"  stray_canceled_count={summary['stray_canceled_count']}")
     print(f"  failed_count={summary['failed_count']}")

@@ -1003,7 +1003,9 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
         "bithumb_bot.app.cancel_open_orders_with_broker",
         lambda _broker: {
             "remote_open_count": 2,
+            "cancel_accepted_count": 1,
             "canceled_count": 1,
+            "cancel_confirm_pending_count": 0,
             "matched_local_count": 1,
             "stray_canceled_count": 0,
             "failed_count": 1,

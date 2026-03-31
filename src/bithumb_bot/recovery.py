@@ -35,6 +35,7 @@ NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_STARTUP_GATE_BLOCKED,
     REASON_SUBMIT_UNKNOWN_UNRESOLVED,
 }
+CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
 
 
 class RecoveryDisposition(str, Enum):
@@ -1342,6 +1343,8 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             return {
                 "remote_open_count": 0,
                 "canceled_count": 0,
+                "cancel_accepted_count": 0,
+                "cancel_confirm_pending_count": 0,
                 "matched_local_count": 0,
                 "stray_canceled_count": 0,
                 "failed_count": 0,
@@ -1361,6 +1364,8 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                 local_by_exchange_id[str(row["exchange_order_id"])] = local_id
 
         canceled_count = 0
+        cancel_accepted_count = 0
+        cancel_confirm_pending_count = 0
         matched_local_count = 0
         stray_canceled_count = 0
         failed_count = 0
@@ -1377,32 +1382,74 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
 
             try:
-                broker.cancel_order(
+                cancel_result = broker.cancel_order(
                     client_order_id=cancel_client_order_id,
                     exchange_order_id=remote.exchange_order_id,
                 )
-                canceled_count += 1
+                cancel_accepted_count += 1
             except Exception as e:
                 failed_count += 1
                 target = remote_exchange_id or cancel_client_order_id
                 error_messages.append(f"failed to cancel {target}: {type(e).__name__}: {e}")
                 continue
 
+            final_status = str(cancel_result.status or "").strip()
+            if final_status == CANCEL_REQUESTED_STATUS:
+                try:
+                    post_cancel = broker.get_order(
+                        client_order_id=cancel_client_order_id,
+                        exchange_order_id=(remote.exchange_order_id or None),
+                    )
+                    final_status = str(post_cancel.status or "").strip() or final_status
+                except Exception as e:
+                    final_status = CANCEL_REQUESTED_STATUS
+                    _LOG.warning(
+                        "post-cancel confirmation lookup failed exchange_order_id=%s client_order_id=%s err=%s: %s",
+                        remote_exchange_id or "-",
+                        cancel_client_order_id,
+                        type(e).__name__,
+                        e,
+                    )
+
+            is_final_canceled = final_status == "CANCELED"
+            is_final_filled = final_status == "FILLED"
+            if is_final_canceled:
+                canceled_count += 1
+            elif final_status == CANCEL_REQUESTED_STATUS:
+                cancel_confirm_pending_count += 1
+
             if local_id:
                 if remote_exchange_id:
                     set_exchange_order_id(local_id, remote_exchange_id, conn=conn)
-                set_status(local_id, "CANCELED", conn=conn)
+                if is_final_canceled:
+                    set_status(local_id, "CANCELED", conn=conn)
+                elif is_final_filled:
+                    set_status(local_id, "FILLED", conn=conn)
+                else:
+                    _LOG.warning(
+                        "cancel accepted but final status unconfirmed client_order_id=%s exchange_order_id=%s status=%s",
+                        local_id,
+                        remote_exchange_id or "-",
+                        final_status or "-",
+                    )
                 matched_local_count += 1
             else:
-                stray_canceled_count += 1
-                stray_messages.append(
-                    f"stray remote order canceled exchange_order_id={remote_exchange_id or '<none>'} side={remote.side} qty={remote.qty_req}"
-                )
+                if is_final_canceled:
+                    stray_canceled_count += 1
+                    stray_messages.append(
+                        f"stray remote order canceled exchange_order_id={remote_exchange_id or '<none>'} side={remote.side} qty={remote.qty_req}"
+                    )
+                else:
+                    stray_messages.append(
+                        f"stray remote cancel accepted but unconfirmed exchange_order_id={remote_exchange_id or '<none>'} status={final_status or CANCEL_REQUESTED_STATUS}"
+                    )
 
         conn.commit()
         return {
             "remote_open_count": len(remote_open),
             "canceled_count": canceled_count,
+            "cancel_accepted_count": cancel_accepted_count,
+            "cancel_confirm_pending_count": cancel_confirm_pending_count,
             "matched_local_count": matched_local_count,
             "stray_canceled_count": stray_canceled_count,
             "failed_count": failed_count,

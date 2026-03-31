@@ -35,6 +35,7 @@ _HTTPX_TRANSIENT_ERRORS = tuple(
     if isinstance(cls, type)
 )
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
 
 
 class _OrderSubmitAuthContext(TypedDict):
@@ -335,6 +336,19 @@ class BithumbPrivateAPI:
             return data
 
         raise BrokerTemporaryError(f"bithumb private {endpoint} failed after retries")
+
+
+def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
+    detail = str(exc).lower()
+    if any(token in detail for token in ("already canceled", "already cancelled", "already cancel", "state=cancel", "취소")):
+        return "ALREADY_CANCELED", "order already canceled"
+    if any(token in detail for token in ("already filled", "already executed", "fully executed", "state=done", "체결")):
+        return "ALREADY_FILLED", "order already filled"
+    if any(token in detail for token in ("not found", "no such order", "unknown order", "주문이 존재하지")):
+        return "NOT_FOUND", "order not found"
+    if any(token in detail for token in ("cannot cancel", "not cancelable", "접수 중", "pending")):
+        return "PENDING_NOT_CANCELABLE", "order not cancelable in current state"
+    return "REJECTED", "unclassified cancel rejection"
 
 
 def classify_private_api_error(exc: Exception) -> tuple[str, str]:
@@ -877,7 +891,36 @@ class BithumbBroker:
         if not cancel_payload:
             raise BrokerRejectError("cancel requires order_id or client_order_id")
 
-        response = self._post_private("/v2/orders/cancel", cancel_payload, retry_safe=False)
+        try:
+            response = self._post_private("/v2/orders/cancel", cancel_payload, retry_safe=False)
+        except BrokerRejectError as exc:
+            category, description = _classify_cancel_reject(exc)
+            now = int(time.time() * 1000)
+            if category == "ALREADY_CANCELED":
+                return BrokerOrder(
+                    order.client_order_id,
+                    order.exchange_order_id,
+                    order.side,
+                    "CANCELED",
+                    order.price,
+                    order.qty_req,
+                    order.qty_filled,
+                    order.created_ts,
+                    now,
+                )
+            if category == "ALREADY_FILLED":
+                return BrokerOrder(
+                    order.client_order_id,
+                    order.exchange_order_id,
+                    order.side,
+                    "FILLED",
+                    order.price,
+                    order.qty_req,
+                    order.qty_req,
+                    order.created_ts,
+                    now,
+                )
+            raise BrokerRejectError(f"cancel rejected category={category} description={description}: {exc}") from exc
         if not isinstance(response, dict):
             raise BrokerRejectError(f"unexpected /v2/orders/cancel payload type: {type(response).__name__}")
         response_row = response.get("data") if isinstance(response.get("data"), dict) else response
@@ -921,7 +964,7 @@ class BithumbBroker:
             order.client_order_id,
             resolved_exchange_order_id or order.exchange_order_id,
             order.side,
-            "CANCELED",
+            CANCEL_REQUESTED_STATUS,
             order.price,
             order.qty_req,
             order.qty_filled,

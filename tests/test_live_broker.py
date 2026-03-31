@@ -208,6 +208,17 @@ class _CancelFailureBroker(_CancelOpenOrdersBroker):
         return super().cancel_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
 
 
+class _CancelAcceptedBroker(_CancelOpenOrdersBroker):
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        self.canceled.append((client_order_id, exchange_order_id))
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "CANCEL_REQUESTED", None, 0.0, 0.0, 1, 1)
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        if exchange_order_id == "ex1":
+            return BrokerOrder(client_order_id, exchange_order_id, "BUY", "CANCELED", 100.0, 0.1, 0.0, 1, 2)
+        return BrokerOrder(client_order_id, exchange_order_id or "stray1", "SELL", "NEW", 110.0, 0.2, 0.05, 1, 2)
+
+
 class _StrictRecoveryBroker(_FakeBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         if exchange_order_id is None:
@@ -1302,6 +1313,32 @@ def test_cancel_open_orders_reports_cancel_failures(tmp_path):
     assert summary["canceled_count"] == 1
     assert summary["failed_count"] == 1
     assert len(summary["error_messages"]) == 1
+
+
+def test_cancel_open_orders_tracks_cancel_acceptance_and_confirmation(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_acceptance.sqlite"))
+    conn = ensure_db(str(tmp_path / "cancel_acceptance.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    summary = cancel_open_orders_with_broker(_CancelAcceptedBroker())
+    conn = ensure_db(str(tmp_path / "cancel_acceptance.sqlite"))
+    row = conn.execute("SELECT status FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert summary["cancel_accepted_count"] == 2
+    assert summary["canceled_count"] == 1
+    assert summary["cancel_confirm_pending_count"] == 0
+    assert summary["stray_canceled_count"] == 0
+    assert len(summary["stray_messages"]) == 1
 
 
 def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(monkeypatch, tmp_path):
