@@ -56,6 +56,101 @@ def test_config_keeps_paper_default_db_path_when_unset(tmp_path: Path) -> None:
     assert Path(proc.stdout.strip()) == Path(env["DATA_ROOT"]) / "paper" / "trades" / "paper.sqlite"
 
 
+def test_config_market_accepts_canonical_market_env() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["MARKET"] = "KRW-BTC"
+    env.pop("PAIR", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c; print(c.settings.PAIR)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "KRW-BTC"
+
+
+def test_config_market_accepts_legacy_pair_alias() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env.pop("MARKET", None)
+    env["PAIR"] = "BTC_KRW"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c; print(c.settings.PAIR)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "KRW-BTC"
+
+
+def test_config_market_prefers_market_over_pair_when_both_match() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["MARKET"] = "KRW-BTC"
+    env["PAIR"] = "BTC_KRW"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c; print(c.settings.PAIR)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "KRW-BTC"
+
+
+def test_config_market_rejects_invalid_market_format_at_startup() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["MARKET"] = "KRW/BTC"
+    env.pop("PAIR", None)
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "invalid MARKET format" in (proc.stderr + proc.stdout)
+
+
+def test_config_market_rejects_market_pair_mismatch() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "paper"
+    env["MARKET"] = "KRW-ETH"
+    env["PAIR"] = "BTC_KRW"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "MARKET and PAIR resolve to different canonical markets" in (proc.stderr + proc.stdout)
+
+
 def test_config_live_fee_rate_estimate_defaults_when_unset() -> None:
     env = dict(os.environ)
     env["MODE"] = "paper"

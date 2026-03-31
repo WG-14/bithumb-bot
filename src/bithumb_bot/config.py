@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,9 @@ PAPER_ONLY_ENV_KEYS = (
 )
 ALLOWED_RUNTIME_MODES = ("paper", "live")
 DEFAULT_RUNTIME_STRATEGY = "sma_with_filter"
+DEFAULT_CANONICAL_MARKET = "KRW-BTC"
 LOG = logging.getLogger(__name__)
+_MARKET_TOKEN_RE = re.compile(r"^[A-Z0-9]+$")
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -86,6 +89,59 @@ def resolve_strategy_name_from_env() -> str:
     return normalized or DEFAULT_RUNTIME_STRATEGY
 
 
+def _normalize_config_market_input(raw_market: str, *, env_key: str) -> str:
+    token = str(raw_market or "").strip().upper().replace(" ", "")
+    if not token:
+        raise ValueError(f"{env_key} must not be empty")
+
+    if "-" in token:
+        left, right = token.split("-", 1)
+        if not (_MARKET_TOKEN_RE.fullmatch(left or "") and _MARKET_TOKEN_RE.fullmatch(right or "")):
+            raise ValueError(
+                f"invalid {env_key} format: {raw_market!r}; expected canonical 'KRW-BTC' style token"
+            )
+        return normalize_market_id(token)
+
+    if "_" in token:
+        left, right = token.split("_", 1)
+        if not (_MARKET_TOKEN_RE.fullmatch(left or "") and _MARKET_TOKEN_RE.fullmatch(right or "")):
+            raise ValueError(
+                f"invalid {env_key} format: {raw_market!r}; expected legacy 'BTC_KRW' style token"
+            )
+        return normalize_market_id(token)
+
+    if not _MARKET_TOKEN_RE.fullmatch(token):
+        raise ValueError(
+            f"invalid {env_key} format: {raw_market!r}; expected one of KRW-BTC, BTC_KRW, BTC"
+        )
+    return normalize_market_id(token)
+
+
+def resolve_market_from_env() -> str:
+    raw_market = os.getenv("MARKET")
+    raw_pair = os.getenv("PAIR")
+
+    has_market = raw_market is not None and raw_market.strip() != ""
+    has_pair = raw_pair is not None and raw_pair.strip() != ""
+
+    if has_market:
+        canonical_market = _normalize_config_market_input(raw_market, env_key="MARKET")
+    elif has_pair:
+        canonical_market = _normalize_config_market_input(raw_pair, env_key="PAIR")
+    else:
+        canonical_market = DEFAULT_CANONICAL_MARKET
+
+    if has_market and has_pair:
+        canonical_pair = _normalize_config_market_input(raw_pair, env_key="PAIR")
+        if canonical_pair != canonical_market:
+            raise ValueError(
+                "MARKET and PAIR resolve to different canonical markets: "
+                f"MARKET={raw_market!r}->{canonical_market}, PAIR={raw_pair!r}->{canonical_pair}"
+            )
+
+    return canonical_market
+
+
 def default_run_lock_path(mode: str) -> str:
     normalized_mode = (mode or "paper").strip().lower() or "paper"
     return str(PATH_MANAGER.config.run_root / normalized_mode / "bithumb-bot.lock")
@@ -109,7 +165,7 @@ def resolve_run_lock_path_from_env(mode: str) -> str:
 class Settings:
     # runtime
     MODE: str = os.getenv("MODE", "paper")
-    PAIR: str = os.getenv("PAIR", "BTC_KRW")
+    PAIR: str = resolve_market_from_env()
     INTERVAL: str = os.getenv("INTERVAL", "1m")
     EVERY: int = int(os.getenv("EVERY", "60"))  # seconds
 

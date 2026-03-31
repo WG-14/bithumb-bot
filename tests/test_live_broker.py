@@ -549,8 +549,9 @@ def test_live_duplicate_intent_after_cancel_is_skipped_by_submit_dedup(monkeypat
             """
             SELECT client_order_id, order_status
             FROM order_intent_dedup
-            WHERE symbol='BTC_KRW' AND side='BUY' AND intent_ts=1000
-            """
+            WHERE symbol=? AND side='BUY' AND intent_ts=1000
+            """,
+            (settings.PAIR,),
         ).fetchone()
     finally:
         conn.close()
@@ -593,8 +594,9 @@ def test_live_failed_before_send_releases_dedup_for_same_intent_retry(monkeypatc
             """
             SELECT client_order_id, order_status
             FROM order_intent_dedup
-            WHERE symbol='BTC_KRW' AND side='BUY' AND intent_ts=1000
-            """
+            WHERE symbol=? AND side='BUY' AND intent_ts=1000
+            """,
+            (settings.PAIR,),
         ).fetchone()
     finally:
         conn.close()

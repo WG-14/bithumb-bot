@@ -89,7 +89,8 @@ uv run bithumb-bot run --short 7 --long 30
 현재 코드에서 실제로 사용하는 주요 옵션입니다.
 
 - `MODE` (기본: `paper`)
-- `PAIR` (기본: `BTC_KRW`)
+- `MARKET` (기본: `KRW-BTC`, canonical)
+- `PAIR` (legacy alias, 예: `BTC_KRW` 또는 `BTC`; `MARKET` 미설정 시에만 사용)
 - `INTERVAL` (기본: `1m`)
 - `EVERY` (기본: `60`)
 - `STRATEGY_NAME` (기본: `sma_with_filter`)
