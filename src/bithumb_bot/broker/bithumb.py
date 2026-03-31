@@ -20,6 +20,7 @@ from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from ..markets import canonical_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
+from .order_payloads import build_order_payload, normalize_order_side
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
 
@@ -344,7 +345,7 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "PERMISSION", "API key scope/permission denied"
     if any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
         return "FUNDS", "balance or orderable-funds check failed"
-    if any(token in detail for token in ("market", "price", "volume", "ord_type", "order_type", "validation")):
+    if any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
         return "PARAM", "market/order parameter validation failed"
     return "UNKNOWN", "unclassified private API failure"
 
@@ -683,14 +684,9 @@ class BithumbBroker:
         if self.dry_run:
             return BrokerOrder(client_order_id, f"dry_{client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
-        normalized_side = str(side).strip().lower()
-        if normalized_side not in {"buy", "sell"}:
-            raise BrokerRejectError(f"unsupported order side: {side}")
-
-        payload: dict[str, object] = {
-            "market": self._market(),
-            "side": "bid" if normalized_side == "buy" else "ask",
-        }
+        normalized_side = normalize_order_side(side)
+        payload: dict[str, object]
+        market = self._market()
         from .order_rules import (
             get_effective_order_rules,
             normalize_limit_price_for_side,
@@ -698,12 +694,11 @@ class BithumbBroker:
             side_price_unit,
         )
 
-        rules = get_effective_order_rules(str(payload["market"])).rules
-        order_side = "BUY" if normalized_side == "buy" else "SELL"
+        rules = get_effective_order_rules(market).rules
+        order_side = "BUY" if normalized_side == "bid" else "SELL"
         volume_text = self._format_volume(qty)
         if price is None:
-            if normalized_side == "buy":
-                market = str(payload["market"])
+            if normalized_side == "bid":
                 try:
                     quote = fetch_orderbook_top(market)
                     ask = validated_best_quote_ask_price(quote, requested_market=market)
@@ -713,21 +708,25 @@ class BithumbBroker:
                         f"market={market} client_order_id={client_order_id} cause={type(exc).__name__}: {exc}"
                     ) from exc
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
-                payload.update({
-                    "price": self._format_krw_amount(notional),
-                    "order_type": "price",
-                })
                 min_total = side_min_total_krw(rules=rules, side=order_side)
                 if min_total > 0 and notional < self._decimal_from_value(min_total):
                     raise BrokerRejectError(
                         "order notional below side minimum for market BUY: "
                         f"side={order_side} notional={format(notional, 'f')} min_total={min_total:.8f}"
                     )
+                payload = build_order_payload(
+                    market=market,
+                    side=normalized_side,
+                    ord_type="price",
+                    price=self._format_krw_amount(notional),
+                )
             else:
-                payload.update({
-                    "volume": volume_text,
-                    "order_type": "market",
-                })
+                payload = build_order_payload(
+                    market=market,
+                    side=normalized_side,
+                    ord_type="market",
+                    volume=volume_text,
+                )
         else:
             requested_limit_price = self._decimal_from_value(price)
             if requested_limit_price <= 0:
@@ -751,18 +750,20 @@ class BithumbBroker:
                     "order notional below side minimum for limit order: "
                     f"side={order_side} notional={format(notional, 'f')} min_total={min_total:.8f}"
                 )
-            payload.update({
-                "volume": volume_text,
-                "price": self._format_krw_amount(requested_limit_price),
-                "order_type": "limit",
-            })
+            payload = build_order_payload(
+                market=market,
+                side=normalized_side,
+                ord_type="limit",
+                volume=volume_text,
+                price=self._format_krw_amount(requested_limit_price),
+            )
 
         RUN_LOG.info(
             format_log_kv(
                 "[ORDER_SUBMIT] broker payload",
                 market=payload.get("market"),
                 side=normalized_side,
-                order_type=payload.get("order_type"),
+                ord_type=payload.get("ord_type"),
                 volume=payload.get("volume"),
                 price=payload.get("price"),
                 payload=payload,

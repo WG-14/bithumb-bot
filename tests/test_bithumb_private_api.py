@@ -178,13 +178,13 @@ def test_canonical_payload_for_query_hash_matches_order_submit_payload():
         "market": "KRW-BTC",
         "side": "bid",
         "price": "9999",
-        "order_type": "price",
+        "ord_type": "price",
     }
 
     assert BithumbPrivateAPI._canonical_payload_for_query_hash(payload) == (
-        "market=KRW-BTC&side=bid&price=9999&order_type=price"
+        "market=KRW-BTC&side=bid&price=9999&ord_type=price"
     )
-    assert BithumbPrivateAPI._query_string(payload) == "market=KRW-BTC&side=bid&price=9999&order_type=price"
+    assert BithumbPrivateAPI._query_string(payload) == "market=KRW-BTC&side=bid&price=9999&ord_type=price"
 
 
 def test_order_submit_query_hash_matches_official_urlencode_sha512_rule():
@@ -192,7 +192,7 @@ def test_order_submit_query_hash_matches_official_urlencode_sha512_rule():
         "market": "KRW-BTC",
         "side": "bid",
         "price": "9998",
-        "order_type": "price",
+        "ord_type": "price",
     }
 
     official_query = urlencode(
@@ -200,7 +200,7 @@ def test_order_submit_query_hash_matches_official_urlencode_sha512_rule():
             ("market", "KRW-BTC"),
             ("side", "bid"),
             ("price", "9998"),
-            ("order_type", "price"),
+            ("ord_type", "price"),
         ],
         doseq=False,
         safe="[]",
@@ -250,7 +250,7 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     broker = BithumbBroker()
-    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "order_type": "market"}, retry_safe=False)
+    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -259,7 +259,7 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
     assert call["headers"]["Content-Type"] == "application/json"
-    assert call["content"] == b'{"market":"KRW-BTC","side":"ask","volume":"0.1","order_type":"market"}'
+    assert call["content"] == b'{"market":"KRW-BTC","side":"ask","volume":"0.1","ord_type":"market"}'
     assert "json" not in call
 
 
@@ -357,7 +357,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "bid",
         "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
-        "order_type": "price",
+        "ord_type": "price",
     }
 
 
@@ -410,7 +410,7 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "ask",
         "volume": "0.4321",
-        "order_type": "market",
+        "ord_type": "market",
     }
 
 
@@ -438,7 +438,7 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "side": "bid",
         "volume": "0.4",
         "price": "149500000",
-        "order_type": "limit",
+        "ord_type": "limit",
     }
 
 
@@ -1027,7 +1027,7 @@ def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
 
     monkeypatch.setattr(api, "_order_submit_auth_context", _spy)
 
-    payload = {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "order_type": "market"}
+    payload = {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"}
     api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
 
     assert len(calls) == 2
@@ -1043,13 +1043,13 @@ def test_order_submit_auth_context_matches_official_claim_contract(monkeypatch):
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "order_type": "price"}
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "ord_type": "price"}
 
     context = api._order_submit_auth_context(payload)
 
-    assert context["canonical_payload"] == "market=KRW-BTC&side=bid&price=9998&order_type=price"
-    assert context["request_body_text"] == '{"market":"KRW-BTC","side":"bid","price":"9998","order_type":"price"}'
-    assert context["request_content"] == b'{"market":"KRW-BTC","side":"bid","price":"9998","order_type":"price"}'
+    assert context["canonical_payload"] == "market=KRW-BTC&side=bid&price=9998&ord_type=price"
+    assert context["request_body_text"] == '{"market":"KRW-BTC","side":"bid","price":"9998","ord_type":"price"}'
+    assert context["request_content"] == b'{"market":"KRW-BTC","side":"bid","price":"9998","ord_type":"price"}'
     assert context["query_hash_claims"] == {
         "query_hash": hashlib.sha512(context["canonical_payload"].encode("utf-8")).hexdigest(),
         "query_hash_alg": "SHA512",
@@ -1064,7 +1064,7 @@ def test_order_submit_auth_context_matches_official_claim_contract(monkeypatch):
     assert context["headers"]["Content-Type"] == "application/json"
     assert context["headers"]["Authorization"].startswith("Bearer ")
     assert context["request_kwargs"] == {
-        "content": b'{"market":"KRW-BTC","side":"bid","price":"9998","order_type":"price"}',
+        "content": b'{"market":"KRW-BTC","side":"bid","price":"9998","ord_type":"price"}',
     }
 
 
@@ -1094,19 +1094,19 @@ def test_non_order_post_does_not_use_order_submit_auth_builder(monkeypatch):
     ("payload", "expected_content", "expected_query"),
     [
         (
-            {"market": "KRW-BTC", "side": "bid", "price": "9999", "order_type": "price"},
-            b'{"market":"KRW-BTC","side":"bid","price":"9999","order_type":"price"}',
-            "market=KRW-BTC&side=bid&price=9999&order_type=price",
+            {"market": "KRW-BTC", "side": "bid", "price": "9999", "ord_type": "price"},
+            b'{"market":"KRW-BTC","side":"bid","price":"9999","ord_type":"price"}',
+            "market=KRW-BTC&side=bid&price=9999&ord_type=price",
         ),
         (
-            {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "order_type": "market"},
-            b'{"market":"KRW-BTC","side":"ask","volume":"0.1","order_type":"market"}',
-            "market=KRW-BTC&side=ask&volume=0.1&order_type=market",
+            {"market": "KRW-BTC", "side": "ask", "volume": "0.1", "ord_type": "market"},
+            b'{"market":"KRW-BTC","side":"ask","volume":"0.1","ord_type":"market"}',
+            "market=KRW-BTC&side=ask&volume=0.1&ord_type=market",
         ),
         (
-            {"market": "KRW-BTC", "side": "bid", "volume": "0.4", "price": "149500000", "order_type": "limit"},
-            b'{"market":"KRW-BTC","side":"bid","volume":"0.4","price":"149500000","order_type":"limit"}',
-            "market=KRW-BTC&side=bid&volume=0.4&price=149500000&order_type=limit",
+            {"market": "KRW-BTC", "side": "bid", "volume": "0.4", "price": "149500000", "ord_type": "limit"},
+            b'{"market":"KRW-BTC","side":"bid","volume":"0.4","price":"149500000","ord_type":"limit"}',
+            "market=KRW-BTC&side=bid&volume=0.4&price=149500000&ord_type=limit",
         ),
     ],
 )
@@ -1142,7 +1142,7 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
     monkeypatch.setattr("bithumb_bot.broker.bithumb.uuid.uuid4", lambda: "nonce-fixed")
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
 
-    payload = {"market": "KRW-BTC", "side": "bid", "price": "10002", "order_type": "price"}
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "10002", "ord_type": "price"}
     broker = BithumbBroker()
     broker._post_private("/v2/orders", payload, retry_safe=False)
 
@@ -1152,10 +1152,10 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
     request_body_text = call["content"].decode()
 
     assert call["headers"]["Content-Type"] == "application/json"
-    assert request_body_text == '{"market":"KRW-BTC","side":"bid","price":"10002","order_type":"price"}'
+    assert request_body_text == '{"market":"KRW-BTC","side":"bid","price":"10002","ord_type":"price"}'
     assert claims["nonce"] == "nonce-fixed"
     assert claims["timestamp"] == 1712230310689
-    canonical_query = "market=KRW-BTC&side=bid&price=10002&order_type=price"
+    canonical_query = "market=KRW-BTC&side=bid&price=10002&ord_type=price"
     assert claims["query_hash"] == BithumbPrivateAPI._query_hash_from_canonical_payload(canonical_query)["query_hash"]
     assert claims["query_hash_alg"] == "SHA512"
 
@@ -1171,19 +1171,19 @@ def test_order_http_debug_request_logs_query_hash_and_json_body(monkeypatch, cap
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
         broker._post_private(
             "/v2/orders",
-            {"market": "KRW-BTC", "side": "bid", "price": "9999", "order_type": "price"},
+            {"market": "KRW-BTC", "side": "bid", "price": "9999", "ord_type": "price"},
             retry_safe=False,
         )
 
     order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] request" in record.message]
     assert order_logs
     assert "content_type=application/json" in order_logs[-1]
-    assert "canonical_query_string=market=KRW-BTC&side=bid&price=9999&order_type=price" in order_logs[-1]
+    assert "canonical_query_string=market=KRW-BTC&side=bid&price=9999&ord_type=price" in order_logs[-1]
     assert "query_hash_alg=SHA512" in order_logs[-1]
     assert "nonce_present=1" in order_logs[-1]
     assert "timestamp_present=1" in order_logs[-1]
-    assert "signed_payload_repr='market=KRW-BTC&side=bid&price=9999&order_type=price'" in order_logs[-1]
-    assert 'transmitted_payload_repr=\'{"market":"KRW-BTC","side":"bid","price":"9999","order_type":"price"}\'' in order_logs[-1]
+    assert "signed_payload_repr='market=KRW-BTC&side=bid&price=9999&ord_type=price'" in order_logs[-1]
+    assert 'transmitted_payload_repr=\'{"market":"KRW-BTC","side":"bid","price":"9999","ord_type":"price"}\'' in order_logs[-1]
 
 
 def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, caplog):
@@ -1214,7 +1214,7 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "order_type": "price"}
+    payload = {"market": "KRW-BTC", "side": "bid", "price": "9998", "ord_type": "price"}
 
     with pytest.raises(BrokerRejectError) as excinfo:
         api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
@@ -1223,10 +1223,10 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
     claims = _decode_jwt(auth.removeprefix("Bearer "))
-    canonical_payload = "market=KRW-BTC&side=bid&price=9998&order_type=price"
+    canonical_payload = "market=KRW-BTC&side=bid&price=9998&ord_type=price"
 
     assert call["headers"]["Content-Type"] == "application/json"
-    assert call["content"] == b'{"market":"KRW-BTC","side":"bid","price":"9998","order_type":"price"}'
+    assert call["content"] == b'{"market":"KRW-BTC","side":"bid","price":"9998","ord_type":"price"}'
     assert "json" not in call
     assert claims == {
         "access_key": "k",
