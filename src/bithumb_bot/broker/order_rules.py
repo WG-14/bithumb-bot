@@ -11,8 +11,17 @@ from ..notifier import notify
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
-_cached_rules: dict[str, tuple[float, "DerivedOrderConstraints", "DerivedOrderConstraints"]] = {}
-KNOWN_RULE_SOURCES = frozenset({"chance_doc", "manual_config", "unsupported_by_doc", "missing"})
+_cached_rules: dict[str, tuple[float, "DerivedOrderConstraints", "DerivedOrderConstraints", dict[str, str]]] = {}
+KNOWN_RULE_SOURCES = frozenset(
+    {
+        "chance_doc",
+        "local_fallback",
+        "manual_config",  # backward-compatible alias for local_fallback
+        "merged",
+        "unsupported_by_doc",
+        "missing",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,29 @@ class DerivedOrderConstraints:
     ask_fee: float = 0.0
     maker_bid_fee: float = 0.0
     maker_ask_fee: float = 0.0
+    min_qty: float = 0.0
+    qty_step: float = 0.0
+    min_notional_krw: float = 0.0
+    max_qty_decimals: int = 0
+
+
+@dataclass(frozen=True)
+class ExchangeDerivedConstraints:
+    market_id: str = ""
+    bid_min_total_krw: float = 0.0
+    ask_min_total_krw: float = 0.0
+    bid_price_unit: float = 0.0
+    ask_price_unit: float = 0.0
+    order_types: tuple[str, ...] = ()
+    order_sides: tuple[str, ...] = ()
+    bid_fee: float = 0.0
+    ask_fee: float = 0.0
+    maker_bid_fee: float = 0.0
+    maker_ask_fee: float = 0.0
+
+
+@dataclass(frozen=True)
+class LocalFallbackConstraints:
     min_qty: float = 0.0
     qty_step: float = 0.0
     min_notional_krw: float = 0.0
@@ -144,23 +176,22 @@ def required_rule_source_issues(source: dict[str, str] | None) -> list[str]:
     return issues
 
 
-def _manual_rules() -> DerivedOrderConstraints:
-    return DerivedOrderConstraints(
-        market_id="",
-        bid_min_total_krw=0.0,
-        ask_min_total_krw=0.0,
-        bid_price_unit=0.0,
-        ask_price_unit=0.0,
-        order_types=(),
-        order_sides=(),
-        bid_fee=0.0,
-        ask_fee=0.0,
-        maker_bid_fee=0.0,
-        maker_ask_fee=0.0,
+def _local_fallback_constraints() -> LocalFallbackConstraints:
+    return LocalFallbackConstraints(
         min_qty=float(settings.LIVE_MIN_ORDER_QTY),
         qty_step=float(settings.LIVE_ORDER_QTY_STEP),
         min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
         max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+
+
+def _local_fallback_rules() -> DerivedOrderConstraints:
+    fallback = _local_fallback_constraints()
+    return DerivedOrderConstraints(
+        min_qty=fallback.min_qty,
+        qty_step=fallback.qty_step,
+        min_notional_krw=fallback.min_notional_krw,
+        max_qty_decimals=fallback.max_qty_decimals,
     )
 
 
@@ -236,8 +267,8 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
     )
 
 
-def derive_order_rules_from_chance(response: OrderChanceResponse) -> DerivedOrderConstraints:
-    return DerivedOrderConstraints(
+def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDerivedConstraints:
+    return ExchangeDerivedConstraints(
         market_id=response.market_id,
         bid_min_total_krw=response.bid.min_total,
         ask_min_total_krw=response.ask.min_total,
@@ -249,10 +280,6 @@ def derive_order_rules_from_chance(response: OrderChanceResponse) -> DerivedOrde
         ask_fee=response.ask_fee,
         maker_bid_fee=response.maker_bid_fee,
         maker_ask_fee=response.maker_ask_fee,
-        min_qty=0.0,
-        qty_step=0.0,
-        min_notional_krw=response.bid.min_total,
-        max_qty_decimals=0,
     )
 
 
@@ -260,7 +287,7 @@ def build_order_rules_market(pair: str) -> str:
     return canonical_market_id(pair)
 
 
-def fetch_exchange_order_rules(pair: str) -> DerivedOrderConstraints:
+def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
     market = build_order_rules_market(pair)
     payload = BithumbBroker().get_order_chance(market=market)
 
@@ -273,88 +300,76 @@ def fetch_exchange_order_rules(pair: str) -> DerivedOrderConstraints:
 
 def get_effective_order_rules(pair: str) -> RuleResolution:
     now = time.time()
-    manual = _manual_rules()
+    fallback = _local_fallback_rules()
 
     cached = _cached_rules.get(pair)
-    if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == manual:
-        return RuleResolution(rules=cached[1], source={})
+    if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
+        return RuleResolution(rules=cached[1], source=cached[3])
     try:
-        auto = fetch_exchange_order_rules(pair)
+        exchange = fetch_exchange_order_rules(pair)
     except Exception as exc:
         code, summary = classify_private_api_error(exc)
         notify(
             f"[WARN] order rules auto-sync failed for {pair}; using manual config only "
             f"({code}: {summary}; {type(exc).__name__}: {exc})"
         )
-        _cached_rules[pair] = (now, manual, manual)
-        return RuleResolution(
-            rules=manual,
-            source={
-                "min_qty": "manual_config",
-                "qty_step": "manual_config",
-                "min_notional_krw": "manual_config",
-                "max_qty_decimals": "manual_config",
-                "market_id": "unsupported_by_doc",
-                "bid_min_total_krw": "unsupported_by_doc",
-                "ask_min_total_krw": "unsupported_by_doc",
-                "bid_price_unit": "unsupported_by_doc",
-                "ask_price_unit": "unsupported_by_doc",
-                "order_types": "unsupported_by_doc",
-                "order_sides": "unsupported_by_doc",
-                "bid_fee": "unsupported_by_doc",
-                "ask_fee": "unsupported_by_doc",
-                "maker_bid_fee": "unsupported_by_doc",
-                "maker_ask_fee": "unsupported_by_doc",
-            },
-        )
-
-    source: dict[str, str] = {}
-    min_qty = manual.min_qty
-    source["min_qty"] = "manual_config"
-
-    qty_step = manual.qty_step
-    source["qty_step"] = "manual_config"
-
-    min_notional = manual.min_notional_krw
-    source["min_notional_krw"] = "manual_config"
-
-    max_decimals = manual.max_qty_decimals
-    source["max_qty_decimals"] = "manual_config"
+        source = {
+            "min_qty": "local_fallback",
+            "qty_step": "local_fallback",
+            "min_notional_krw": "local_fallback",
+            "max_qty_decimals": "local_fallback",
+            "market_id": "unsupported_by_doc",
+            "bid_min_total_krw": "unsupported_by_doc",
+            "ask_min_total_krw": "unsupported_by_doc",
+            "bid_price_unit": "unsupported_by_doc",
+            "ask_price_unit": "unsupported_by_doc",
+            "order_types": "unsupported_by_doc",
+            "order_sides": "unsupported_by_doc",
+            "bid_fee": "unsupported_by_doc",
+            "ask_fee": "unsupported_by_doc",
+            "maker_bid_fee": "unsupported_by_doc",
+            "maker_ask_fee": "unsupported_by_doc",
+            "ruleset": "merged",
+        }
+        _cached_rules[pair] = (now, fallback, fallback, source)
+        return RuleResolution(rules=fallback, source=source)
 
     merged = DerivedOrderConstraints(
-        market_id=auto.market_id or manual.market_id,
-        bid_min_total_krw=auto.bid_min_total_krw if auto.bid_min_total_krw > 0 else manual.bid_min_total_krw,
-        ask_min_total_krw=auto.ask_min_total_krw if auto.ask_min_total_krw > 0 else manual.ask_min_total_krw,
-        bid_price_unit=auto.bid_price_unit if auto.bid_price_unit > 0 else manual.bid_price_unit,
-        ask_price_unit=auto.ask_price_unit if auto.ask_price_unit > 0 else manual.ask_price_unit,
-        order_types=auto.order_types or manual.order_types,
-        order_sides=auto.order_sides or manual.order_sides,
-        bid_fee=auto.bid_fee if auto.bid_fee > 0 else manual.bid_fee,
-        ask_fee=auto.ask_fee if auto.ask_fee > 0 else manual.ask_fee,
-        maker_bid_fee=auto.maker_bid_fee if auto.maker_bid_fee > 0 else manual.maker_bid_fee,
-        maker_ask_fee=auto.maker_ask_fee if auto.maker_ask_fee > 0 else manual.maker_ask_fee,
-        min_qty=min_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional,
-        max_qty_decimals=max_decimals,
+        market_id=exchange.market_id,
+        bid_min_total_krw=exchange.bid_min_total_krw,
+        ask_min_total_krw=exchange.ask_min_total_krw,
+        bid_price_unit=exchange.bid_price_unit,
+        ask_price_unit=exchange.ask_price_unit,
+        order_types=exchange.order_types,
+        order_sides=exchange.order_sides,
+        bid_fee=exchange.bid_fee,
+        ask_fee=exchange.ask_fee,
+        maker_bid_fee=exchange.maker_bid_fee,
+        maker_ask_fee=exchange.maker_ask_fee,
+        min_qty=fallback.min_qty,
+        qty_step=fallback.qty_step,
+        min_notional_krw=fallback.min_notional_krw,
+        max_qty_decimals=fallback.max_qty_decimals,
     )
-    source["market_id"] = "chance_doc" if auto.market_id else "unsupported_by_doc"
-    source["bid_min_total_krw"] = "chance_doc" if auto.bid_min_total_krw > 0 else "unsupported_by_doc"
-    source["ask_min_total_krw"] = "chance_doc" if auto.ask_min_total_krw > 0 else "unsupported_by_doc"
-    source["bid_price_unit"] = "chance_doc" if auto.bid_price_unit > 0 else "unsupported_by_doc"
-    source["ask_price_unit"] = "chance_doc" if auto.ask_price_unit > 0 else "unsupported_by_doc"
-    source["order_types"] = "chance_doc" if auto.order_types else "unsupported_by_doc"
-    source["order_sides"] = "chance_doc" if auto.order_sides else "unsupported_by_doc"
-    source["bid_fee"] = "chance_doc" if auto.bid_fee > 0 else "unsupported_by_doc"
-    source["ask_fee"] = "chance_doc" if auto.ask_fee > 0 else "unsupported_by_doc"
-    source["maker_bid_fee"] = "chance_doc" if auto.maker_bid_fee > 0 else "unsupported_by_doc"
-    source["maker_ask_fee"] = "chance_doc" if auto.maker_ask_fee > 0 else "unsupported_by_doc"
-
-    manual_fields = [name for name, field_source in source.items() if field_source == "manual_config"]
-    if manual_fields:
-        notify(f"[WARN] order rules auto-sync partial for {pair}; fallback to manual for: {', '.join(manual_fields)}")
-
-    _cached_rules[pair] = (now, merged, manual)
+    source = {
+        "market_id": "chance_doc",
+        "bid_min_total_krw": "chance_doc",
+        "ask_min_total_krw": "chance_doc",
+        "bid_price_unit": "chance_doc",
+        "ask_price_unit": "chance_doc",
+        "order_types": "chance_doc",
+        "order_sides": "chance_doc",
+        "bid_fee": "chance_doc",
+        "ask_fee": "chance_doc",
+        "maker_bid_fee": "chance_doc",
+        "maker_ask_fee": "chance_doc",
+        "min_qty": "local_fallback",
+        "qty_step": "local_fallback",
+        "min_notional_krw": "local_fallback",
+        "max_qty_decimals": "local_fallback",
+        "ruleset": "merged",
+    }
+    _cached_rules[pair] = (now, merged, fallback, source)
     return RuleResolution(rules=merged, source=source)
 
 

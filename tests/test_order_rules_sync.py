@@ -95,10 +95,10 @@ def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monk
     assert rules.ask_fee == 0.0025
     assert rules.maker_bid_fee == 0.0025
     assert rules.maker_ask_fee == 0.0025
-    assert rules.min_notional_krw == 5000.0
-    assert rules.min_qty == 0.0
-    assert rules.qty_step == 0.0
-    assert rules.max_qty_decimals == 0
+    assert not hasattr(rules, "min_notional_krw")
+    assert not hasattr(rules, "min_qty")
+    assert not hasattr(rules, "qty_step")
+    assert not hasattr(rules, "max_qty_decimals")
 
 
 def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_response):
@@ -145,7 +145,7 @@ def test_derive_order_rules_from_chance_preserves_bid_ask_split():
     assert rules.ask_min_total_krw == 5000.0
     assert rules.bid_price_unit == 10.0
     assert rules.ask_price_unit == 1.0
-    assert rules.min_notional_krw == 5100.0
+    assert not hasattr(rules, "min_notional_krw")
 
 
 def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch, market_mismatch_response):
@@ -190,9 +190,8 @@ def test_fetch_exchange_order_rules_ignores_extra_undocumented_fields(monkeypatc
 
     rules = order_rules.fetch_exchange_order_rules("KRW-BTC")
 
-    assert rules.min_notional_krw == 5000.0
-    assert rules.min_qty == 0.0
-    assert rules.qty_step == 0.0
+    assert rules.bid_min_total_krw == 5000.0
+    assert rules.ask_min_total_krw == 5000.0
 
 
 def test_get_effective_order_rules_reports_schema_violation_even_with_manual_fallback(monkeypatch, missing_required_field_response):
@@ -215,7 +214,7 @@ def test_get_effective_order_rules_reports_schema_violation_even_with_manual_fal
     resolved = order_rules.get_effective_order_rules("KRW-BTC")
 
     assert resolved.rules.min_notional_krw == 6000.0
-    assert resolved.source["min_notional_krw"] == "manual_config"
+    assert resolved.source["min_notional_krw"] == "local_fallback"
     assert warnings
     assert "OrderChanceSchemaError" in warnings[0]
     assert "response.market.bid.min_total" in warnings[0]
@@ -232,7 +231,7 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
     monkeypatch.setattr(
         order_rules,
         "fetch_exchange_order_rules",
-        lambda _pair: order_rules.OrderRules(
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
             market_id="KRW-BTC",
             bid_min_total_krw=10000.0,
             ask_min_total_krw=11000.0,
@@ -244,10 +243,6 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
             ask_fee=0.0025,
             maker_bid_fee=0.0020,
             maker_ask_fee=0.0020,
-            min_qty=0.001,  # undocumented field should never override manual config
-            qty_step=0.001,  # undocumented field should never override manual config
-            min_notional_krw=10000.0,  # documented constraints are side-specific bid/ask min_total
-            max_qty_decimals=3,  # undocumented field should never override manual config
         ),
     )
 
@@ -257,10 +252,10 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
     assert resolved.rules.qty_step == 0.0001
     assert resolved.rules.min_notional_krw == 5000.0
     assert resolved.rules.max_qty_decimals == 4
-    assert resolved.source["min_qty"] == "manual_config"
-    assert resolved.source["qty_step"] == "manual_config"
-    assert resolved.source["min_notional_krw"] == "manual_config"
-    assert resolved.source["max_qty_decimals"] == "manual_config"
+    assert resolved.source["min_qty"] == "local_fallback"
+    assert resolved.source["qty_step"] == "local_fallback"
+    assert resolved.source["min_notional_krw"] == "local_fallback"
+    assert resolved.source["max_qty_decimals"] == "local_fallback"
     assert resolved.source["bid_min_total_krw"] == "chance_doc"
     assert resolved.source["ask_min_total_krw"] == "chance_doc"
     assert resolved.source["bid_price_unit"] == "chance_doc"
@@ -271,6 +266,7 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
     assert resolved.source["ask_fee"] == "chance_doc"
     assert resolved.source["maker_bid_fee"] == "chance_doc"
     assert resolved.source["maker_ask_fee"] == "chance_doc"
+    assert resolved.source["ruleset"] == "merged"
 
 
 def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fails(monkeypatch):
@@ -296,13 +292,48 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     assert resolved.rules.qty_step == 0.0005
     assert resolved.rules.min_notional_krw == 6000.0
     assert resolved.rules.max_qty_decimals == 5
-    assert resolved.source["min_qty"] == "manual_config"
-    assert resolved.source["qty_step"] == "manual_config"
-    assert resolved.source["min_notional_krw"] == "manual_config"
-    assert resolved.source["max_qty_decimals"] == "manual_config"
+    assert resolved.source["min_qty"] == "local_fallback"
+    assert resolved.source["qty_step"] == "local_fallback"
+    assert resolved.source["min_notional_krw"] == "local_fallback"
+    assert resolved.source["max_qty_decimals"] == "local_fallback"
     assert resolved.source["bid_min_total_krw"] == "unsupported_by_doc"
+    assert resolved.source["ruleset"] == "merged"
     assert warnings
     assert "auto-sync failed" in warnings[0]
+
+
+def test_get_effective_order_rules_cached_result_preserves_source_metadata(monkeypatch):
+    order_rules._cached_rules.clear()
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0003)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0007)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 9000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
+            market_id="KRW-BTC",
+            bid_min_total_krw=7000.0,
+            ask_min_total_krw=7100.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            order_types=("limit",),
+            order_sides=("ask", "bid"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
+        ),
+    )
+
+    first = order_rules.get_effective_order_rules("BTC_KRW")
+    second = order_rules.get_effective_order_rules("BTC_KRW")
+
+    assert first.source["bid_min_total_krw"] == "chance_doc"
+    assert second.source["bid_min_total_krw"] == "chance_doc"
+    assert first.source["min_qty"] == "local_fallback"
+    assert second.source["min_qty"] == "local_fallback"
 
 
 def test_side_min_total_krw_prefers_bid_ask_from_doc() -> None:
