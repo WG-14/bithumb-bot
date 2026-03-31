@@ -7,7 +7,7 @@ from typing import Any
 
 from ..config import settings
 from ..notifier import notify
-from ..marketdata import to_v1_market
+from ..markets import normalize_market_id
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
@@ -88,9 +88,7 @@ def _pick_int(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> in
 
 
 def build_order_rules_market(pair: str) -> str:
-    token = str(pair).strip()
-    normalized = token if any(sep in token for sep in ("_", "-")) else f"{token}_KRW"
-    return to_v1_market(normalized)
+    return normalize_market_id(pair)
 
 
 def fetch_exchange_order_rules(pair: str) -> OrderRules:

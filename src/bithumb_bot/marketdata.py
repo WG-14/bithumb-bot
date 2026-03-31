@@ -8,6 +8,7 @@ import httpx
 
 from .config import settings
 from .db_core import ensure_db
+from .markets import normalize_market_id
 from .notifier import notify
 
 
@@ -86,13 +87,8 @@ def fetch_json(path: str) -> dict[str, Any]:
 
 
 def to_v1_market(pair: str) -> str:
-    """
-    BTC_KRW -> KRW-BTC
-    """
-    if "_" not in pair:
-        return pair
-    base, quote = pair.split("_", 1)
-    return f"{quote}-{base}"
+    """Backward-compatible wrapper for canonical market normalization."""
+    return normalize_market_id(pair)
 
 
 def fetch_orderbook_top(pair: str | None = None) -> tuple[float, float]:

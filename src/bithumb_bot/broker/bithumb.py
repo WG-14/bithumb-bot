@@ -16,7 +16,8 @@ from typing import TypedDict
 import httpx
 
 from ..config import settings
-from ..marketdata import fetch_orderbook_top, to_v1_market
+from ..marketdata import fetch_orderbook_top
+from ..markets import normalize_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 
@@ -464,11 +465,11 @@ class BithumbBroker:
         return self._request_private("DELETE", endpoint, params=params, retry_safe=retry_safe)
 
     def _pair(self) -> tuple[str, str]:
-        order_currency, payment_currency = settings.PAIR.split("_")
-        return order_currency, payment_currency
+        quote_currency, order_currency = normalize_market_id(settings.PAIR).split("-", 1)
+        return order_currency, quote_currency
 
     def _market(self) -> str:
-        return to_v1_market(settings.PAIR)
+        return normalize_market_id(settings.PAIR)
 
     @staticmethod
     def _decimal_from_value(value: object) -> Decimal:

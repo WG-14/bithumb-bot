@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+
+
+BASE_URL = "https://api.bithumb.com"
+
+
+class MarketCatalogError(RuntimeError):
+    """Raised when market catalog fetch/parsing fails."""
+
+
+class UnsupportedMarketError(ValueError):
+    """Raised when a market is not supported by the loaded market catalog."""
+
+
+@dataclass(frozen=True)
+class MarketInfo:
+    market: str
+    korean_name: str | None = None
+    english_name: str | None = None
+    market_warning: str | None = None
+
+
+class MarketCatalogClient:
+    def __init__(self, *, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+        self._base_url = base_url
+        self._timeout = timeout
+
+    def fetch_markets(self, *, is_details: bool = False) -> list[MarketInfo]:
+        params = {"isDetails": "true" if is_details else "false"}
+        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
+            response = client.get("/v1/market/all", params=params)
+            response.raise_for_status()
+            payload = response.json()
+
+        if not isinstance(payload, list):
+            raise MarketCatalogError(f"unexpected market catalog payload type: {type(payload).__name__}")
+        if not payload:
+            raise MarketCatalogError("market catalog is empty")
+
+        items: list[MarketInfo] = []
+        for row in payload:
+            if not isinstance(row, dict):
+                raise MarketCatalogError(f"unexpected market catalog row type: {type(row).__name__}")
+            market = row.get("market")
+            if not isinstance(market, str) or not market.strip():
+                raise MarketCatalogError(f"market key missing in catalog row: {row}")
+            canonical = normalize_market_id(market)
+            items.append(
+                MarketInfo(
+                    market=canonical,
+                    korean_name=_as_optional_str(row.get("korean_name")),
+                    english_name=_as_optional_str(row.get("english_name")),
+                    market_warning=_as_optional_str(row.get("market_warning")),
+                )
+            )
+        return items
+
+
+class MarketRegistry:
+    def __init__(self, markets: list[MarketInfo]) -> None:
+        self._markets: dict[str, MarketInfo] = {m.market: m for m in markets}
+
+    @classmethod
+    def from_catalog(cls, *, client: MarketCatalogClient | None = None, is_details: bool = False) -> "MarketRegistry":
+        catalog_client = client or MarketCatalogClient()
+        return cls(catalog_client.fetch_markets(is_details=is_details))
+
+    def is_supported(self, market: str) -> bool:
+        canonical = normalize_market_id(market)
+        return canonical in self._markets
+
+    def require_supported(self, market: str) -> str:
+        canonical = normalize_market_id(market)
+        if canonical not in self._markets:
+            raise UnsupportedMarketError(f"unsupported market: {market!r} (canonical={canonical})")
+        return canonical
+
+
+def _as_optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
+    token = str(market).strip().upper().replace(" ", "")
+    if not token:
+        raise ValueError("market must not be empty")
+
+    quote = str(default_quote).strip().upper()
+    if not quote:
+        raise ValueError("default_quote must not be empty")
+
+    if "-" in token:
+        left, right = _split_pair(token, "-")
+        return f"{left}-{right}"
+
+    if "_" in token:
+        base, quote_token = _split_pair(token, "_")
+        return f"{quote_token}-{base}"
+
+    return f"{quote}-{token}"
+
+
+def normalize_market_id_with_registry(market: str, *, registry: MarketRegistry, default_quote: str = "KRW") -> str:
+    canonical = normalize_market_id(market, default_quote=default_quote)
+    return registry.require_supported(canonical)
+
+
+def _split_pair(token: str, separator: str) -> tuple[str, str]:
+    left, right = token.split(separator, 1)
+    left = left.strip().upper()
+    right = right.strip().upper()
+    if not left or not right:
+        raise ValueError(f"invalid market format: {token!r}")
+    return left, right
+
+
+def canonical_to_legacy_pair(market: str) -> str:
+    quote, base = _split_pair(normalize_market_id(market), "-")
+    return f"{base}_{quote}"
