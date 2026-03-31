@@ -575,3 +575,22 @@ def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(
         config.validate_market_preflight(settings)
 
     assert "market preflight detected warning state" in caplog.text
+
+
+def test_market_preflight_rejects_registry_inconsistency_when_market_lookup_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _InconsistentRegistry:
+        def require_supported(self, market: str) -> str:
+            return market
+
+        def get(self, _market: str) -> None:
+            return None
+
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(config, "_fetch_market_registry_for_preflight", lambda: _InconsistentRegistry())
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "registry inconsistency" in str(exc.value)

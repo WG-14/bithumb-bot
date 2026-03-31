@@ -328,6 +328,8 @@ def validate_market_preflight(cfg: Settings) -> None:
     block_on_warning = (
         bool(cfg.MARKET_PREFLIGHT_BLOCK_ON_WARNING)
         if os.getenv("MARKET_PREFLIGHT_BLOCK_ON_WARNING") not in (None, "")
+        # Safety default: block warning states only for armed live-real execution.
+        # Dry-run/paper paths keep warning-only behavior unless explicitly overridden.
         else is_live_real
     )
 
@@ -357,7 +359,13 @@ def validate_market_preflight(cfg: Settings) -> None:
         ) from exc
 
     market_info = registry.get(canonical_market)
-    market_warning = str((market_info.market_warning if market_info else "") or "").strip().upper()
+    if market_info is None:
+        raise MarketPreflightValidationError(
+            "market preflight registry inconsistency: "
+            f"pair={configured_market!r} canonical={canonical_market}"
+        )
+
+    market_warning = str(market_info.market_warning or "").strip().upper()
     if market_warning and market_warning in warning_block_states:
         msg = (
             "market preflight detected warning state: "

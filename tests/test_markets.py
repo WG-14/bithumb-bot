@@ -134,7 +134,9 @@ def test_catalog_fetch_raises_on_invalid_payload_type(monkeypatch) -> None:
 
 def test_catalog_fetch_supports_is_details_true(monkeypatch) -> None:
     _reset_fake_client()
-    _FakeClient.payload = [{"market": "KRW-BTC"}]
+    _FakeClient.payload = [
+        {"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin", "market_warning": "NONE"}
+    ]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
     MarketCatalogClient().fetch_markets(is_details=True)
@@ -177,6 +179,46 @@ def test_catalog_fetch_raises_on_schema_mismatch_field_type(monkeypatch) -> None
 
     with pytest.raises(PublicApiSchemaError, match="english_name"):
         MarketCatalogClient().fetch_markets()
+
+
+def test_catalog_fetch_raises_when_row_is_not_dict(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = ["KRW-BTC"]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="row type"):
+        MarketCatalogClient().fetch_markets()
+
+
+def test_catalog_fetch_raises_when_required_market_field_missing(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"english_name": "Bitcoin"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="required field missing"):
+        MarketCatalogClient().fetch_markets()
+
+
+def test_catalog_fetch_raises_when_detail_fields_missing_with_is_details_true(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "KRW-BTC"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="required field missing"):
+        MarketCatalogClient().fetch_markets(is_details=True)
+
+
+def test_catalog_fetch_allows_optional_detail_fields_with_is_details_false(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "KRW-BTC"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    items = MarketCatalogClient().fetch_markets(is_details=False)
+
+    assert items[0].market == "KRW-BTC"
+    assert items[0].korean_name is None
+    assert items[0].english_name is None
+    assert items[0].market_warning is None
 
 
 def test_extract_api_error_parses_known_shape() -> None:

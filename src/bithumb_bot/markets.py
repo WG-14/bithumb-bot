@@ -45,16 +45,30 @@ class MarketCatalogClient:
         for row in payload:
             if not isinstance(row, dict):
                 raise MarketCatalogError(f"unexpected market catalog row type: {type(row).__name__}")
-            market = row.get("market")
-            if not isinstance(market, str) or not market.strip():
-                raise MarketCatalogError(f"market key missing in catalog row: {row}")
+            market = _require_catalog_field(row=row, field="market", required=True)
             canonical = normalize_market_id(market)
+
+            korean_name = _require_catalog_field(
+                row=row,
+                field="korean_name",
+                required=is_details,
+            )
+            english_name = _require_catalog_field(
+                row=row,
+                field="english_name",
+                required=is_details,
+            )
+            market_warning = _require_catalog_field(
+                row=row,
+                field="market_warning",
+                required=is_details,
+            )
             items.append(
                 MarketInfo(
                     market=canonical,
-                    korean_name=_as_optional_str(row.get("korean_name"), field="korean_name"),
-                    english_name=_as_optional_str(row.get("english_name"), field="english_name"),
-                    market_warning=_as_optional_str(row.get("market_warning"), field="market_warning"),
+                    korean_name=korean_name,
+                    english_name=english_name,
+                    market_warning=market_warning,
                 )
             )
         return items
@@ -122,6 +136,14 @@ def _as_optional_str(value: object, *, field: str) -> str | None:
         raise MarketCatalogError(f"market catalog field {field!r} must be string or null: type={type(value).__name__}")
     text = value.strip()
     return text or None
+
+
+def _require_catalog_field(*, row: dict[str, object], field: str, required: bool) -> str | None:
+    if field not in row:
+        if required:
+            raise MarketCatalogError(f"market catalog required field missing: {field!r} row={row}")
+        return None
+    return _as_optional_str(row.get(field), field=field)
 
 
 def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
