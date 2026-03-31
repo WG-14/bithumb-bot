@@ -180,3 +180,25 @@ def test_marketdata_orderbook_fetch_fails_when_public_quote_market_mismatch(monk
 
     with pytest.raises(RuntimeError, match="market mismatch"):
         fetch_marketdata_orderbook_top("BTC_KRW")
+
+
+def test_marketdata_orderbook_fetch_fails_when_quote_crossed(monkeypatch, _settings_guard) -> None:
+    monkeypatch.setattr(
+        "bithumb_bot.marketdata.fetch_public_orderbook_top",
+        lambda *_args, **_kwargs: [BestQuote(market="KRW-BTC", bid_price=101.0, ask_price=100.0)],
+    )
+    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+
+    with pytest.raises(RuntimeError, match="invalid quote"):
+        fetch_marketdata_orderbook_top("BTC_KRW")
+
+
+def test_marketdata_orderbook_fetch_fails_when_quote_non_positive(monkeypatch, _settings_guard) -> None:
+    monkeypatch.setattr(
+        "bithumb_bot.marketdata.fetch_public_orderbook_top",
+        lambda *_args, **_kwargs: [BestQuote(market="KRW-BTC", bid_price=0.0, ask_price=100.0)],
+    )
+    monkeypatch.setattr("bithumb_bot.marketdata.to_v1_market", lambda _pair: "KRW-BTC")
+
+    with pytest.raises(RuntimeError, match="invalid quote"):
+        fetch_marketdata_orderbook_top("BTC_KRW")

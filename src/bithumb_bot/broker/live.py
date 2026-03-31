@@ -11,6 +11,7 @@ from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
+from ..public_api_orderbook import BestQuote
 from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
 from .order_rules import get_effective_order_rules
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
@@ -257,27 +258,41 @@ def _format_epoch_ts(epoch_sec: float | None) -> str:
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(whole))}.{millis:03d}Z"
 
 
-def _load_live_reference_quote(*, pair: str) -> dict[str, float | str]:
+def _validated_best_quote(*, quote: BestQuote, market: str, side: str | None = None) -> tuple[float, float]:
+    bid = float(quote.bid_price)
+    ask = float(quote.ask_price)
+    if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0:
+        raise ValueError(
+            "invalid best quote price: "
+            f"market={market} side={side or 'UNKNOWN'} bid={bid} ask={ask}"
+        )
+    if bid > ask:
+        raise ValueError(
+            "crossed best quote: "
+            f"market={market} side={side or 'UNKNOWN'} bid={bid} ask={ask}"
+        )
+    return bid, ask
+
+
+def _load_live_reference_quote(*, pair: str, side: str | None = None) -> dict[str, float | str]:
+    market = str(pair)
     try:
         quote = fetch_orderbook_top(pair)
-        if hasattr(quote, "bid_price") and hasattr(quote, "ask_price"):
-            bid, ask = float(quote.bid_price), float(quote.ask_price)
-        else:
-            bid, ask = float(quote[0]), float(quote[1])
+        bid, ask = _validated_best_quote(quote=quote, market=market, side=side)
     except Exception as exc:
-        raise ValueError(f"reference price unavailable: {type(exc).__name__}: {exc}") from exc
+        raise ValueError(
+            "reference price unavailable: "
+            f"market={market} side={side or 'UNKNOWN'} {type(exc).__name__}: {exc}"
+        ) from exc
 
-    if not math.isfinite(float(bid)) or not math.isfinite(float(ask)) or bid <= 0 or ask <= 0 or bid > ask:
-        raise ValueError(f"invalid orderbook top: bid={bid} ask={ask}")
-
-    observed_epoch_sec = time.time()
+    observed_epoch_sec = quote.observed_at_epoch_sec if quote.observed_at_epoch_sec is not None else time.time()
     reference_price = (float(bid) + float(ask)) / 2.0
     return {
         "bid": float(bid),
         "ask": float(ask),
         "reference_price": float(reference_price),
         "reference_ts_epoch_sec": float(observed_epoch_sec),
-        "reference_source": "orderbook_top_mid",
+        "reference_source": quote.source or "bithumb_public_v1_orderbook",
     }
 
 
@@ -337,8 +352,10 @@ def _validate_live_price_protection(
     if max_slippage_bps <= 0:
         return
 
-    if not math.isfinite(float(bid)) or not math.isfinite(float(ask)) or bid <= 0 or ask <= 0 or bid > ask:
-        raise ValueError(f"invalid orderbook top: bid={bid} ask={ask}")
+    if not math.isfinite(float(bid)) or not math.isfinite(float(ask)) or bid <= 0 or ask <= 0:
+        raise ValueError(f"invalid orderbook top: side={side} bid={bid} ask={ask}")
+    if bid > ask:
+        raise ValueError(f"crossed orderbook top: side={side} bid={bid} ask={ask}")
     if not math.isfinite(float(reference_price)) or float(reference_price) <= 0:
         raise ValueError(f"invalid reference price: {reference_price}")
     if not math.isfinite(float(reference_ts_epoch_sec)):
@@ -363,6 +380,7 @@ def _validate_live_price_protection(
         if float(ref_age_sec) > max_ref_age_sec:
             raise ValueError(
                 "reference price stale: "
+                f"side={side} "
                 f"reference_price={float(reference_price):.8f} "
                 f"reference_ts={_format_epoch_ts(reference_ts_epoch_sec)} "
                 f"age_sec={float(ref_age_sec):.3f} > limit={max_ref_age_sec} "
@@ -375,6 +393,7 @@ def _validate_live_price_protection(
     if side == "BUY" and expected_exec_price - reference_price > allowed_slippage_abs:
         raise ValueError(
             "price protection blocked BUY: "
+            f"side={side} "
             f"expected={expected_exec_price:.8f} reference={reference_price:.8f} "
             f"slippage_bps={_as_bps(expected_exec_price - reference_price, reference_price):.2f} "
             f"limit_bps={max_slippage_bps:.2f}"
@@ -383,6 +402,7 @@ def _validate_live_price_protection(
     if side == "SELL" and reference_price - expected_exec_price > allowed_slippage_abs:
         raise ValueError(
             "price protection blocked SELL: "
+            f"side={side} "
             f"expected={expected_exec_price:.8f} reference={reference_price:.8f} "
             f"slippage_bps={_as_bps(reference_price - expected_exec_price, reference_price):.2f} "
             f"limit_bps={max_slippage_bps:.2f}"
@@ -442,12 +462,12 @@ def validate_pretrade(
         return
 
     if reference_bid is None or reference_ask is None:
-        reference_quote = _load_live_reference_quote(pair=settings.PAIR)
+        reference_quote = _load_live_reference_quote(pair=settings.PAIR, side=side)
     else:
         bid = float(reference_bid)
         ask = float(reference_ask)
         if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or bid > ask:
-            raise ValueError(f"invalid orderbook top: bid={bid} ask={ask}")
+            raise ValueError(f"invalid orderbook top: market={settings.PAIR} side={side} bid={bid} ask={ask}")
         if reference_ts_epoch_sec is None:
             reference_ts_epoch_sec = time.time()
         reference_quote = {
@@ -476,12 +496,21 @@ def validate_pretrade(
     mid = (bid + ask) / 2.0
     spread_bps = _as_bps(ask - bid, mid)
     if spread_limit_bps > 0 and spread_bps > spread_limit_bps:
-        raise ValueError(f"spread guard blocked: spread_bps={spread_bps:.2f} > limit={spread_limit_bps:.2f}")
+        raise ValueError(
+            "spread guard blocked: "
+            f"market={settings.PAIR} side={side} spread_bps={spread_bps:.2f} > limit={spread_limit_bps:.2f}"
+        )
 
     exec_price = ask if side == "BUY" else bid
-    slippage_bps = _as_bps(abs(exec_price - float(market_price)), float(market_price))
+    reference_mid = (bid + ask) / 2.0
+    slippage_bps = _as_bps(abs(exec_price - reference_mid), reference_mid)
     if slip_limit_bps > 0 and slippage_bps > slip_limit_bps:
-        raise ValueError(f"slippage guard blocked: bps={slippage_bps:.2f} > limit={slip_limit_bps:.2f}")
+        raise ValueError(
+            "slippage guard blocked: "
+            f"market={settings.PAIR} side={side} requested_price={float(market_price):.8f} "
+            f"exec_price={exec_price:.8f} reference_mid={reference_mid:.8f} "
+            f"bps={slippage_bps:.2f} > limit={slip_limit_bps:.2f}"
+        )
     return reference_quote
 
 

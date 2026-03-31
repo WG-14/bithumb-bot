@@ -4,6 +4,7 @@ import random
 import time
 from datetime import UTC, datetime
 from dataclasses import replace
+import math
 
 import httpx
 
@@ -103,8 +104,17 @@ def fetch_orderbook_top(pair: str | None = None) -> BestQuote:
             "orderbook top market mismatch "
             f"requested_market={market!r} returned_market={top.market!r}"
         )
+    bid = float(top.bid_price)
+    ask = float(top.ask_price)
+    if not math.isfinite(bid) or not math.isfinite(ask) or bid <= 0 or ask <= 0 or bid > ask:
+        raise RuntimeError(
+            "orderbook top invalid quote "
+            f"market={market!r} bid={bid!r} ask={ask!r}"
+        )
     return replace(
         top,
+        bid_price=bid,
+        ask_price=ask,
         observed_at_epoch_sec=time.time(),
         source="bithumb_public_v1_orderbook",
     )

@@ -26,6 +26,7 @@ from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_resume_eligibility
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
+from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.recovery import reconcile_with_broker
 
 
@@ -2716,7 +2717,10 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _BrokerFactory())
     monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
-    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
 
     try:
         cmd_flatten_position(dry_run=False)
@@ -2761,7 +2765,10 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _FailBroker())
     monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
-    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
 
     with pytest.raises(SystemExit) as exc:
         cmd_flatten_position(dry_run=False)
@@ -2808,7 +2815,10 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
     broker = _LowAssetBroker()
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
     monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
-    monkeypatch.setattr("bithumb_bot.broker.live.fetch_orderbook_top", lambda _pair: (100_000_000.0, 100_010_000.0))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
 
     with pytest.raises(SystemExit) as exc:
         cmd_flatten_position(dry_run=False)

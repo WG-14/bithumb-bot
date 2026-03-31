@@ -13,6 +13,7 @@ from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
+from bithumb_bot.public_api_orderbook import BestQuote
 from tests.fakes import FakeMarketData
 
 
@@ -512,6 +513,34 @@ def test_validate_pretrade_price_protection_blocks_stale_quote_timestamp() -> No
             reference_bid=100.0,
             reference_ask=101.0,
             reference_ts_epoch_sec=time.time() - 30.0,
+            reference_source="test_quote",
+        )
+
+
+def test_validate_pretrade_rejects_crossed_quote() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 1.0)
+    with pytest.raises(ValueError, match="invalid orderbook top: market="):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="BUY",
+            qty=0.001,
+            market_price=100.5,
+            reference_bid=101.0,
+            reference_ask=100.0,
+            reference_source="test_quote",
+        )
+
+
+def test_validate_pretrade_rejects_non_positive_quote() -> None:
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 1.0)
+    with pytest.raises(ValueError, match="invalid orderbook top: market="):
+        validate_pretrade(
+            broker=_FakeBroker(),
+            side="SELL",
+            qty=0.001,
+            market_price=100.5,
+            reference_bid=0.0,
+            reference_ask=101.0,
             reference_source="test_quote",
         )
 
@@ -1191,7 +1220,7 @@ def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_pa
 
     evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert evidence["reference_price"] is None
-    assert evidence["top_of_book"]["error"].startswith("RuntimeError:")
+    assert evidence["top_of_book"]["error"].startswith("market=KRW-BTC side=UNKNOWN RuntimeError:")
 
 
 def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
@@ -1697,7 +1726,11 @@ def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):
 
     from bithumb_bot.broker import live as live_module
 
-    monkeypatch.setattr(live_module, "fetch_orderbook_top", lambda _pair: (100.0, 101.0))
+    monkeypatch.setattr(
+        live_module,
+        "fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0),
+    )
 
     broker = _FakeBroker()
     trade = live_execute_signal(broker, "BUY", 1000, 100.5)
