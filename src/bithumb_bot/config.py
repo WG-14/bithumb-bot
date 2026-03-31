@@ -153,18 +153,23 @@ def default_run_lock_path(mode: str) -> str:
     return str(PATH_MANAGER.config.run_root / normalized_mode / "bithumb-bot.lock")
 
 
-def resolve_run_lock_path(path: str) -> str:
-    p = Path(path)
-    if p.is_absolute():
-        return str(p)
-    return str((PROJECT_ROOT / p).resolve())
+def resolve_run_lock_path(path: str, *, mode: str | None = None) -> str:
+    normalized_mode = str(mode or os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
+    resolved = PathManager._resolve_explicit_root(
+        "RUN_LOCK_PATH",
+        path,
+        normalized_mode,
+        PROJECT_ROOT,
+    )
+    return str(resolved)
 
 
 def resolve_run_lock_path_from_env(mode: str) -> str:
+    normalized_mode = str(mode or "paper").strip().lower() or "paper"
     raw = os.getenv("RUN_LOCK_PATH")
     if raw and raw.strip():
-        return resolve_run_lock_path(raw)
-    return default_run_lock_path(mode)
+        return resolve_run_lock_path(raw, mode=normalized_mode)
+    return default_run_lock_path(normalized_mode)
 
 
 @dataclass(frozen=True)
@@ -438,14 +443,19 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         except ValueError:
             pass
 
-    lock_path = resolve_run_lock_path_from_env(cfg.MODE)
-    if "/paper/" in lock_path.replace("\\", "/"):
-        issues.append("RUN_LOCK_PATH must not point to a paper-scoped path when MODE=live")
+    lock_path: str | None = None
     try:
-        Path(lock_path).resolve().relative_to(PROJECT_ROOT.resolve())
-        issues.append("RUN_LOCK_PATH must be outside repository when MODE=live")
-    except ValueError:
-        pass
+        lock_path = resolve_run_lock_path_from_env(cfg.MODE)
+    except ValueError as exc:
+        issues.append(str(exc))
+    if lock_path:
+        if "/paper/" in lock_path.replace("\\", "/"):
+            issues.append("RUN_LOCK_PATH must not point to a paper-scoped path when MODE=live")
+        try:
+            Path(lock_path).resolve().relative_to(PROJECT_ROOT.resolve())
+            issues.append("RUN_LOCK_PATH must be outside repository when MODE=live")
+        except ValueError:
+            pass
 
     explicitly_set_paper_keys = [
         key for key in PAPER_ONLY_ENV_KEYS if os.getenv(key) not in (None, "")

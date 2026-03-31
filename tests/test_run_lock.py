@@ -28,13 +28,22 @@ def test_default_lock_path_is_mode_scoped(monkeypatch: pytest.MonkeyPatch) -> No
     assert "/live/" in str(run_lock._default_lock_path()).replace("\\", "/")
 
 
-def test_default_lock_path_prefers_run_lock_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_lock_path_prefers_run_lock_path_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    lock_path = (tmp_path / "run" / "live" / "custom-run.lock").resolve()
+    monkeypatch.setenv("RUN_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("MODE", "live")
+
+    assert run_lock._default_lock_path() == lock_path
+
+
+
+
+def test_default_lock_path_rejects_live_relative_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RUN_LOCK_PATH", "run/live/custom-run.lock")
     monkeypatch.setenv("MODE", "live")
 
-    assert run_lock._default_lock_path() == Path(config.resolve_run_lock_path("run/live/custom-run.lock"))
-
-
+    with pytest.raises(ValueError, match="absolute path"):
+        config.resolve_run_lock_path("run/live/custom-run.lock", mode="live")
 def test_second_acquire_fails_while_first_is_held(tmp_path: Path) -> None:
     lock_path = tmp_path / "run.lock"
 

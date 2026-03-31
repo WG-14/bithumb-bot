@@ -145,4 +145,4 @@ def test_live_blocks_paper_lock_path(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "RUN_LOCK_PATH must not point to a paper-scoped path" in str(exc.value)
+    assert "RUN_LOCK_PATH must not contain a paper-scoped path segment" in str(exc.value)

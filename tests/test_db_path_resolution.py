@@ -61,3 +61,9 @@ def test_default_run_lock_path_is_mode_scoped():
     live_lock = config.default_run_lock_path("live")
     assert "/paper/" in paper_lock.replace("\\", "/")
     assert "/live/" in live_lock.replace("\\", "/")
+
+
+def test_live_run_lock_path_rejects_relative_override() -> None:
+    with pytest.raises(ValueError) as exc:
+        config.resolve_run_lock_path("run/live/instance-a.lock", mode="live")
+    assert "RUN_LOCK_PATH must be an absolute path when MODE=live" in str(exc.value)
