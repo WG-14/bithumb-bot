@@ -1047,7 +1047,7 @@ def cmd_broker_diagnose() -> None:
         missing = ",".join(str(item) for item in list(account_diag_raw.get("missing_required_currencies") or [])[:10]) or "-"
         duplicate = ",".join(str(item) for item in list(account_diag_raw.get("duplicate_currencies") or [])[:10]) or "-"
         add_check(
-            "accounts validation diagnostic",
+            "accounts snapshot(/v1/accounts) validation diagnostic",
             "PASS" if account_validation_reason == "ok" else "WARN",
             (
                 f"reason={account_validation_reason} row_count={row_count} "

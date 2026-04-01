@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""Helpers for /v1/accounts REST snapshot parsing.
+
+This module validates Bithumb private REST `/v1/accounts` payloads used by
+`BithumbBroker.get_balance()`. It does not implement MyAsset(WebSocket)
+streaming balances.
+"""
+
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 

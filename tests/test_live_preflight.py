@@ -710,7 +710,7 @@ def test_live_preflight_blocks_startup_on_accounts_schema_mismatch(
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "/v1/accounts preflight validation failed" in msg
+    assert "/v1/accounts REST snapshot preflight validation failed" in msg
     assert "reason=schema mismatch" in msg
     assert "reason_code=ACCOUNTS_SCHEMA_MISMATCH" in msg
 
@@ -733,7 +733,7 @@ def test_live_preflight_blocks_startup_on_required_currency_missing(
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "/v1/accounts preflight validation failed" in msg
+    assert "/v1/accounts REST snapshot preflight validation failed" in msg
     assert "reason=required currency missing" in msg
     assert "reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
 
@@ -755,7 +755,7 @@ def test_accounts_preflight_diagnostics_are_warning_only_in_non_live_modes(
     with caplog.at_level("WARNING"):
         config.validate_market_preflight(settings)
 
-    assert f"accounts preflight warning (mode={mode})" in caplog.text
+    assert f"accounts REST snapshot preflight warning (mode={mode})" in caplog.text
     assert "reason=required currency missing" in caplog.text
     assert "reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING" in caplog.text
 

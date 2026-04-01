@@ -288,7 +288,7 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
 
 
 
-def test_balance_parses_available_and_locked(monkeypatch):
+def test_accounts_rest_balance_parses_available_and_locked(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -309,7 +309,7 @@ def test_balance_parses_available_and_locked(monkeypatch):
     assert bal.asset_locked == 0.02
 
 
-def test_balance_uses_split_accounts_layers(monkeypatch):
+def test_accounts_rest_balance_uses_split_accounts_layers(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     calls: list[str] = []
@@ -359,7 +359,7 @@ def test_balance_uses_split_accounts_layers(monkeypatch):
     assert bal.asset_available == 0.1
 
 
-def test_balance_rejects_non_array_payload(monkeypatch):
+def test_accounts_rest_balance_rejects_non_array_payload(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: {"currency": "KRW"})
@@ -368,7 +368,7 @@ def test_balance_rejects_non_array_payload(monkeypatch):
         broker.get_balance()
 
 
-def test_balance_rejects_non_object_row(monkeypatch):
+def test_accounts_rest_balance_rejects_non_object_row(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -382,7 +382,7 @@ def test_balance_rejects_non_object_row(monkeypatch):
 
 
 @pytest.mark.parametrize("currency", [None, "", "   "])
-def test_balance_rejects_missing_or_empty_currency(monkeypatch, currency):
+def test_accounts_rest_balance_rejects_missing_or_empty_currency(monkeypatch, currency):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -399,7 +399,7 @@ def test_balance_rejects_missing_or_empty_currency(monkeypatch, currency):
 
 
 @pytest.mark.parametrize("field", ["balance", "locked"])
-def test_balance_rejects_missing_required_numeric_fields(monkeypatch, field):
+def test_accounts_rest_balance_rejects_missing_required_numeric_fields(monkeypatch, field):
     _configure_live()
     broker = BithumbBroker()
     krw_row = {"currency": "KRW", "balance": "1000", "locked": "25"}
@@ -415,7 +415,7 @@ def test_balance_rejects_missing_required_numeric_fields(monkeypatch, field):
 
 
 @pytest.mark.parametrize("bad_value", ["abc", object()])
-def test_balance_rejects_non_numeric_values(monkeypatch, bad_value):
+def test_accounts_rest_balance_rejects_non_numeric_values(monkeypatch, bad_value):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -432,7 +432,7 @@ def test_balance_rejects_non_numeric_values(monkeypatch, bad_value):
 
 
 @pytest.mark.parametrize("bad_value", ["-1", "-0.0001", "NaN", "Infinity", "-Infinity"])
-def test_balance_rejects_negative_or_non_finite_values(monkeypatch, bad_value):
+def test_accounts_rest_balance_rejects_negative_or_non_finite_values(monkeypatch, bad_value):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -448,7 +448,7 @@ def test_balance_rejects_negative_or_non_finite_values(monkeypatch, bad_value):
         broker.get_balance()
 
 
-def test_balance_rejects_duplicate_currency_rows(monkeypatch):
+def test_accounts_rest_balance_rejects_duplicate_currency_rows(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -465,7 +465,7 @@ def test_balance_rejects_duplicate_currency_rows(monkeypatch):
         broker.get_balance()
 
 
-def test_balance_rejects_missing_pair_currency_rows(monkeypatch):
+def test_accounts_rest_balance_rejects_missing_pair_currency_rows(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -478,7 +478,7 @@ def test_balance_rejects_missing_pair_currency_rows(monkeypatch):
         broker.get_balance()
 
 
-def test_balance_rejects_missing_quote_currency_row(monkeypatch):
+def test_accounts_rest_balance_rejects_missing_quote_currency_row(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(

@@ -119,11 +119,11 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         detail = str(exc)
         if code in {"AUTH_SIGN", "PERMISSION"}:
             raise AccountsPreflightValidationError(
-                "/v1/accounts preflight 인증 실패: "
+                "/v1/accounts REST snapshot preflight 인증 실패: "
                 f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} detail={detail}"
             ) from exc
         raise AccountsPreflightValidationError(
-            "/v1/accounts preflight transport 실패: "
+            "/v1/accounts REST snapshot preflight transport 실패: "
             f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} detail={detail}"
         ) from exc
 
@@ -158,7 +158,7 @@ def validate_accounts_preflight(cfg: Settings) -> None:
                 else "ACCOUNTS_SCHEMA_MISMATCH"
             )
         raise AccountsPreflightValidationError(
-            "/v1/accounts preflight validation failed: "
+            "/v1/accounts REST snapshot preflight validation failed: "
             f"reason={reason} reason_code={reason_code} row_count={row_count} "
             f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} detail={exc}"
         ) from exc
@@ -504,7 +504,7 @@ def validate_market_preflight(cfg: Settings) -> None:
         if normalized_mode == "live":
             raise MarketPreflightValidationError(str(exc)) from exc
         LOG.warning(
-            "accounts preflight warning (mode=%s): %s",
+            "accounts REST snapshot preflight warning (mode=%s): %s",
             normalized_mode,
             exc,
         )

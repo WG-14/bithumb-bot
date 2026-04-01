@@ -723,6 +723,7 @@ class BithumbBroker:
         return parsed
 
     def fetch_accounts_raw(self) -> object:
+        """Fetch a balance snapshot via private REST `/v1/accounts`."""
         response = self._get_private("/v1/accounts", {}, retry_safe=True)
         self._journal_read_summary(path="/v1/accounts", data=response)
         return response
@@ -1556,6 +1557,7 @@ class BithumbBroker:
         return fills
 
     def get_balance(self) -> BrokerBalance:
+        """Return balances from `/v1/accounts` REST snapshot (not WebSocket stream)."""
         if self.dry_run:
             return BrokerBalance(cash_available=settings.START_CASH_KRW, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
         order_currency, payment_currency = self._pair()
