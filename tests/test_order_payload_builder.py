@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.broker.base import BrokerRejectError
-from bithumb_bot.broker.order_payloads import build_order_payload
+from bithumb_bot.broker.order_payloads import build_order_payload, validate_client_order_id
 
 
 def test_build_limit_order_payload_uses_doc_fields() -> None:
@@ -70,5 +70,26 @@ def test_build_payload_rejects_unsupported_order_type() -> None:
 
 
 def test_build_payload_rejects_empty_client_order_id() -> None:
-    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+    with pytest.raises(BrokerRejectError, match="must not be empty"):
         build_order_payload(market="KRW-BTC", side="buy", ord_type="limit", volume="0.1", price="10000", client_order_id="  ")
+
+
+def test_validate_client_order_id_accepts_documented_characters() -> None:
+    assert validate_client_order_id("abcXYZ_123-xyz") == "abcXYZ_123-xyz"
+
+
+def test_validate_client_order_id_rejects_too_long_value() -> None:
+    with pytest.raises(BrokerRejectError, match="at most 36"):
+        validate_client_order_id("a" * 37)
+
+
+def test_validate_client_order_id_rejects_invalid_characters() -> None:
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+        validate_client_order_id("cid.bad")
+
+
+def test_validate_client_order_id_rejects_empty_or_whitespace() -> None:
+    with pytest.raises(BrokerRejectError, match="must not be empty"):
+        validate_client_order_id("")
+    with pytest.raises(BrokerRejectError, match="must not be empty"):
+        validate_client_order_id("   ")

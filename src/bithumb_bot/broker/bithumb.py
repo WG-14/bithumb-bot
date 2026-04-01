@@ -1568,6 +1568,7 @@ class BithumbBroker:
                     state=state,
                     page=1,
                     order_by="desc",
+                    limit=min(lim, 100),
                 ),
                 retry_safe=True,
             )

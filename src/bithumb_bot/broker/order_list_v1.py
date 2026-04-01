@@ -11,6 +11,7 @@ from .order_payloads import validate_client_order_id
 _ORDER_BY_VALUES = {"asc", "desc"}
 _MAX_IDENTIFIER_COUNT = 100
 _MAX_PAGE = 10_000
+_MAX_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class OrderListQuery:
     state: str | None = None
     page: int = 1
     order_by: str = "desc"
+    limit: int | None = None
 
     def to_params(self) -> dict[str, object]:
         params: dict[str, object] = {
@@ -32,6 +34,8 @@ class OrderListQuery:
             params["client_order_ids"] = list(self.client_order_ids)
         if self.state is not None:
             params["state"] = self.state
+        if self.limit is not None:
+            params["limit"] = self.limit
         return params
 
 
@@ -164,6 +168,7 @@ def build_order_list_params(
     state: str | None = None,
     page: int = 1,
     order_by: str = "desc",
+    limit: int | None = None,
 ) -> dict[str, object]:
     uuid_values = _validate_identifier_list(list(uuids or []), field_name="uuids")
     client_values = _validate_identifier_list(
@@ -185,11 +190,17 @@ def build_order_list_params(
     if normalized_order_by not in _ORDER_BY_VALUES:
         raise ValueError(f"order_by must be one of {sorted(_ORDER_BY_VALUES)}")
 
+    normalized_limit: int | None = None
+    if limit is not None:
+        normalized_limit = int(limit)
+        if normalized_limit < 1 or normalized_limit > _MAX_LIMIT:
+            raise ValueError(f"limit must be between 1 and {_MAX_LIMIT}")
+
     return OrderListQuery(
         uuids=uuid_values,
         client_order_ids=client_values,
         state=normalized_state,
         page=normalized_page,
         order_by=normalized_order_by,
+        limit=normalized_limit,
     ).to_params()
-

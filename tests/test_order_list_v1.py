@@ -17,12 +17,19 @@ def test_build_order_list_params_accepts_uuids_only() -> None:
 
 
 def test_build_order_list_params_accepts_client_order_ids_only() -> None:
-    params = build_order_list_params(client_order_ids=["cid-1", "cid-2"], state="done", page=2, order_by="asc")
+    params = build_order_list_params(
+        client_order_ids=["cid-1", "cid-2"],
+        state="done",
+        page=2,
+        order_by="asc",
+        limit=10,
+    )
     assert params == {
         "client_order_ids": ["cid-1", "cid-2"],
         "state": "done",
         "page": 2,
         "order_by": "asc",
+        "limit": 10,
     }
 
 
@@ -51,6 +58,11 @@ def test_build_order_list_params_rejects_invalid_order_by() -> None:
         build_order_list_params(uuids=["uuid-1"], order_by="latest")
 
 
+def test_build_order_list_params_rejects_out_of_range_limit() -> None:
+    with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+        build_order_list_params(uuids=["uuid-1"], limit=0)
+
+
 def test_build_order_list_params_query_string_remains_query_hash_compatible() -> None:
     params = build_order_list_params(uuids=["uuid-1", "uuid-2"], state="wait", page=3, order_by="desc")
     query = BithumbPrivateAPI._query_string(params)
@@ -61,9 +73,9 @@ def test_build_order_list_params_query_string_remains_query_hash_compatible() ->
 
 
 def test_build_order_list_params_client_order_ids_array_is_consistent_for_auth_hash() -> None:
-    params = build_order_list_params(client_order_ids=["cid-1", "cid-2"], state="done")
+    params = build_order_list_params(client_order_ids=["cid-1", "cid-2"], state="done", limit=5)
     query = BithumbPrivateAPI._query_string(params)
-    assert query == "page=1&order_by=desc&client_order_ids[]=cid-1&client_order_ids[]=cid-2&state=done"
+    assert query == "page=1&order_by=desc&client_order_ids[]=cid-1&client_order_ids[]=cid-2&state=done&limit=5"
     claims = BithumbPrivateAPI._query_hash_claims(params)
     assert claims["query_hash"]
 

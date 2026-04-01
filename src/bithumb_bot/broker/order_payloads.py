@@ -23,7 +23,7 @@ def normalize_order_side(side: str) -> OrderSide:
 def validate_client_order_id(client_order_id: str) -> str:
     if not isinstance(client_order_id, str):
         raise BrokerRejectError("client_order_id must be a string")
-    if client_order_id == "":
+    if client_order_id == "" or client_order_id.strip() == "":
         raise BrokerRejectError("client_order_id must not be empty")
     if len(client_order_id) > CLIENT_ORDER_ID_MAX_LENGTH:
         raise BrokerRejectError(

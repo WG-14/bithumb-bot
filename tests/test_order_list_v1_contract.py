@@ -41,15 +41,18 @@ def test_v1_orders_builder_accepts_documented_identifier_query_only() -> None:
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "error_type"),
     [
-        {"market": "KRW-BTC", "state": "wait", "limit": 100},
-        {"state": "wait", "limit": 100},
-        {"market": "KRW-BTC", "state": "done"},
+        ({"market": "KRW-BTC", "state": "wait", "limit": 100}, TypeError),
+        ({"state": "wait", "limit": 100}, ValueError),
+        ({"market": "KRW-BTC", "state": "done"}, TypeError),
     ],
 )
-def test_v1_orders_builder_rejects_legacy_market_state_limit_scan_shape(kwargs: dict[str, object]) -> None:
-    with pytest.raises(TypeError):
+def test_v1_orders_builder_rejects_legacy_market_state_limit_scan_shape(
+    kwargs: dict[str, object],
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type):
         build_order_list_params(**kwargs)
 
 
