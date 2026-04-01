@@ -41,6 +41,11 @@ class _AvailableOnlyBalanceBroker:
         return BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.5, asset_locked=0.0)
 
 
+class _SplitBalanceBroker(_AvailableOnlyBalanceBroker):
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(cash_available=900.0, cash_locked=100.0, asset_available=0.4, asset_locked=0.1)
+
+
 def test_partial_fill_sequence_preserves_locked_aware_accounting(tmp_path):
     db_path = tmp_path / "partial_fill.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
@@ -239,3 +244,40 @@ def test_reconcile_with_open_orders_preserves_local_locked_when_balance_is_avail
     assert cash_locked == pytest.approx(250.0)
     assert asset_available == pytest.approx(0.5)
     assert asset_locked == pytest.approx(0.2)
+
+
+def test_reconcile_with_open_orders_uses_broker_locked_split_when_provided(tmp_path):
+    db_path = tmp_path / "reconcile_locked_from_broker.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+
+    conn = ensure_db(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+            VALUES ('live_1_buy','ex1','NEW', 'BUY', 100.0, 1.0, 0.0, 1, 1, NULL)
+            """
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1000.0,
+            cash_locked=250.0,
+            asset_available=0.5,
+            asset_locked=0.2,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SplitBalanceBroker())
+
+    conn = ensure_db(str(db_path))
+    try:
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+    finally:
+        conn.close()
+
+    assert cash_available == pytest.approx(900.0)
+    assert cash_locked == pytest.approx(100.0)
+    assert asset_available == pytest.approx(0.4)
+    assert asset_locked == pytest.approx(0.1)

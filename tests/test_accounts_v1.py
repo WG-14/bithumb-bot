@@ -8,7 +8,7 @@ from bithumb_bot.broker.accounts_v1 import PairBalances, parse_accounts_response
 from bithumb_bot.broker.base import BrokerRejectError
 
 
-def test_parse_accounts_response_is_strict_and_pure():
+def test_v1_accounts_parse_response_is_strict_and_pure():
     parsed = parse_accounts_response(
         [
             {"currency": "krw", "balance": "1000", "locked": "10"},
@@ -22,30 +22,30 @@ def test_parse_accounts_response_is_strict_and_pure():
     assert parsed.balances["BTC"] == (Decimal("0.2"), Decimal("0.05"))
 
 
-def test_parse_accounts_response_schema_error_surfaces_broker_reject():
+def test_v1_accounts_parse_response_schema_error_surfaces_broker_reject():
     with pytest.raises(BrokerRejectError, match="schema mismatch: expected array payload"):
         parse_accounts_response({"currency": "KRW"})
 
 
-def test_parse_accounts_response_rejects_non_object_row() -> None:
+def test_v1_accounts_parse_response_rejects_non_object_row() -> None:
     with pytest.raises(BrokerRejectError, match=r"/v1/accounts\[0\] schema mismatch: expected object row"):
         parse_accounts_response(["bad-row"])
 
 
-def test_parse_accounts_response_rejects_missing_currency() -> None:
+def test_v1_accounts_parse_response_rejects_missing_currency() -> None:
     with pytest.raises(BrokerRejectError, match="missing required text field 'currency'"):
         parse_accounts_response([{"balance": "1", "locked": "0"}])
 
 
 @pytest.mark.parametrize("field,bad", [("balance", "abc"), ("locked", "-1")])
-def test_parse_accounts_response_rejects_invalid_required_numeric_fields(field: str, bad: str) -> None:
+def test_v1_accounts_parse_response_rejects_invalid_required_numeric_fields(field: str, bad: str) -> None:
     row = {"currency": "KRW", "balance": "1", "locked": "0"}
     row[field] = bad
     with pytest.raises(BrokerRejectError, match=rf"(invalid|negative) numeric field '{field}'"):
         parse_accounts_response([row])
 
 
-def test_parse_accounts_response_rejects_duplicate_currency_row() -> None:
+def test_v1_accounts_parse_response_rejects_duplicate_currency_row() -> None:
     with pytest.raises(BrokerRejectError, match="duplicate currency row 'KRW'"):
         parse_accounts_response(
             [
@@ -55,7 +55,7 @@ def test_parse_accounts_response_rejects_duplicate_currency_row() -> None:
         )
 
 
-def test_parse_accounts_response_accepts_documented_optional_fields() -> None:
+def test_v1_accounts_parse_response_accepts_documented_optional_fields() -> None:
     parsed = parse_accounts_response(
         [
             {
@@ -74,7 +74,7 @@ def test_parse_accounts_response_accepts_documented_optional_fields() -> None:
     assert row.unit_currency == "KRW"
 
 
-def test_parse_accounts_response_optional_fields_can_be_absent() -> None:
+def test_v1_accounts_parse_response_optional_fields_can_be_absent() -> None:
     parsed = parse_accounts_response([{"currency": "BTC", "balance": "0.2", "locked": "0.05"}])
     row = parsed.rows[0]
     assert row.avg_buy_price is None
@@ -82,14 +82,14 @@ def test_parse_accounts_response_optional_fields_can_be_absent() -> None:
     assert row.unit_currency is None
 
 
-def test_select_pair_balances_requires_pair_currencies():
+def test_v1_accounts_select_pair_balances_requires_pair_currencies():
     parsed = parse_accounts_response([{"currency": "BTC", "balance": "0.2", "locked": "0.05"}])
 
     with pytest.raises(BrokerRejectError, match="missing quote currency row 'KRW'"):
         select_pair_balances(parsed, order_currency="BTC", payment_currency="KRW")
 
 
-def test_to_broker_balance_maps_values():
+def test_v1_accounts_to_broker_balance_maps_values():
     mapped = to_broker_balance(
         PairBalances(
             cash_balance=Decimal("1000"),
@@ -105,7 +105,7 @@ def test_to_broker_balance_maps_values():
     assert mapped.asset_locked == 0.05
 
 
-def test_select_pair_balances_uses_decimal_totals_without_float_error():
+def test_v1_accounts_select_pair_balances_uses_decimal_totals_without_float_error():
     parsed = parse_accounts_response([
         {"currency": "KRW", "balance": "0.1", "locked": "0.2"},
         {"currency": "BTC", "balance": "0.00000001", "locked": "0.00000002"},
@@ -115,3 +115,57 @@ def test_select_pair_balances_uses_decimal_totals_without_float_error():
 
     assert pair.cash_total == Decimal("0.3")
     assert pair.asset_total == Decimal("0.00000003")
+
+
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        (True, True),
+        (False, False),
+        ("1", True),
+        ("0", False),
+        ("TRUE", True),
+        ("false", False),
+    ],
+)
+def test_v1_accounts_parse_response_accepts_documented_optional_bool_tokens(token: object, expected: bool) -> None:
+    parsed = parse_accounts_response(
+        [
+            {
+                "currency": "BTC",
+                "balance": "0.2",
+                "locked": "0.05",
+                "avg_buy_price_modified": token,
+            }
+        ]
+    )
+    assert parsed.rows[0].avg_buy_price_modified is expected
+
+
+def test_v1_accounts_parse_response_rejects_invalid_optional_bool_field() -> None:
+    with pytest.raises(BrokerRejectError, match=r"invalid optional bool field 'avg_buy_price_modified'"):
+        parse_accounts_response(
+            [
+                {
+                    "currency": "BTC",
+                    "balance": "0.2",
+                    "locked": "0.05",
+                    "avg_buy_price_modified": "maybe",
+                }
+            ]
+        )
+
+
+@pytest.mark.parametrize("bad_value", ["-1", "NaN", "Infinity"])
+def test_v1_accounts_parse_response_rejects_invalid_optional_numeric_field(bad_value: str) -> None:
+    with pytest.raises(BrokerRejectError, match=r"(negative|non-finite) optional numeric field 'avg_buy_price'"):
+        parse_accounts_response(
+            [
+                {
+                    "currency": "BTC",
+                    "balance": "0.2",
+                    "locked": "0.05",
+                    "avg_buy_price": bad_value,
+                }
+            ]
+        )

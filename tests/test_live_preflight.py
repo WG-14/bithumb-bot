@@ -951,6 +951,23 @@ def test_accounts_preflight_auth_failure_is_classified(monkeypatch: pytest.Monke
     assert "ACCOUNTS_AUTH_FAILED" in msg
 
 
+def test_accounts_preflight_permission_failure_is_classified_as_auth_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("status=403 out_of_scope permission denied")),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "인증 실패" in msg
+    assert "ACCOUNTS_AUTH_FAILED" in msg
+    assert "class=PERMISSION" in msg
+
+
 def test_accounts_preflight_transport_failure_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
     monkeypatch.setattr(
@@ -965,3 +982,20 @@ def test_accounts_preflight_transport_failure_is_classified(monkeypatch: pytest.
     msg = str(exc.value)
     assert "transport 실패" in msg
     assert "ACCOUNTS_TRANSPORT_FAILED" in msg
+
+
+def test_accounts_preflight_unclassified_private_error_is_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("unexpected broker fault")),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "transport 실패" in msg
+    assert "ACCOUNTS_TRANSPORT_FAILED" in msg
+    assert "class=UNRECOVERABLE" in msg

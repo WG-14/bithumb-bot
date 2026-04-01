@@ -495,6 +495,52 @@ def test_accounts_rest_balance_rejects_missing_quote_currency_row(monkeypatch):
         broker.get_balance()
 
 
+def test_accounts_rest_balance_records_v1_accounts_diag_on_success(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    broker.get_balance()
+    diag = broker.get_accounts_validation_diagnostics()
+
+    assert diag["reason"] == "ok"
+    assert diag["row_count"] == 2
+    assert diag["currencies"] == ["BTC", "KRW"]
+    assert diag["missing_required_currencies"] == []
+    assert diag["duplicate_currencies"] == []
+    assert diag["last_success_reason"] == "ok"
+
+
+def test_accounts_rest_balance_records_v1_accounts_diag_on_required_currency_missing(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing base currency row 'BTC'"):
+        broker.get_balance()
+
+    diag = broker.get_accounts_validation_diagnostics()
+    assert diag["reason"] == "required currency missing"
+    assert diag["row_count"] == 1
+    assert diag["currencies"] == ["KRW"]
+    assert diag["missing_required_currencies"] == ["BTC"]
+    assert diag["duplicate_currencies"] == []
+    assert diag["last_failure_reason"] == "required currency missing"
+
+
 def test_order_chance_uses_private_v1_endpoint(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
