@@ -34,6 +34,7 @@ from .accounts_v1 import (
     select_pair_balances,
     to_broker_balance,
 )
+from .myasset_ws import MyAssetWsBalanceSource
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -564,9 +565,13 @@ class BithumbBroker:
         source = self._balance_source
         if isinstance(source, AccountsV1BalanceSource):
             return AccountsV1BalanceSource.SOURCE_ID
+        if isinstance(source, MyAssetWsBalanceSource):
+            return MyAssetWsBalanceSource.SOURCE_ID
         if isinstance(source, DryRunBalanceSource):
             return "dry_run_static"
-        return "dry_run_static" if self.dry_run else AccountsV1BalanceSource.SOURCE_ID
+        if self.dry_run:
+            return "dry_run_static"
+        return MyAssetWsBalanceSource.SOURCE_ID if bool(settings.BITHUMB_WS_MYASSET_ENABLED) else AccountsV1BalanceSource.SOURCE_ID
 
     def _get_balance_source(self) -> BalanceSource:
         source = self._balance_source
@@ -579,6 +584,16 @@ class BithumbBroker:
         if self.dry_run:
             return DryRunBalanceSource()
         order_currency, payment_currency = self._pair()
+        if bool(settings.BITHUMB_WS_MYASSET_ENABLED):
+            return MyAssetWsBalanceSource(
+                connection_factory=self._build_myasset_ws_connection,
+                order_currency=order_currency,
+                payment_currency=payment_currency,
+                now_ms=lambda: int(time.time() * 1000),
+                stale_after_ms=int(settings.BITHUMB_WS_MYASSET_STALE_AFTER_MS),
+                recv_timeout_sec=float(settings.BITHUMB_WS_MYASSET_RECV_TIMEOUT_SEC),
+                subscribe_ticket=str(settings.BITHUMB_WS_MYASSET_SUBSCRIBE_TICKET or "").strip() or None,
+            )
         return AccountsV1BalanceSource(
             fetch_accounts_raw=lambda: self.fetch_accounts_raw(),
             order_currency=order_currency,
@@ -587,6 +602,12 @@ class BithumbBroker:
             parse_accounts_response=lambda payload: parse_accounts_response(payload),
             select_pair_balances=lambda accounts, **kwargs: select_pair_balances(accounts, **kwargs),
             to_broker_balance=lambda pair: to_broker_balance(pair),
+        )
+
+    def _build_myasset_ws_connection(self):
+        raise BrokerTemporaryError(
+            "myAsset websocket private stream adapter is not configured; "
+            "provide broker._build_myasset_ws_connection override/injection for runtime"
         )
 
     def _request_private(

@@ -2754,3 +2754,26 @@ def test_balance_source_injection_uses_dry_run_source_when_dryrun_enabled(monkey
     assert bal.cash_available == 12345.0
     assert broker.get_balance_source_id() == "dry_run_static"
     assert diag["reason"] == "not_applicable"
+
+
+def test_balance_source_feature_flag_off_keeps_accounts_v1_snapshot_path(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "BITHUMB_WS_MYASSET_ENABLED", False)
+    broker = BithumbBroker()
+
+    called: list[str] = []
+
+    def _fake_get_private(endpoint, params, retry_safe=False):
+        called.append(str(endpoint))
+        return [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ]
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get_private)
+    snapshot = broker.get_balance_snapshot()
+
+    assert snapshot.source_id == "accounts_v1_rest_snapshot"
+    assert called == ["/v1/accounts"]
