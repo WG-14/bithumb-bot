@@ -412,7 +412,7 @@ class BithumbBroker:
             base_url=self.base_url,
             dry_run=self.dry_run,
         )
-        self._balance_source: BalanceSource = self._build_balance_source()
+        self._balance_source: BalanceSource | None = None
 
     def _mask_sensitive(self, data: dict[str, object]) -> dict[str, object]:
         redacted: dict[str, object] = {}
@@ -546,7 +546,7 @@ class BithumbBroker:
 
     def get_accounts_validation_diagnostics(self) -> dict[str, object]:
         source = self._balance_source
-        if hasattr(source, "get_validation_diagnostics"):
+        if source is not None and hasattr(source, "get_validation_diagnostics"):
             return dict(source.get_validation_diagnostics())
         return {
             "reason": "not_applicable",
@@ -566,7 +566,14 @@ class BithumbBroker:
             return AccountsV1BalanceSource.SOURCE_ID
         if isinstance(source, DryRunBalanceSource):
             return "dry_run_static"
-        return type(source).__name__
+        return "dry_run_static" if self.dry_run else AccountsV1BalanceSource.SOURCE_ID
+
+    def _get_balance_source(self) -> BalanceSource:
+        source = self._balance_source
+        if source is None:
+            source = self._build_balance_source()
+            self._balance_source = source
+        return source
 
     def _build_balance_source(self) -> BalanceSource:
         if self.dry_run:
@@ -1581,7 +1588,7 @@ class BithumbBroker:
 
     def get_balance(self) -> BrokerBalance:
         """Return broker balance via configured snapshot source abstraction."""
-        return self._balance_source.fetch_snapshot().balance
+        return self._get_balance_source().fetch_snapshot().balance
 
     def get_recent_orders(
         self,
