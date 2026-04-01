@@ -45,6 +45,7 @@ LEGACY_V1_ORDER_SCAN_ENV_KEYS = (
 )
 LOG = logging.getLogger(__name__)
 _MARKET_TOKEN_RE = re.compile(r"^[A-Z0-9]+$")
+_CANONICAL_MARKET_RE = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
 
 
 def parse_bool_env(key: str, default: str = "false") -> bool:
@@ -184,10 +185,24 @@ def resolve_strategy_name_from_env() -> str:
     return normalized or DEFAULT_RUNTIME_STRATEGY
 
 
-def _normalize_config_market_input(raw_market: str, *, env_key: str) -> str:
-    token = str(raw_market or "").strip().upper().replace(" ", "")
+def _normalize_config_market_input(raw_market: str, *, env_key: str, strict_canonical: bool) -> str:
+    token = str(raw_market or "").strip().upper()
     if not token:
         raise ValueError(f"{env_key} must not be empty")
+
+    if " " in token:
+        raise ValueError(
+            f"invalid {env_key} format: {raw_market!r}; market code must not contain spaces"
+        )
+
+    if strict_canonical:
+        if not _CANONICAL_MARKET_RE.fullmatch(token):
+            raise ValueError(
+                f"invalid {env_key} format for MODE=live: {raw_market!r}; "
+                "must be canonical QUOTE-BASE token like 'KRW-BTC' "
+                "(legacy 'BTC_KRW' and bare 'BTC' are not allowed in live mode)"
+            )
+        return token
 
     if "-" in token:
         left, right = token.split("-", 1)
@@ -213,6 +228,8 @@ def _normalize_config_market_input(raw_market: str, *, env_key: str) -> str:
 
 
 def resolve_market_from_env() -> str:
+    normalized_mode = str(os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
+    strict_canonical = normalized_mode == "live"
     raw_market = os.getenv("MARKET")
     raw_pair = os.getenv("PAIR")
 
@@ -220,14 +237,26 @@ def resolve_market_from_env() -> str:
     has_pair = raw_pair is not None and raw_pair.strip() != ""
 
     if has_market:
-        canonical_market = _normalize_config_market_input(raw_market, env_key="MARKET")
+        canonical_market = _normalize_config_market_input(
+            raw_market,
+            env_key="MARKET",
+            strict_canonical=True,
+        )
     elif has_pair:
-        canonical_market = _normalize_config_market_input(raw_pair, env_key="PAIR")
+        canonical_market = _normalize_config_market_input(
+            raw_pair,
+            env_key="PAIR",
+            strict_canonical=strict_canonical,
+        )
     else:
         canonical_market = DEFAULT_CANONICAL_MARKET
 
     if has_market and has_pair:
-        canonical_pair = _normalize_config_market_input(raw_pair, env_key="PAIR")
+        canonical_pair = _normalize_config_market_input(
+            raw_pair,
+            env_key="PAIR",
+            strict_canonical=strict_canonical,
+        )
         if canonical_pair != canonical_market:
             raise ValueError(
                 "MARKET and PAIR resolve to different canonical markets: "
@@ -452,7 +481,18 @@ def validate_market_preflight(cfg: Settings) -> None:
     )
 
     configured_market = str(cfg.PAIR or "")
-    normalized_market_input = normalize_market_id(configured_market)
+    strict_canonical = normalized_mode == "live"
+    try:
+        normalized_market_input = _normalize_config_market_input(
+            configured_market,
+            env_key="PAIR",
+            strict_canonical=strict_canonical,
+        )
+    except ValueError as exc:
+        raise MarketPreflightValidationError(
+            "market preflight rejected invalid configured market format: "
+            f"pair={configured_market!r} mode={normalized_mode} detail={exc}"
+        ) from exc
     warning_block_states = _warning_state_set(cfg.MARKET_PREFLIGHT_WARNING_STATES)
     if cfg.MARKET_REGISTRY_CACHE_TTL_SEC < 0:
         raise MarketPreflightValidationError(

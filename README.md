@@ -90,7 +90,7 @@ uv run bithumb-bot run --short 7 --long 30
 
 - `MODE` (기본: `paper`)
 - `MARKET` (기본: `KRW-BTC`, canonical)
-- `PAIR` (legacy alias, 예: `BTC_KRW` 또는 `BTC`; `MARKET` 미설정 시에만 사용)
+- `PAIR` (legacy alias. `MARKET` 미설정 시에만 사용; `MODE=live`에서는 `KRW-BTC` canonical만 허용되고 `BTC_KRW`/`BTC`는 거부)
 - `INTERVAL` (기본: `1m`)
 - `EVERY` (기본: `60`)
 - `STRATEGY_NAME` (기본: `sma_with_filter`)

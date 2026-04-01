@@ -592,7 +592,7 @@ def test_market_preflight_rejects_unsupported_market(monkeypatch: pytest.MonkeyP
     assert "unsupported pair" in str(exc.value)
 
 
-def test_market_preflight_accepts_supported_legacy_alias_when_catalog_has_canonical(
+def test_market_preflight_rejects_legacy_alias_in_live_mode_even_when_catalog_supports_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
@@ -603,7 +603,11 @@ def test_market_preflight_accepts_supported_legacy_alias_when_catalog_has_canoni
         lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
     )
 
-    config.validate_live_mode_preflight(settings)
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "invalid configured market format" in str(exc.value)
+    assert "MODE=live" in str(exc.value)
 
 
 def test_market_preflight_blocks_warning_state_in_live_real_mode(monkeypatch: pytest.MonkeyPatch) -> None:
