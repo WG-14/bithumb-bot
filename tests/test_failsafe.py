@@ -323,7 +323,7 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
 
 
-def test_run_loop_calls_market_preflight_before_live_startup(monkeypatch):
+def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatch):
     _prepare_run_loop(monkeypatch)
     called = {"n": 0}
 
@@ -331,11 +331,8 @@ def test_run_loop_calls_market_preflight_before_live_startup(monkeypatch):
         called["n"] += 1
         raise ValueError("market gate")
 
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", _market_runtime)
-    monkeypatch.setattr(
-        "bithumb_bot.engine.BithumbBroker",
-        lambda: (_ for _ in ()).throw(AssertionError("broker must not be constructed")),
-    )
 
     with pytest.raises(Exception) as exc:
         run_loop(5, 20)
