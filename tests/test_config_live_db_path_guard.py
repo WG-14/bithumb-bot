@@ -115,6 +115,23 @@ def test_config_market_accepts_legacy_pair_alias() -> None:
     assert proc.stdout.strip() == "KRW-BTC"
 
 
+def test_config_rejects_dryrun_mode_at_startup() -> None:
+    env = dict(os.environ)
+    env["MODE"] = "dryrun"
+    env["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "invalid MODE='dryrun'" in (proc.stderr + proc.stdout)
+
+
 def test_config_live_market_rejects_bare_symbol_pair_alias(tmp_path: Path) -> None:
     env = dict(os.environ)
     env["MODE"] = "live"

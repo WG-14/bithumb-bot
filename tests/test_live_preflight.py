@@ -711,6 +711,24 @@ def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(
     assert "market preflight detected warning state" in caplog.text
 
 
+def test_market_preflight_warns_and_allows_warning_state_in_dryrun_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "MODE", "dryrun")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="CAUTION")]),
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_market_preflight(settings)
+
+    assert "market preflight detected warning state" in caplog.text
+
+
 def test_live_preflight_blocks_startup_on_accounts_schema_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

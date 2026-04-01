@@ -55,6 +55,10 @@ def test_normalize_ticker_markets_rejects_noncanonical_format() -> None:
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         normalize_ticker_markets(["BTC_KRW"])
 
+def test_normalize_ticker_markets_rejects_bare_symbol() -> None:
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        normalize_ticker_markets(["BTC"])
+
 
 def test_parse_ticker_payload_fails_when_required_field_missing() -> None:
     payload = _sample_ticker()

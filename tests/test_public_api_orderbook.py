@@ -206,6 +206,11 @@ def test_fetch_orderbook_snapshots_rejects_noncanonical_requested_market(monkeyp
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         fetch_orderbook_snapshots(client=object(), markets=["BTC_KRW"])
 
+def test_fetch_orderbook_snapshots_rejects_bare_symbol_requested_market(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: [])
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        fetch_orderbook_snapshots(client=object(), markets=["BTC"])
+
 
 def test_fetch_orderbook_snapshots_includes_context_in_schema_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: [])
