@@ -6,15 +6,20 @@ import httpx
 import pytest
 
 from bithumb_bot.markets import (
+    ExchangeMarketCodeError,
     MarketCatalogClient,
     MarketCatalogError,
+    MarketContractDriftError,
     MarketInfo,
     MarketRegistry,
     UnsupportedMarketError,
     canonical_market_with_raw,
+    parse_documented_market_code,
+    parse_exchange_market_response_code,
+    parse_user_market_input,
     normalize_market_id,
     normalize_market_id_with_registry,
-    validate_exchange_market_id,
+    validate_exchange_market_code,
     canonical_market_id,
     get_market_registry,
 )
@@ -70,18 +75,19 @@ def _reset_fake_client() -> None:
     _FakeClient.requests = []
 
 
-def test_normalize_market_id_aliases() -> None:
-    assert normalize_market_id("BTC_KRW") == "KRW-BTC"
-    assert normalize_market_id("btc_krw") == "KRW-BTC"
-    assert normalize_market_id("KRW-BTC") == "KRW-BTC"
-    assert normalize_market_id(" BTC_KRW ") == "KRW-BTC"
+def test_parse_user_market_input_aliases() -> None:
+    assert parse_user_market_input("BTC_KRW") == "KRW-BTC"
+    assert parse_user_market_input("btc_krw") == "KRW-BTC"
+    assert parse_user_market_input("KRW-BTC") == "KRW-BTC"
+    assert parse_user_market_input(" BTC_KRW ") == "KRW-BTC"
+    assert parse_user_market_input("BTC") == "KRW-BTC"
     assert normalize_market_id("BTC") == "KRW-BTC"
 
 
-def test_normalize_market_id_is_not_naive_string_reverse() -> None:
+def test_parse_user_market_input_is_not_naive_string_reverse() -> None:
     # 회귀 계약: canonical 형태(QUOTE-BASE)는 추가 뒤집기 없이 그대로 유지한다.
-    assert normalize_market_id("BTC-KRW") == "BTC-KRW"
-    assert normalize_market_id("USDT-ETH") == "USDT-ETH"
+    assert parse_user_market_input("BTC-KRW") == "BTC-KRW"
+    assert parse_user_market_input("USDT-ETH") == "USDT-ETH"
 
 
 def test_normalize_market_id_with_registry_rejects_unsupported() -> None:
@@ -90,11 +96,27 @@ def test_normalize_market_id_with_registry_rejects_unsupported() -> None:
         normalize_market_id_with_registry("ETH_KRW", registry=registry)
 
 
-def test_validate_exchange_market_id_requires_canonical_quote_base_without_implicit_default_quote() -> None:
+def test_validate_exchange_market_code_requires_canonical_quote_base_without_implicit_default_quote() -> None:
     registry = MarketRegistry([MarketInfo(market="KRW-BTC")])
-    assert validate_exchange_market_id("KRW-BTC", registry=registry) == "KRW-BTC"
-    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
-        validate_exchange_market_id("BTC", registry=registry)
+    assert validate_exchange_market_code("KRW-BTC", registry=registry) == "KRW-BTC"
+    with pytest.raises(ExchangeMarketCodeError, match="canonical QUOTE-BASE"):
+        validate_exchange_market_code("BTC", registry=registry)
+    with pytest.raises(ExchangeMarketCodeError, match="canonical QUOTE-BASE"):
+        validate_exchange_market_code("BTC_KRW", registry=registry)
+
+
+def test_parse_documented_market_code_accepts_only_canonical() -> None:
+    assert parse_documented_market_code("krw-btc") == "KRW-BTC"
+    with pytest.raises(ExchangeMarketCodeError):
+        parse_documented_market_code("BTC")
+    with pytest.raises(ExchangeMarketCodeError):
+        parse_documented_market_code("BTC_KRW")
+
+
+def test_parse_exchange_market_response_code_rejects_contract_drift() -> None:
+    assert parse_exchange_market_response_code("KRW-BTC", requested_market="KRW-BTC") == "KRW-BTC"
+    with pytest.raises(MarketContractDriftError, match="drift"):
+        parse_exchange_market_response_code("BTC_KRW", requested_market="KRW-BTC")
 
 
 def test_canonical_market_with_raw_tracks_noncanonical_input() -> None:

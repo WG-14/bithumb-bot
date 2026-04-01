@@ -115,9 +115,8 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
 
 
 def test_parse_order_chance_response_matches_market_by_normalized_equivalence(valid_doc_shaped_response):
-    parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="BTC_KRW")
-
-    assert parsed.market_id == "KRW-BTC"
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="BTC_KRW")
 
 
 def test_parse_order_chance_response_does_not_depend_on_public_market_registry(valid_doc_shaped_response, monkeypatch):

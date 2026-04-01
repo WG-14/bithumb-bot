@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
-from ..markets import canonical_market_id, normalize_market_id
+from ..markets import canonical_market_id, parse_documented_market_code
 from ..notifier import notify
 from .bithumb import BithumbBroker, classify_private_api_error
 
@@ -236,8 +236,8 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
     }
 
     market = _require_dict(payload, "market", where="response")
-    market_id = normalize_market_id(_require_non_empty_str(market, "id", where="response.market"))
-    normalized_requested_market = normalize_market_id(requested_market)
+    market_id = parse_documented_market_code(_require_non_empty_str(market, "id", where="response.market"))
+    normalized_requested_market = parse_documented_market_code(requested_market)
     if market_id != normalized_requested_market:
         raise OrderChanceMarketMismatchError(
             "/v1/orders/chance response.market.id mismatch: "

@@ -15,6 +15,18 @@ class MarketCatalogError(PublicApiSchemaError):
     """Raised when market catalog fetch/parsing fails."""
 
 
+class MarketContractDriftError(MarketCatalogError):
+    """Raised when exchange market code format drifts from documented schema."""
+
+
+class UserMarketInputError(ValueError):
+    """Raised when user/config market input cannot be parsed."""
+
+
+class ExchangeMarketCodeError(ValueError):
+    """Raised when exchange boundary market code is not canonical QUOTE-BASE."""
+
+
 class UnsupportedMarketError(ValueError):
     """Raised when a market is not supported by the loaded market catalog."""
 
@@ -47,7 +59,7 @@ class MarketCatalogClient:
             if not isinstance(row, dict):
                 raise MarketCatalogError(f"unexpected market catalog row type: {type(row).__name__}")
             market = _require_catalog_field(row=row, field="market", required=True)
-            canonical = normalize_market_id(market)
+            canonical = parse_documented_market_code(market)
 
             korean_name = _require_catalog_field(
                 row=row,
@@ -85,18 +97,22 @@ class MarketRegistry:
         return cls(catalog_client.fetch_markets(is_details=is_details))
 
     def is_supported(self, market: str) -> bool:
-        canonical = normalize_market_id(market)
-        return canonical in self._markets
+        return self.is_supported_canonical(parse_documented_market_code(market))
 
     def require_supported(self, market: str) -> str:
-        canonical = normalize_market_id(market)
-        if canonical not in self._markets:
-            raise UnsupportedMarketError(f"unsupported market: {market!r} (canonical={canonical})")
-        return canonical
+        canonical = parse_documented_market_code(market)
+        return self.require_supported_canonical(canonical)
+
+    def is_supported_canonical(self, market: str) -> bool:
+        return market in self._markets
+
+    def require_supported_canonical(self, market: str) -> str:
+        if market not in self._markets:
+            raise UnsupportedMarketError(f"unsupported market: {market!r} (canonical={market})")
+        return market
 
     def get(self, market: str) -> MarketInfo | None:
-        canonical = normalize_market_id(market)
-        return self._markets.get(canonical)
+        return self._markets.get(parse_documented_market_code(market))
 
 
 _market_registry_lock = Lock()
@@ -159,7 +175,8 @@ def get_market_registry(
 def canonical_market_id(market: str, *, registry: MarketRegistry | None = None) -> str:
     """Normalize user input and validate the resulting market against exchange catalog."""
     active_registry = registry or get_market_registry()
-    return normalize_market_id_with_registry(market, registry=active_registry)
+    user_market = parse_user_market_input(market)
+    return validate_exchange_market_code(user_market, registry=active_registry)
 
 
 def _as_optional_str(value: object, *, field: str) -> str | None:
@@ -179,7 +196,7 @@ def _require_catalog_field(*, row: dict[str, object], field: str, required: bool
     return _as_optional_str(row.get(field), field=field)
 
 
-def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
+def parse_user_market_input(market: str, *, default_quote: str = "KRW") -> str:
     """User-input convenience normalization layer.
 
     Accepts:
@@ -189,11 +206,11 @@ def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
     """
     token = str(market).strip().upper().replace(" ", "")
     if not token:
-        raise ValueError("market must not be empty")
+        raise UserMarketInputError("market must not be empty")
 
     quote = str(default_quote).strip().upper()
     if not quote:
-        raise ValueError("default_quote must not be empty")
+        raise UserMarketInputError("default_quote must not be empty")
 
     if "-" in token:
         left, right = _split_pair(token, "-")
@@ -206,26 +223,63 @@ def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
     return f"{quote}-{token}"
 
 
-def normalize_market_id_with_registry(market: str, *, registry: MarketRegistry, default_quote: str = "KRW") -> str:
-    canonical = normalize_market_id(market, default_quote=default_quote)
-    return registry.require_supported(canonical)
+def parse_documented_market_code(market: str) -> str:
+    token = str(market).strip().upper()
+    if not token:
+        raise ExchangeMarketCodeError("market must not be empty")
+    if " " in token:
+        raise ExchangeMarketCodeError(f"invalid exchange market code: {market!r}")
+    if token.count("-") != 1:
+        raise ExchangeMarketCodeError(
+            f"exchange market code must use canonical QUOTE-BASE format, got {market!r}"
+        )
+    quote, base = _split_pair(token, "-")
+    return f"{quote}-{base}"
 
 
-def validate_exchange_market_id(market: str, *, registry: MarketRegistry) -> str:
+def validate_exchange_market_code(market: str, *, registry: MarketRegistry) -> str:
     """Core exchange validation layer.
 
     This function validates only exchange-document market id format (QUOTE-BASE),
     and never applies implicit default quote inference.
     """
-    token = str(market).strip().upper().replace(" ", "")
-    if not token:
-        raise ValueError("market must not be empty")
-    if "-" not in token:
-        raise ValueError(
-            f"exchange market id must be canonical QUOTE-BASE format, got {market!r}"
-        )
-    quote, base = _split_pair(token, "-")
-    return registry.require_supported(f"{quote}-{base}")
+    token = parse_documented_market_code(market)
+    require_supported_canonical = getattr(registry, "require_supported_canonical", None)
+    if callable(require_supported_canonical):
+        return require_supported_canonical(token)
+    return registry.require_supported(token)
+
+
+def parse_exchange_market_response_code(
+    market: str,
+    *,
+    requested_market: str | None = None,
+) -> str:
+    try:
+        response_market = parse_documented_market_code(market)
+    except ExchangeMarketCodeError as exc:
+        raise MarketContractDriftError(f"exchange response market code drift: {market!r}") from exc
+    if requested_market is not None:
+        expected_market = parse_documented_market_code(requested_market)
+        if response_market != expected_market:
+            raise MarketContractDriftError(
+                "exchange response market code mismatch: "
+                f"requested={expected_market!r} response={response_market!r}"
+            )
+    return response_market
+
+
+def normalize_market_id_with_registry(market: str, *, registry: MarketRegistry, default_quote: str = "KRW") -> str:
+    canonical = parse_user_market_input(market, default_quote=default_quote)
+    return validate_exchange_market_code(canonical, registry=registry)
+
+
+def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
+    return parse_user_market_input(market, default_quote=default_quote)
+
+
+def validate_exchange_market_id(market: str, *, registry: MarketRegistry) -> str:
+    return validate_exchange_market_code(market, registry=registry)
 
 
 def _split_pair(token: str, separator: str) -> tuple[str, str]:
@@ -238,13 +292,13 @@ def _split_pair(token: str, separator: str) -> tuple[str, str]:
 
 
 def canonical_to_legacy_pair(market: str) -> str:
-    quote, base = _split_pair(normalize_market_id(market), "-")
+    quote, base = _split_pair(parse_documented_market_code(market), "-")
     return f"{base}_{quote}"
 
 
 def canonical_market_with_raw(market: str) -> tuple[str, str | None]:
     raw = str(market).strip()
-    canonical = normalize_market_id(raw)
+    canonical = parse_user_market_input(raw)
     if not raw:
         return canonical, None
     if raw.upper() == canonical:

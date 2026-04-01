@@ -10,7 +10,7 @@ import httpx
 
 from .config import settings
 from .db_core import ensure_db
-from .markets import canonical_market_id, normalize_market_id
+from .markets import parse_documented_market_code, canonical_market_id
 from .notifier import notify
 from .public_api_minute_candles import (
     MinuteCandle,
@@ -92,10 +92,10 @@ def fetch_orderbook_tops(pairs: list[str]) -> list[BestQuote]:
     with httpx.Client(base_url=BASE_URL, timeout=ORDERBOOK_FETCH_TIMEOUT_SEC) as c:
         quotes = fetch_public_orderbook_tops(c, markets=markets, max_retries=ORDERBOOK_FETCH_MAX_RETRIES)
 
-    quote_by_market = {normalize_market_id(quote.market): quote for quote in quotes}
+    quote_by_market = {parse_documented_market_code(quote.market): quote for quote in quotes}
     resolved: list[BestQuote] = []
     for market in markets:
-        key = normalize_market_id(market)
+        key = parse_documented_market_code(market)
         if key not in quote_by_market:
             returned_markets = sorted(quote_by_market.keys())
             raise RuntimeError(
@@ -133,7 +133,7 @@ def validated_best_quote_prices(
     requested_market: str | None = None,
 ) -> tuple[float, float]:
     requested = str(requested_market or quote.market)
-    if normalize_market_id(quote.market) != normalize_market_id(requested):
+    if parse_documented_market_code(quote.market) != parse_documented_market_code(requested):
         raise RuntimeError(
             "orderbook top market mismatch "
             f"requested_market={requested!r} returned_market={quote.market!r}"

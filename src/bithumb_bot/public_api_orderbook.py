@@ -5,7 +5,7 @@ from typing import Any, Sequence
 
 import httpx
 
-from .markets import normalize_market_id
+from .markets import ExchangeMarketCodeError, parse_documented_market_code
 from .public_api import PublicApiSchemaError, get_public_json_with_retry
 
 
@@ -100,7 +100,7 @@ def parse_orderbook_snapshots(payload: object) -> list[OrderbookSnapshot]:
 
         snapshots.append(
             OrderbookSnapshot(
-                market=market.strip(),
+                market=parse_documented_market_code(market),
                 orderbook_units=tuple(parsed_units),
             )
         )
@@ -126,7 +126,7 @@ def parse_orderbook_top(payload: object) -> list[OrderbookTop]:
 
 
 def _canonicalize_market_set(markets: Sequence[str]) -> set[str]:
-    return {normalize_market_id(market) for market in markets}
+    return {parse_documented_market_code(market) for market in markets}
 
 
 def _canonicalize_requested_markets(markets: Sequence[str]) -> list[str]:
@@ -136,7 +136,7 @@ def _canonicalize_requested_markets(markets: Sequence[str]) -> list[str]:
     canonicalized: list[str] = []
     seen: set[str] = set()
     for market in markets:
-        canonical = normalize_market_id(market)
+        canonical = parse_documented_market_code(market)
         if canonical in seen:
             continue
         seen.add(canonical)
@@ -192,7 +192,7 @@ def fetch_orderbook_snapshots(
             snapshots=snapshots,
             endpoint=endpoint,
         )
-    except PublicApiSchemaError as exc:
+    except (PublicApiSchemaError, ExchangeMarketCodeError) as exc:
         raise PublicApiSchemaError(
             "orderbook schema validation failed "
             f"endpoint={endpoint} requested_markets={requested_markets} params={params} "

@@ -50,12 +50,12 @@ def test_fetch_orderbook_top_uses_canonical_market_source(monkeypatch):
 
 def test_validated_best_quote_ask_price_returns_ask_for_matching_market() -> None:
     quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0)
-    assert validated_best_quote_ask_price(quote, requested_market="btc_krw") == 101.0
+    assert validated_best_quote_ask_price(quote, requested_market="KRW-BTC") == 101.0
 
 
 def test_validated_best_quote_prices_returns_bid_ask_for_matching_market() -> None:
     quote = BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0)
-    assert validated_best_quote_prices(quote, requested_market="btc_krw") == (100.0, 101.0)
+    assert validated_best_quote_prices(quote, requested_market="KRW-BTC") == (100.0, 101.0)
 
 
 def test_validated_best_quote_ask_price_rejects_non_positive_ask() -> None:

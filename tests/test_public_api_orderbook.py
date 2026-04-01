@@ -119,7 +119,7 @@ def test_fetch_orderbook_snapshots_serializes_multi_markets(monkeypatch: pytest.
 
     monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", _fake_get_public_json_with_retry)
 
-    snapshots = fetch_orderbook_snapshots(client=object(), markets=["btc_krw", "KRW-ETH", "KRW-BTC"])
+    snapshots = fetch_orderbook_snapshots(client=object(), markets=["KRW-BTC", "KRW-ETH", "KRW-BTC"])
 
     assert captured["path"] == "/v1/orderbook"
     assert captured["params"] == {"markets": "KRW-BTC,KRW-ETH"}
@@ -165,7 +165,7 @@ def test_fetch_orderbook_snapshots_rejects_duplicate_return_rows(monkeypatch: py
 
     monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
-    with pytest.raises(PublicApiSchemaError, match="orderbook response market mismatch"):
+    with pytest.raises(PublicApiSchemaError, match="schema validation failed"):
         fetch_orderbook_snapshots(client=object(), markets=["KRW-BTC"])
 
 
@@ -194,11 +194,17 @@ def test_fetch_orderbook_tops_multi_market(monkeypatch: pytest.MonkeyPatch) -> N
     ]
     monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: payload)
 
-    tops = fetch_orderbook_tops(client=object(), markets=["KRW-BTC", "ETH_KRW"])
+    tops = fetch_orderbook_tops(client=object(), markets=["KRW-BTC", "KRW-ETH"])
     assert tops == [
         BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=101.0),
         BestQuote(market="KRW-ETH", bid_price=200.0, ask_price=201.0),
     ]
+
+
+def test_fetch_orderbook_snapshots_rejects_noncanonical_requested_market(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bithumb_bot.public_api_orderbook.get_public_json_with_retry", lambda *_args, **_kwargs: [])
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        fetch_orderbook_snapshots(client=object(), markets=["BTC_KRW"])
 
 
 def test_fetch_orderbook_snapshots_includes_context_in_schema_failure(monkeypatch: pytest.MonkeyPatch) -> None:
