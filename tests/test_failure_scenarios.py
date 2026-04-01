@@ -107,6 +107,8 @@ class _CancelThenLateFillBroker(_NoopBroker):
 
 def _patch_single_tick_live_loop(monkeypatch) -> None:
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
+    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", lambda _cfg: None)
     _set_live_runtime_paths(monkeypatch, base_dir=Path(settings.DB_PATH).resolve().parent)
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "KILL_SWITCH", False)
