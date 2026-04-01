@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from .base import BrokerRejectError
 
 OrderSide = Literal["bid", "ask"]
 OrderKind = Literal["limit", "price", "market"]
+CLIENT_ORDER_ID_MAX_LENGTH = 36
+CLIENT_ORDER_ID_ALLOWED_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def normalize_order_side(side: str) -> OrderSide:
@@ -15,6 +18,22 @@ def normalize_order_side(side: str) -> OrderSide:
     if token in {"sell", "ask"}:
         return "ask"
     raise BrokerRejectError(f"unsupported order side: {side}")
+
+
+def validate_client_order_id(client_order_id: str) -> str:
+    if not isinstance(client_order_id, str):
+        raise BrokerRejectError("client_order_id must be a string")
+    if client_order_id == "":
+        raise BrokerRejectError("client_order_id must not be empty")
+    if len(client_order_id) > CLIENT_ORDER_ID_MAX_LENGTH:
+        raise BrokerRejectError(
+            f"client_order_id must be at most {CLIENT_ORDER_ID_MAX_LENGTH} characters"
+        )
+    if not CLIENT_ORDER_ID_ALLOWED_PATTERN.fullmatch(client_order_id):
+        raise BrokerRejectError(
+            "client_order_id contains invalid characters; allowed: A-Z, a-z, 0-9, underscore(_), hyphen(-)"
+        )
+    return client_order_id
 
 
 def build_order_payload(
@@ -37,10 +56,7 @@ def build_order_payload(
         "ord_type": ord_type_token,
     }
     if client_order_id is not None:
-        normalized_client_order_id = str(client_order_id).strip()
-        if not normalized_client_order_id:
-            raise BrokerRejectError("client_order_id must be a non-empty string")
-        payload["client_order_id"] = normalized_client_order_id
+        payload["client_order_id"] = validate_client_order_id(client_order_id)
     if ord_type_token == "limit":
         if not volume or not price:
             raise BrokerRejectError("limit order requires both volume and price")

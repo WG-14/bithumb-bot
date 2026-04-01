@@ -20,7 +20,7 @@ from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from ..markets import canonical_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
-from .order_payloads import build_order_payload, normalize_order_side
+from .order_payloads import build_order_payload, normalize_order_side, validate_client_order_id
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
 
@@ -431,7 +431,7 @@ class BithumbBroker:
         fallback_exchange_order_id: str | None = None,
     ) -> tuple[str, str]:
         exchange_order_id = ""
-        for key in ("uuid", "order_id", "id"):
+        for key in ("uuid", "order_id"):
             candidate = self._clean_identifier(row.get(key))
             if candidate:
                 exchange_order_id = candidate
@@ -440,7 +440,7 @@ class BithumbBroker:
             exchange_order_id = self._clean_identifier(fallback_exchange_order_id)
 
         client_order_id = ""
-        for key in ("client_order_id", "coid"):
+        for key in ("client_order_id",):
             candidate = self._clean_identifier(row.get(key))
             if candidate:
                 client_order_id = candidate
@@ -806,7 +806,7 @@ class BithumbBroker:
         fallback_exchange_order_id: str | None = None,
     ) -> dict[str, object]:
         raw: dict[str, object] = {}
-        for key in ("market", "ord_type", "client_order_id", "coid"):
+        for key in ("market", "ord_type", "client_order_id"):
             if row.get(key) not in (None, ""):
                 raw[key] = row[key]
         if row.get("order_id") not in (None, ""):
@@ -816,6 +816,20 @@ class BithumbBroker:
         if "uuid" not in raw and fallback_exchange_order_id:
             raw["uuid"] = fallback_exchange_order_id
         return raw
+
+    @staticmethod
+    def _build_v1_order_lookup_params(
+        *,
+        client_order_id: str | None,
+        exchange_order_id: str | None,
+    ) -> dict[str, str]:
+        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        requested_client_order_id = str(client_order_id or "").strip()
+        if requested_exchange_order_id:
+            return {"uuid": requested_exchange_order_id}
+        if requested_client_order_id:
+            return {"client_order_id": validate_client_order_id(requested_client_order_id)}
+        raise ValueError("order lookup requires exchange_order_id(uuid) or client_order_id")
 
     def _order_from_v2_row(
         self,
@@ -897,8 +911,9 @@ class BithumbBroker:
 
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
         now = int(time.time() * 1000)
+        validated_client_order_id = validate_client_order_id(client_order_id)
         if self.dry_run:
-            return BrokerOrder(client_order_id, f"dry_{client_order_id}", side, "NEW", price, qty, 0.0, now, now)
+            return BrokerOrder(validated_client_order_id, f"dry_{validated_client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
         normalized_side = normalize_order_side(side)
         payload: dict[str, object]
@@ -921,7 +936,7 @@ class BithumbBroker:
                 except Exception as exc:
                     raise BrokerTemporaryError(
                         "market buy blocked: failed to load validated best ask "
-                        f"market={market} client_order_id={client_order_id} cause={type(exc).__name__}: {exc}"
+                        f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
                     ) from exc
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
                 min_total = side_min_total_krw(rules=rules, side=order_side)
@@ -935,7 +950,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="price",
                     price=self._format_krw_amount(notional),
-                    client_order_id=client_order_id,
+                    client_order_id=validated_client_order_id,
                 )
             else:
                 payload = build_order_payload(
@@ -943,7 +958,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="market",
                     volume=volume_text,
-                    client_order_id=client_order_id,
+                    client_order_id=validated_client_order_id,
                 )
         else:
             requested_limit_price = self._decimal_from_value(price)
@@ -974,7 +989,7 @@ class BithumbBroker:
                 ord_type="limit",
                 volume=volume_text,
                 price=self._format_krw_amount(requested_limit_price),
-                client_order_id=client_order_id,
+                client_order_id=validated_client_order_id,
             )
 
         RUN_LOG.info(
@@ -986,7 +1001,7 @@ class BithumbBroker:
                 volume=payload.get("volume"),
                 price=payload.get("price"),
                 payload=payload,
-                client_order_id=client_order_id,
+                client_order_id=validated_client_order_id,
             )
         )
 
@@ -996,22 +1011,22 @@ class BithumbBroker:
         response_row = data.get("data") if isinstance(data.get("data"), dict) else data
         resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
             response_row if isinstance(response_row, dict) else {},
-            fallback_client_order_id=client_order_id,
+            fallback_client_order_id=validated_client_order_id,
         )
         if not resolved_exchange_order_id:
             raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
-        if resolved_client_order_id and resolved_client_order_id != str(client_order_id):
+        if resolved_client_order_id and resolved_client_order_id != validated_client_order_id:
             raise BrokerRejectError(
                 "order submit response client_order_id mismatch: "
-                f"requested={client_order_id} response={resolved_client_order_id}"
+                f"requested={validated_client_order_id} response={resolved_client_order_id}"
             )
         raw = self._raw_order_fields(
             response_row if isinstance(response_row, dict) else {},
-            fallback_client_order_id=client_order_id,
+            fallback_client_order_id=validated_client_order_id,
         )
         raw.setdefault("market", payload.get("market"))
         raw.setdefault("ord_type", payload.get("ord_type"))
-        return BrokerOrder(client_order_id, resolved_exchange_order_id, side, "NEW", price, qty, 0.0, now, now, raw)
+        return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, qty, 0.0, now, now, raw)
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         order = self.get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
@@ -1118,18 +1133,15 @@ class BithumbBroker:
         now = int(time.time() * 1000)
         requested_client_order_id = str(client_order_id or "").strip()
         requested_exchange_order_id = str(exchange_order_id or "").strip()
-        if not requested_client_order_id and not requested_exchange_order_id:
-            raise ValueError("order lookup requires exchange_order_id(uuid) or client_order_id")
+        params = self._build_v1_order_lookup_params(
+            client_order_id=requested_client_order_id,
+            exchange_order_id=requested_exchange_order_id,
+        )
 
         exid = requested_exchange_order_id or f"dry_{requested_client_order_id}"
         if self.dry_run:
             return BrokerOrder(requested_client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
 
-        params: dict[str, object] = {}
-        if requested_exchange_order_id:
-            params["uuid"] = requested_exchange_order_id
-        else:
-            params["client_order_id"] = requested_client_order_id
         data = self._get_private("/v1/order", params, retry_safe=True)
         if not isinstance(data, dict):
             raise BrokerRejectError(

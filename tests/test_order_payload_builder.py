@@ -70,5 +70,5 @@ def test_build_payload_rejects_unsupported_order_type() -> None:
 
 
 def test_build_payload_rejects_empty_client_order_id() -> None:
-    with pytest.raises(BrokerRejectError, match="client_order_id must be a non-empty string"):
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
         build_order_payload(market="KRW-BTC", side="buy", ord_type="limit", volume="0.1", price="10000", client_order_id="  ")

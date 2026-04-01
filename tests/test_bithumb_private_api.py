@@ -356,6 +356,51 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     }
 
 
+def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+    valid_client_order_id = "Abc_123-xyz_456-7890_ABC-def-ghi-jkl"
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
+    )
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        return {"uuid": "mkt-valid-cid-1", "client_order_id": payload["client_order_id"]}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id=valid_client_order_id, side="BUY", qty=0.1234, price=None)
+
+    assert order.client_order_id == valid_client_order_id
+    assert call["payload"]["client_order_id"] == valid_client_order_id
+
+
+def test_place_order_rejects_empty_client_order_id():
+    _configure_live()
+    broker = BithumbBroker()
+    with pytest.raises(BrokerRejectError, match="must not be empty"):
+        broker.place_order(client_order_id="", side="BUY", qty=0.1, price=149000000)
+
+
+def test_place_order_rejects_overlength_client_order_id():
+    _configure_live()
+    broker = BithumbBroker()
+    with pytest.raises(BrokerRejectError, match="at most 36 characters"):
+        broker.place_order(client_order_id=("a" * 37), side="BUY", qty=0.1, price=149000000)
+
+
+def test_place_order_rejects_invalid_characters_in_client_order_id():
+    _configure_live()
+    broker = BithumbBroker()
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+        broker.place_order(client_order_id="cid invalid", side="BUY", qty=0.1, price=149000000)
+
+
 def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -783,6 +828,36 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
     assert order.raw["uuid"] == "filled-1"
 
 
+def test_get_order_prefers_uuid_when_client_order_id_is_invalid(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        return {
+            "uuid": "filled-priority-1",
+            "client_order_id": "cid-priority",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "done",
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    order = broker.get_order(client_order_id="bad id with space", exchange_order_id="filled-priority-1")
+
+    assert call == {"endpoint": "/v1/order", "params": {"uuid": "filled-priority-1"}}
+    assert order.exchange_order_id == "filled-priority-1"
+
+
 def test_get_order_supports_client_order_id_lookup(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1026,10 +1101,7 @@ def test_recent_orders_maps_exchange_and_client_identifiers_consistently(monkeyp
     assert len(rows) == 1
     assert rows[0].exchange_order_id == "open-consistent-1"
     assert rows[0].client_order_id == "coid-open-1"
-    assert rows[0].raw == {
-        "client_order_id": "coid-open-1",
-        "coid": "legacy-open-1",
-    }
+    assert rows[0].raw == {"client_order_id": "coid-open-1"}
 
 
 
