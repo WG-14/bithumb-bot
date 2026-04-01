@@ -13,6 +13,7 @@ from .config import (
     settings,
     validate_live_mode_preflight,
     validate_market_preflight,
+    validate_market_runtime,
 )
 from .marketdata import cmd_sync
 from .strategy import create_strategy
@@ -1078,6 +1079,7 @@ def run_loop(short_n: int, long_n: int) -> None:
     fail_count = 0
     MAX_FAILS = 5
     last_open_order_reconcile_at: float | None = None
+    last_market_runtime_check_at: float | None = None
 
     try:
         while True:
@@ -1178,6 +1180,34 @@ def run_loop(short_n: int, long_n: int) -> None:
                     f"{stale_cutoff_sec}s; order blocked"
                 )
                 continue
+
+            runtime_market_check_interval = float(settings.MARKET_RUNTIME_REGISTRY_REFRESH_INTERVAL_SEC)
+            if runtime_market_check_interval < 0:
+                _halt_trading(
+                    _halt_reason(
+                        "MARKET_RUNTIME_POLICY_INVALID",
+                        "MARKET_RUNTIME_REGISTRY_REFRESH_INTERVAL_SEC must be >= 0",
+                    ),
+                    unresolved=False,
+                )
+                continue
+            should_check_runtime_market = settings.MODE == "live" and runtime_market_check_interval > 0 and (
+                last_market_runtime_check_at is None
+                or (now - last_market_runtime_check_at) >= runtime_market_check_interval
+            )
+            if should_check_runtime_market:
+                try:
+                    validate_market_runtime(settings)
+                    last_market_runtime_check_at = now
+                except MarketPreflightValidationError as exc:
+                    _halt_trading(
+                        _halt_reason(
+                            "MARKET_RUNTIME_CONTRACT_FAILED",
+                            f"market runtime contract failed: {exc}",
+                        ),
+                        unresolved=False,
+                    )
+                    continue
 
             if settings.MODE == "live" and broker is not None:
                 if settings.KILL_SWITCH:

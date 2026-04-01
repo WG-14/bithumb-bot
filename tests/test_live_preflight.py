@@ -729,6 +729,45 @@ def test_market_preflight_warns_and_allows_warning_state_in_dryrun_mode(
     assert "market preflight detected warning state" in caplog.text
 
 
+def test_market_preflight_treats_unexpected_market_warning_as_unknown_and_blocks_live_real(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **_kwargs: MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="SUSPICIOUS_NEW_STATE")]),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "market_warning=UNKNOWN" in str(exc.value)
+
+
+def test_market_runtime_validation_forces_registry_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    calls: list[tuple[bool, float, bool]] = []
+    monkeypatch.setattr(
+        config,
+        "_fetch_market_registry_for_preflight",
+        lambda **kwargs: (
+            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]), bool(kwargs["is_details"]))),
+            MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
+        )[1],
+    )
+
+    config.validate_market_runtime(settings)
+
+    assert calls == [(True, float(settings.MARKET_REGISTRY_CACHE_TTL_SEC), True)]
+
+
 def test_live_preflight_blocks_startup_on_accounts_schema_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

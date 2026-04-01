@@ -12,6 +12,8 @@ from bithumb_bot.markets import (
     MarketContractDriftError,
     MarketInfo,
     MarketRegistry,
+    evaluate_market_warning_policy,
+    normalize_market_warning_value,
     UnsupportedMarketError,
     canonical_market_id,
     canonical_market_with_raw,
@@ -309,3 +311,26 @@ class TestRegistryCacheRegression:
         assert first is second
         assert third is not second
         assert calls["count"] == 2
+
+
+class TestMarketWarningPolicy:
+    def test_normalize_market_warning_value_maps_unknown_or_empty_to_unknown(self) -> None:
+        assert normalize_market_warning_value(None) == "UNKNOWN"
+        assert normalize_market_warning_value("") == "UNKNOWN"
+        assert normalize_market_warning_value("  ") == "UNKNOWN"
+        assert normalize_market_warning_value("paused") == "UNKNOWN"
+
+    def test_evaluate_market_warning_policy_handles_allow_warn_block(self) -> None:
+        allow = evaluate_market_warning_policy(raw_warning="NONE", warning_block_states={"CAUTION", "UNKNOWN"})
+        assert allow.is_warning_state is False
+        assert allow.should_block is False
+
+        warn_only = evaluate_market_warning_policy(raw_warning="CAUTION", warning_block_states={"UNKNOWN"})
+        assert warn_only.normalized_warning == "CAUTION"
+        assert warn_only.is_warning_state is True
+        assert warn_only.should_block is False
+
+        block_unknown = evaluate_market_warning_policy(raw_warning="UNEXPECTED", warning_block_states={"UNKNOWN"})
+        assert block_unknown.normalized_warning == "UNKNOWN"
+        assert block_unknown.is_warning_state is True
+        assert block_unknown.should_block is True

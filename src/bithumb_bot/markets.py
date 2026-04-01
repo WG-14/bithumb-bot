@@ -43,6 +43,13 @@ class MarketInfo:
     market_warning: str | None = None
 
 
+@dataclass(frozen=True)
+class MarketWarningPolicyDecision:
+    normalized_warning: str
+    is_warning_state: bool
+    should_block: bool
+
+
 class MarketCatalogClient:
     def __init__(
         self,
@@ -251,6 +258,37 @@ def parse_market_catalog_row_details(row: object) -> MarketInfo:
         korean_name=korean_name,
         english_name=english_name,
         market_warning=market_warning,
+    )
+
+
+def normalize_market_warning_value(raw_warning: object) -> str:
+    token = str(raw_warning or "").strip().upper()
+    if not token:
+        return "UNKNOWN"
+    if token == "NONE":
+        return "NONE"
+    if token == "CAUTION":
+        return "CAUTION"
+    return "UNKNOWN"
+
+
+def evaluate_market_warning_policy(
+    *,
+    raw_warning: object,
+    warning_block_states: set[str],
+) -> MarketWarningPolicyDecision:
+    normalized_warning = normalize_market_warning_value(raw_warning)
+    if normalized_warning == "NONE":
+        return MarketWarningPolicyDecision(
+            normalized_warning=normalized_warning,
+            is_warning_state=False,
+            should_block=False,
+        )
+    should_block = normalized_warning in warning_block_states
+    return MarketWarningPolicyDecision(
+        normalized_warning=normalized_warning,
+        is_warning_state=True,
+        should_block=should_block,
     )
 
 

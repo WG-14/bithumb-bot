@@ -10,6 +10,7 @@ from pathlib import Path
 from .markets import (
     MarketCatalogError,
     MarketRegistry,
+    evaluate_market_warning_policy,
     UnsupportedMarketError,
     get_market_registry,
     normalize_market_id,
@@ -430,6 +431,9 @@ class Settings:
     MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH: bool = parse_bool_env(
         "MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", ""
     )
+    MARKET_RUNTIME_REGISTRY_REFRESH_INTERVAL_SEC: float = parse_float_env(
+        "MARKET_RUNTIME_REGISTRY_REFRESH_INTERVAL_SEC", "900"
+    )
 
 settings = Settings()
 
@@ -461,10 +465,19 @@ def _fetch_market_registry_for_preflight(
 def _warning_state_set(raw_states: str) -> set[str]:
     states = {token.strip().upper() for token in str(raw_states or "").split(",")}
     cleaned = {token for token in states if token}
-    return cleaned or {"CAUTION"}
+    if not cleaned:
+        return {"CAUTION", "UNKNOWN"}
+    cleaned.add("UNKNOWN")
+    return cleaned
 
 
-def validate_market_preflight(cfg: Settings) -> None:
+def _validate_market_registry_contract(
+    cfg: Settings,
+    *,
+    context: str,
+    record_snapshot: bool,
+    force_refresh: bool,
+) -> None:
     normalized_mode = str(cfg.MODE or "").strip().lower()
     is_dryrun = normalized_mode == "live" and bool(cfg.LIVE_DRY_RUN)
     is_live_real = normalized_mode == "live" and not is_dryrun
@@ -491,7 +504,7 @@ def validate_market_preflight(cfg: Settings) -> None:
         )
     except ValueError as exc:
         raise MarketPreflightValidationError(
-            "market preflight rejected invalid configured market format: "
+            f"market {context} rejected invalid configured market format: "
             f"pair={configured_market!r} mode={normalized_mode} detail={exc}"
         ) from exc
     warning_block_states = _warning_state_set(cfg.MARKET_PREFLIGHT_WARNING_STATES)
@@ -499,11 +512,6 @@ def validate_market_preflight(cfg: Settings) -> None:
         raise MarketPreflightValidationError(
             "MARKET_REGISTRY_CACHE_TTL_SEC must be >= 0"
         )
-    force_refresh = (
-        bool(cfg.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH)
-        if os.getenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH") not in (None, "")
-        else normalized_mode == "live"
-    )
 
     try:
         registry = _fetch_market_registry_for_preflight(
@@ -513,7 +521,7 @@ def validate_market_preflight(cfg: Settings) -> None:
         )
     except Exception as exc:
         msg = (
-            "market preflight catalog fetch failed: "
+            f"market {context} catalog fetch failed: "
             "endpoint=/v1/market/all isDetails=true "
             f"pair={configured_market!r} normalized={normalized_market_input} "
             f"mode={normalized_mode} dry_run={is_dryrun} block_on_catalog_error={block_on_catalog_error} "
@@ -529,41 +537,68 @@ def validate_market_preflight(cfg: Settings) -> None:
         canonical_market = validate_exchange_market_id(normalized_market_input, registry=registry)
     except (UnsupportedMarketError, ValueError) as exc:
         raise MarketPreflightValidationError(
-            "market preflight rejected unsupported pair: "
+            f"market {context} rejected unsupported pair: "
             f"pair={configured_market!r} normalized={normalized_market_input}"
         ) from exc
 
     market_info = registry.get(canonical_market)
     if market_info is None:
         raise MarketPreflightValidationError(
-            "market preflight registry inconsistency: "
+            f"market {context} registry inconsistency: "
             f"pair={configured_market!r} canonical={canonical_market}"
         )
 
-    market_warning = str(market_info.market_warning or "").strip().upper()
-    if market_warning and market_warning in warning_block_states:
+    warning_decision = evaluate_market_warning_policy(
+        raw_warning=market_info.market_warning,
+        warning_block_states=warning_block_states,
+    )
+    if warning_decision.is_warning_state:
         msg = (
-            "market preflight detected warning state: "
-            f"pair={configured_market!r} canonical={canonical_market} market_warning={market_warning}"
+            f"market {context} detected warning state: "
+            f"pair={configured_market!r} canonical={canonical_market} "
+            f"market_warning={warning_decision.normalized_warning}"
         )
-        if block_on_warning:
+        if warning_decision.should_block and block_on_warning:
             raise MarketPreflightValidationError(msg)
-        LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
-
-    try:
-        record_market_catalog_snapshot(
-            path_manager=PATH_MANAGER,
-            mode=normalized_mode,
-            source="market_preflight",
-            markets=registry.items(),
-        )
-    except Exception as exc:
         LOG.warning(
-            "market catalog snapshot update failed mode=%s source=market_preflight error=%s: %s",
+            "%s; continuing by policy (mode=%s, dry_run=%s, block_on_warning=%s, warning_block_states=%s)",
+            msg,
             normalized_mode,
-            type(exc).__name__,
-            exc,
+            is_dryrun,
+            block_on_warning,
+            sorted(warning_block_states),
         )
+
+    if record_snapshot:
+        try:
+            record_market_catalog_snapshot(
+                path_manager=PATH_MANAGER,
+                mode=normalized_mode,
+                source="market_preflight",
+                markets=registry.items(),
+            )
+        except Exception as exc:
+            LOG.warning(
+                "market catalog snapshot update failed mode=%s source=market_preflight error=%s: %s",
+                normalized_mode,
+                type(exc).__name__,
+                exc,
+            )
+
+
+def validate_market_preflight(cfg: Settings) -> None:
+    normalized_mode = str(cfg.MODE or "").strip().lower()
+    force_refresh = (
+        bool(cfg.MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH)
+        if os.getenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH") not in (None, "")
+        else normalized_mode == "live"
+    )
+    _validate_market_registry_contract(
+        cfg,
+        context="preflight",
+        record_snapshot=True,
+        force_refresh=force_refresh,
+    )
 
     try:
         validate_accounts_preflight(cfg)
@@ -575,6 +610,15 @@ def validate_market_preflight(cfg: Settings) -> None:
             normalized_mode,
             exc,
         )
+
+
+def validate_market_runtime(cfg: Settings) -> None:
+    _validate_market_registry_contract(
+        cfg,
+        context="runtime",
+        record_snapshot=False,
+        force_refresh=True,
+    )
 
 
 def validate_live_mode_preflight(cfg: Settings) -> None:
