@@ -753,6 +753,45 @@ def test_place_order_rejects_when_response_client_order_id_mismatches(monkeypatc
         broker.place_order(client_order_id="cid-local", side="BUY", qty=0.4, price=149500000)
 
 
+def test_place_order_accepts_coid_alias_when_client_order_id_missing(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda *_args, **_kwargs: {
+            "uuid": "lmt-coid-only",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "coid": "cid-coid-only",
+        },
+    )
+
+    order = broker.place_order(client_order_id="cid-coid-only", side="BUY", qty=0.4, price=149500000)
+
+    assert order.exchange_order_id == "lmt-coid-only"
+    assert order.client_order_id == "cid-coid-only"
+
+
+def test_place_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda *_args, **_kwargs: {
+            "uuid": "lmt-coid-mismatch",
+            "client_order_id": "cid-primary",
+            "coid": "cid-other",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="client identifier mismatch"):
+        broker.place_order(client_order_id="cid-primary", side="BUY", qty=0.4, price=149500000)
+
+
 def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1026,6 +1065,73 @@ def test_cancel_order_raises_on_order_id_mismatch(monkeypatch):
 
     with pytest.raises(BrokerRejectError, match="cancel response order_id mismatch"):
         broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
+
+
+def test_cancel_order_accepts_coid_alias_when_client_order_id_missing(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-coid-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "order_id": payload["order_id"],
+            "coid": payload["client_order_id"],
+        },
+    )
+
+    order = broker.cancel_order(client_order_id="cid-cancel-coid", exchange_order_id="cancel-coid-1")
+
+    assert order.exchange_order_id == "cancel-coid-1"
+    assert order.client_order_id == "cid-cancel-coid"
+
+
+def test_cancel_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-conflict-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: {
+            "order_id": payload["order_id"],
+            "client_order_id": payload["client_order_id"],
+            "coid": "different-cid",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="client identifier mismatch"):
+        broker.cancel_order(client_order_id="cid-cancel-conflict", exchange_order_id="cancel-conflict-1")
 
 
 def test_get_order_uses_v1_order_lookup(monkeypatch):

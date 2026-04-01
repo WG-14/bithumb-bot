@@ -468,6 +468,8 @@ class BithumbBroker:
         *,
         fallback_client_order_id: str | None = None,
         fallback_exchange_order_id: str | None = None,
+        allow_coid_alias: bool = False,
+        context: str = "order response",
     ) -> tuple[str, str]:
         exchange_order_id = ""
         for key in ("uuid", "order_id"):
@@ -478,12 +480,17 @@ class BithumbBroker:
         if not exchange_order_id:
             exchange_order_id = self._clean_identifier(fallback_exchange_order_id)
 
-        client_order_id = ""
-        for key in ("client_order_id",):
-            candidate = self._clean_identifier(row.get(key))
-            if candidate:
-                client_order_id = candidate
-                break
+        client_order_id = self._clean_identifier(row.get("client_order_id"))
+        coid_alias = self._clean_identifier(row.get("coid"))
+        if allow_coid_alias:
+            # v2/실시간(MyOrder) 계열 payload에서는 `coid`가 client_order_id 별칭으로 올 수 있다.
+            # REST v1 읽기 계약(uuid/client_order_id)과 충돌을 피하기 위해 alias는 opt-in 경로에서만 해석한다.
+            if client_order_id and coid_alias and client_order_id != coid_alias:
+                raise BrokerRejectError(
+                    f"{context} client identifier mismatch: client_order_id={client_order_id} coid={coid_alias}"
+                )
+            if not client_order_id:
+                client_order_id = coid_alias
         if not client_order_id:
             client_order_id = self._clean_identifier(fallback_client_order_id)
 
@@ -973,6 +980,8 @@ class BithumbBroker:
             row,
             fallback_client_order_id=client_order_id,
             fallback_exchange_order_id=exchange_order_id or str(normalized["uuid"]),
+            allow_coid_alias=True,
+            context="/v2/orders",
         )
         state = str(normalized["state"])
         qty_req = float(normalized["volume"])
@@ -1142,6 +1151,8 @@ class BithumbBroker:
         resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
             response_row if isinstance(response_row, dict) else {},
             fallback_client_order_id=validated_client_order_id,
+            allow_coid_alias=True,
+            context="/v2/orders submit response",
         )
         if not resolved_exchange_order_id:
             raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
@@ -1209,6 +1220,8 @@ class BithumbBroker:
             response_row if isinstance(response_row, dict) else {},
             fallback_client_order_id=str(response.get("client_order_id") or ""),
             fallback_exchange_order_id=str(response.get("order_id") or response.get("uuid") or ""),
+            allow_coid_alias=True,
+            context="/v2/orders/cancel response",
         )
         requested_order_id = str(cancel_payload.get("order_id") or "")
         requested_client_order_id = str(cancel_payload.get("client_order_id") or "")
