@@ -1,14 +1,30 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from bithumb_bot.app import main as app_main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.paths import PathManager
 from bithumb_bot.reporting import FeeDiagnosticSummary, cmd_fee_diagnostics, fetch_fee_diagnostics
+import bithumb_bot.reporting as reporting
+
+
+def _set_managed_runtime_paths(monkeypatch, tmp_path: Path) -> PathManager:
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("ENV_ROOT", str((runtime_root / "env").resolve()))
+    monkeypatch.setenv("RUN_ROOT", str((runtime_root / "run").resolve()))
+    monkeypatch.setenv("DATA_ROOT", str((runtime_root / "data").resolve()))
+    monkeypatch.setenv("LOG_ROOT", str((runtime_root / "logs").resolve()))
+    monkeypatch.setenv("BACKUP_ROOT", str((runtime_root / "backup").resolve()))
+    manager = PathManager.from_env(Path.cwd())
+    monkeypatch.setattr(reporting, "PATH_MANAGER", manager)
+    return manager
 
 
 def test_fee_diagnostics_metrics_are_computed_correctly(tmp_path, monkeypatch):
+    _set_managed_runtime_paths(monkeypatch, tmp_path)
     db_path = str(tmp_path / "fee-diagnostics.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -91,6 +107,7 @@ def test_fee_diagnostics_metrics_are_computed_correctly(tmp_path, monkeypatch):
 
 
 def test_fee_diagnostics_handles_empty_data(tmp_path, monkeypatch, capsys):
+    manager = _set_managed_runtime_paths(monkeypatch, tmp_path)
     db_path = str(tmp_path / "fee-diagnostics-empty.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -103,9 +120,11 @@ def test_fee_diagnostics_handles_empty_data(tmp_path, monkeypatch, capsys):
     assert "[FEE-DIAGNOSTICS]" in out
     assert "avg_fee_rate=-" in out
     assert "no fills found in the selected window" in out
+    assert manager.fee_diagnostics_report_path().exists()
 
 
 def test_fee_diagnostics_cli_json_smoke(tmp_path, monkeypatch, capsys):
+    manager = _set_managed_runtime_paths(monkeypatch, tmp_path)
     db_path = str(tmp_path / "fee-diagnostics-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -119,6 +138,7 @@ def test_fee_diagnostics_cli_json_smoke(tmp_path, monkeypatch, capsys):
     assert payload["roundtrip_window"]["limit"] == 2
     assert "fills" in payload
     assert "roundtrip" in payload
+    assert manager.fee_diagnostics_report_path().exists()
 
 
 def test_fee_diagnostics_default_estimate_uses_live_fee_rate_in_live_mode(monkeypatch):
