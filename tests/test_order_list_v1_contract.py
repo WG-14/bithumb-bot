@@ -111,6 +111,30 @@ def test_v1_orders_query_hash_serialization_for_identifier_arrays_is_stable() ->
     assert claims["query_hash"] == hashlib.sha512(canonical.encode("utf-8")).hexdigest()
 
 
+def test_v1_orders_query_hash_serialization_uses_bracket_array_for_single_identifier_kind() -> None:
+    payload = {
+        "page": 1,
+        "order_by": "desc",
+        "client_order_ids": ["cid-1", "cid-2"],
+        "state": "wait",
+        "limit": 2,
+    }
+    canonical = BithumbPrivateAPI._canonical_payload_for_query_hash(payload)
+    assert canonical == "page=1&order_by=desc&client_order_ids[]=cid-1&client_order_ids[]=cid-2&state=wait&limit=2"
+
+
+def test_v1_orders_builder_rejects_invalid_client_order_id_format() -> None:
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+        build_order_list_params(client_order_ids=["invalid id"])
+
+
+def test_get_recent_orders_rejects_broad_scan_without_identifiers() -> None:
+    _configure_live()
+    broker = BithumbBroker()
+    with pytest.raises(BrokerRejectError, match="broad /v1/orders market/state scans are disabled"):
+        broker.get_recent_orders(limit=10)
+
+
 def test_get_recent_orders_fails_fast_on_contract_violation_row(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_live()
     broker = BithumbBroker()
