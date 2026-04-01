@@ -858,6 +858,36 @@ def test_get_order_prefers_uuid_when_client_order_id_is_invalid(monkeypatch):
     assert order.exchange_order_id == "filled-priority-1"
 
 
+def test_get_order_lookup_identifier_priority_prefers_uuid_over_client_order_id(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["params"] = params
+        return {
+            "uuid": "filled-priority-2",
+            "client_order_id": "cid-priority-2",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "done",
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    order = broker.get_order(client_order_id="cid-priority-2", exchange_order_id="filled-priority-2")
+
+    assert call == {"endpoint": "/v1/order", "params": {"uuid": "filled-priority-2"}}
+    assert order.exchange_order_id == "filled-priority-2"
+
+
 def test_get_order_supports_client_order_id_lookup(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -987,6 +1017,32 @@ def test_get_order_rejects_invalid_numeric_fields(monkeypatch):
         broker.get_order(client_order_id="cid-bad-number")
 
 
+def test_get_order_rejects_invalid_executed_funds_numeric(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-bad-executed-funds-1",
+            "client_order_id": "cid-bad-executed-funds",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.03",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.03",
+            "executed_funds": "not-a-number",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "done",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="invalid numeric field 'executed_funds'"):
+        broker.get_order(client_order_id="cid-bad-executed-funds")
+
+
 def test_get_order_rejects_non_list_trades(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1039,6 +1095,42 @@ def test_get_order_accepts_optional_executed_funds(monkeypatch, executed_funds):
     monkeypatch.setattr(broker, "_get_private", _fake_get)
     order = broker.get_order(client_order_id="cid-executed-funds")
     assert order.status == "FILLED"
+
+
+def test_get_order_allows_optional_documented_field_expansion(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-optional-1",
+            "client_order_id": "cid-optional",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "ask",
+            "price": "151000000",
+            "volume": "0.02",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.02",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:01:00+00:00",
+            "state": "done",
+            "paid_fee": "123",
+            "locked": "0",
+            "trades_count": "2",
+            "extra_future_field": "ignored",
+        },
+    )
+
+    order = broker.get_order(client_order_id="cid-optional")
+
+    assert order.status == "FILLED"
+    assert order.raw is not None
+    assert order.raw["paid_fee"] == "123"
+    assert order.raw["locked"] == "0"
+    assert order.raw["trades_count"] == "2"
+    assert "extra_future_field" not in order.raw
 
 
 def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
@@ -1130,6 +1222,32 @@ def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     assert [fill.fill_id for fill in fills] == ["t1", "t2"]
     assert fills[0].qty == pytest.approx(0.02)
     assert fills[1].fee == pytest.approx(12.0)
+
+
+@pytest.mark.parametrize("trades_value", [None, []])
+def test_get_fills_v1_order_handles_missing_or_empty_trades_with_aggregate_fill(monkeypatch, trades_value):
+    _configure_live()
+    broker = BithumbBroker()
+
+    payload = {
+        "uuid": "filled-agg-1",
+        "client_order_id": "cid-agg-1",
+        "price": "149000000",
+        "volume": "0.05",
+        "executed_volume": "0.05",
+        "state": "done",
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    if trades_value is not None:
+        payload["trades"] = trades_value
+
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    fills = broker.get_fills(client_order_id="cid-agg-1", exchange_order_id="filled-agg-1")
+
+    assert len(fills) == 1
+    assert fills[0].exchange_order_id == "filled-agg-1"
+    assert fills[0].qty == pytest.approx(0.05)
 
 
 def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
