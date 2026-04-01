@@ -10,7 +10,12 @@ import httpx
 import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI, classify_private_api_error
-from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
+from bithumb_bot.broker.base import (
+    BrokerIdentifierMismatchError,
+    BrokerRejectError,
+    BrokerSchemaError,
+    BrokerTemporaryError,
+)
 from bithumb_bot.config import settings
 from bithumb_bot.public_api_orderbook import BestQuote
 from decimal import Decimal
@@ -173,6 +178,13 @@ def test_classify_private_api_error_categories_cover_v1_orders_contract_failures
 
     code, summary = classify_private_api_error(BrokerTemporaryError("bithumb private /v1/orders transport error"))
     assert code == "TEMPORARY"
+
+    code, summary = classify_private_api_error(BrokerIdentifierMismatchError("order lookup response exchange_order_id mismatch"))
+    assert code == "IDENTIFIER_MISMATCH"
+    assert "identifiers conflict" in summary
+
+    code, summary = classify_private_api_error(BrokerSchemaError("order lookup response schema mismatch: expected object payload"))
+    assert code == "DOC_SCHEMA"
 
 
 
@@ -2501,3 +2513,46 @@ def test_get_recent_orders_logs_parser_failure_context_for_v1_orders(monkeypatch
     assert "uuid_present=1" in caplog.text
     assert "parser_failure_reason=" in caplog.text
     assert "unknown state 'mystery'" in caplog.text
+
+
+def test_get_order_logs_myorder_lookup_failure_context_on_identifier_mismatch(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "other-exid",
+            "client_order_id": "cid-lookup-1",
+            "side": "bid",
+            "volume": "0.1",
+            "remaining_volume": "0.1",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "wait",
+        },
+    )
+
+    with caplog.at_level(logging.ERROR, logger="bithumb_bot.run"):
+        with pytest.raises(BrokerRejectError, match="exchange_order_id mismatch"):
+            broker.get_order(client_order_id="cid-lookup-1", exchange_order_id="requested-exid")
+
+    assert "[V1_MYORDER_LOOKUP_FAIL]" in caplog.text
+    assert "stage=get_order" in caplog.text
+    assert "requested_exchange_order_id=requested-exid" in caplog.text
+    assert "response_exchange_order_id=other-exid" in caplog.text
+    assert 'reason="IDENTIFIER_MISMATCH:' in caplog.text
+
+
+def test_get_fills_logs_myorder_lookup_failure_context_on_schema_mismatch(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: [])
+
+    with caplog.at_level(logging.ERROR, logger="bithumb_bot.run"):
+        with pytest.raises(BrokerRejectError, match="expected object payload actual=list"):
+            broker.get_fills(client_order_id="cid-fill-log-1", exchange_order_id="filled-log-1")
+
+    assert "[V1_MYORDER_LOOKUP_FAIL]" in caplog.text
+    assert "stage=get_fills" in caplog.text
+    assert "requested_client_order_id=cid-fill-log-1" in caplog.text
+    assert 'reason="DOC_SCHEMA:' in caplog.text

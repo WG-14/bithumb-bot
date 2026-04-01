@@ -19,12 +19,23 @@ from ..config import settings
 from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from ..markets import canonical_market_id
 from ..observability import format_log_kv
-from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
+from .base import (
+    BrokerBalance,
+    BrokerFill,
+    BrokerIdentifierMismatchError,
+    BrokerOrder,
+    BrokerRejectError,
+    BrokerSchemaError,
+    BrokerTemporaryError,
+)
 from .accounts_v1 import parse_accounts_response, select_pair_balances, to_broker_balance
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
+    ensure_identifier_consistency as ensure_v1_identifier_consistency,
+    require_order_payload_dict as require_v1_order_payload_dict,
     require_known_state as require_v1_known_state,
+    resolve_requested_identifiers as resolve_v1_requested_identifiers,
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
@@ -366,7 +377,9 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         token in detail for token in ("transport error", "server error", "timeout", "timed out", "temporar")
     ):
         return "TEMPORARY", "temporary network/server error; retry with backoff"
-    if "schema mismatch" in detail:
+    if isinstance(exc, BrokerIdentifierMismatchError) or "identifier mismatch" in detail:
+        return "IDENTIFIER_MISMATCH", "request/response identifiers conflict; reject and investigate"
+    if isinstance(exc, BrokerSchemaError) or "schema mismatch" in detail:
         return "DOC_SCHEMA", "documented response schema mismatch (/v1/orders or /v1/order)"
     if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail or "signature" in detail:
         return "AUTH_SIGN", "authentication/signature failed (401 / invalid JWT / key-secret mismatch)"
@@ -568,6 +581,31 @@ class BithumbBroker:
                 uuid_present=bool(self._clean_identifier(row.get("uuid"))),
                 client_order_id_present=bool(self._clean_identifier(row.get("client_order_id"))),
                 parser_failure_reason=reason,
+            )
+        )
+
+    def _log_v1_myorder_lookup_failure(
+        self,
+        *,
+        stage: str,
+        retry_safe: bool,
+        requested_client_order_id: str,
+        requested_exchange_order_id: str,
+        response_client_order_id: str,
+        response_exchange_order_id: str,
+        reason: str,
+    ) -> None:
+        RUN_LOG.error(
+            format_log_kv(
+                "[V1_MYORDER_LOOKUP_FAIL]",
+                stage=stage,
+                retry_safe=int(retry_safe),
+                retryable=int("temporary" in reason.lower()),
+                requested_client_order_id=requested_client_order_id,
+                requested_exchange_order_id=requested_exchange_order_id,
+                response_client_order_id=response_client_order_id,
+                response_exchange_order_id=response_exchange_order_id,
+                reason=reason,
             )
         )
 
@@ -1223,60 +1261,66 @@ class BithumbBroker:
         exchange_order_id: str | None = None,
     ) -> BrokerOrder:
         now = int(time.time() * 1000)
-        requested_client_order_id = str(client_order_id or "").strip()
-        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        requested = resolve_v1_requested_identifiers(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+        )
         params = build_v1_order_lookup_params(
-            client_order_id=requested_client_order_id,
-            exchange_order_id=requested_exchange_order_id,
+            client_order_id=requested.client_order_id,
+            exchange_order_id=requested.exchange_order_id,
         )
 
-        exid = requested_exchange_order_id or f"dry_{requested_client_order_id}"
+        exid = requested.exchange_order_id or f"dry_{requested.client_order_id}"
         if self.dry_run:
-            return BrokerOrder(requested_client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
+            return BrokerOrder(requested.client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
 
-        data = self._get_private("/v1/order", params, retry_safe=True)
-        if not isinstance(data, dict):
-            raise BrokerRejectError(
-                "order lookup response schema mismatch: "
-                f"unexpected /v1/order payload type={type(data).__name__}"
+        response_client_order_id = ""
+        response_exchange_order_id = ""
+        try:
+            # 1) transport/schema gate
+            payload = self._get_private("/v1/order", params, retry_safe=True)
+            data = require_v1_order_payload_dict(payload, context="order lookup response")
+            self._journal_read_summary(path="/v1/order", data=data)
+            response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
+            if not response_has_identifier:
+                raise BrokerSchemaError("order lookup response schema mismatch: missing both uuid and client_order_id in response")
+
+            # 2) identifier resolution and consistency
+            resolved_ids = resolve_v1_order_identifiers(
+                data,
+                fallback_client_order_id=requested.client_order_id,
             )
-        self._journal_read_summary(path="/v1/order", data=data)
-        response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
-        resolved_ids = resolve_v1_order_identifiers(
-            data,
-            fallback_client_order_id=requested_client_order_id,
-        )
-        resolved_client_order_id = resolved_ids.client_order_id
-        resolved_exchange_order_id = resolved_ids.exchange_order_id
-        if requested_exchange_order_id and resolved_exchange_order_id and requested_exchange_order_id != resolved_exchange_order_id:
-            raise BrokerRejectError(
-                "order lookup response exchange_order_id mismatch: "
-                f"requested={requested_exchange_order_id} response={resolved_exchange_order_id}"
+            response_client_order_id = resolved_ids.client_order_id
+            response_exchange_order_id = resolved_ids.exchange_order_id
+            ensure_v1_identifier_consistency(
+                requested=requested,
+                response=resolved_ids,
+                context="order lookup response",
+                require_response_identifier=True,
             )
-        if (
-            requested_client_order_id
-            and not requested_exchange_order_id
-            and resolved_client_order_id
-            and requested_client_order_id != resolved_client_order_id
-        ):
-            raise BrokerRejectError(
-                "order lookup response client_order_id mismatch: "
-                f"requested={requested_client_order_id} response={resolved_client_order_id}"
+
+            # 3) domain mapping
+            normalized = self._normalize_v1_order_row_strict(data)
+        except (BrokerSchemaError, BrokerIdentifierMismatchError, BrokerTemporaryError, BrokerRejectError) as exc:
+            self._log_v1_myorder_lookup_failure(
+                stage="get_order",
+                retry_safe=True,
+                requested_client_order_id=requested.client_order_id,
+                requested_exchange_order_id=requested.exchange_order_id,
+                response_client_order_id=response_client_order_id,
+                response_exchange_order_id=response_exchange_order_id,
+                reason=f"{classify_private_api_error(exc)[0]}:{exc}",
             )
-        if not response_has_identifier:
-            raise BrokerRejectError(
-                "order lookup response schema mismatch: "
-                "missing both uuid and client_order_id in response"
-            )
-        normalized = self._normalize_v1_order_row_strict(data)
+            raise
+
         state = normalized.state
         qty_req = float(normalized.volume)
         qty_filled = float(normalized.executed_volume)
         status = v1_status_from_state(state=state, qty_req=qty_req, qty_filled=qty_filled)
         order_raw = self._raw_v1_order_fields(data)
         return BrokerOrder(
-            client_order_id=resolved_client_order_id,
-            exchange_order_id=resolved_exchange_order_id,
+            client_order_id=response_client_order_id,
+            exchange_order_id=response_exchange_order_id,
             side=str(normalized.side),
             status=status,
             price=float(normalized.price) if normalized.price is not None else None,
@@ -1355,48 +1399,55 @@ class BithumbBroker:
         if self.dry_run:
             return []
 
-        requested_client_order_id = str(client_order_id or "").strip()
-        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        requested = resolve_v1_requested_identifiers(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+        )
 
-        if not (requested_exchange_order_id or requested_client_order_id):
+        if not (requested.exchange_order_id or requested.client_order_id):
             raise BrokerRejectError(
                 "fill lookup requires identifiers; /v1/order does not support broad recent fill scans without uuid/client_order_id"
             )
         params = build_v1_order_lookup_params(
-            client_order_id=requested_client_order_id,
-            exchange_order_id=requested_exchange_order_id,
+            client_order_id=requested.client_order_id,
+            exchange_order_id=requested.exchange_order_id,
         )
-        data = self._get_private("/v1/order", params, retry_safe=True)
-        self._journal_read_summary(path="/v1/order(fills)", data=data)
-        if not isinstance(data, dict):
-            raise BrokerRejectError(
-                "fill lookup response schema mismatch: "
-                f"unexpected /v1/order payload type={type(data).__name__}"
+        response_client_order_id = ""
+        response_exchange_order_id = ""
+        try:
+            # 1) transport/schema gate
+            payload = self._get_private("/v1/order", params, retry_safe=True)
+            data = require_v1_order_payload_dict(payload, context="fill lookup response")
+            self._journal_read_summary(path="/v1/order(fills)", data=data)
+            response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
+            if not response_has_identifier:
+                raise BrokerSchemaError("fill lookup response schema mismatch: missing both uuid and client_order_id in response")
+
+            # 2) identifier resolution and consistency
+            response_ids = resolve_v1_order_identifiers(
+                data,
+                fallback_client_order_id=requested.client_order_id,
             )
-        response_ids = resolve_v1_order_identifiers(
-            data,
-            fallback_client_order_id=requested_client_order_id,
-        )
-        response_client_order_id = response_ids.client_order_id
-        response_exchange_order_id = response_ids.exchange_order_id
-        if (
-            requested_exchange_order_id
-            and response_exchange_order_id
-            and requested_exchange_order_id != response_exchange_order_id
-        ):
-            raise BrokerRejectError(
-                "fill lookup response exchange_order_id mismatch: "
-                f"requested={requested_exchange_order_id} response={response_exchange_order_id}"
+            response_client_order_id = response_ids.client_order_id
+            response_exchange_order_id = response_ids.exchange_order_id
+            ensure_v1_identifier_consistency(
+                requested=requested,
+                response=response_ids,
+                context="fill lookup response",
+                require_response_identifier=True,
+                enforce_client_match_with_exchange_lookup=True,
             )
-        if (
-            requested_client_order_id
-            and response_client_order_id
-            and requested_client_order_id != response_client_order_id
-        ):
-            raise BrokerRejectError(
-                "fill lookup response client_order_id mismatch: "
-                f"requested={requested_client_order_id} response={response_client_order_id}"
+        except (BrokerSchemaError, BrokerIdentifierMismatchError, BrokerTemporaryError, BrokerRejectError) as exc:
+            self._log_v1_myorder_lookup_failure(
+                stage="get_fills",
+                retry_safe=True,
+                requested_client_order_id=requested.client_order_id,
+                requested_exchange_order_id=requested.exchange_order_id,
+                response_client_order_id=response_client_order_id,
+                response_exchange_order_id=response_exchange_order_id,
+                reason=f"{classify_private_api_error(exc)[0]}:{exc}",
             )
+            raise
 
         fills: list[BrokerFill] = []
         requires_removed_legacy_scan = False
@@ -1427,7 +1478,7 @@ class BithumbBroker:
                     ts = self._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
                     trade_client_order_id, _ = self._resolve_order_identifiers(
                         trade,
-                        fallback_client_order_id=requested_client_order_id or row.get("client_order_id") or "",
+                        fallback_client_order_id=requested.client_order_id or row.get("client_order_id") or "",
                     )
                     fills.append(
                         BrokerFill(
@@ -1471,7 +1522,7 @@ class BithumbBroker:
             )
             aggregate_client_order_id, aggregate_exchange_order_id = self._resolve_order_identifiers(
                 row,
-                fallback_client_order_id=requested_client_order_id or "",
+                fallback_client_order_id=requested.client_order_id or "",
                 fallback_exchange_order_id=str(normalized.get("uuid") or ""),
             )
             fills.append(

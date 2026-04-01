@@ -16,6 +16,14 @@ class BrokerRejectError(BrokerError):
     """Exchange business reject (request was received but rejected)."""
 
 
+class BrokerSchemaError(BrokerRejectError):
+    """Broker/exchange response contract (schema) mismatch."""
+
+
+class BrokerIdentifierMismatchError(BrokerRejectError):
+    """Requested and response identifiers conflict."""
+
+
 class BrokerSubmissionUnknownError(BrokerError):
     """Order submission state is unknown and requires reconciliation."""
 
