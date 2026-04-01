@@ -219,6 +219,20 @@ class _CancelAcceptedBroker(_CancelOpenOrdersBroker):
         return BrokerOrder(client_order_id, exchange_order_id or "stray1", "SELL", "NEW", 110.0, 0.2, 0.05, 1, 2)
 
 
+class _CancelIdentifierMismatchBroker(_CancelOpenOrdersBroker):
+    def get_open_orders(self) -> list[BrokerOrder]:
+        return [BrokerOrder("live_1000_buy", "remote_mismatch_exid", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
+
+
+class _CancelAcceptedUnknownStatusBroker(_CancelOpenOrdersBroker):
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        self.canceled.append((client_order_id, exchange_order_id))
+        return BrokerOrder(client_order_id, exchange_order_id, "BUY", "CANCEL_REQUESTED", None, 0.0, 0.0, 1, 1)
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 2)
+
+
 class _StrictRecoveryBroker(_FakeBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         if exchange_order_id is None:
@@ -1339,6 +1353,55 @@ def test_cancel_open_orders_tracks_cancel_acceptance_and_confirmation(tmp_path):
     assert summary["cancel_confirm_pending_count"] == 0
     assert summary["stray_canceled_count"] == 0
     assert len(summary["stray_messages"]) == 1
+
+
+def test_cancel_open_orders_does_not_bind_by_client_order_id_when_exchange_id_mismatch(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_identifier_mismatch.sqlite"))
+    conn = ensure_db(str(tmp_path / "cancel_identifier_mismatch.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    summary = cancel_open_orders_with_broker(_CancelIdentifierMismatchBroker())
+
+    conn = ensure_db(str(tmp_path / "cancel_identifier_mismatch.sqlite"))
+    row = conn.execute("SELECT status FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "NEW"
+    assert summary["failed_count"] == 1
+    assert any("identifier mismatch" in str(message) for message in summary["error_messages"])
+
+
+def test_cancel_open_orders_escalates_when_post_cancel_status_is_unresolved(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_unresolved_status.sqlite"))
+    conn = ensure_db(str(tmp_path / "cancel_unresolved_status.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    summary = cancel_open_orders_with_broker(_CancelAcceptedUnknownStatusBroker())
+
+    conn = ensure_db(str(tmp_path / "cancel_unresolved_status.sqlite"))
+    row = conn.execute("SELECT status, last_error FROM orders WHERE client_order_id='live_1000_buy'").fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "manual recovery required" in str(row["last_error"])
+    assert summary["failed_count"] == 1
+    assert any("final status unresolved" in str(message) for message in summary["error_messages"])
 
 
 def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_and_continues(monkeypatch, tmp_path):

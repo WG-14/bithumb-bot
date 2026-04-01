@@ -1353,13 +1353,13 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             }
 
         local_by_exchange_id: dict[str, str] = {}
-        local_by_client_order_id: dict[str, str] = {}
+        local_rows_by_client_order_id: dict[str, object] = {}
         rows = conn.execute(
-            "SELECT client_order_id, exchange_order_id FROM orders"
+            "SELECT client_order_id, exchange_order_id, side, status FROM orders"
         ).fetchall()
         for row in rows:
             local_id = str(row["client_order_id"])
-            local_by_client_order_id[local_id] = local_id
+            local_rows_by_client_order_id[local_id] = row
             if row["exchange_order_id"]:
                 local_by_exchange_id[str(row["exchange_order_id"])] = local_id
 
@@ -1376,8 +1376,30 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             remote_exchange_id = str(remote.exchange_order_id or "")
             remote_client_order_id = str(remote.client_order_id or "")
             local_id = local_by_exchange_id.get(remote_exchange_id)
+            local_weak_mismatch_id: str | None = None
             if local_id is None and remote_client_order_id:
-                local_id = local_by_client_order_id.get(remote_client_order_id)
+                candidate = local_rows_by_client_order_id.get(remote_client_order_id)
+                if candidate is not None:
+                    candidate_exchange = str(candidate["exchange_order_id"] or "")
+                    if _strong_order_correlation(
+                        local_client_order_id=str(candidate["client_order_id"]),
+                        local_exchange_order_id=(candidate_exchange or None),
+                        remote_client_order_id=remote_client_order_id,
+                        remote_exchange_order_id=(remote_exchange_id or None),
+                    ):
+                        local_id = str(candidate["client_order_id"])
+                    else:
+                        local_weak_mismatch_id = str(candidate["client_order_id"])
+
+            if local_weak_mismatch_id is not None:
+                failed_count += 1
+                error_messages.append(
+                    "cancel skipped due to identifier mismatch: "
+                    f"remote_exchange_order_id={remote_exchange_id or '<none>'} "
+                    f"remote_client_order_id={remote_client_order_id or '<none>'} "
+                    f"local_client_order_id={local_weak_mismatch_id}"
+                )
+                continue
 
             cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
 
@@ -1403,6 +1425,12 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                     final_status = str(post_cancel.status or "").strip() or final_status
                 except Exception as e:
                     final_status = CANCEL_REQUESTED_STATUS
+                    error_messages.append(
+                        "post-cancel confirmation lookup failed: "
+                        f"exchange_order_id={remote_exchange_id or '<none>'} "
+                        f"client_order_id={cancel_client_order_id} "
+                        f"error={type(e).__name__}: {e}"
+                    )
                     _LOG.warning(
                         "post-cancel confirmation lookup failed exchange_order_id=%s client_order_id=%s err=%s: %s",
                         remote_exchange_id or "-",
@@ -1426,11 +1454,30 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                 elif is_final_filled:
                     set_status(local_id, "FILLED", conn=conn)
                 else:
-                    _LOG.warning(
-                        "cancel accepted but final status unconfirmed client_order_id=%s exchange_order_id=%s status=%s",
-                        local_id,
-                        remote_exchange_id or "-",
-                        final_status or "-",
+                    reason = (
+                        "cancel accepted but final status unresolved; "
+                        f"exchange_order_id={remote_exchange_id or '<none>'}; "
+                        f"status={final_status or CANCEL_REQUESTED_STATUS}; manual recovery required"
+                    )
+                    current = conn.execute(
+                        "SELECT status, side FROM orders WHERE client_order_id=?",
+                        (local_id,),
+                    ).fetchone()
+                    from_status = str(current["status"]) if current and current["status"] else "UNKNOWN"
+                    local_side = str(current["side"]) if current and current["side"] else str(remote.side)
+                    _mark_recovery_required_with_reason(
+                        conn,
+                        client_order_id=local_id,
+                        side=local_side,
+                        from_status=from_status,
+                        reason_code=RECONCILE_MISMATCH,
+                        reason=reason,
+                    )
+                    failed_count += 1
+                    error_messages.append(
+                        "cancel final status unresolved for local order: "
+                        f"client_order_id={local_id} exchange_order_id={remote_exchange_id or '<none>'} "
+                        f"status={final_status or CANCEL_REQUESTED_STATUS}"
                     )
                 matched_local_count += 1
             else:
