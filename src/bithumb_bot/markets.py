@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import re
 from threading import Lock
 import time
 import httpx
 
-from .public_api import PublicApiSchemaError, get_public_json
+from .public_api import PublicApiSchemaError, get_public_json_with_retry
 
 
 BASE_URL = "https://api.bithumb.com"
+MARKET_CATALOG_ENDPOINT = "/v1/market/all"
+LOG = logging.getLogger(__name__)
 
 
 class MarketCatalogError(PublicApiSchemaError):
@@ -41,25 +44,60 @@ class MarketInfo:
 
 
 class MarketCatalogClient:
-    def __init__(self, *, base_url: str = BASE_URL, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = BASE_URL,
+        timeout: float = 10.0,
+        max_retries: int = 3,
+        base_backoff_sec: float = 0.2,
+        max_backoff_sec: float = 2.0,
+        jitter_sec: float = 0.1,
+    ) -> None:
         self._base_url = base_url
         self._timeout = timeout
+        self._max_retries = max_retries
+        self._base_backoff_sec = base_backoff_sec
+        self._max_backoff_sec = max_backoff_sec
+        self._jitter_sec = jitter_sec
 
     def fetch_markets(self, *, is_details: bool = False) -> list[MarketInfo]:
+        endpoint = MARKET_CATALOG_ENDPOINT
         params = {"isDetails": "true" if is_details else "false"}
-        with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
-            payload = get_public_json(client, "/v1/market/all", params=params)
+        try:
+            with httpx.Client(base_url=self._base_url, timeout=self._timeout) as client:
+                payload = get_public_json_with_retry(
+                    client,
+                    endpoint,
+                    params=params,
+                    max_retries=self._max_retries,
+                    base_backoff_sec=self._base_backoff_sec,
+                    max_backoff_sec=self._max_backoff_sec,
+                    jitter_sec=self._jitter_sec,
+                )
 
-        if not isinstance(payload, list):
-            raise MarketCatalogError(f"unexpected market catalog payload type: {type(payload).__name__}")
-        if not payload:
-            raise MarketCatalogError("market catalog is empty")
+            if not isinstance(payload, list):
+                raise MarketCatalogError(f"unexpected market catalog payload type: {type(payload).__name__}")
+            if not payload:
+                raise MarketCatalogError("market catalog is empty")
 
-        items: list[MarketInfo] = []
-        for row in payload:
-            item = parse_market_catalog_row_details(row) if is_details else parse_market_catalog_row(row)
-            items.append(item)
-        return items
+            items: list[MarketInfo] = []
+            for row in payload:
+                item = parse_market_catalog_row_details(row) if is_details else parse_market_catalog_row(row)
+                items.append(item)
+            return items
+        except Exception as exc:
+            schema_drift = isinstance(exc, (MarketCatalogError, PublicApiSchemaError))
+            LOG.warning(
+                "market catalog fetch failed endpoint=%s isDetails=%s retries=%s schema_drift=%s error=%s: %s",
+                endpoint,
+                params["isDetails"],
+                max(0, int(self._max_retries)),
+                schema_drift,
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
 
 class MarketRegistry:

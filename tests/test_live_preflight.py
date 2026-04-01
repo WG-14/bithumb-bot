@@ -661,7 +661,12 @@ def test_market_preflight_blocks_on_catalog_fetch_failure_in_live_real_mode(monk
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "catalog fetch failed" in str(exc.value)
+    msg = str(exc.value)
+    assert "catalog fetch failed" in msg
+    assert "endpoint=/v1/market/all" in msg
+    assert "isDetails=true" in msg
+    assert "mode=live" in msg
+    assert "block_on_catalog_error=True" in msg
 
 
 def test_market_preflight_allows_catalog_fetch_failure_in_dry_run_with_warning(
@@ -680,6 +685,12 @@ def test_market_preflight_allows_catalog_fetch_failure_in_dry_run_with_warning(
         config.validate_live_mode_preflight(settings)
 
     assert "catalog fetch failed" in caplog.text
+    assert "endpoint=/v1/market/all" in caplog.text
+    assert "isDetails=true" in caplog.text
+    assert "mode=live" in caplog.text
+    assert "dry_run=True" in caplog.text
+    assert "block_on_catalog_error=False" in caplog.text
+    assert "schema_drift=True" in caplog.text
 
 
 def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(

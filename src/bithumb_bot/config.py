@@ -513,12 +513,15 @@ def validate_market_preflight(cfg: Settings) -> None:
     except Exception as exc:
         msg = (
             "market preflight catalog fetch failed: "
+            "endpoint=/v1/market/all isDetails=true "
             f"pair={configured_market!r} normalized={normalized_market_input} "
+            f"mode={normalized_mode} dry_run={is_dryrun} block_on_catalog_error={block_on_catalog_error} "
+            f"schema_drift={isinstance(exc, MarketCatalogError)} "
             f"error={type(exc).__name__}: {exc}"
         )
         if block_on_catalog_error:
             raise MarketPreflightValidationError(msg) from exc
-        LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
+        LOG.warning("%s; continuing by policy", msg)
         return
 
     try:

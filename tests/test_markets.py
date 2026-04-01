@@ -24,9 +24,9 @@ from bithumb_bot.markets import (
     get_market_registry,
 )
 from bithumb_bot.public_api import (
-    PublicApiRequestError,
     PublicApiResponseError,
     PublicApiSchemaError,
+    PublicApiTransientError,
     extract_api_error,
 )
 
@@ -48,6 +48,9 @@ class _FakeClient:
     status_code = 200
     text = ""
     raise_request_error: Exception | None = None
+    raise_request_errors: list[Exception | None] | None = None
+    status_codes: list[int] | None = None
+    payloads: list[object] | None = None
     requests = []
 
     def __init__(self, *, base_url: str, timeout: float) -> None:
@@ -62,9 +65,20 @@ class _FakeClient:
 
     def get(self, path: str, params=None):
         self.__class__.requests.append({"path": path, "params": params})
-        if self.__class__.raise_request_error is not None:
+        if self.__class__.raise_request_errors:
+            req_err = self.__class__.raise_request_errors.pop(0)
+            if req_err is not None:
+                raise req_err
+        elif self.__class__.raise_request_error is not None:
             raise self.__class__.raise_request_error
-        return _FakeResponse(self.__class__.payload, status_code=self.__class__.status_code, text=self.__class__.text)
+
+        status_code = (
+            self.__class__.status_codes.pop(0)
+            if self.__class__.status_codes
+            else self.__class__.status_code
+        )
+        payload = self.__class__.payloads.pop(0) if self.__class__.payloads else self.__class__.payload
+        return _FakeResponse(payload, status_code=status_code, text=self.__class__.text)
 
 
 def _reset_fake_client() -> None:
@@ -72,6 +86,9 @@ def _reset_fake_client() -> None:
     _FakeClient.status_code = 200
     _FakeClient.text = ""
     _FakeClient.raise_request_error = None
+    _FakeClient.raise_request_errors = None
+    _FakeClient.status_codes = None
+    _FakeClient.payloads = None
     _FakeClient.requests = []
 
 
@@ -198,8 +215,55 @@ def test_catalog_fetch_raises_on_network_error(monkeypatch) -> None:
     _FakeClient.raise_request_error = httpx.ConnectError("network down")
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
-    with pytest.raises(PublicApiRequestError, match="request failed"):
+    with pytest.raises(PublicApiTransientError, match="transient failure after retries"):
         MarketCatalogClient().fetch_markets()
+
+
+def test_catalog_fetch_retries_transient_http_status_then_succeeds(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.status_codes = [503, 200]
+    _FakeClient.payloads = [
+        {"error": {"name": "temporarily_unavailable", "message": "retry"}},
+        [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin"}],
+    ]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    items = MarketCatalogClient(max_retries=1, base_backoff_sec=0.0, max_backoff_sec=0.0, jitter_sec=0.0).fetch_markets()
+
+    assert [item.market for item in items] == ["KRW-BTC"]
+    assert len(_FakeClient.requests) == 2
+
+
+def test_catalog_fetch_raises_after_retry_budget_exhausted(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.status_codes = [503, 503]
+    _FakeClient.payloads = [{"error": "busy"}, {"error": "busy"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(PublicApiTransientError, match="transient failure after retries"):
+        MarketCatalogClient(max_retries=1, base_backoff_sec=0.0, max_backoff_sec=0.0, jitter_sec=0.0).fetch_markets()
+
+
+def test_catalog_fetch_does_not_retry_schema_error(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": 123}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(PublicApiSchemaError, match="english_name"):
+        MarketCatalogClient(max_retries=3, base_backoff_sec=0.0, max_backoff_sec=0.0, jitter_sec=0.0).fetch_markets()
+
+    assert len(_FakeClient.requests) == 1
+
+
+def test_catalog_fetch_retries_timeout_error_then_succeeds(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.raise_request_errors = [httpx.ReadTimeout("timeout"), None]
+    _FakeClient.payloads = [[{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin"}]]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    items = MarketCatalogClient(max_retries=1, base_backoff_sec=0.0, max_backoff_sec=0.0, jitter_sec=0.0).fetch_markets()
+    assert len(items) == 1
+    assert len(_FakeClient.requests) == 2
 
 
 def test_catalog_fetch_raises_on_schema_mismatch_field_type(monkeypatch) -> None:
