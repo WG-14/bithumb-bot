@@ -51,6 +51,19 @@ def _restore_settings():
     order_rules._cached_rules.update(old_cache)
 
 
+
+
+@pytest.fixture(autouse=True)
+def _stub_accounts_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [
+            {"currency": "KRW", "balance": "1000000", "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0"},
+        ],
+    )
+
 @pytest.fixture(autouse=True)
 def _set_live_roots_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     roots = {
@@ -769,3 +782,68 @@ def test_live_preflight_rejects_legacy_broad_scan_env_keys(monkeypatch: pytest.M
     message = str(exc.value)
     assert "legacy /v1/orders broad-scan env is not allowed" in message
     assert "BITHUMB_V1_ORDER_SCAN_MARKET" in message
+
+
+def test_accounts_preflight_passes_with_valid_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    config.validate_live_mode_preflight(settings)
+
+
+def test_accounts_preflight_schema_error_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(config, "_fetch_accounts_payload_for_preflight", lambda **_kwargs: {"status": "0000"})
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "schema mismatch" in msg
+    assert "ACCOUNTS_SCHEMA_MISMATCH" in msg
+
+
+def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "required currency missing" in msg
+    assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+
+
+def test_accounts_preflight_auth_failure_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("status=401 unauthorized")),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "인증 실패" in msg
+    assert "ACCOUNTS_AUTH_FAILED" in msg
+
+
+def test_accounts_preflight_transport_failure_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("transport error timeout")),
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "transport 실패" in msg
+    assert "ACCOUNTS_TRANSPORT_FAILED" in msg

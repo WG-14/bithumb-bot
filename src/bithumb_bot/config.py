@@ -84,6 +84,67 @@ class MarketPreflightValidationError(ValueError):
     pass
 
 
+class AccountsPreflightValidationError(ValueError):
+    pass
+
+
+def _fetch_accounts_payload_for_preflight(*, api_key: str, api_secret: str, base_url: str) -> object:
+    from .broker.bithumb import BithumbPrivateAPI
+
+    private_api = BithumbPrivateAPI(
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=base_url,
+        dry_run=False,
+    )
+    return private_api.request("GET", "/v1/accounts", params={}, retry_safe=True)
+
+
+def validate_accounts_preflight(cfg: Settings) -> None:
+    from .broker.bithumb import BithumbBroker, classify_private_api_error
+
+    canonical_market = normalize_market_id(str(cfg.PAIR or ""))
+    quote_currency, base_currency = canonical_market.split("-", 1)
+
+    try:
+        response = _fetch_accounts_payload_for_preflight(
+            api_key=str(cfg.BITHUMB_API_KEY or ""),
+            api_secret=str(cfg.BITHUMB_API_SECRET or ""),
+            base_url=str(cfg.BITHUMB_API_BASE or ""),
+        )
+    except Exception as exc:
+        code, summary = classify_private_api_error(exc)
+        detail = str(exc)
+        if code in {"AUTH_SIGN", "PERMISSION"}:
+            raise AccountsPreflightValidationError(
+                "/v1/accounts preflight 인증 실패: "
+                f"reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} detail={detail}"
+            ) from exc
+        raise AccountsPreflightValidationError(
+            "/v1/accounts preflight transport 실패: "
+            f"reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} detail={detail}"
+        ) from exc
+
+    try:
+        accounts = BithumbBroker._parse_accounts_payload(response)
+    except Exception as exc:
+        raise AccountsPreflightValidationError(
+            "/v1/accounts preflight schema mismatch: "
+            f"reason_code=ACCOUNTS_SCHEMA_MISMATCH detail={exc}"
+        ) from exc
+
+    missing: list[str] = []
+    if quote_currency not in accounts:
+        missing.append(quote_currency)
+    if base_currency not in accounts:
+        missing.append(base_currency)
+    if missing:
+        raise AccountsPreflightValidationError(
+            "/v1/accounts preflight required currency missing: "
+            f"reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING market={canonical_market} missing={','.join(missing)}"
+        )
+
+
 def resolve_db_path_from_env(mode: str) -> str:
     raw_db_path = os.getenv("DB_PATH")
     normalized_mode = str(mode or "").strip().lower()
@@ -410,6 +471,17 @@ def validate_market_preflight(cfg: Settings) -> None:
         if block_on_warning:
             raise MarketPreflightValidationError(msg)
         LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
+
+    try:
+        validate_accounts_preflight(cfg)
+    except AccountsPreflightValidationError as exc:
+        if normalized_mode == "live":
+            raise MarketPreflightValidationError(str(exc)) from exc
+        LOG.warning(
+            "accounts preflight warning (mode=%s): %s",
+            normalized_mode,
+            exc,
+        )
 
 
 def validate_live_mode_preflight(cfg: Settings) -> None:
