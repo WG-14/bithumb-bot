@@ -226,13 +226,14 @@ def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
 
 
 def cmd_ticker() -> None:
+    market = canonical_market_id(settings.PAIR)
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
-        snapshots = fetch_ticker(client, markets=settings.PAIR)
+        snapshots = fetch_ticker(client, markets=market)
     if not snapshots:
-        raise RuntimeError(f"ticker payload is empty for markets={settings.PAIR!r}")
+        raise RuntimeError(f"ticker payload is empty for markets={market!r}")
     d = snapshots[0]
     print(
-        f"[TICKER {d.market}] close={d.trade_price} high={d.high_price} "
+        f"[TICKER {d.market}] trade_price={d.trade_price} high={d.high_price} "
         f"low={d.low_price} volume_24h={d.acc_trade_volume_24h}"
     )
 

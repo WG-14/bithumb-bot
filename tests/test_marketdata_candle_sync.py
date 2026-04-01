@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.marketdata import cmd_candles, cmd_sync
+from bithumb_bot.marketdata import cmd_candles, cmd_sync, cmd_ticker
 from bithumb_bot.marketdata import (
     fetch_orderbook_top as fetch_marketdata_orderbook_top,
     fetch_orderbook_tops as fetch_marketdata_orderbook_tops,
@@ -14,6 +14,7 @@ from bithumb_bot.marketdata import (
 from bithumb_bot.public_api import PublicApiSchemaError
 from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.public_api_minute_candles import MinuteCandle
+from bithumb_bot.public_api_ticker import TickerSnapshot
 
 
 class _DummyClient:
@@ -228,3 +229,30 @@ def test_marketdata_orderbook_multi_market_fetch(monkeypatch, _settings_guard) -
     assert [q.market for q in quotes] == ["KRW-BTC", "KRW-ETH"]
     assert all(q.observed_at_epoch_sec is not None for q in quotes)
 
+
+def test_cmd_ticker_uses_canonical_market_input(monkeypatch, capsys, _settings_guard) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_ticker(client, *, markets):
+        captured["markets"] = markets
+        return [
+            TickerSnapshot(
+                market="KRW-BTC",
+                trade_price=100.0,
+                high_price=110.0,
+                low_price=90.0,
+                acc_trade_volume_24h=123.0,
+            )
+        ]
+
+    monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
+    monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
+    monkeypatch.setattr("bithumb_bot.marketdata.fetch_ticker", _fake_fetch_ticker)
+
+    cmd_ticker()
+
+    out = capsys.readouterr().out
+    assert captured["markets"] == "KRW-BTC"
+    assert "[TICKER KRW-BTC]" in out
+    assert "trade_price=100.0" in out
+    assert "close=" not in out
