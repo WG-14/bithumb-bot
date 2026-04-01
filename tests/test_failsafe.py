@@ -770,7 +770,12 @@ class _CleanupRevalidateBroker:
         self.open_order_calls = 0
         self.balance_calls = 0
 
-    def get_open_orders(self):
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ):
         self.open_order_calls += 1
         idx = min(self.open_order_calls - 1, len(self._open_orders_seq) - 1)
         open_present = bool(self._open_orders_seq[idx])
@@ -815,13 +820,28 @@ def test_cleanup_revalidation_ambiguous_state_remains_halted(monkeypatch):
     from bithumb_bot.engine import _revalidate_cleanup_state_after_failure
 
     class _AmbiguousBroker:
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             raise RuntimeError("open orders unavailable")
 
         def get_balance(self):
             raise RuntimeError("balance unavailable")
 
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    conn = ensure_db()
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('reval_ambiguous_1','ex-reval-1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
 
     safe, detail = _revalidate_cleanup_state_after_failure(
         _AmbiguousBroker(),
@@ -839,6 +859,15 @@ def test_cleanup_revalidation_is_bounded_by_max_attempts(monkeypatch):
     from bithumb_bot.engine import _revalidate_cleanup_state_after_failure
 
     broker = _CleanupRevalidateBroker(open_orders_seq=[True], position_seq=[True])
+    conn = ensure_db()
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('reval_bounded_1','ex-reval-2','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
 
     reconcile_calls = {"n": 0}
 

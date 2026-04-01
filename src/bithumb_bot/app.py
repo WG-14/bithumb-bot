@@ -933,13 +933,44 @@ def cmd_broker_diagnose() -> None:
         add_check("balance query", "PASS", balance_summary, critical=True)
 
     try:
-        open_orders = broker.get_open_orders()
-        add_check("open order query", "PASS", f"count={len(open_orders)}", critical=False)
+        conn = ensure_db()
+        try:
+            rows = conn.execute(
+                """
+                SELECT client_order_id, exchange_order_id
+                FROM orders
+                WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+        exchange_order_ids = sorted(
+            {
+                str(row["exchange_order_id"]).strip()
+                for row in rows
+                if str(row["exchange_order_id"] or "").strip()
+            }
+        )
+        client_order_ids = sorted(
+            {
+                str(row["client_order_id"]).strip()
+                for row in rows
+                if str(row["client_order_id"] or "").strip()
+            }
+        )
+        if exchange_order_ids or client_order_ids:
+            open_orders = broker.get_open_orders(
+                exchange_order_ids=exchange_order_ids,
+                client_order_ids=client_order_ids,
+            )
+            add_check("open order query", "PASS", f"known_unresolved_count={len(open_orders)}", critical=False)
+        else:
+            add_check("open order query", "PASS", "known_unresolved_count=0 (no local unresolved ids)", critical=False)
     except Exception as e:
         add_check(
             "open order query",
             "WARN",
-            f"snapshot failed ({type(e).__name__}: {e})",
+            f"identifier-scoped snapshot failed ({type(e).__name__}: {e})",
             critical=False,
         )
 
@@ -1052,12 +1083,46 @@ def _last_reconcile_failed(state) -> bool:
 def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[object], str | None]:
     if settings.MODE != "live":
         return [], "broker snapshot unavailable in non-live mode"
+    conn = ensure_db()
     try:
-        from .broker.bithumb import BithumbBroker, classify_private_api_error
+        local_rows = conn.execute(
+            """
+            SELECT client_order_id, exchange_order_id
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            ORDER BY updated_ts DESC, created_ts DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    finally:
+        conn.close()
+    exchange_order_ids = sorted(
+        {
+            str(row["exchange_order_id"]).strip()
+            for row in local_rows
+            if str(row["exchange_order_id"] or "").strip()
+        }
+    )
+    client_order_ids = sorted(
+        {
+            str(row["client_order_id"]).strip()
+            for row in local_rows
+            if str(row["client_order_id"] or "").strip()
+        }
+    )
+    if not exchange_order_ids and not client_order_ids:
+        return [], "no local unresolved identifiers available for broker snapshot"
+    try:
+        from .broker.bithumb import BithumbBroker
 
-        return BithumbBroker().get_recent_orders(limit=limit), None
+        return BithumbBroker().get_recent_orders(
+            limit=limit,
+            exchange_order_ids=exchange_order_ids,
+            client_order_ids=client_order_ids,
+        ), None
     except Exception as e:
-        return [], f"failed to load recent broker orders: {type(e).__name__}: {e}"
+        return [], f"failed to load identifier-scoped broker orders: {type(e).__name__}: {e}"
 
 
 def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_orders: list[object]) -> list[dict[str, str | float | int]]:
@@ -1871,10 +1936,21 @@ class _OfflineTestReconcileBroker:
     ) -> list:
         return []
 
-    def get_open_orders(self) -> list:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list:
         return []
 
-    def get_recent_orders(self, *, limit: int = 100) -> list:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list:
         return []
 
     def get_recent_fills(self, *, limit: int = 100) -> list:

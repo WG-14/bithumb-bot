@@ -1377,6 +1377,15 @@ def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
 
 def test_cancel_open_orders_reports_cancel_failures(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "cancel_failure.sqlite"))
+    conn = ensure_db(str(tmp_path / "cancel_failure.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1000_buy','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
 
     summary = cancel_open_orders_with_broker(_CancelFailureBroker())
 

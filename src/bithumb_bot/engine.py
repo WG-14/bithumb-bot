@@ -765,7 +765,45 @@ def _revalidate_cleanup_state_after_failure(
         position_present: bool | None = None
 
         try:
-            open_orders_present = len(broker.get_open_orders()) > 0
+            conn = ensure_db()
+            try:
+                placeholders = ",".join("?" for _ in LIVE_UNRESOLVED_ORDER_STATUSES)
+                rows = conn.execute(
+                    f"""
+                    SELECT client_order_id, exchange_order_id
+                    FROM orders
+                    WHERE status IN ({placeholders})
+                    """,
+                    LIVE_UNRESOLVED_ORDER_STATUSES,
+                ).fetchall()
+            finally:
+                conn.close()
+            exchange_order_ids = sorted(
+                {
+                    str(row["exchange_order_id"]).strip()
+                    for row in rows
+                    if str(row["exchange_order_id"] or "").strip()
+                }
+            )
+            client_order_ids = sorted(
+                {
+                    str(row["client_order_id"]).strip()
+                    for row in rows
+                    if str(row["client_order_id"] or "").strip()
+                }
+            )
+            if exchange_order_ids or client_order_ids:
+                open_orders_present = (
+                    len(
+                        broker.get_open_orders(
+                            exchange_order_ids=exchange_order_ids,
+                            client_order_ids=client_order_ids,
+                        )
+                    )
+                    > 0
+                )
+            else:
+                open_orders_present = False
         except Exception as exc:
             last_errors.append(f"attempt={attempt} open_orders={type(exc).__name__}: {exc}")
 

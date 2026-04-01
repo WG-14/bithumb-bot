@@ -1428,7 +1428,25 @@ def recover_order_with_exchange_id(
 def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]:
     conn = ensure_db()
     try:
-        remote_open = broker.get_open_orders()
+        local_by_exchange_id: dict[str, str] = {}
+        local_rows_by_client_order_id: dict[str, object] = {}
+        placeholders = ",".join("?" for _ in sorted(UNRESOLVED_ORDER_STATUSES))
+        rows = conn.execute(
+            f"SELECT client_order_id, exchange_order_id, side, status FROM orders WHERE status IN ({placeholders})",
+            tuple(sorted(UNRESOLVED_ORDER_STATUSES)),
+        ).fetchall()
+        for row in rows:
+            local_id = str(row["client_order_id"])
+            local_rows_by_client_order_id[local_id] = row
+            if row["exchange_order_id"]:
+                local_by_exchange_id[str(row["exchange_order_id"])] = local_id
+
+        known_exchange_order_ids, known_client_order_ids = _known_identifier_sets(rows)
+        remote_open = _get_open_orders_for_known_ids(
+            broker,
+            exchange_order_ids=known_exchange_order_ids,
+            client_order_ids=known_client_order_ids,
+        )
         if not remote_open:
             return {
                 "remote_open_count": 0,
@@ -1441,17 +1459,6 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                 "stray_messages": [],
                 "error_messages": [],
             }
-
-        local_by_exchange_id: dict[str, str] = {}
-        local_rows_by_client_order_id: dict[str, object] = {}
-        rows = conn.execute(
-            "SELECT client_order_id, exchange_order_id, side, status FROM orders"
-        ).fetchall()
-        for row in rows:
-            local_id = str(row["client_order_id"])
-            local_rows_by_client_order_id[local_id] = row
-            if row["exchange_order_id"]:
-                local_by_exchange_id[str(row["exchange_order_id"])] = local_id
 
         canceled_count = 0
         cancel_accepted_count = 0

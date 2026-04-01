@@ -1086,6 +1086,15 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
 
 def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('diag_live_1','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
     original_mode = settings.MODE
     original_max_order = settings.MAX_ORDER_KRW
     original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
@@ -1203,7 +1212,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] live execution mode: MODE=live LIVE_DRY_RUN=True armed=False" in out
     assert "[PASS] order submit routing: price=None => /v2/orders market/price order, price set => /v2/orders limit order" in out
     assert "[PASS] order lookup path: get_order reads /v1/order directly; open/recent snapshots use /v1/orders" in out
-    assert "[PASS] open order query: count=2" in out
+    assert "[PASS] open order query: known_unresolved_count=2" in out
     assert "[PASS] symbol/order rule query" in out
     assert "[PASS] accounts validation diagnostic: reason=ok" in out
     assert "bid_min_total_krw=0.0 (source=chance_doc)" in out
@@ -1214,6 +1223,15 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
 
 def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('diag_live_2','ex1','NEW','BUY',100.0,0.1,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
     original_mode = settings.MODE
     original_max_order = settings.MAX_ORDER_KRW
     original_max_daily_loss = settings.MAX_DAILY_LOSS_KRW
