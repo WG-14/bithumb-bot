@@ -2712,3 +2712,45 @@ def test_get_fills_logs_myorder_lookup_failure_context_on_schema_mismatch(monkey
     assert "stage=get_fills" in caplog.text
     assert "requested_client_order_id=cid-fill-log-1" in caplog.text
     assert 'reason="DOC_SCHEMA:' in caplog.text
+
+def test_balance_source_diagnostics_include_source_and_observed_timestamp(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "MODE", "live")
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    broker.get_balance()
+    diag = broker.get_accounts_validation_diagnostics()
+
+    assert diag["source"] == "accounts_v1_rest_snapshot"
+    assert int(diag["last_observed_ts_ms"]) > 0
+
+
+def test_balance_source_injection_uses_dry_run_source_when_dryrun_enabled(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "START_CASH_KRW", 12345.0)
+
+    broker = BithumbBroker()
+
+    # dry source should not call private accounts endpoint when dry-run is enabled
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: (_ for _ in ()).throw(RuntimeError("should not call private API")),
+    )
+
+    bal = broker.get_balance()
+    diag = broker.get_accounts_validation_diagnostics()
+
+    assert bal.cash_available == 12345.0
+    assert broker.get_balance_source_id() == "dry_run_static"
+    assert diag["reason"] == "not_applicable"

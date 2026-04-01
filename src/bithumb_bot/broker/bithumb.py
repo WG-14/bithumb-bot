@@ -28,8 +28,8 @@ from .base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
+from .balance_source import AccountsV1BalanceSource, BalanceSource, DryRunBalanceSource
 from .accounts_v1 import (
-    AccountsRequiredCurrencyMissingError,
     parse_accounts_response,
     select_pair_balances,
     to_broker_balance,
@@ -406,21 +406,13 @@ class BithumbBroker:
         self.base_url = settings.BITHUMB_API_BASE
         self.dry_run = settings.LIVE_DRY_RUN
         self._read_journal: dict[str, str] = {}
-        self._accounts_validation_diag: dict[str, object] = {
-            "reason": "not_checked",
-            "row_count": 0,
-            "currencies": [],
-            "missing_required_currencies": [],
-            "duplicate_currencies": [],
-            "last_success_reason": None,
-            "last_failure_reason": None,
-        }
         self._private_api = BithumbPrivateAPI(
             api_key=self.api_key,
             api_secret=self.api_secret,
             base_url=self.base_url,
             dry_run=self.dry_run,
         )
+        self._balance_source: BalanceSource = self._build_balance_source()
 
     def _mask_sensitive(self, data: dict[str, object]) -> dict[str, object]:
         redacted: dict[str, object] = {}
@@ -553,7 +545,42 @@ class BithumbBroker:
         return dict(self._read_journal)
 
     def get_accounts_validation_diagnostics(self) -> dict[str, object]:
-        return dict(self._accounts_validation_diag)
+        source = self._balance_source
+        if hasattr(source, "get_validation_diagnostics"):
+            return dict(source.get_validation_diagnostics())
+        return {
+            "reason": "not_applicable",
+            "row_count": 0,
+            "currencies": [],
+            "missing_required_currencies": [],
+            "duplicate_currencies": [],
+            "last_success_reason": None,
+            "last_failure_reason": None,
+            "source": self.get_balance_source_id(),
+            "last_observed_ts_ms": None,
+        }
+
+    def get_balance_source_id(self) -> str:
+        source = self._balance_source
+        if isinstance(source, AccountsV1BalanceSource):
+            return AccountsV1BalanceSource.SOURCE_ID
+        if isinstance(source, DryRunBalanceSource):
+            return "dry_run_static"
+        return type(source).__name__
+
+    def _build_balance_source(self) -> BalanceSource:
+        if self.dry_run:
+            return DryRunBalanceSource()
+        order_currency, payment_currency = self._pair()
+        return AccountsV1BalanceSource(
+            fetch_accounts_raw=lambda: self.fetch_accounts_raw(),
+            order_currency=order_currency,
+            payment_currency=payment_currency,
+            now_ms=lambda: int(time.time() * 1000),
+            parse_accounts_response=lambda payload: parse_accounts_response(payload),
+            select_pair_balances=lambda accounts, **kwargs: select_pair_balances(accounts, **kwargs),
+            to_broker_balance=lambda pair: to_broker_balance(pair),
+        )
 
     def _request_private(
         self,
@@ -732,15 +759,6 @@ class BithumbBroker:
         response = self._get_private("/v1/accounts", {}, retry_safe=True)
         self._journal_read_summary(path="/v1/accounts", data=response)
         return response
-
-    @staticmethod
-    def _classify_accounts_validation_reason(exc: Exception) -> str:
-        if isinstance(exc, AccountsRequiredCurrencyMissingError):
-            return "required currency missing"
-        detail = str(exc).lower()
-        if "duplicate currency row" in detail:
-            return "duplicate currency"
-        return "schema mismatch"
 
     @staticmethod
     def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
@@ -1562,62 +1580,8 @@ class BithumbBroker:
         return fills
 
     def get_balance(self) -> BrokerBalance:
-        """Return balances from `/v1/accounts` REST snapshot (not WebSocket stream)."""
-        if self.dry_run:
-            return BrokerBalance(cash_available=settings.START_CASH_KRW, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
-        order_currency, payment_currency = self._pair()
-        response = self.fetch_accounts_raw()
-        row_count = len(response) if isinstance(response, list) else 0
-        currencies: list[str] = []
-        if isinstance(response, list):
-            for row in response:
-                if not isinstance(row, dict):
-                    continue
-                token = str(row.get("currency") or "").strip().upper()
-                if token:
-                    currencies.append(token)
-        parsed_accounts = None
-        try:
-            parsed_accounts = parse_accounts_response(response)
-            pair_balances = select_pair_balances(
-                parsed_accounts,
-                order_currency=order_currency,
-                payment_currency=payment_currency,
-            )
-        except Exception as exc:
-            reason = self._classify_accounts_validation_reason(exc)
-            missing_required_currencies: list[str] = []
-            error_text = str(exc)
-            if "missing quote currency row '" in error_text:
-                missing_required_currencies.append(payment_currency.upper())
-            if "missing base currency row '" in error_text:
-                missing_required_currencies.append(order_currency.upper())
-            duplicate_currencies = (
-                list(parsed_accounts.duplicate_currencies)
-                if parsed_accounts is not None
-                else sorted({token for token in currencies if currencies.count(token) > 1})
-            )
-            self._accounts_validation_diag = {
-                "reason": reason,
-                "row_count": row_count,
-                "currencies": sorted(set(currencies)),
-                "missing_required_currencies": missing_required_currencies,
-                "duplicate_currencies": duplicate_currencies,
-                "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
-                "last_failure_reason": reason,
-            }
-            raise
-
-        self._accounts_validation_diag = {
-            "reason": "ok",
-            "row_count": row_count,
-            "currencies": sorted(parsed_accounts.balances.keys()) if parsed_accounts is not None else [],
-            "missing_required_currencies": [],
-            "duplicate_currencies": list(parsed_accounts.duplicate_currencies) if parsed_accounts is not None else [],
-            "last_success_reason": "ok",
-            "last_failure_reason": self._accounts_validation_diag.get("last_failure_reason"),
-        }
-        return to_broker_balance(pair_balances)
+        """Return broker balance via configured snapshot source abstraction."""
+        return self._balance_source.fetch_snapshot().balance
 
     def get_recent_orders(
         self,
