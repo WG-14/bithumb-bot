@@ -686,6 +686,7 @@ class BithumbBroker:
         context: str,
         qty: float | None,
         price: float | None,
+        strict: bool = False,
     ) -> float:
         fee_keys = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
         present_keys = [key for key in fee_keys if key in row]
@@ -698,6 +699,8 @@ class BithumbBroker:
             }
         )
         if not present_keys:
+            if strict:
+                raise BrokerRejectError(f"/v1/order.{context} schema mismatch: missing required fee field")
             RUN_LOG.warning(format_log_kv("[FILL_FEE] missing fee key", payload=log_payload))
             return 0.0
 
@@ -705,16 +708,22 @@ class BithumbBroker:
             raw = row.get(key)
             parsed = self._to_float(raw, default=None)
             if parsed is None:
+                if strict:
+                    raise BrokerRejectError(f"/v1/order.{context} schema mismatch: invalid fee field '{key}'={raw}")
                 if raw in (None, "") or (isinstance(raw, str) and raw.strip().lower() in {"null", "none"}):
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] empty fee value", payload=log_payload, fee_key=key))
                 else:
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] invalid fee value", payload=log_payload, fee_key=key))
                 continue
             fee = float(parsed)
+            if fee < 0:
+                raise BrokerRejectError(f"/v1/order.{context} schema mismatch: negative fee field '{key}'={raw}")
             if fee == 0.0 and (qty or 0.0) > 0 and price is not None and price > 0:
                 RUN_LOG.warning(format_log_kv("[FILL_FEE] resolved zero fee", payload=log_payload, fee_key=key))
             return fee
 
+        if strict:
+            raise BrokerRejectError(f"/v1/order.{context} schema mismatch: unable to parse fee field")
         RUN_LOG.warning(format_log_kv("[FILL_FEE] unable to parse any fee value", payload=log_payload))
         return 0.0
 
@@ -1267,6 +1276,9 @@ class BithumbBroker:
         for row in rows:
             if row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
                 raise BrokerRejectError("/v1/order schema mismatch: trades must be a list when present")
+            state = str(row.get("state") or "").strip().lower()
+            if state not in {"wait", "watch", "done", "cancel"}:
+                raise BrokerRejectError(f"/v1/order schema mismatch: unknown state '{row.get('state')}'")
             normalized = self._normalize_order_row(row)
             trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
             if trades:
@@ -1284,13 +1296,10 @@ class BithumbBroker:
                         context="trade",
                         qty=qty,
                         price=price,
+                        strict=True,
                     )
                     ts_raw = trade.get("created_at")
-                    ts = (
-                        self._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
-                        if ts_raw not in (None, "")
-                        else int(normalized["updated_ts"])
-                    )
+                    ts = self._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
                     trade_client_order_id, _ = self._resolve_order_identifiers(
                         trade,
                         fallback_client_order_id=requested_client_order_id or row.get("client_order_id") or "",
@@ -1298,12 +1307,12 @@ class BithumbBroker:
                     fills.append(
                         BrokerFill(
                             client_order_id=trade_client_order_id,
-                            fill_id=str(trade.get("uuid") or trade.get("id") or f"{normalized['uuid']}:{index}:{ts}"),
+                            fill_id=str(trade.get("uuid") or trade.get("id") or f"{row.get('uuid') or ''}:{index}:{ts}"),
                             fill_ts=ts,
                             price=float(price),
                             qty=float(qty),
                             fee=fee,
-                            exchange_order_id=str(normalized["uuid"]),
+                            exchange_order_id=str(row.get("uuid") or ""),
                         )
                     )
                 continue
@@ -1316,12 +1325,24 @@ class BithumbBroker:
             if price is None:
                 need_fallback_scan = fallback_scan_allowed
                 continue
-            ts = int(normalized["updated_ts"])
+            updated_raw = row.get("updated_at")
+            created_raw = row.get("created_at")
+            try:
+                if updated_raw not in (None, ""):
+                    ts = self._strict_parse_ts(updated_raw, field_name="updated_at", context="/v1/order")
+                elif created_raw not in (None, ""):
+                    ts = self._strict_parse_ts(created_raw, field_name="created_at", context="/v1/order")
+                else:
+                    raise BrokerRejectError("/v1/order schema mismatch: missing required timestamp field 'created_at'")
+            except BrokerRejectError:
+                need_fallback_scan = fallback_scan_allowed
+                continue
             fee = self._extract_fill_fee(
                 row,
                 context="aggregate",
                 qty=qty_filled,
                 price=price,
+                strict=False,
             )
             aggregate_client_order_id, aggregate_exchange_order_id = self._resolve_order_identifiers(
                 row,
@@ -1331,7 +1352,7 @@ class BithumbBroker:
             fills.append(
                 BrokerFill(
                     client_order_id=aggregate_client_order_id,
-                    fill_id=f"{normalized['uuid']}:aggregate:{ts}",
+                    fill_id=f"{row.get('uuid') or ''}:aggregate:{ts}",
                     fill_ts=ts,
                     price=float(price),
                     qty=qty_filled,

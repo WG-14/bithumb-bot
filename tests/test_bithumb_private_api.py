@@ -1069,6 +1069,41 @@ def test_get_order_rejects_non_list_trades(monkeypatch):
         broker.get_order(client_order_id="cid-bad-trades")
 
 
+@pytest.mark.parametrize(
+    ("created_at", "expected_error"),
+    [
+        ("not-a-timestamp", "invalid timestamp field 'created_at'"),
+        (None, "missing required timestamp field 'created_at'"),
+    ],
+)
+def test_get_order_rejects_invalid_or_missing_created_at_timestamp(monkeypatch, created_at, expected_error):
+    _configure_live()
+    broker = BithumbBroker()
+
+    payload = {
+        "uuid": "filled-bad-ts-1",
+        "client_order_id": "cid-bad-ts",
+        "market": "KRW-BTC",
+        "ord_type": "limit",
+        "side": "ask",
+        "price": "149000000",
+        "volume": "0.03",
+        "remaining_volume": "0.03",
+        "state": "wait",
+    }
+    if created_at is not None:
+        payload["created_at"] = created_at
+
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: payload,
+    )
+
+    with pytest.raises(BrokerRejectError, match=expected_error):
+        broker.get_order(client_order_id="cid-bad-ts")
+
+
 @pytest.mark.parametrize("executed_funds", [None, "4470000"])
 def test_get_order_accepts_optional_executed_funds(monkeypatch, executed_funds):
     _configure_live()
@@ -1414,6 +1449,92 @@ def test_get_fills_rejects_non_list_trades_for_v1_order(monkeypatch):
         broker.get_fills(client_order_id=None, exchange_order_id="filled-id-1")
 
 
+def test_get_fills_rejects_unknown_state_for_v1_order(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-unknown-state-1",
+            "client_order_id": "cid-unknown-state-1",
+            "state": "mystery",
+            "side": "ask",
+            "volume": "0.01",
+            "remaining_volume": "0.01",
+            "created_at": "2024-01-01T00:00:00+00:00",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="unknown state"):
+        broker.get_fills(client_order_id="cid-unknown-state-1", exchange_order_id="filled-unknown-state-1")
+
+
+@pytest.mark.parametrize(
+    ("created_at", "expected_error"),
+    [
+        ("not-a-timestamp", "invalid timestamp field 'created_at'"),
+        (None, "missing required timestamp field 'created_at'"),
+    ],
+)
+def test_get_fills_rejects_invalid_or_missing_trade_timestamp(monkeypatch, created_at, expected_error):
+    _configure_live()
+    broker = BithumbBroker()
+    trade = {
+        "uuid": "t-bad-ts",
+        "price": "149000000",
+        "volume": "0.02",
+        "fee": "1.0",
+    }
+    if created_at is not None:
+        trade["created_at"] = created_at
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-bad-ts",
+            "client_order_id": "cid-bad-ts",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "trades": [trade],
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match=expected_error):
+        broker.get_fills(client_order_id="cid-bad-ts", exchange_order_id="filled-bad-ts")
+
+
+def test_get_fills_accepts_paid_fee_when_fee_field_is_absent(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    trade = {
+        "uuid": "t-paid-fee-only",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "paid_fee": "2.22",
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-paid-fee-only",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
+    fills = broker.get_fills(client_order_id="cid-paid-fee-only", exchange_order_id="filled-paid-fee-only")
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(2.22)
+
+
 def test_get_fills_client_order_id_path_does_not_regress_to_done_scan(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1503,15 +1624,14 @@ def test_get_fills_normalizes_fee_from_supported_keys(monkeypatch, trade_row, ex
 
 
 @pytest.mark.parametrize(
-    ("trade_row", "expected_message"),
+    ("trade_row", "expected_error"),
     [
-        ({"fee": ""}, "empty fee value"),
-        ({"fee": None}, "empty fee value"),
-        ({}, "missing fee key"),
-        ({"fee": "0"}, "resolved zero fee"),
+        ({"fee": ""}, "invalid fee field"),
+        ({"fee": None}, "invalid fee field"),
+        ({}, "missing required fee field"),
     ],
 )
-def test_get_fills_warns_for_missing_or_zero_fee(monkeypatch, caplog, trade_row, expected_message):
+def test_get_fills_rejects_missing_or_invalid_trade_fee(monkeypatch, trade_row, expected_error):
     _configure_live()
     broker = BithumbBroker()
 
@@ -1535,12 +1655,40 @@ def test_get_fills_warns_for_missing_or_zero_fee(monkeypatch, caplog, trade_row,
         },
     )
 
+    with pytest.raises(BrokerRejectError, match=expected_error):
+        broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
+
+
+def test_get_fills_allows_trade_zero_fee_value(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+
+    trade = {
+        "uuid": "t-zero-fee",
+        "price": "149000000",
+        "volume": "0.02",
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "fee": "0",
+    }
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-zero-fee",
+            "price": "149000000",
+            "volume": "0.02",
+            "executed_volume": "0.02",
+            "state": "done",
+            "trades": [trade],
+        },
+    )
+
     with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
-        fills = broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
+        fills = broker.get_fills(client_order_id="cid-zero-fee", exchange_order_id="filled-zero-fee")
 
     assert len(fills) == 1
     assert fills[0].fee == pytest.approx(0.0)
-    assert any(expected_message in rec.message for rec in caplog.records)
+    assert any("resolved zero fee" in rec.message for rec in caplog.records)
 
 
 @pytest.mark.parametrize("fee_key", ["fee", "paid_fee", "commission", "trade_fee"])
@@ -1606,16 +1754,16 @@ def test_get_fills_fee_key_regression_parses_numeric_type(monkeypatch, fee_key):
 
 
 @pytest.mark.parametrize(
-    ("fee_value", "expected_warning"),
+    ("fee_value", "expected_error"),
     [
-        ("", "empty fee value"),
-        (None, "empty fee value"),
-        ("not-a-number", "invalid fee value"),
-        ("nan", "invalid fee value"),
-        ("inf", "invalid fee value"),
+        ("", "invalid fee field"),
+        (None, "invalid fee field"),
+        ("not-a-number", "invalid fee field"),
+        ("nan", "invalid fee field"),
+        ("inf", "invalid fee field"),
     ],
 )
-def test_get_fills_fee_parsing_regression_defaults_to_zero_for_invalid_values(monkeypatch, caplog, fee_value, expected_warning):
+def test_get_fills_fee_parsing_regression_rejects_invalid_values(monkeypatch, fee_value, expected_error):
     _configure_live()
     broker = BithumbBroker()
 
@@ -1639,12 +1787,8 @@ def test_get_fills_fee_parsing_regression_defaults_to_zero_for_invalid_values(mo
         },
     )
 
-    with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
-        fills = broker.get_fills(client_order_id="cid-invalid-fee", exchange_order_id="filled-invalid-fee")
-
-    assert len(fills) == 1
-    assert fills[0].fee == pytest.approx(0.0)
-    assert any(expected_warning in rec.message for rec in caplog.records)
+    with pytest.raises(BrokerRejectError, match=expected_error):
+        broker.get_fills(client_order_id="cid-invalid-fee", exchange_order_id="filled-invalid-fee")
 
 
 def test_get_fills_fee_key_regression_prioritizes_fee_over_other_fee_keys(monkeypatch):
@@ -1680,7 +1824,7 @@ def test_get_fills_fee_key_regression_prioritizes_fee_over_other_fee_keys(monkey
     assert fills[0].fee == pytest.approx(1.11)
 
 
-def test_get_fills_fee_key_regression_falls_back_to_next_fee_key_when_higher_priority_invalid(monkeypatch):
+def test_get_fills_fee_key_regression_rejects_when_fee_field_is_present_but_invalid(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -1707,10 +1851,8 @@ def test_get_fills_fee_key_regression_falls_back_to_next_fee_key_when_higher_pri
         },
     )
 
-    fills = broker.get_fills(client_order_id="cid-fee-fallback", exchange_order_id="filled-fee-fallback")
-
-    assert len(fills) == 1
-    assert fills[0].fee == pytest.approx(2.22)
+    with pytest.raises(BrokerRejectError, match="invalid fee field 'fee'"):
+        broker.get_fills(client_order_id="cid-fee-fallback", exchange_order_id="filled-fee-fallback")
 
 
 def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
@@ -1736,7 +1878,7 @@ def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
     assert fills == []
 
 
-def test_get_fills_uses_avg_price_fallback_for_aggregate_fill(monkeypatch):
+def test_get_fills_skips_aggregate_fill_without_timestamps_even_when_avg_price_exists(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -1757,8 +1899,7 @@ def test_get_fills_uses_avg_price_fallback_for_aggregate_fill(monkeypatch):
 
     fills = broker.get_fills(client_order_id="cid-2", exchange_order_id=None)
 
-    assert len(fills) == 1
-    assert fills[0].price == pytest.approx(151000000.0)
+    assert fills == []
 
 
 
