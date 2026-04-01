@@ -1822,6 +1822,7 @@ def test_restart_reconcile_api_exception_halts_and_prevents_resume(isolated_db, 
 
 def _patch_single_tick_run_loop(monkeypatch) -> None:
     monkeypatch.setattr("bithumb_bot.config.notifier_is_configured", lambda: True)
+    monkeypatch.setattr("bithumb_bot.config.validate_market_preflight", lambda _cfg: None)
     _set_live_runtime_paths(monkeypatch, base_dir=Path(settings.DB_PATH).resolve().parent)
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "KILL_SWITCH", False)
