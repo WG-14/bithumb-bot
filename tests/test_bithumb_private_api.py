@@ -2093,6 +2093,44 @@ def test_read_journal_summary_masks_sensitive_balance_fields(monkeypatch):
     assert "api_nonce" not in summary["/v1/accounts"]
     assert "api_key" not in summary["/v1/accounts"]
     assert "authorization" not in summary["/v1/accounts"]
+    assert "currencies" in summary["/v1/accounts"]
+    assert "KRW" in summary["/v1/accounts"]
+    assert "BTC" in summary["/v1/accounts"]
+    assert "1000" not in summary["/v1/accounts"]
+
+
+def test_accounts_validation_diagnostic_records_schema_mismatch_reason(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: [{"currency": "KRW", "locked": "0"}])
+
+    with pytest.raises(BrokerRejectError, match="schema mismatch"):
+        broker.get_balance()
+
+    diag = broker.get_accounts_validation_diagnostics()
+    assert diag["reason"] == "schema mismatch"
+    assert diag["row_count"] == 1
+    assert diag["currencies"] == ["KRW"]
+
+
+def test_accounts_validation_diagnostic_records_missing_currency_reason(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [{"currency": "KRW", "balance": "1000", "locked": "0"}],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing base currency row 'BTC'"):
+        broker.get_balance()
+
+    diag = broker.get_accounts_validation_diagnostics()
+    assert diag["reason"] == "required currency missing"
+    assert diag["missing_required_currencies"] == ["BTC"]
+    assert "1000" not in str(diag)
 
 
 

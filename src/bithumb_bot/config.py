@@ -119,19 +119,38 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         if code in {"AUTH_SIGN", "PERMISSION"}:
             raise AccountsPreflightValidationError(
                 "/v1/accounts preflight 인증 실패: "
-                f"reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} detail={detail}"
+                f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} detail={detail}"
             ) from exc
         raise AccountsPreflightValidationError(
             "/v1/accounts preflight transport 실패: "
-            f"reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} detail={detail}"
+            f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} detail={detail}"
         ) from exc
+
+    row_count = len(response) if isinstance(response, list) else 0
+    currencies: list[str] = []
+    if isinstance(response, list):
+        for row in response:
+            if not isinstance(row, dict):
+                continue
+            token = str(row.get("currency") or "").strip().upper()
+            if token:
+                currencies.append(token)
+    duplicate_currencies = sorted({token for token in currencies if currencies.count(token) > 1})
 
     try:
         accounts = BithumbBroker._parse_accounts_payload(response)
     except Exception as exc:
+        detail_lower = str(exc).lower()
+        reason = "duplicate currency" if "duplicate currency row" in detail_lower else "schema mismatch"
+        reason_code = (
+            "ACCOUNTS_DUPLICATE_CURRENCY"
+            if reason == "duplicate currency"
+            else "ACCOUNTS_SCHEMA_MISMATCH"
+        )
         raise AccountsPreflightValidationError(
             "/v1/accounts preflight schema mismatch: "
-            f"reason_code=ACCOUNTS_SCHEMA_MISMATCH detail={exc}"
+            f"reason={reason} reason_code={reason_code} row_count={row_count} "
+            f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} detail={exc}"
         ) from exc
 
     missing: list[str] = []
@@ -142,7 +161,8 @@ def validate_accounts_preflight(cfg: Settings) -> None:
     if missing:
         raise AccountsPreflightValidationError(
             "/v1/accounts preflight required currency missing: "
-            f"reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING market={canonical_market} missing={','.join(missing)}"
+            f"reason=required currency missing reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING market={canonical_market} "
+            f"row_count={row_count} currencies={','.join(sorted(accounts.keys()))} missing={','.join(missing)}"
         )
 
 

@@ -387,6 +387,15 @@ class BithumbBroker:
         self.base_url = settings.BITHUMB_API_BASE
         self.dry_run = settings.LIVE_DRY_RUN
         self._read_journal: dict[str, str] = {}
+        self._accounts_validation_diag: dict[str, object] = {
+            "reason": "not_checked",
+            "row_count": 0,
+            "currencies": [],
+            "missing_required_currencies": [],
+            "duplicate_currencies": [],
+            "last_success_reason": None,
+            "last_failure_reason": None,
+        }
         self._private_api = BithumbPrivateAPI(
             api_key=self.api_key,
             api_secret=self.api_secret,
@@ -491,12 +500,34 @@ class BithumbBroker:
         }
         if sample_order_ids:
             summary["sample_order_ids"] = sample_order_ids
+        if path == "/v1/accounts" and isinstance(rows, list):
+            currencies: list[str] = []
+            duplicate_currencies: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                raw_currency = row.get("currency")
+                currency = str(raw_currency).strip().upper() if raw_currency is not None else ""
+                if not currency:
+                    continue
+                if currency in seen and currency not in duplicate_currencies:
+                    duplicate_currencies.append(currency)
+                seen.add(currency)
+                currencies.append(currency)
+            if currencies:
+                summary["currencies"] = sorted(seen)
+            if duplicate_currencies:
+                summary["duplicate_currencies"] = sorted(duplicate_currencies)
         if isinstance(rows, dict):
             summary["keys"] = sorted(self._mask_sensitive(rows).keys())[:10]
         self._read_journal[path] = str(summary)
 
     def get_read_journal_summary(self) -> dict[str, str]:
         return dict(self._read_journal)
+
+    def get_accounts_validation_diagnostics(self) -> dict[str, object]:
+        return dict(self._accounts_validation_diag)
 
     def _request_private(
         self,
@@ -683,6 +714,15 @@ class BithumbBroker:
             locked = cls._required_non_negative_decimal(row, "locked", context=row_context)
             accounts[currency] = (balance, locked)
         return accounts
+
+    @staticmethod
+    def _classify_accounts_validation_reason(exc: Exception) -> str:
+        detail = str(exc).lower()
+        if "duplicate currency row" in detail:
+            return "duplicate currency"
+        if "missing quote currency row" in detail or "missing base currency row" in detail:
+            return "required currency missing"
+        return "schema mismatch"
 
     @staticmethod
     def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
@@ -1488,14 +1528,62 @@ class BithumbBroker:
         order_currency, payment_currency = self._pair()
         response = self._get_private("/v1/accounts", {}, retry_safe=True)
         self._journal_read_summary(path="/v1/accounts", data=response)
-        accounts = self._parse_accounts_payload(response)
+        row_count = len(response) if isinstance(response, list) else 0
+        currencies: list[str] = []
+        if isinstance(response, list):
+            for row in response:
+                if not isinstance(row, dict):
+                    continue
+                token = str(row.get("currency") or "").strip().upper()
+                if token:
+                    currencies.append(token)
+        accounts: dict[str, tuple[Decimal, Decimal]]
+        try:
+            accounts = self._parse_accounts_payload(response)
+        except Exception as exc:
+            reason = self._classify_accounts_validation_reason(exc)
+            self._accounts_validation_diag = {
+                "reason": reason,
+                "row_count": row_count,
+                "currencies": sorted(set(currencies)),
+                "missing_required_currencies": [],
+                "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
+                "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
+                "last_failure_reason": reason,
+            }
+            raise
 
         quote_currency = payment_currency.upper()
         base_currency = order_currency.upper()
+        missing_required_currencies: list[str] = []
         if quote_currency not in accounts:
-            raise BrokerRejectError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
+            missing_required_currencies.append(quote_currency)
         if base_currency not in accounts:
+            missing_required_currencies.append(base_currency)
+        if missing_required_currencies:
+            reason = "required currency missing"
+            self._accounts_validation_diag = {
+                "reason": reason,
+                "row_count": row_count,
+                "currencies": sorted(accounts.keys()),
+                "missing_required_currencies": missing_required_currencies,
+                "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
+                "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
+                "last_failure_reason": reason,
+            }
+            if quote_currency in missing_required_currencies:
+                raise BrokerRejectError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
             raise BrokerRejectError(f"/v1/accounts schema mismatch: missing base currency row '{base_currency}'")
+
+        self._accounts_validation_diag = {
+            "reason": "ok",
+            "row_count": row_count,
+            "currencies": sorted(accounts.keys()),
+            "missing_required_currencies": [],
+            "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
+            "last_success_reason": "ok",
+            "last_failure_reason": self._accounts_validation_diag.get("last_failure_reason"),
+        }
         cash_balance, cash_locked = accounts[quote_currency]
         asset_balance, asset_locked = accounts[base_currency]
         return BrokerBalance(

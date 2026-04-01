@@ -798,7 +798,9 @@ def test_accounts_preflight_schema_error_blocks_live(monkeypatch: pytest.MonkeyP
 
     msg = str(exc.value)
     assert "schema mismatch" in msg
+    assert "reason=schema mismatch" in msg
     assert "ACCOUNTS_SCHEMA_MISMATCH" in msg
+    assert "row_count=0" in msg
 
 
 def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -814,7 +816,30 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
 
     msg = str(exc.value)
     assert "required currency missing" in msg
+    assert "reason=required currency missing" in msg
+    assert "row_count=1" in msg
+    assert "currencies=KRW" in msg
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+
+
+def test_accounts_preflight_duplicate_currency_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [
+            {"currency": "KRW", "balance": "1000000", "locked": "0"},
+            {"currency": "KRW", "balance": "2000", "locked": "0"},
+        ],
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "reason=duplicate currency" in msg
+    assert "ACCOUNTS_DUPLICATE_CURRENCY" in msg
+    assert "duplicate_currencies=KRW" in msg
 
 
 def test_accounts_preflight_auth_failure_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:

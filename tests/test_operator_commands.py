@@ -1161,6 +1161,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] order lookup path: get_order reads /v1/order directly; open/recent snapshots use /v1/orders" in out
     assert "[PASS] open order query: count=2" in out
     assert "[PASS] symbol/order rule query" in out
+    assert "[PASS] accounts validation diagnostic: reason=ok" in out
     assert "bid_min_total_krw=0.0 (source=chance_doc)" in out
     assert "ask_price_unit=0.0 (source=chance_doc)" in out
     assert "min_qty=0.0001 (source=local_fallback)" in out

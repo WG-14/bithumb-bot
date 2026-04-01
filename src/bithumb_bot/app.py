@@ -872,6 +872,8 @@ def cmd_broker_diagnose() -> None:
 
     broker = BithumbBroker()
     checks: list[dict[str, str | bool]] = []
+    account_validation_reason = "not_checked"
+    account_validation_last_failure_reason = "none"
 
     def add_check(name: str, status: str, detail: str, *, critical: bool) -> None:
         checks.append({"name": name, "status": status, "detail": detail, "critical": critical})
@@ -905,9 +907,20 @@ def cmd_broker_diagnose() -> None:
     balance = None
     try:
         balance = broker.get_balance()
+        account_validation_reason = "ok"
         add_check("broker authentication", "PASS", "private API reachable", critical=True)
     except Exception as e:
         code, summary = classify_private_api_error(e)
+        if code in {"AUTH_SIGN", "PERMISSION"}:
+            account_validation_reason = "auth failure"
+        elif code == "TEMPORARY":
+            account_validation_reason = "transport failure"
+        elif "missing quote currency row" in str(e).lower() or "missing base currency row" in str(e).lower():
+            account_validation_reason = "required currency missing"
+        elif "duplicate currency row" in str(e).lower():
+            account_validation_reason = "duplicate currency"
+        elif "schema mismatch" in str(e).lower():
+            account_validation_reason = "schema mismatch"
         detail = f"private API failed [{code}] {summary} ({type(e).__name__}: {e})"
         add_check("broker authentication", "FAIL", detail, critical=True)
         add_check("balance query", "FAIL", detail, critical=True)
@@ -993,6 +1006,26 @@ def cmd_broker_diagnose() -> None:
             conn.close()
     except Exception as e:
         add_check("DB writable", "FAIL", f"db write probe failed ({type(e).__name__}: {e})", critical=True)
+
+    account_diag_raw = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
+    if isinstance(account_diag_raw, dict):
+        account_validation_reason = str(account_diag_raw.get("reason") or account_validation_reason)
+        account_validation_last_failure_reason = str(account_diag_raw.get("last_failure_reason") or "none")
+        row_count = int(account_diag_raw.get("row_count") or 0)
+        currencies = ",".join(str(item) for item in list(account_diag_raw.get("currencies") or [])[:20]) or "-"
+        missing = ",".join(str(item) for item in list(account_diag_raw.get("missing_required_currencies") or [])[:10]) or "-"
+        duplicate = ",".join(str(item) for item in list(account_diag_raw.get("duplicate_currencies") or [])[:10]) or "-"
+        add_check(
+            "accounts validation diagnostic",
+            "PASS" if account_validation_reason == "ok" else "WARN",
+            (
+                f"reason={account_validation_reason} row_count={row_count} "
+                f"currencies={currencies} missing_required_currencies={missing} duplicate_currencies={duplicate} "
+                f"last_success={account_diag_raw.get('last_success_reason') or '-'} "
+                f"last_failure={account_validation_last_failure_reason}"
+            ),
+            critical=False,
+        )
 
     fail_count = sum(1 for check in checks if check["status"] == "FAIL")
     warn_count = sum(1 for check in checks if check["status"] == "WARN")
