@@ -233,26 +233,24 @@ def test_marketdata_orderbook_multi_market_fetch(monkeypatch, _settings_guard) -
 def test_cmd_ticker_uses_canonical_market_input(monkeypatch, capsys, _settings_guard) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_fetch_ticker(client, *, markets):
-        captured["markets"] = markets
-        return [
-            TickerLiteSnapshot(
-                market="KRW-BTC",
-                trade_price=100.0,
-                high_price=110.0,
-                low_price=90.0,
-                acc_trade_volume_24h=123.0,
-            )
-        ]
+    def _fake_fetch_ticker_single(client, *, market):
+        captured["market"] = market
+        return TickerLiteSnapshot(
+            market="KRW-BTC",
+            trade_price=100.0,
+            high_price=110.0,
+            low_price=90.0,
+            acc_trade_volume_24h=123.0,
+        )
 
     monkeypatch.setattr("bithumb_bot.marketdata.httpx.Client", lambda *args, **kwargs: _DummyClient())
     monkeypatch.setattr("bithumb_bot.marketdata.canonical_market_id", lambda _pair: "KRW-BTC")
-    monkeypatch.setattr("bithumb_bot.marketdata.fetch_ticker", _fake_fetch_ticker)
+    monkeypatch.setattr("bithumb_bot.marketdata.fetch_ticker_single", _fake_fetch_ticker_single)
 
     cmd_ticker()
 
     out = capsys.readouterr().out
-    assert captured["markets"] == "KRW-BTC"
+    assert captured["market"] == "KRW-BTC"
     assert "[TICKER KRW-BTC]" in out
     assert "trade_price=100.0" in out
     assert "close=" not in out

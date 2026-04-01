@@ -18,7 +18,7 @@ from .public_api_minute_candles import (
     interval_to_minute_unit,
 )
 from .public_api_orderbook import BestQuote, fetch_orderbook_tops as fetch_public_orderbook_tops
-from .public_api_ticker import fetch_ticker
+from .public_api_ticker import fetch_ticker_single
 
 
 BASE_URL = "https://api.bithumb.com"
@@ -228,10 +228,7 @@ def cmd_sync(quiet: bool = False, limit: int = 200) -> None:
 def cmd_ticker() -> None:
     market = canonical_market_id(settings.PAIR)
     with httpx.Client(base_url=BASE_URL, timeout=10.0) as client:
-        snapshots = fetch_ticker(client, markets=market)
-    if not snapshots:
-        raise RuntimeError(f"ticker payload is empty for markets={market!r}")
-    d = snapshots[0]
+        d = fetch_ticker_single(client, market=market)
     print(
         f"[TICKER {d.market}] trade_price={d.trade_price} high={d.high_price} "
         f"low={d.low_price} volume_24h={d.acc_trade_volume_24h}"

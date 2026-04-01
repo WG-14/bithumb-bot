@@ -77,6 +77,13 @@ def normalize_ticker_markets(markets: str | Iterable[str]) -> str:
     return ",".join(normalized)
 
 
+def normalize_single_ticker_market(market: str) -> str:
+    canonical_market = normalize_ticker_markets([market])
+    if "," in canonical_market:
+        raise ValueError(f"single market expected exactly one market actual={canonical_market!r}")
+    return canonical_market
+
+
 def parse_ticker_lite_payload(payload: object) -> list[TickerLiteSnapshot]:
     if not isinstance(payload, list):
         raise PublicApiSchemaError(f"ticker schema mismatch expected=list actual={type(payload).__name__}")
@@ -120,7 +127,10 @@ def _validate_batch_market_response(
     snapshots: list[TickerLiteSnapshot],
     endpoint: str,
 ) -> list[TickerLiteSnapshot]:
-    requested_market_set = {parse_documented_market_code(token) for token in requested_markets_csv.split(",")}
+    requested_market_order = [
+        parse_documented_market_code(token) for token in requested_markets_csv.split(",")
+    ]
+    requested_market_set = set(requested_market_order)
     returned_market_set = {parse_documented_market_code(snapshot.market) for snapshot in snapshots}
     if len(snapshots) != len(requested_market_set) or returned_market_set != requested_market_set:
         raise PublicApiSchemaError(
@@ -133,7 +143,23 @@ def _validate_batch_market_response(
     return snapshots
 
 
-def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[TickerLiteSnapshot]:
+def _resolve_snapshots_by_market(
+    *,
+    requested_markets_csv: str,
+    snapshots: list[TickerLiteSnapshot],
+) -> dict[str, TickerLiteSnapshot]:
+    requested_market_order = [
+        parse_documented_market_code(token) for token in requested_markets_csv.split(",")
+    ]
+    snapshot_by_market = {
+        parse_documented_market_code(snapshot.market): snapshot for snapshot in snapshots
+    }
+    return {market: snapshot_by_market[market] for market in requested_market_order}
+
+
+def fetch_ticker_batch(
+    client: httpx.Client, *, markets: str | Iterable[str]
+) -> dict[str, TickerLiteSnapshot]:
     endpoint = "/v1/ticker"
     try:
         requested_markets_csv = normalize_ticker_markets(markets)
@@ -146,16 +172,35 @@ def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[
     payload = get_public_json(client, endpoint, params=params)
     try:
         snapshots = parse_ticker_lite_payload(payload)
-        return _validate_batch_market_response(
+        _validate_batch_market_response(
             requested_markets_csv=requested_markets_csv,
             snapshots=snapshots,
             endpoint=endpoint,
+        )
+        return _resolve_snapshots_by_market(
+            requested_markets_csv=requested_markets_csv,
+            snapshots=snapshots,
         )
     except ExchangeMarketCodeError as exc:
         raise PublicApiSchemaError(
             "ticker response market validation failed "
             f"endpoint={endpoint} requested_markets={requested_markets_csv} detail={exc}"
         ) from exc
+
+
+def fetch_ticker_single(client: httpx.Client, *, market: str) -> TickerLiteSnapshot:
+    canonical_market = normalize_single_ticker_market(market)
+    snapshots_by_market = fetch_ticker_batch(client, markets=[canonical_market])
+    return snapshots_by_market[canonical_market]
+
+
+def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[TickerLiteSnapshot]:
+    """Backward-compatible alias for batch ticker fetch.
+
+    Returns snapshots in the same order as requested markets.
+    """
+
+    return list(fetch_ticker_batch(client, markets=markets).values())
 
 
 # Backward compatibility: keep historical public name while clarifying the contract.

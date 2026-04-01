@@ -5,7 +5,10 @@ import pytest
 
 from bithumb_bot.public_api import PublicApiResponseError, PublicApiSchemaError
 from bithumb_bot.public_api_ticker import (
+    fetch_ticker_batch,
+    fetch_ticker_single,
     fetch_ticker,
+    normalize_single_ticker_market,
     normalize_ticker_markets,
     parse_ticker_lite_payload,
     parse_ticker_payload,
@@ -56,9 +59,14 @@ def test_normalize_ticker_markets_rejects_noncanonical_format() -> None:
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         normalize_ticker_markets(["BTC_KRW"])
 
+
 def test_normalize_ticker_markets_rejects_bare_symbol() -> None:
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         normalize_ticker_markets(["BTC"])
+
+
+def test_normalize_single_ticker_market_requires_exactly_one_market() -> None:
+    assert normalize_single_ticker_market("krw-btc") == "KRW-BTC"
 
 
 def test_parse_ticker_lite_payload_fails_when_required_field_missing() -> None:
@@ -114,6 +122,29 @@ def test_fetch_ticker_sends_markets_param() -> None:
     assert len(tickers) == 2
 
 
+def test_fetch_ticker_batch_returns_mapping_by_requested_order_when_response_order_changes() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_sample_ticker() | {"market": "KRW-ETH"}, _sample_ticker()])
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
+        snapshots_by_market = fetch_ticker_batch(client, markets=["KRW-BTC", "KRW-ETH"])
+
+    assert list(snapshots_by_market.keys()) == ["KRW-BTC", "KRW-ETH"]
+    assert snapshots_by_market["KRW-BTC"].market == "KRW-BTC"
+    assert snapshots_by_market["KRW-ETH"].market == "KRW-ETH"
+
+
+def test_fetch_ticker_single_enforces_single_market_contract() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("markets") == "KRW-BTC"
+        return httpx.Response(200, json=[_sample_ticker()])
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
+        snapshot = fetch_ticker_single(client, market="krw-btc")
+
+    assert snapshot.market == "KRW-BTC"
+
+
 def test_fetch_ticker_rejects_response_market_mismatch() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[_sample_ticker() | {"market": "KRW-ETH"}])
@@ -121,6 +152,15 @@ def test_fetch_ticker_rejects_response_market_mismatch() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
         with pytest.raises(PublicApiSchemaError, match="ticker response market mismatch"):
             fetch_ticker(client, markets=["KRW-BTC"])
+
+
+def test_fetch_ticker_batch_rejects_response_market_mismatch_strict() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_sample_ticker() | {"market": "KRW-XRP"}])
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
+        with pytest.raises(PublicApiSchemaError, match="ticker response market mismatch"):
+            fetch_ticker_batch(client, markets=["KRW-BTC"])
 
 
 def test_ticker_contract_uses_markets_csv_string_input_without_private_auth() -> None:
