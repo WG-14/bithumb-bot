@@ -1359,7 +1359,9 @@ class BithumbBroker:
         requested_exchange_order_id = str(exchange_order_id or "").strip()
 
         if not (requested_exchange_order_id or requested_client_order_id):
-            return []
+            raise BrokerRejectError(
+                "fill lookup requires identifiers; /v1/order does not support broad recent fill scans without uuid/client_order_id"
+            )
         params = build_v1_order_lookup_params(
             client_order_id=requested_client_order_id,
             exchange_order_id=requested_exchange_order_id,
@@ -1613,6 +1615,6 @@ class BithumbBroker:
         return out[:lim]
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
-        fills = self.get_fills(client_order_id=None, exchange_order_id=None)
-        fills.sort(key=lambda f: int(f.fill_ts), reverse=True)
-        return fills[: max(0, int(limit))]
+        raise BrokerRejectError(
+            "recent fill broad scan is unsupported: Bithumb MyOrder contract requires uuid/client_order_id lookups"
+        )

@@ -337,10 +337,21 @@ def test_submit_unknown_survives_restart_into_reconcile_and_startup_gate(tmp_pat
         def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
             return []
 
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return []
 
-        def get_recent_orders(self, *, limit: int = 100):
+        def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return []
 
         def get_recent_fills(self, *, limit: int = 100):

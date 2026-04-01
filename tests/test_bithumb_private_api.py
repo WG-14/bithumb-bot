@@ -861,6 +861,22 @@ def test_v1_orders_broad_scan_is_rejected_without_identifiers() -> None:
         broker.get_recent_orders(limit=5)
 
 
+def test_get_fills_rejects_broad_scan_without_identifiers() -> None:
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(BrokerRejectError, match="requires identifiers"):
+        broker.get_fills()
+
+
+def test_get_recent_fills_is_explicitly_unsupported() -> None:
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(BrokerRejectError, match="unsupported"):
+        broker.get_recent_fills(limit=5)
+
+
 def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(monkeypatch):
     _configure_live()
     broker = BithumbBroker()

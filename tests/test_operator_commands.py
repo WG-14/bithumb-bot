@@ -222,10 +222,21 @@ class _RecoverSuccessBroker:
             )
         ]
 
-    def get_open_orders(self):
+    def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return []
 
-    def get_recent_orders(self, *, limit: int = 100):
+    def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return []
 
     def get_recent_fills(self, *, limit: int = 100):
@@ -281,10 +292,21 @@ class _SubmitUnknownRecoveredByRecentFillBroker:
     ) -> list[BrokerFill]:
         return []
 
-    def get_open_orders(self):
+    def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return []
 
-    def get_recent_orders(self, *, limit: int = 100):
+    def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return []
 
     def get_recent_fills(self, *, limit: int = 100):
@@ -313,7 +335,13 @@ class _RecoveryReportCandidateBroker:
     def __init__(self, recent_orders: list[BrokerOrder]):
         self._recent_orders = recent_orders
 
-    def get_recent_orders(self, *, limit: int = 100):
+    def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return self._recent_orders[:limit]
 
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
@@ -322,7 +350,12 @@ class _RecoveryReportCandidateBroker:
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
         return []
 
-    def get_open_orders(self):
+    def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
         return []
 
     def get_recent_fills(self, *, limit: int = 100):
@@ -1084,13 +1117,24 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
         def get_balance(self):
             return BrokerBalance(1200000.0, 10000.0, 0.12, 0.01)
 
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return [
                 BrokerOrder("a", "ex1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1),
                 BrokerOrder("b", "ex2", "SELL", "PARTIAL", 110.0, 0.1, 0.05, 1, 1),
             ]
 
-        def get_recent_orders(self, *, limit: int = 100):
+        def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return [
                 BrokerOrder("", "ex3", "BUY", "FILLED", 120.0, 0.2, 0.2, 1, 2),
                 BrokerOrder("", "ex4", "SELL", "CANCELED", 121.0, 0.2, 0.0, 1, 2),
@@ -1201,10 +1245,21 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
         def get_balance(self):
             return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
 
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             raise RuntimeError("open orders timeout")
 
-        def get_recent_orders(self, *, limit: int = 100):
+        def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return []
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagPartialBroker())
@@ -1264,7 +1319,12 @@ def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsy
         def get_balance(self):
             return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
 
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return []
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
@@ -1364,10 +1424,21 @@ def test_broker_diagnose_never_calls_place_order(monkeypatch, tmp_path):
         def get_balance(self):
             return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
 
-        def get_open_orders(self):
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             return []
 
-        def get_recent_orders(self, *, limit: int = 100):
+        def get_recent_orders(
+            self,
+            *,
+            limit: int = 100,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
             raise NotImplementedError
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoTradeBroker())

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
-from .broker.base import Broker, BrokerFill, BrokerOrder
+from .broker.base import Broker, BrokerFill, BrokerOrder, BrokerRejectError
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
@@ -941,10 +941,9 @@ def _get_recent_orders_for_known_ids(
             client_order_ids=client_order_ids,
         )
     except TypeError:
-        try:
-            return broker.get_recent_orders(limit=limit)
-        except TypeError:
-            return broker.get_recent_orders()
+        raise BrokerRejectError(
+            "broker.get_recent_orders must support identifier-scoped lookups; broad scans are unsupported"
+        )
 
 
 def _get_open_orders_for_known_ids(
@@ -961,7 +960,9 @@ def _get_open_orders_for_known_ids(
             client_order_ids=client_order_ids,
         )
     except TypeError:
-        return broker.get_open_orders()
+        raise BrokerRejectError(
+            "broker.get_open_orders must support identifier-scoped lookups; broad scans are unsupported"
+        )
 
 
 def _get_recent_fills_for_known_orders(
