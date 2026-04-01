@@ -203,6 +203,7 @@ RUNTIME_ROOT/data/live/raw/broker/private_balance_2026-03-30.jsonl
 ```text
 RUNTIME_ROOT/data/live/derived/validation/signal_trace_2026-03-30.jsonl
 RUNTIME_ROOT/data/live/derived/features/features_2026-03-30.parquet
+RUNTIME_ROOT/data/live/derived/market_catalog_snapshot/market_catalog_snapshot_2026-03-30.json
 ```
 
 - 전략 검증, 관측, 튜닝용 가공 결과
@@ -224,6 +225,7 @@ RUNTIME_ROOT/data/live/trades/reconcile/reconcile_2026-03-30.jsonl
 ```text
 RUNTIME_ROOT/data/live/reports/ops/ops_report_2026-03-30T090000KST.txt
 RUNTIME_ROOT/data/live/reports/strategy/strategy_report_2026-03-30.json
+RUNTIME_ROOT/data/live/reports/market_catalog_diff/market_catalog_diff_2026-03-30.jsonl
 ```
 
 - 임시 터미널 출력도 필요하면 파일 아카이브 가능

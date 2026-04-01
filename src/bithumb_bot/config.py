@@ -15,6 +15,7 @@ from .markets import (
     normalize_market_id,
     validate_exchange_market_id,
 )
+from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError
 
@@ -548,6 +549,21 @@ def validate_market_preflight(cfg: Settings) -> None:
         if block_on_warning:
             raise MarketPreflightValidationError(msg)
         LOG.warning("%s; continuing by policy (mode=%s, dry_run=%s)", msg, normalized_mode, is_dryrun)
+
+    try:
+        record_market_catalog_snapshot(
+            path_manager=PATH_MANAGER,
+            mode=normalized_mode,
+            source="market_preflight",
+            markets=registry.items(),
+        )
+    except Exception as exc:
+        LOG.warning(
+            "market catalog snapshot update failed mode=%s source=market_preflight error=%s: %s",
+            normalized_mode,
+            type(exc).__name__,
+            exc,
+        )
 
     try:
         validate_accounts_preflight(cfg)

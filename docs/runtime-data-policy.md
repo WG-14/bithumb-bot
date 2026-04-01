@@ -105,6 +105,7 @@
 ### 4.4 derived
 - 지표, feature, validation, tuning intermediate
 - raw를 덮어쓰지 않고 별도 저장
+- market catalog snapshot(정규화된 마켓/경고 상태 스냅샷)은 `data/<mode>/derived/market_catalog_snapshot/`에 저장한다.
 
 ### 4.5 trades
 - 주문 요청/응답
@@ -120,6 +121,7 @@
 - fee diagnostics
 - incident summary
 - 사람이 읽는 운영 요약
+- market catalog diff 이벤트(JSONL append-only)는 `data/<mode>/reports/market_catalog_diff/`에 저장한다.
 
 ### 4.7 logs
 - app

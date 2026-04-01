@@ -127,6 +127,9 @@ class MarketRegistry:
     def get(self, market: str) -> MarketInfo | None:
         return self._markets.get(parse_documented_market_code(market))
 
+    def items(self) -> list[MarketInfo]:
+        return list(self._markets.values())
+
 
 _market_registry_lock = Lock()
 _market_registry_cache_by_detail: dict[bool, MarketRegistry] = {}
