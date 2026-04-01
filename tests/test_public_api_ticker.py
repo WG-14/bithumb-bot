@@ -7,6 +7,7 @@ from bithumb_bot.public_api import PublicApiResponseError, PublicApiSchemaError
 from bithumb_bot.public_api_ticker import (
     fetch_ticker,
     normalize_ticker_markets,
+    parse_ticker_lite_payload,
     parse_ticker_payload,
 )
 
@@ -36,8 +37,8 @@ def _sample_ticker() -> dict[str, object]:
     }
 
 
-def test_parse_ticker_payload_success() -> None:
-    tickers = parse_ticker_payload([_sample_ticker()])
+def test_parse_ticker_lite_payload_success_with_required_subset_fields() -> None:
+    tickers = parse_ticker_lite_payload([_sample_ticker()])
     assert len(tickers) == 1
     assert tickers[0].market == "KRW-BTC"
     assert tickers[0].trade_price == 110.0
@@ -60,18 +61,23 @@ def test_normalize_ticker_markets_rejects_bare_symbol() -> None:
         normalize_ticker_markets(["BTC"])
 
 
-def test_parse_ticker_payload_fails_when_required_field_missing() -> None:
+def test_parse_ticker_lite_payload_fails_when_required_field_missing() -> None:
     payload = _sample_ticker()
     del payload["trade_price"]
     with pytest.raises(PublicApiSchemaError, match="missing_fields=trade_price"):
-        parse_ticker_payload([payload])
+        parse_ticker_lite_payload([payload])
 
 
-def test_parse_ticker_payload_fails_on_type_mismatch() -> None:
+def test_parse_ticker_lite_payload_fails_on_type_mismatch() -> None:
     payload = _sample_ticker()
     payload["acc_trade_volume_24h"] = "not-number"
     with pytest.raises(PublicApiSchemaError, match="field=acc_trade_volume_24h"):
-        parse_ticker_payload([payload])
+        parse_ticker_lite_payload([payload])
+
+
+def test_parse_ticker_payload_backward_compat_alias() -> None:
+    tickers = parse_ticker_payload([_sample_ticker()])
+    assert tickers[0].market == "KRW-BTC"
 
 
 def test_fetch_ticker_raises_on_non_json_response() -> None:

@@ -14,7 +14,7 @@ from bithumb_bot.marketdata import (
 from bithumb_bot.public_api import PublicApiSchemaError
 from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.public_api_minute_candles import MinuteCandle
-from bithumb_bot.public_api_ticker import TickerSnapshot
+from bithumb_bot.public_api_ticker import TickerLiteSnapshot
 
 
 class _DummyClient:
@@ -236,7 +236,7 @@ def test_cmd_ticker_uses_canonical_market_input(monkeypatch, capsys, _settings_g
     def _fake_fetch_ticker(client, *, markets):
         captured["markets"] = markets
         return [
-            TickerSnapshot(
+            TickerLiteSnapshot(
                 market="KRW-BTC",
                 trade_price=100.0,
                 high_price=110.0,

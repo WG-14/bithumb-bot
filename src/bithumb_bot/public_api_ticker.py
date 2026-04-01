@@ -19,7 +19,13 @@ _REQUIRED_FIELDS = (
 
 
 @dataclass(frozen=True)
-class TickerSnapshot:
+class TickerLiteSnapshot:
+    """Subset ticker model used by the bot's current market-data flow.
+
+    This is intentionally *not* the full documented /v1/ticker response model.
+    Only fields required by the current system are validated and retained.
+    """
+
     market: str
     trade_price: float
     high_price: float
@@ -71,11 +77,11 @@ def normalize_ticker_markets(markets: str | Iterable[str]) -> str:
     return ",".join(normalized)
 
 
-def parse_ticker_payload(payload: object) -> list[TickerSnapshot]:
+def parse_ticker_lite_payload(payload: object) -> list[TickerLiteSnapshot]:
     if not isinstance(payload, list):
         raise PublicApiSchemaError(f"ticker schema mismatch expected=list actual={type(payload).__name__}")
 
-    snapshots: list[TickerSnapshot] = []
+    snapshots: list[TickerLiteSnapshot] = []
     for item in payload:
         if not isinstance(item, dict):
             raise PublicApiSchemaError(
@@ -90,7 +96,7 @@ def parse_ticker_payload(payload: object) -> list[TickerSnapshot]:
             )
 
         snapshots.append(
-            TickerSnapshot(
+            TickerLiteSnapshot(
                 market=parse_documented_market_code(_require_str(row=item, field="market")),
                 trade_price=_require_number(row=item, field="trade_price"),
                 high_price=_require_number(row=item, field="high_price"),
@@ -102,12 +108,18 @@ def parse_ticker_payload(payload: object) -> list[TickerSnapshot]:
     return snapshots
 
 
+def parse_ticker_payload(payload: object) -> list[TickerLiteSnapshot]:
+    """Backward-compatible alias for the lite ticker payload parser."""
+
+    return parse_ticker_lite_payload(payload)
+
+
 def _validate_batch_market_response(
     *,
     requested_markets_csv: str,
-    snapshots: list[TickerSnapshot],
+    snapshots: list[TickerLiteSnapshot],
     endpoint: str,
-) -> list[TickerSnapshot]:
+) -> list[TickerLiteSnapshot]:
     requested_market_set = {parse_documented_market_code(token) for token in requested_markets_csv.split(",")}
     returned_market_set = {parse_documented_market_code(snapshot.market) for snapshot in snapshots}
     if len(snapshots) != len(requested_market_set) or returned_market_set != requested_market_set:
@@ -121,7 +133,7 @@ def _validate_batch_market_response(
     return snapshots
 
 
-def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[TickerSnapshot]:
+def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[TickerLiteSnapshot]:
     endpoint = "/v1/ticker"
     try:
         requested_markets_csv = normalize_ticker_markets(markets)
@@ -133,7 +145,7 @@ def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[
     params = {"markets": requested_markets_csv}
     payload = get_public_json(client, endpoint, params=params)
     try:
-        snapshots = parse_ticker_payload(payload)
+        snapshots = parse_ticker_lite_payload(payload)
         return _validate_batch_market_response(
             requested_markets_csv=requested_markets_csv,
             snapshots=snapshots,
@@ -144,3 +156,7 @@ def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[
             "ticker response market validation failed "
             f"endpoint={endpoint} requested_markets={requested_markets_csv} detail={exc}"
         ) from exc
+
+
+# Backward compatibility: keep historical public name while clarifying the contract.
+TickerSnapshot = TickerLiteSnapshot
