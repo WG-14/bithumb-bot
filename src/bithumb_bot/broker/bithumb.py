@@ -27,7 +27,7 @@ from .order_lookup_v1 import (
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
-from .order_list_v1 import build_legacy_order_scan_params
+from .order_list_v1 import build_legacy_order_scan_params, parse_v1_order_list_row
 from .order_payloads import build_order_payload, normalize_order_side, validate_client_order_id
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
@@ -1189,7 +1189,29 @@ class BithumbBroker:
         )
         self._journal_read_summary(path="/v1/orders(open_orders)", data=data)
         rows = data if isinstance(data, list) else []
-        return [self._order_from_v2_row(row) for row in rows if isinstance(row, dict)]
+        out: list[BrokerOrder] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = parse_v1_order_list_row(row)
+            qty_req = float(normalized.volume)
+            qty_filled = float(normalized.executed_volume)
+            status = v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled)
+            out.append(
+                BrokerOrder(
+                    client_order_id=normalized.client_order_id,
+                    exchange_order_id=normalized.uuid,
+                    side=normalized.side,
+                    status=status,
+                    price=float(normalized.price),
+                    qty_req=qty_req,
+                    qty_filled=qty_filled,
+                    created_ts=int(normalized.created_ts),
+                    updated_ts=int(normalized.updated_ts),
+                    raw=self._raw_v1_order_fields(row),
+                )
+            )
+        return out
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         if self.dry_run:
@@ -1343,24 +1365,24 @@ class BithumbBroker:
                         continue
                     if requested_client_order_id and row_client_order_id != requested_client_order_id:
                         continue
-                    normalized = self._normalize_order_row(row)
-                    qty_filled = float(normalized["executed_volume"])
+                    normalized = parse_v1_order_list_row(row)
+                    qty_filled = float(normalized.executed_volume)
                     if qty_filled <= 0:
                         continue
-                    price = self._resolve_fill_price(row, normalized_row=normalized)
+                    price = float(normalized.price) if normalized.price > 0 else None
                     if price is None:
                         continue
-                    ts = int(normalized["updated_ts"])
+                    ts = int(normalized.updated_ts)
                     fee = self._extract_fill_fee(row, context="aggregate-fallback", qty=qty_filled, price=price)
                     fills.append(
                         BrokerFill(
                             client_order_id=row_client_order_id or requested_client_order_id,
-                            fill_id=f"{normalized['uuid']}:aggregate:{ts}",
+                            fill_id=f"{normalized.uuid}:aggregate:{ts}",
                             fill_ts=ts,
                             price=float(price),
                             qty=qty_filled,
                             fee=fee,
-                            exchange_order_id=row_exchange_order_id or str(normalized["uuid"]),
+                            exchange_order_id=row_exchange_order_id or str(normalized.uuid),
                         )
                     )
         return fills
@@ -1408,7 +1430,21 @@ class BithumbBroker:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                order = self._order_from_v2_row(row)
+                normalized = parse_v1_order_list_row(row)
+                qty_req = float(normalized.volume)
+                qty_filled = float(normalized.executed_volume)
+                order = BrokerOrder(
+                    client_order_id=normalized.client_order_id,
+                    exchange_order_id=normalized.uuid,
+                    side=normalized.side,
+                    status=v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled),
+                    price=float(normalized.price),
+                    qty_req=qty_req,
+                    qty_filled=qty_filled,
+                    created_ts=int(normalized.created_ts),
+                    updated_ts=int(normalized.updated_ts),
+                    raw=self._raw_v1_order_fields(row),
+                )
                 snapshot_key = str(order.exchange_order_id or order.client_order_id or "")
                 if snapshot_key:
                     snapshots[snapshot_key] = order

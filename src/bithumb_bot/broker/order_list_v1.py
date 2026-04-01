@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import math
 
+from .base import BrokerRejectError
 from .order_lookup_v1 import V1_ORDER_STATES, clean_identifier
 from .order_payloads import validate_client_order_id
 
@@ -32,6 +35,23 @@ class OrderListQuery:
         return params
 
 
+@dataclass(frozen=True)
+class V1ListNormalizedOrder:
+    uuid: str
+    client_order_id: str
+    market: str
+    side: str
+    ord_type: str
+    state: str
+    price: float
+    volume: float
+    remaining_volume: float
+    executed_volume: float
+    created_ts: int
+    updated_ts: int
+    executed_funds: float | None
+
+
 def _validate_identifier_list(values: list[str], *, field_name: str) -> tuple[str, ...]:
     if len(values) > _MAX_IDENTIFIER_COUNT:
         raise ValueError(f"{field_name} allows at most {_MAX_IDENTIFIER_COUNT} items")
@@ -42,6 +62,99 @@ def _validate_identifier_list(values: list[str], *, field_name: str) -> tuple[st
             raise ValueError(f"{field_name} must not include empty identifiers")
         out.append(cleaned)
     return tuple(out)
+
+
+def _required_text(row: dict[str, object], key: str, *, context: str) -> str:
+    value = clean_identifier(row.get(key))
+    if not value:
+        raise BrokerRejectError(f"{context} schema mismatch: missing required field '{key}'")
+    return value
+
+
+def _required_number(row: dict[str, object], key: str, *, context: str) -> float:
+    raw = row.get(key)
+    if raw in (None, ""):
+        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field '{key}'")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
+    if not math.isfinite(parsed):
+        raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
+    return parsed
+
+
+def _optional_number(row: dict[str, object], key: str, *, context: str) -> float | None:
+    raw = row.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
+    if not math.isfinite(parsed):
+        raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
+    return parsed
+
+
+def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
+    if raw in (None, ""):
+        raise BrokerRejectError(f"{context} schema mismatch: missing required timestamp field '{field_name}'")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        text = str(raw).strip()
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise BrokerRejectError(f"{context} schema mismatch: invalid timestamp field '{field_name}'={raw}") from exc
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    if not math.isfinite(value):
+        raise BrokerRejectError(f"{context} schema mismatch: non-finite timestamp field '{field_name}'={raw}")
+    if value > 1_000_000_000_000:
+        return int(value)
+    return int(value * 1000)
+
+
+def _normalize_side(side: object, *, context: str) -> str:
+    normalized = clean_identifier(side).lower()
+    if normalized in {"bid", "buy"}:
+        return "BUY"
+    if normalized in {"ask", "sell"}:
+        return "SELL"
+    raise BrokerRejectError(f"{context} schema mismatch: unknown side '{side}'")
+
+
+def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
+    context = "/v1/orders"
+    uuid = clean_identifier(row.get("uuid"))
+    client_order_id = clean_identifier(row.get("client_order_id"))
+    if not uuid and not client_order_id:
+        raise BrokerRejectError(f"{context} schema mismatch: missing both uuid and client_order_id")
+
+    state = clean_identifier(row.get("state")).lower()
+    if state not in V1_ORDER_STATES:
+        raise BrokerRejectError(f"{context} schema mismatch: unknown state '{row.get('state')}'")
+
+    return V1ListNormalizedOrder(
+        uuid=uuid,
+        client_order_id=client_order_id,
+        market=_required_text(row, "market", context=context),
+        side=_normalize_side(row.get("side"), context=context),
+        ord_type=_required_text(row, "ord_type", context=context),
+        state=state,
+        price=_required_number(row, "price", context=context),
+        volume=_required_number(row, "volume", context=context),
+        remaining_volume=_required_number(row, "remaining_volume", context=context),
+        executed_volume=_required_number(row, "executed_volume", context=context),
+        created_ts=_strict_parse_ts(row.get("created_at"), field_name="created_at", context=context),
+        updated_ts=_strict_parse_ts(row.get("updated_at"), field_name="updated_at", context=context),
+        executed_funds=_optional_number(row, "executed_funds", context=context),
+    )
 
 
 def build_order_list_params(

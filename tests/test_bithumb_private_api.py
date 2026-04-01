@@ -609,11 +609,11 @@ def test_recent_orders_includes_done_and_cancel_states(monkeypatch):
         assert endpoint == "/v1/orders"
         state = params["state"]
         if state == "wait":
-            return [{"uuid": "open-1", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "state": "wait"}]
+            return [{"uuid": "open-1", "market": "KRW-BTC", "ord_type": "limit", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "executed_volume": "0", "state": "wait", "created_at": "2024-01-01T00:00:00+00:00", "updated_at": "2024-01-01T00:00:00+00:00"}]
         if state == "done":
-            return [{"uuid": "filled-1", "side": "ask", "price": "151000000", "volume": "0.01", "remaining_volume": "0", "executed_volume": "0.01", "state": "done"}]
+            return [{"uuid": "filled-1", "market": "KRW-BTC", "ord_type": "limit", "side": "ask", "price": "151000000", "volume": "0.01", "remaining_volume": "0", "executed_volume": "0.01", "state": "done", "created_at": "2024-01-01T00:00:00+00:00", "updated_at": "2024-01-01T00:01:00+00:00"}]
         if state == "cancel":
-            return [{"uuid": "cancel-1", "side": "bid", "price": "149000000", "volume": "0.03", "remaining_volume": "0.02", "executed_volume": "0.01", "state": "cancel"}]
+            return [{"uuid": "cancel-1", "market": "KRW-BTC", "ord_type": "limit", "side": "bid", "price": "149000000", "volume": "0.03", "remaining_volume": "0.02", "executed_volume": "0.01", "state": "cancel", "created_at": "2024-01-01T00:00:00+00:00", "updated_at": "2024-01-01T00:00:30+00:00"}]
         raise AssertionError(state)
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
@@ -636,7 +636,7 @@ def test_get_open_orders_uses_wait_state(monkeypatch):
     def _fake_get(endpoint, params, retry_safe=False):
         call["endpoint"] = endpoint
         call["params"] = params
-        return [{"uuid": "open-1", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "state": "wait"}]
+        return [{"uuid": "open-1", "market": "KRW-BTC", "ord_type": "limit", "side": "bid", "price": "150000000", "volume": "0.02", "remaining_volume": "0.02", "executed_volume": "0", "state": "wait", "created_at": "2024-01-01T00:00:00+00:00", "updated_at": "2024-01-01T00:00:00+00:00"}]
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
@@ -1184,7 +1184,10 @@ def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
                 "price": "150000000",
                 "volume": "0.02",
                 "remaining_volume": "0.02",
+                "executed_volume": "0",
                 "state": "wait",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "updated_at": "2024-01-01T00:00:00+00:00",
             }
         ],
     )
@@ -1192,11 +1195,10 @@ def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
     rows = broker.get_open_orders()
 
     assert len(rows) == 1
-    assert rows[0].raw == {
-        "market": "KRW-BTC",
-        "ord_type": "price",
-        "client_order_id": "exchange-open-1",
-    }
+    assert rows[0].raw is not None
+    assert rows[0].raw["market"] == "KRW-BTC"
+    assert rows[0].raw["ord_type"] == "price"
+    assert rows[0].raw["client_order_id"] == "exchange-open-1"
     assert rows[0].client_order_id == "exchange-open-1"
 
 
@@ -1216,7 +1218,12 @@ def test_recent_orders_maps_exchange_and_client_identifiers_consistently(monkeyp
                     "price": "100",
                     "volume": "0.1",
                     "remaining_volume": "0.1",
+                    "executed_volume": "0",
                     "state": "wait",
+                    "market": "KRW-BTC",
+                    "ord_type": "limit",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
                 }
             ]
         return []
@@ -1228,7 +1235,8 @@ def test_recent_orders_maps_exchange_and_client_identifiers_consistently(monkeyp
     assert len(rows) == 1
     assert rows[0].exchange_order_id == "open-consistent-1"
     assert rows[0].client_order_id == "coid-open-1"
-    assert rows[0].raw == {"client_order_id": "coid-open-1"}
+    assert rows[0].raw is not None
+    assert rows[0].raw["client_order_id"] == "coid-open-1"
 
 
 
@@ -1359,10 +1367,15 @@ def test_get_fills_uses_limited_done_scan_fallback_when_direct_lookup_has_no_usa
             {
                 "uuid": "filled-fallback-1",
                 "client_order_id": "cid-fallback-1",
+                "market": "KRW-BTC",
+                "ord_type": "limit",
+                "side": "bid",
                 "price": "149000000",
                 "volume": "0.05",
+                "remaining_volume": "0.00",
                 "executed_volume": "0.05",
                 "state": "done",
+                "created_at": "2024-01-01T00:00:00+00:00",
                 "updated_at": "2024-01-01T00:00:01+00:00",
             }
         ]
@@ -1934,7 +1947,7 @@ def test_recent_orders_journal_summary_captures_sample_order_ids(monkeypatch):
         if params["state"] == "wait":
             return []
         if params["state"] == "done":
-            return [{"uuid": "filled-1", "side": "bid", "price": "100", "volume": "0.1", "executed_volume": "0.1", "state": "done"}]
+            return [{"uuid": "filled-1", "market": "KRW-BTC", "ord_type": "limit", "side": "bid", "price": "100", "volume": "0.1", "remaining_volume": "0", "executed_volume": "0.1", "state": "done", "created_at": "2024-01-01T00:00:00+00:00", "updated_at": "2024-01-01T00:00:01+00:00"}]
         return []
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
