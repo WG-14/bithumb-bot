@@ -361,15 +361,23 @@ def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
 
 def classify_private_api_error(exc: Exception) -> tuple[str, str]:
     detail = str(exc).lower()
-    if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail:
-        return "AUTH", "authentication failed (401 / invalid JWT / key-secret mismatch)"
+    if isinstance(exc, BrokerTemporaryError) or any(
+        token in detail for token in ("transport error", "server error", "timeout", "timed out", "temporar")
+    ):
+        return "TEMPORARY", "temporary network/server error; retry with backoff"
+    if "schema mismatch" in detail:
+        return "DOC_SCHEMA", "documented response schema mismatch (/v1/orders or /v1/order)"
+    if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail or "signature" in detail:
+        return "AUTH_SIGN", "authentication/signature failed (401 / invalid JWT / key-secret mismatch)"
     if "status=403" in detail or "out_of_scope" in detail or "permission" in detail:
         return "PERMISSION", "API key scope/permission denied"
+    if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
+        return "RECOVERY_REQUIRED", "startup/recovery path requires identifier-based lookup only"
     if any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
         return "FUNDS", "balance or orderable-funds check failed"
     if any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
         return "PARAM", "market/order parameter validation failed"
-    return "UNKNOWN", "unclassified private API failure"
+    return "UNRECOVERABLE", "unclassified private API failure; operator investigation required"
 
 
 class BithumbBroker:
@@ -506,6 +514,29 @@ class BithumbBroker:
             json_body=json_body,
             retry_safe=retry_safe,
             response_excerpt=self._response_body_excerpt,
+        )
+
+    def _log_v1_orders_parse_failure(
+        self,
+        *,
+        endpoint: str,
+        state: str,
+        exchange_ids_count: int,
+        client_ids_count: int,
+        row: dict[str, object],
+        reason: str,
+    ) -> None:
+        RUN_LOG.error(
+            format_log_kv(
+                "[V1_ORDERS_PARSE_FAIL]",
+                endpoint=endpoint,
+                state=state,
+                exchange_ids_count=exchange_ids_count,
+                client_ids_count=client_ids_count,
+                uuid_present=bool(self._clean_identifier(row.get("uuid"))),
+                client_order_id_present=bool(self._clean_identifier(row.get("client_order_id"))),
+                parser_failure_reason=reason,
+            )
         )
 
     def _get_private(self, endpoint: str, params: dict[str, object], *, retry_safe: bool = False) -> dict | list:
@@ -1207,10 +1238,23 @@ class BithumbBroker:
             raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
 
         out: list[BrokerOrder] = []
+        exchange_ids_count = len(exchange_order_ids or [])
+        client_ids_count = len(client_order_ids or [])
         for row in data:
             if not isinstance(row, dict):
                 raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
-            normalized = parse_v1_order_list_row(row)
+            try:
+                normalized = parse_v1_order_list_row(row)
+            except BrokerRejectError as exc:
+                self._log_v1_orders_parse_failure(
+                    endpoint="/v1/orders",
+                    state="wait",
+                    exchange_ids_count=exchange_ids_count,
+                    client_ids_count=client_ids_count,
+                    row=row,
+                    reason=str(exc),
+                )
+                raise
             qty_req = float(normalized.volume)
             qty_filled = float(normalized.executed_volume)
             status = v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled)
@@ -1410,6 +1454,8 @@ class BithumbBroker:
             )
 
         snapshots: dict[str, BrokerOrder] = {}
+        exchange_ids_count = len(exchange_order_ids or [])
+        client_ids_count = len(client_order_ids or [])
         for state, journal_path in (("wait", "/v1/orders(open_orders)"), ("done", "/v1/orders(done)"), ("cancel", "/v1/orders(cancel)")):
             data = self._get_private(
                 "/v1/orders",
@@ -1428,7 +1474,18 @@ class BithumbBroker:
             for row in data:
                 if not isinstance(row, dict):
                     raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
-                normalized = parse_v1_order_list_row(row)
+                try:
+                    normalized = parse_v1_order_list_row(row)
+                except BrokerRejectError as exc:
+                    self._log_v1_orders_parse_failure(
+                        endpoint="/v1/orders",
+                        state=state,
+                        exchange_ids_count=exchange_ids_count,
+                        client_ids_count=client_ids_count,
+                        row=row,
+                        reason=str(exc),
+                    )
+                    raise
                 qty_req = float(normalized.volume)
                 qty_filled = float(normalized.executed_volume)
                 order = BrokerOrder(

@@ -430,11 +430,27 @@ def evaluate_startup_safety_gate() -> str | None:
     if stray_remote_open_count > 0:
         reasons.append(f"stray_remote_open_orders={stray_remote_open_count}")
 
+    RUN_LOG.info(
+        format_log_kv(
+            "[STARTUP_GATE] evaluated",
+            pending_submit=status_counts["pending_submit"],
+            submit_unknown=status_counts["submit_unknown"],
+            recovery_required=status_counts["recovery_required"],
+            stale_new_partial=status_counts["stale_new_partial"],
+            unresolved_open_orders=state.unresolved_open_order_count,
+            runtime_recovery_required=state.recovery_required_count,
+            submit_unknown_without_exchange_id=submit_unknown_without_exchange_count,
+            stray_remote_open_orders=stray_remote_open_count,
+            gate_blocked=bool(reasons),
+        )
+    )
+
     if not reasons:
         runtime_state.set_startup_gate_reason(None)
         return None
 
     reason = f"{STARTUP_RECOVERY_GATE_PREFIX}: " + ", ".join(reasons)
+    RUN_LOG.warning(format_log_kv("[STARTUP_GATE] blocked", reason=reason))
     runtime_state.set_startup_gate_reason(reason)
     return reason
 

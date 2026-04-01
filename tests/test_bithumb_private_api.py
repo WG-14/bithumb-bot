@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
+from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI, classify_private_api_error
 from bithumb_bot.broker.base import BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.config import settings
 from bithumb_bot.public_api_orderbook import BestQuote
@@ -155,6 +155,24 @@ def test_private_safe_call_retries_temporary_error(monkeypatch):
     assert isinstance(data, list)
     assert _SequencedClient.calls == 2
     assert sleeps == [0.2]
+
+
+def test_classify_private_api_error_categories_cover_v1_orders_contract_failures() -> None:
+    code, summary = classify_private_api_error(BrokerRejectError("/v1/orders schema mismatch: unknown state 'halted'"))
+    assert code == "DOC_SCHEMA"
+    assert "schema mismatch" in summary
+
+    code, summary = classify_private_api_error(
+        BrokerRejectError("open order lookup requires identifiers; broad /v1/orders market/state scans are disabled")
+    )
+    assert code == "RECOVERY_REQUIRED"
+    assert "identifier-based lookup" in summary
+
+    code, summary = classify_private_api_error(BrokerRejectError("rejected with http status=401 body=invalid jwt"))
+    assert code == "AUTH_SIGN"
+
+    code, summary = classify_private_api_error(BrokerTemporaryError("bithumb private /v1/orders transport error"))
+    assert code == "TEMPORARY"
 
 
 
@@ -2209,3 +2227,42 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
         "query_hash": hashlib.sha512(canonical_payload.encode("utf-8")).hexdigest(),
         "query_hash_alg": "SHA512",
     }
+
+
+def test_get_recent_orders_logs_parser_failure_context_for_v1_orders(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint: str, params: dict[str, object], retry_safe: bool = False):
+        assert endpoint == "/v1/orders"
+        if params.get("state") == "wait":
+            return [
+                {
+                    "uuid": "ex-log-1",
+                    "market": "KRW-BTC",
+                    "side": "bid",
+                    "ord_type": "limit",
+                    "state": "mystery",
+                    "price": "100",
+                    "volume": "0.1",
+                    "remaining_volume": "0.1",
+                    "executed_volume": "0",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    with caplog.at_level(logging.ERROR, logger="bithumb_bot.run"):
+        with pytest.raises(BrokerRejectError, match="/v1/orders schema mismatch: unknown state"):
+            broker.get_recent_orders(limit=5, exchange_order_ids=["ex-log-1"])
+
+    assert "[V1_ORDERS_PARSE_FAIL]" in caplog.text
+    assert "endpoint=/v1/orders" in caplog.text
+    assert "state=wait" in caplog.text
+    assert "exchange_ids_count=1" in caplog.text
+    assert "uuid_present=1" in caplog.text
+    assert "parser_failure_reason=" in caplog.text
+    assert "unknown state 'mystery'" in caplog.text

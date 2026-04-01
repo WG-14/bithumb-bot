@@ -755,3 +755,17 @@ def test_market_preflight_rejects_negative_cache_ttl(monkeypatch: pytest.MonkeyP
         config.validate_live_mode_preflight(settings)
 
     assert "MARKET_REGISTRY_CACHE_TTL_SEC must be >= 0" in str(exc.value)
+
+
+def test_live_preflight_rejects_legacy_broad_scan_env_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.setenv("BITHUMB_V1_ORDER_SCAN_MARKET", "KRW-BTC")
+    monkeypatch.setenv("BITHUMB_V1_ORDER_SCAN_STATES", "wait,done")
+    monkeypatch.setenv("BITHUMB_V1_ORDER_SCAN_LIMIT", "100")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    message = str(exc.value)
+    assert "legacy /v1/orders broad-scan env is not allowed" in message
+    assert "BITHUMB_V1_ORDER_SCAN_MARKET" in message

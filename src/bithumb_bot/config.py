@@ -37,6 +37,11 @@ PAPER_ONLY_ENV_KEYS = (
 ALLOWED_RUNTIME_MODES = ("paper", "live")
 DEFAULT_RUNTIME_STRATEGY = "sma_with_filter"
 DEFAULT_CANONICAL_MARKET = "KRW-BTC"
+LEGACY_V1_ORDER_SCAN_ENV_KEYS = (
+    "BITHUMB_V1_ORDER_SCAN_MARKET",
+    "BITHUMB_V1_ORDER_SCAN_STATES",
+    "BITHUMB_V1_ORDER_SCAN_LIMIT",
+)
 LOG = logging.getLogger(__name__)
 _MARKET_TOKEN_RE = re.compile(r"^[A-Z0-9]+$")
 
@@ -536,6 +541,16 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         required_rule_issues,
         required_rule_source_issues,
     )
+
+    legacy_scan_keys = [
+        key for key in LEGACY_V1_ORDER_SCAN_ENV_KEYS if os.getenv(key) not in (None, "")
+    ]
+    if legacy_scan_keys:
+        issues.append(
+            "legacy /v1/orders broad-scan env is not allowed; "
+            "identifier-based lookup only after /v1/orders transition. "
+            "unset keys: " + ", ".join(legacy_scan_keys)
+        )
 
     try:
         resolved = get_effective_order_rules(cfg.PAIR)
