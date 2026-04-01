@@ -14,6 +14,7 @@ from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
 from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
 from .order_rules import get_effective_order_rules, side_min_total_krw
+from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
 from ..oms import (
@@ -426,9 +427,20 @@ def validate_pretrade(
     if min_notional > 0 and notional < min_notional:
         raise ValueError(f"order notional below minimum ({side}): {notional:.2f} < {min_notional:.2f}")
 
-    balance = broker.get_balance()
+    balance_snapshot = fetch_balance_snapshot(broker)
+    source_id = str(balance_snapshot.source_id or "unknown")
+    observed_ts_ms = int(balance_snapshot.observed_ts_ms)
+    balance = balance_snapshot.balance
     if not math.isfinite(float(balance.cash_available)) or not math.isfinite(float(balance.asset_available)):
         raise ValueError("invalid broker balance payload")
+    if (
+        settings.MODE == "live"
+        and not bool(settings.LIVE_DRY_RUN)
+        and source_id == "dry_run_static"
+    ):
+        raise ValueError("invalid live balance source: dry_run_static")
+    if observed_ts_ms <= 0 and source_id not in {"dry_run_static", "legacy_balance_api"}:
+        raise ValueError(f"invalid balance snapshot observed_ts_ms: source={source_id} observed_ts_ms={observed_ts_ms}")
 
     buffer_mult = 1.0 + max(0.0, float(settings.PRETRADE_BALANCE_BUFFER_BPS)) / 10_000.0
     if side == "BUY":

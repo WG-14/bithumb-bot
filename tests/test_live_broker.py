@@ -7,6 +7,7 @@ import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
+from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order, validate_pretrade
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
@@ -1780,6 +1781,8 @@ def test_reconcile_records_balance_split_mismatch_metadata(tmp_path):
     payload = json.loads(state.last_reconcile_metadata)
     assert int(payload.get("balance_split_mismatch_count", 0)) >= 1
     assert "cash_available" in str(payload.get("balance_split_mismatch_summary", ""))
+    assert payload.get("balance_source") in {"legacy_balance_api", "accounts_v1_rest_snapshot", "dry_run_static"}
+    assert int(payload.get("balance_observed_ts_ms", 0)) >= 0
 
 
 def test_validate_order_rejects_invalid_qty():
@@ -1876,6 +1879,47 @@ def test_validate_pretrade_buy_becomes_more_conservative_when_live_fee_increases
             reference_bid=99.9,
             reference_ask=100.1,
         )
+
+
+def test_validate_pretrade_rejects_dry_run_balance_source_in_live_real_order() -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    broker = _FakeBroker()
+    broker.get_balance_snapshot = lambda: BalanceSnapshot(  # type: ignore[attr-defined]
+        source_id="dry_run_static",
+        observed_ts_ms=0,
+        balance=BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
+    )
+
+    with pytest.raises(ValueError, match="invalid live balance source: dry_run_static"):
+        validate_pretrade(
+            broker=broker,
+            side="BUY",
+            qty=1.0,
+            market_price=100.0,
+            reference_bid=99.9,
+            reference_ask=100.1,
+        )
+
+
+def test_validate_pretrade_accepts_accounts_snapshot_balance_source() -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    broker = _FakeBroker()
+    broker.get_balance_snapshot = lambda: BalanceSnapshot(  # type: ignore[attr-defined]
+        source_id="accounts_v1_rest_snapshot",
+        observed_ts_ms=int(time.time() * 1000),
+        balance=BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
+    )
+
+    validate_pretrade(
+        broker=broker,
+        side="BUY",
+        qty=1.0,
+        market_price=100.0,
+        reference_bid=99.9,
+        reference_ask=100.1,
+    )
 
 
 def test_live_excessive_spread_rejected_before_submit(monkeypatch, tmp_path):

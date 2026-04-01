@@ -15,6 +15,7 @@ from .broker.base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
+from .broker.balance_source import fetch_balance_snapshot
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
@@ -1095,6 +1096,8 @@ def reconcile_with_broker(broker: Broker) -> None:
         "lookup_identifier_mismatch": 0,
         "lookup_temporary_broker_error": 0,
         "lookup_schema_mismatch": 0,
+        "balance_source": "-",
+        "balance_observed_ts_ms": 0,
     }
     try:
         init_portfolio(conn)
@@ -1346,12 +1349,17 @@ def reconcile_with_broker(broker: Broker) -> None:
             metadata["source_conflict_halt"] = len(conflicts)
             reason_code = REASON_SOURCE_CONFLICT_HALT
 
-        bal = broker.get_balance()
+        balance_snapshot = fetch_balance_snapshot(broker)
+        bal = balance_snapshot.balance
+        metadata["balance_source"] = str(balance_snapshot.source_id or "-")
+        metadata["balance_observed_ts_ms"] = int(balance_snapshot.observed_ts_ms)
         local_cash_available, local_cash_locked, local_asset_available, local_asset_locked = get_portfolio_breakdown(conn)
         has_open_orders = bool(local_open) or bool(remote_open)
 
         cash_locked = float(bal.cash_locked)
         asset_locked = float(bal.asset_locked)
+        # Accounts snapshot source can briefly report locked=0 around in-flight open orders.
+        # Keep local locked split as conservative floor when remote split is zero during open-order windows.
         if has_open_orders and cash_locked <= 1e-12 and local_cash_locked > 1e-12:
             cash_locked = local_cash_locked
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:

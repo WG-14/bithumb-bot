@@ -28,7 +28,7 @@ from .base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
-from .balance_source import AccountsV1BalanceSource, BalanceSource, DryRunBalanceSource
+from .balance_source import AccountsV1BalanceSource, BalanceSnapshot, BalanceSource, DryRunBalanceSource
 from .accounts_v1 import (
     parse_accounts_response,
     select_pair_balances,
@@ -1589,6 +1589,9 @@ class BithumbBroker:
     def get_balance(self) -> BrokerBalance:
         """Return broker balance via configured snapshot source abstraction."""
         return self._get_balance_source().fetch_snapshot().balance
+
+    def get_balance_snapshot(self) -> BalanceSnapshot:
+        return self._get_balance_source().fetch_snapshot()
 
     def get_recent_orders(
         self,

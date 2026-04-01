@@ -20,6 +20,26 @@ class BalanceSource(Protocol):
         ...
 
 
+def fetch_balance_snapshot(broker: object) -> BalanceSnapshot:
+    fetcher = getattr(broker, "get_balance_snapshot", None)
+    if callable(fetcher):
+        snapshot = fetcher()
+        if isinstance(snapshot, BalanceSnapshot):
+            return snapshot
+
+    balance_getter = getattr(broker, "get_balance", None)
+    if not callable(balance_getter):
+        raise AttributeError("broker does not provide get_balance/get_balance_snapshot")
+    balance = balance_getter()
+    if not isinstance(balance, BrokerBalance):
+        raise TypeError("broker.get_balance() returned non-BrokerBalance payload")
+    return BalanceSnapshot(
+        source_id="legacy_balance_api",
+        observed_ts_ms=0,
+        balance=balance,
+    )
+
+
 class DryRunBalanceSource:
     def fetch_snapshot(self) -> BalanceSnapshot:
         return BalanceSnapshot(
