@@ -100,56 +100,64 @@ class MarketRegistry:
 
 
 _market_registry_lock = Lock()
-_market_registry_cache: MarketRegistry | None = None
-_market_registry_cached_at_monotonic: float | None = None
+_market_registry_cache_by_detail: dict[bool, MarketRegistry] = {}
+_market_registry_cached_at_monotonic_by_detail: dict[bool, float] = {}
 
 
-def _cache_is_fresh(*, now_monotonic: float, ttl_seconds: float | None) -> bool:
-    if _market_registry_cache is None:
+def _cache_is_fresh_for_details(*, is_details: bool, now_monotonic: float, ttl_seconds: float | None) -> bool:
+    if is_details not in _market_registry_cache_by_detail:
         return False
     if ttl_seconds is None:
         return True
     if ttl_seconds <= 0:
         return False
-    if _market_registry_cached_at_monotonic is None:
+    cached_at = _market_registry_cached_at_monotonic_by_detail.get(is_details)
+    if cached_at is None:
         return False
-    return (now_monotonic - _market_registry_cached_at_monotonic) < ttl_seconds
+    return (now_monotonic - cached_at) < ttl_seconds
 
 
 def get_market_registry(
     *,
     refresh: bool = False,
     client: MarketCatalogClient | None = None,
+    is_details: bool = False,
     ttl_seconds: float | None = 900.0,
 ) -> MarketRegistry:
     """Return cached market registry loaded from /v1/market/all."""
-    global _market_registry_cache, _market_registry_cached_at_monotonic
     now_monotonic = time.monotonic()
     if refresh:
-        registry = MarketRegistry.from_catalog(client=client)
+        registry = MarketRegistry.from_catalog(client=client, is_details=is_details)
         with _market_registry_lock:
-            _market_registry_cache = registry
-            _market_registry_cached_at_monotonic = now_monotonic
+            _market_registry_cache_by_detail[is_details] = registry
+            _market_registry_cached_at_monotonic_by_detail[is_details] = now_monotonic
         return registry
 
     with _market_registry_lock:
-        if _cache_is_fresh(now_monotonic=now_monotonic, ttl_seconds=ttl_seconds):
-            assert _market_registry_cache is not None
-            return _market_registry_cache
+        if _cache_is_fresh_for_details(
+            is_details=is_details,
+            now_monotonic=now_monotonic,
+            ttl_seconds=ttl_seconds,
+        ):
+            return _market_registry_cache_by_detail[is_details]
 
-    registry = MarketRegistry.from_catalog(client=client)
+    registry = MarketRegistry.from_catalog(client=client, is_details=is_details)
     with _market_registry_lock:
-        if refresh or not _cache_is_fresh(now_monotonic=now_monotonic, ttl_seconds=ttl_seconds):
-            _market_registry_cache = registry
-            _market_registry_cached_at_monotonic = now_monotonic
-        elif _market_registry_cache is None:
-            _market_registry_cache = registry
-            _market_registry_cached_at_monotonic = now_monotonic
-        return _market_registry_cache
+        if refresh or not _cache_is_fresh_for_details(
+            is_details=is_details,
+            now_monotonic=now_monotonic,
+            ttl_seconds=ttl_seconds,
+        ):
+            _market_registry_cache_by_detail[is_details] = registry
+            _market_registry_cached_at_monotonic_by_detail[is_details] = now_monotonic
+        elif is_details not in _market_registry_cache_by_detail:
+            _market_registry_cache_by_detail[is_details] = registry
+            _market_registry_cached_at_monotonic_by_detail[is_details] = now_monotonic
+        return _market_registry_cache_by_detail[is_details]
 
 
 def canonical_market_id(market: str, *, registry: MarketRegistry | None = None) -> str:
-    """Normalize and validate market against exchange catalog."""
+    """Normalize user input and validate the resulting market against exchange catalog."""
     active_registry = registry or get_market_registry()
     return normalize_market_id_with_registry(market, registry=active_registry)
 
@@ -172,6 +180,13 @@ def _require_catalog_field(*, row: dict[str, object], field: str, required: bool
 
 
 def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
+    """User-input convenience normalization layer.
+
+    Accepts:
+    - canonical exchange id: ``KRW-BTC``
+    - legacy alias: ``BTC_KRW``
+    - base-only shorthand: ``BTC`` (default quote is applied)
+    """
     token = str(market).strip().upper().replace(" ", "")
     if not token:
         raise ValueError("market must not be empty")
@@ -194,6 +209,23 @@ def normalize_market_id(market: str, *, default_quote: str = "KRW") -> str:
 def normalize_market_id_with_registry(market: str, *, registry: MarketRegistry, default_quote: str = "KRW") -> str:
     canonical = normalize_market_id(market, default_quote=default_quote)
     return registry.require_supported(canonical)
+
+
+def validate_exchange_market_id(market: str, *, registry: MarketRegistry) -> str:
+    """Core exchange validation layer.
+
+    This function validates only exchange-document market id format (QUOTE-BASE),
+    and never applies implicit default quote inference.
+    """
+    token = str(market).strip().upper().replace(" ", "")
+    if not token:
+        raise ValueError("market must not be empty")
+    if "-" not in token:
+        raise ValueError(
+            f"exchange market id must be canonical QUOTE-BASE format, got {market!r}"
+        )
+    quote, base = _split_pair(token, "-")
+    return registry.require_supported(f"{quote}-{base}")
 
 
 def _split_pair(token: str, separator: str) -> tuple[str, str]:

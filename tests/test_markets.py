@@ -14,6 +14,7 @@ from bithumb_bot.markets import (
     canonical_market_with_raw,
     normalize_market_id,
     normalize_market_id_with_registry,
+    validate_exchange_market_id,
     canonical_market_id,
     get_market_registry,
 )
@@ -87,6 +88,13 @@ def test_normalize_market_id_with_registry_rejects_unsupported() -> None:
     registry = MarketRegistry([])
     with pytest.raises(UnsupportedMarketError, match="unsupported market"):
         normalize_market_id_with_registry("ETH_KRW", registry=registry)
+
+
+def test_validate_exchange_market_id_requires_canonical_quote_base_without_implicit_default_quote() -> None:
+    registry = MarketRegistry([MarketInfo(market="KRW-BTC")])
+    assert validate_exchange_market_id("KRW-BTC", registry=registry) == "KRW-BTC"
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        validate_exchange_market_id("BTC", registry=registry)
 
 
 def test_canonical_market_with_raw_tracks_noncanonical_input() -> None:
@@ -270,8 +278,8 @@ def test_get_market_registry_refreshes_when_ttl_expires(monkeypatch) -> None:
 
     monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
     monkeypatch.setattr(markets_mod.time, "monotonic", lambda: monotonic["value"])
-    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
-    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache_by_detail", {})
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic_by_detail", {})
 
     first = get_market_registry(ttl_seconds=10)
     monotonic["value"] = 109.0
@@ -295,8 +303,8 @@ def test_get_market_registry_forces_refresh_when_requested(monkeypatch) -> None:
         return MarketRegistry([MarketInfo(market=f"KRW-FAKE{calls['count']}")])
 
     monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
-    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
-    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache_by_detail", {})
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic_by_detail", {})
 
     first = get_market_registry(ttl_seconds=300)
     second = get_market_registry(refresh=True, ttl_seconds=300)
@@ -316,11 +324,37 @@ def test_get_market_registry_ttl_zero_disables_reuse(monkeypatch) -> None:
         return MarketRegistry([MarketInfo(market=f"KRW-FAKE{calls['count']}")])
 
     monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
-    monkeypatch.setattr(markets_mod, "_market_registry_cache", None)
-    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic", None)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache_by_detail", {})
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic_by_detail", {})
 
     first = get_market_registry(ttl_seconds=0)
     second = get_market_registry(ttl_seconds=0)
 
     assert second is not first
     assert calls["count"] == 2
+
+
+def test_get_market_registry_caches_details_and_non_details_separately(monkeypatch) -> None:
+    import bithumb_bot.markets as markets_mod
+
+    calls: list[bool] = []
+
+    def _fake_from_catalog(*, client=None, is_details=False):
+        del client
+        calls.append(bool(is_details))
+        suffix = "DETAIL" if is_details else "BASIC"
+        return MarketRegistry([MarketInfo(market=f"KRW-{suffix}")])
+
+    monkeypatch.setattr(markets_mod.MarketRegistry, "from_catalog", _fake_from_catalog)
+    monkeypatch.setattr(markets_mod, "_market_registry_cache_by_detail", {})
+    monkeypatch.setattr(markets_mod, "_market_registry_cached_at_monotonic_by_detail", {})
+
+    first_basic = get_market_registry(is_details=False, ttl_seconds=300)
+    first_detail = get_market_registry(is_details=True, ttl_seconds=300)
+    second_basic = get_market_registry(is_details=False, ttl_seconds=300)
+    second_detail = get_market_registry(is_details=True, ttl_seconds=300)
+
+    assert first_basic is second_basic
+    assert first_detail is second_detail
+    assert first_basic is not first_detail
+    assert calls == [False, True]

@@ -13,6 +13,7 @@ from .markets import (
     UnsupportedMarketError,
     get_market_registry,
     normalize_market_id,
+    validate_exchange_market_id,
 )
 from .notifier import is_configured as notifier_is_configured
 from .paths import PathManager, PathPolicyError
@@ -387,10 +388,16 @@ def validate_mode_or_raise(mode: str) -> None:
     )
 
 
-def _fetch_market_registry_for_preflight(*, refresh: bool, ttl_seconds: float) -> MarketRegistry:
+def _fetch_market_registry_for_preflight(
+    *,
+    refresh: bool,
+    ttl_seconds: float,
+    is_details: bool,
+) -> MarketRegistry:
     return get_market_registry(
         refresh=refresh,
         client=None,
+        is_details=is_details,
         ttl_seconds=ttl_seconds,
     )
 
@@ -419,7 +426,7 @@ def validate_market_preflight(cfg: Settings) -> None:
     )
 
     configured_market = str(cfg.PAIR or "")
-    canonical_market = normalize_market_id(configured_market)
+    normalized_market_input = normalize_market_id(configured_market)
     warning_block_states = _warning_state_set(cfg.MARKET_PREFLIGHT_WARNING_STATES)
     if cfg.MARKET_REGISTRY_CACHE_TTL_SEC < 0:
         raise MarketPreflightValidationError(
@@ -435,11 +442,12 @@ def validate_market_preflight(cfg: Settings) -> None:
         registry = _fetch_market_registry_for_preflight(
             refresh=force_refresh,
             ttl_seconds=cfg.MARKET_REGISTRY_CACHE_TTL_SEC,
+            is_details=True,
         )
     except Exception as exc:
         msg = (
             "market preflight catalog fetch failed: "
-            f"pair={configured_market!r} canonical={canonical_market} "
+            f"pair={configured_market!r} normalized={normalized_market_input} "
             f"error={type(exc).__name__}: {exc}"
         )
         if block_on_catalog_error:
@@ -448,11 +456,11 @@ def validate_market_preflight(cfg: Settings) -> None:
         return
 
     try:
-        registry.require_supported(canonical_market)
-    except UnsupportedMarketError as exc:
+        canonical_market = validate_exchange_market_id(normalized_market_input, registry=registry)
+    except (UnsupportedMarketError, ValueError) as exc:
         raise MarketPreflightValidationError(
             "market preflight rejected unsupported pair: "
-            f"pair={configured_market!r} canonical={canonical_market}"
+            f"pair={configured_market!r} normalized={normalized_market_input}"
         ) from exc
 
     market_info = registry.get(canonical_market)

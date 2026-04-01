@@ -717,7 +717,7 @@ def test_market_preflight_rejects_registry_inconsistency_when_market_lookup_is_m
 
 def test_market_preflight_live_defaults_to_forced_registry_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
-    calls: list[tuple[bool, float]] = []
+    calls: list[tuple[bool, float, bool]] = []
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", 123.0)
     monkeypatch.delenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", raising=False)
@@ -725,19 +725,19 @@ def test_market_preflight_live_defaults_to_forced_registry_refresh(monkeypatch: 
         config,
         "_fetch_market_registry_for_preflight",
         lambda **kwargs: (
-            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]))),
+            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]), bool(kwargs["is_details"]))),
             MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
         )[1],
     )
 
     config.validate_market_preflight(settings)
 
-    assert calls == [(True, 123.0)]
+    assert calls == [(True, 123.0, True)]
 
 
 def test_market_preflight_paper_defaults_to_cache_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
-    calls: list[tuple[bool, float]] = []
+    calls: list[tuple[bool, float, bool]] = []
     object.__setattr__(settings, "MODE", "paper")
     object.__setattr__(settings, "MARKET_REGISTRY_CACHE_TTL_SEC", 456.0)
     monkeypatch.delenv("MARKET_PREFLIGHT_FORCE_REGISTRY_REFRESH", raising=False)
@@ -745,14 +745,14 @@ def test_market_preflight_paper_defaults_to_cache_reuse(monkeypatch: pytest.Monk
         config,
         "_fetch_market_registry_for_preflight",
         lambda **kwargs: (
-            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]))),
+            calls.append((bool(kwargs["refresh"]), float(kwargs["ttl_seconds"]), bool(kwargs["is_details"]))),
             MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")]),
         )[1],
     )
 
     config.validate_market_preflight(settings)
 
-    assert calls == [(False, 456.0)]
+    assert calls == [(False, 456.0, True)]
 
 
 def test_market_preflight_rejects_negative_cache_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
