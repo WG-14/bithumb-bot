@@ -1368,9 +1368,9 @@ def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
     assert row is not None
     assert row["status"] == "CANCELED"
     assert summary["remote_open_count"] == 2
-    assert summary["canceled_count"] == 2
+    assert summary["canceled_count"] == 1
     assert summary["matched_local_count"] == 1
-    assert summary["stray_canceled_count"] == 1
+    assert summary["stray_canceled_count"] == 0
     assert summary["failed_count"] == 0
     assert len(summary["stray_messages"]) == 1
 
@@ -1391,8 +1391,9 @@ def test_cancel_open_orders_reports_cancel_failures(tmp_path):
 
     assert summary["remote_open_count"] == 2
     assert summary["canceled_count"] == 1
-    assert summary["failed_count"] == 1
-    assert len(summary["error_messages"]) == 1
+    assert summary["failed_count"] == 0
+    assert len(summary["error_messages"]) == 0
+    assert len(summary["stray_messages"]) == 1
 
 
 def test_cancel_open_orders_tracks_cancel_acceptance_and_confirmation(tmp_path):
@@ -1414,7 +1415,7 @@ def test_cancel_open_orders_tracks_cancel_acceptance_and_confirmation(tmp_path):
 
     assert row is not None
     assert row["status"] == "CANCELED"
-    assert summary["cancel_accepted_count"] == 2
+    assert summary["cancel_accepted_count"] == 1
     assert summary["canceled_count"] == 1
     assert summary["cancel_confirm_pending_count"] == 0
     assert summary["stray_canceled_count"] == 0

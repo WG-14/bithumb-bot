@@ -6,7 +6,15 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
-from .broker.base import Broker, BrokerFill, BrokerOrder, BrokerRejectError
+from .broker.base import (
+    Broker,
+    BrokerFill,
+    BrokerIdentifierMismatchError,
+    BrokerOrder,
+    BrokerRejectError,
+    BrokerSchemaError,
+    BrokerTemporaryError,
+)
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
@@ -26,6 +34,7 @@ REASON_SOURCE_CONFLICT_HALT = "SOURCE_CONFLICT_HALT"
 REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
+REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVERY"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
@@ -333,6 +342,22 @@ def _mark_recovery_required_with_reason(
             ),
         )
     )
+
+
+def _classify_lookup_error(exc: Exception) -> str:
+    if isinstance(exc, BrokerIdentifierMismatchError):
+        return "identifier_mismatch"
+    if isinstance(exc, BrokerSchemaError):
+        return "schema_mismatch"
+    if isinstance(exc, BrokerTemporaryError):
+        return "temporary_broker_error"
+    if isinstance(exc, BrokerRejectError):
+        detail = str(exc).lower()
+        if "not found" in detail:
+            return "lookup_not_found"
+        return "broker_reject"
+    return "unexpected_error"
+
 
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
@@ -1063,6 +1088,13 @@ def reconcile_with_broker(broker: Broker) -> None:
         "source_conflict_halt": 0,
         "invalid_fill_price_blocked": 0,
         "balance_split_mismatch_count": 0,
+        "lookup_known_exchange_id": 0,
+        "lookup_known_client_order_id": 0,
+        "lookup_identifier_missing": 0,
+        "lookup_not_found": 0,
+        "lookup_identifier_mismatch": 0,
+        "lookup_temporary_broker_error": 0,
+        "lookup_schema_mismatch": 0,
     }
     try:
         init_portfolio(conn)
@@ -1130,7 +1162,60 @@ def reconcile_with_broker(broker: Broker) -> None:
                 reason_code = REASON_SUBMIT_UNKNOWN_UNRESOLVED
                 continue
 
-            remote = broker.get_order(client_order_id=oid, exchange_order_id=row["exchange_order_id"])
+            exchange_order_id = str(row["exchange_order_id"] or "").strip()
+            client_order_id = str(oid or "").strip()
+            lookup_mode = "missing_identifier"
+            if exchange_order_id:
+                lookup_mode = "known_exchange_order_id"
+                metadata["lookup_known_exchange_id"] += 1
+            elif client_order_id:
+                lookup_mode = "known_client_order_id"
+                metadata["lookup_known_client_order_id"] += 1
+            else:
+                metadata["lookup_identifier_missing"] += 1
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
+                    from_status=str(row["status"]),
+                    reason_code=REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY,
+                    reason="reconcile identifier lookup failed: identifier missing; manual recovery required",
+                )
+                if reason_code == REASON_RECONCILE_OK:
+                    reason_code = REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY
+                continue
+            try:
+                remote = broker.get_order(
+                    client_order_id=(client_order_id if client_order_id else None),
+                    exchange_order_id=(exchange_order_id if exchange_order_id else None),
+                )
+            except Exception as exc:
+                failure_kind = _classify_lookup_error(exc)
+                if failure_kind == "lookup_not_found":
+                    metadata["lookup_not_found"] += 1
+                elif failure_kind == "identifier_mismatch":
+                    metadata["lookup_identifier_mismatch"] += 1
+                elif failure_kind == "temporary_broker_error":
+                    metadata["lookup_temporary_broker_error"] += 1
+                elif failure_kind == "schema_mismatch":
+                    metadata["lookup_schema_mismatch"] += 1
+
+                if failure_kind in {"lookup_not_found", "identifier_mismatch", "schema_mismatch"}:
+                    _mark_recovery_required_with_reason(
+                        conn,
+                        client_order_id=oid,
+                        side=str(row["side"]),
+                        from_status=str(row["status"]),
+                        reason_code=REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY,
+                        reason=(
+                            f"reconcile identifier lookup failed: {failure_kind}; "
+                            f"lookup_mode={lookup_mode}; manual recovery required ({type(exc).__name__}: {exc})"
+                        ),
+                    )
+                    if reason_code == REASON_RECONCILE_OK:
+                        reason_code = REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY
+                    continue
+                raise
             if remote.exchange_order_id:
                 set_exchange_order_id(oid, remote.exchange_order_id, conn=conn)
                 notify(
@@ -1498,6 +1583,14 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                 )
                 continue
 
+            if local_id is None:
+                stray_messages.append(
+                    "cancel skipped for remote open order without local unresolved mapping: "
+                    f"exchange_order_id={remote_exchange_id or '<none>'} "
+                    f"client_order_id={remote_client_order_id or '<none>'}"
+                )
+                continue
+
             cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
 
             try:
@@ -1578,15 +1671,12 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                     )
                 matched_local_count += 1
             else:
-                if is_final_canceled:
-                    stray_canceled_count += 1
-                    stray_messages.append(
-                        f"stray remote order canceled exchange_order_id={remote_exchange_id or '<none>'} side={remote.side} qty={remote.qty_req}"
-                    )
-                else:
-                    stray_messages.append(
-                        f"stray remote cancel accepted but unconfirmed exchange_order_id={remote_exchange_id or '<none>'} status={final_status or CANCEL_REQUESTED_STATUS}"
-                    )
+                stray_messages.append(
+                    "cancel skipped for remote open order without local unresolved mapping: "
+                    f"exchange_order_id={remote_exchange_id or '<none>'} "
+                    f"client_order_id={remote_client_order_id or '<none>'} "
+                    f"status={final_status or CANCEL_REQUESTED_STATUS}"
+                )
 
         conn.commit()
         return {

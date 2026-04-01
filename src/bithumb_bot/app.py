@@ -1466,6 +1466,7 @@ def _load_recovery_report(
         )
 
     unprocessed_remote_open_orders = 0
+    remote_known_unresolved_verification_summary = "none"
     balance_split_mismatch_summary = "none"
     if health_row and health_row["last_reconcile_metadata"]:
         try:
@@ -1480,6 +1481,23 @@ def _load_recovery_report(
         raw_mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "").strip()
         if raw_mismatch_summary:
             balance_split_mismatch_summary = raw_mismatch_summary
+        remote_known_unresolved_verification_summary = (
+            "lookup_known_exchange_id={lookup_known_exchange_id} "
+            "lookup_known_client_order_id={lookup_known_client_order_id} "
+            "lookup_identifier_missing={lookup_identifier_missing} "
+            "lookup_not_found={lookup_not_found} "
+            "lookup_identifier_mismatch={lookup_identifier_mismatch} "
+            "lookup_temporary_broker_error={lookup_temporary_broker_error} "
+            "lookup_schema_mismatch={lookup_schema_mismatch}".format(
+                lookup_known_exchange_id=int(reconcile_meta.get("lookup_known_exchange_id", 0) or 0),
+                lookup_known_client_order_id=int(reconcile_meta.get("lookup_known_client_order_id", 0) or 0),
+                lookup_identifier_missing=int(reconcile_meta.get("lookup_identifier_missing", 0) or 0),
+                lookup_not_found=int(reconcile_meta.get("lookup_not_found", 0) or 0),
+                lookup_identifier_mismatch=int(reconcile_meta.get("lookup_identifier_mismatch", 0) or 0),
+                lookup_temporary_broker_error=int(reconcile_meta.get("lookup_temporary_broker_error", 0) or 0),
+                lookup_schema_mismatch=int(reconcile_meta.get("lookup_schema_mismatch", 0) or 0),
+            )
+        )
 
     resume_allowed, blockers = evaluate_resume_eligibility()
     blocker_list: list[dict[str, str | bool]] = [
@@ -1629,6 +1647,7 @@ def _load_recovery_report(
         "last_reconcile_summary": last_reconcile_summary,
         "recent_halt_reason": recent_halt_reason,
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
+        "remote_known_unresolved_verification_summary": remote_known_unresolved_verification_summary,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
@@ -1698,6 +1717,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         )
     print("  [P3] balance_mismatch")
     print(f"    summary={report['balance_split_mismatch_summary']}")
+    print("  [P3.1] remote_known_unresolved_verification")
+    print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")
     print(f"    {report['last_reconcile_summary']}")
     print("  [P5] recent_halt_reason")

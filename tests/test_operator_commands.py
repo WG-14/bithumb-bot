@@ -2064,11 +2064,12 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "trading_enabled",
         "emergency_flatten_blocked",
         "emergency_flatten_block_reason",
-        "recovery_candidates",
-        "unprocessed_remote_open_orders",
-        "unresolved_count",
-        "unresolved_summary",
-    }
+            "recovery_candidates",
+            "remote_known_unresolved_verification_summary",
+            "unprocessed_remote_open_orders",
+            "unresolved_count",
+            "unresolved_summary",
+        }
 
 
 def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):

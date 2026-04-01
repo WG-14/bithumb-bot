@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker.base import (
+    BrokerBalance,
+    BrokerFill,
+    BrokerIdentifierMismatchError,
+    BrokerOrder,
+)
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
@@ -68,6 +73,20 @@ class _NoopBroker:
 
     def get_balance(self) -> BrokerBalance:
         return BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
+
+
+class _ClientOnlyLookupBroker(_NoopBroker):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        self.calls.append((client_order_id, exchange_order_id))
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-client-only", "BUY", "CANCELED", 100.0, 1.0, 0.0, 1, 1)
+
+
+class _IdentifierMismatchLookupBroker(_NoopBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        raise BrokerIdentifierMismatchError("identifier mismatch during myorder lookup")
 
 
 class _RecentFillBroker(_NoopBroker):
@@ -1411,6 +1430,70 @@ def test_submit_unknown_timeout_metadata_incompatible_status_qty_side_rejected(i
     assert "manual recovery required" in str(row["last_error"])
     assert autolink is not None
     assert "outcome=insufficient_evidence" in str(autolink["message"])
+
+
+def test_reconcile_uses_client_order_id_lookup_when_exchange_order_id_is_missing(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="client_only_lookup",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _ClientOnlyLookupBroker()
+    reconcile_with_broker(broker)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id FROM orders WHERE client_order_id='client_only_lookup'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert broker.calls == [("client_only_lookup", None)]
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert row["exchange_order_id"] == "ex-client-only"
+
+
+def test_reconcile_identifier_mismatch_marks_recovery_required_with_reason(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="lookup_identifier_mismatch",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_IdentifierMismatchLookupBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, last_error FROM orders WHERE client_order_id='lookup_identifier_mismatch'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "identifier_mismatch" in str(row["last_error"])
 
 
 def test_restarted_ambiguous_order_blocks_new_submit_until_resolved(isolated_db, monkeypatch):
