@@ -27,6 +27,7 @@ from .order_lookup_v1 import (
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
+from .order_list_v1 import build_legacy_order_scan_params
 from .order_payloads import build_order_payload, normalize_order_side, validate_client_order_id
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
@@ -1183,11 +1184,7 @@ class BithumbBroker:
             return []
         data = self._get_private(
             "/v1/orders",
-            {
-                "market": self._market(),
-                "state": "wait",
-                "limit": 100,
-            },
+            build_legacy_order_scan_params(market=self._market(), state="wait", limit=100),
             retry_safe=True,
         )
         self._journal_read_summary(path="/v1/orders(open_orders)", data=data)
@@ -1334,7 +1331,7 @@ class BithumbBroker:
         if not fills and fallback_scan_allowed and need_fallback_scan:
             data = self._get_private(
                 "/v1/orders",
-                {"market": self._market(), "state": "done", "limit": 100},
+                build_legacy_order_scan_params(market=self._market(), state="done", limit=100),
                 retry_safe=True,
             )
             self._journal_read_summary(path="/v1/orders(fills)", data=data)
@@ -1399,7 +1396,7 @@ class BithumbBroker:
             try:
                 data = self._get_private(
                     "/v1/orders",
-                    {"market": self._market(), "state": state, "limit": max(lim, 100)},
+                    build_legacy_order_scan_params(market=self._market(), state=state, limit=max(lim, 100)),
                     retry_safe=True,
                 )
             except (BrokerRejectError, BrokerTemporaryError):
