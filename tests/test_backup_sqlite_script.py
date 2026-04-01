@@ -9,6 +9,12 @@ from pathlib import Path
 import pytest
 
 
+def _with_explicit_env_file(tmp_path: Path, env: dict[str, str], *, mode: str) -> dict[str, str]:
+    env_file = tmp_path / f".env.{mode}"
+    env_file.write_text(f"MODE={mode}\n", encoding="utf-8", newline="\n")
+    return {**env, "BITHUMB_ENV_FILE": str(env_file)}
+
+
 @pytest.mark.skipif(shutil.which("sqlite3") is None, reason="sqlite3 CLI is required")
 def test_backup_script_uses_backup_root_mode_scoped_directory(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
@@ -38,12 +44,16 @@ def test_backup_script_uses_backup_root_mode_scoped_directory(tmp_path: Path) ->
     first_cwd.mkdir()
     second_cwd.mkdir()
 
-    env = {
-        "DB_PATH": str(db_path.resolve()),
-        "BACKUP_ROOT": str((project_root / "backup-root").resolve()),
-        "MODE": "paper",
-        "PYTHONPATH": str(Path("src").resolve()),
-    }
+    env = _with_explicit_env_file(
+        tmp_path,
+        {
+            "DB_PATH": str(db_path.resolve()),
+            "BACKUP_ROOT": str((project_root / "backup-root").resolve()),
+            "MODE": "paper",
+            "PYTHONPATH": str(Path("src").resolve()),
+        },
+        mode="paper",
+    )
 
     first = subprocess.run(
         ["bash", str(script_path)],
@@ -101,17 +111,21 @@ def test_backup_script_rejects_live_repo_internal_backup_override(tmp_path: Path
     finally:
         conn.close()
 
-    env = {
-        "MODE": "live",
-        "ENV_ROOT": str((tmp_path / "runtime" / "env").resolve()),
-        "RUN_ROOT": str((tmp_path / "runtime" / "run").resolve()),
-        "DATA_ROOT": str((tmp_path / "runtime" / "data").resolve()),
-        "LOG_ROOT": str((tmp_path / "runtime" / "logs").resolve()),
-        "BACKUP_ROOT": str((tmp_path / "runtime" / "backup").resolve()),
-        "DB_PATH": str(db_path.resolve()),
-        "BACKUP_DIR": str((project_root / "backup").resolve()),
-        "PYTHONPATH": str(Path("src").resolve()),
-    }
+    env = _with_explicit_env_file(
+        tmp_path,
+        {
+            "MODE": "live",
+            "ENV_ROOT": str((tmp_path / "runtime" / "env").resolve()),
+            "RUN_ROOT": str((tmp_path / "runtime" / "run").resolve()),
+            "DATA_ROOT": str((tmp_path / "runtime" / "data").resolve()),
+            "LOG_ROOT": str((tmp_path / "runtime" / "logs").resolve()),
+            "BACKUP_ROOT": str((tmp_path / "runtime" / "backup").resolve()),
+            "DB_PATH": str(db_path.resolve()),
+            "BACKUP_DIR": str((project_root / "backup").resolve()),
+            "PYTHONPATH": str(Path("src").resolve()),
+        },
+        mode="live",
+    )
 
     out = subprocess.run(
         ["bash", str(script_path)],
@@ -161,17 +175,21 @@ def test_backup_script_rejects_live_invalid_backup_override_path(
     finally:
         conn.close()
 
-    env = {
-        "MODE": "live",
-        "ENV_ROOT": str((runtime_root / "env").resolve()),
-        "RUN_ROOT": str((runtime_root / "run").resolve()),
-        "DATA_ROOT": str(data_dir.resolve()),
-        "LOG_ROOT": str((runtime_root / "logs").resolve()),
-        "BACKUP_ROOT": str((runtime_root / "backup").resolve()),
-        "DB_PATH": str(db_path.resolve()),
-        "BACKUP_DIR": backup_dir.format(runtime=str(runtime_root.resolve())),
-        "PYTHONPATH": str(Path("src").resolve()),
-    }
+    env = _with_explicit_env_file(
+        tmp_path,
+        {
+            "MODE": "live",
+            "ENV_ROOT": str((runtime_root / "env").resolve()),
+            "RUN_ROOT": str((runtime_root / "run").resolve()),
+            "DATA_ROOT": str(data_dir.resolve()),
+            "LOG_ROOT": str((runtime_root / "logs").resolve()),
+            "BACKUP_ROOT": str((runtime_root / "backup").resolve()),
+            "DB_PATH": str(db_path.resolve()),
+            "BACKUP_DIR": backup_dir.format(runtime=str(runtime_root.resolve())),
+            "PYTHONPATH": str(Path("src").resolve()),
+        },
+        mode="live",
+    )
 
     out = subprocess.run(
         ["bash", str(script_path)],
