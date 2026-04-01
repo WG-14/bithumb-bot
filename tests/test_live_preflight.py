@@ -696,6 +696,99 @@ def test_market_preflight_warns_and_allows_warning_state_in_paper_mode(
     assert "market preflight detected warning state" in caplog.text
 
 
+def test_live_preflight_blocks_startup_on_accounts_schema_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(config, "_fetch_accounts_payload_for_preflight", lambda **_kwargs: {"currency": "KRW"})
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "/v1/accounts preflight validation failed" in msg
+    assert "reason=schema mismatch" in msg
+    assert "reason_code=ACCOUNTS_SCHEMA_MISMATCH" in msg
+
+
+def test_live_preflight_blocks_startup_on_required_currency_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "/v1/accounts preflight validation failed" in msg
+    assert "reason=required currency missing" in msg
+    assert "reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+
+
+@pytest.mark.parametrize("mode", ["paper", "dryrun"])
+def test_accounts_preflight_diagnostics_are_warning_only_in_non_live_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "MODE", mode)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "BTC", "balance": "0.2", "locked": "0"}],
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_market_preflight(settings)
+
+    assert f"accounts preflight warning (mode={mode})" in caplog.text
+    assert "reason=required currency missing" in caplog.text
+    assert "reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING" in caplog.text
+
+
+def test_live_preflight_runs_market_and_accounts_contracts_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    calls: list[str] = []
+
+    def _market_registry(**_kwargs):
+        calls.append("market")
+        return MarketRegistry([MarketInfo(market="KRW-BTC", market_warning="NONE")])
+
+    def _accounts_payload(**_kwargs):
+        calls.append("accounts")
+        return [
+            {"currency": "KRW", "balance": "1000000", "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0"},
+        ]
+
+    monkeypatch.setattr(config, "_fetch_market_registry_for_preflight", _market_registry)
+    monkeypatch.setattr(config, "_fetch_accounts_payload_for_preflight", _accounts_payload)
+
+    config.validate_live_mode_preflight(settings)
+
+    assert calls == ["market", "accounts"]
+
+
 def test_market_preflight_rejects_registry_inconsistency_when_market_lookup_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
