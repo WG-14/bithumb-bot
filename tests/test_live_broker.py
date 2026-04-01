@@ -1888,6 +1888,7 @@ def test_validate_pretrade_rejects_dry_run_balance_source_in_live_real_order() -
     broker.get_balance_snapshot = lambda: BalanceSnapshot(  # type: ignore[attr-defined]
         source_id="dry_run_static",
         observed_ts_ms=0,
+        asset_ts_ms=0,
         balance=BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
     )
 
@@ -1909,6 +1910,7 @@ def test_validate_pretrade_accepts_accounts_snapshot_balance_source() -> None:
     broker.get_balance_snapshot = lambda: BalanceSnapshot(  # type: ignore[attr-defined]
         source_id="accounts_v1_rest_snapshot",
         observed_ts_ms=int(time.time() * 1000),
+        asset_ts_ms=int(time.time() * 1000),
         balance=BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
     )
 

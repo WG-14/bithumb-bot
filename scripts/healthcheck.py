@@ -74,6 +74,7 @@ def main() -> int:
 
     from bithumb_bot.config import PROJECT_ROOT, settings
     from bithumb_bot.notifier import notify
+    from bithumb_bot.broker.bithumb import BithumbBroker
     from bithumb_bot.paths import PathManager
     from bithumb_bot.run_lock import read_run_lock_status
     from bithumb_bot.runtime_state import refresh_open_order_health, snapshot
@@ -83,6 +84,7 @@ def main() -> int:
 
     reconcile_stale_threshold_sec = float(os.getenv("HEALTH_MAX_RECONCILE_AGE_SEC", "900"))
     unresolved_age_threshold_sec = float(os.getenv("HEALTH_MAX_UNRESOLVED_ORDER_AGE_SEC", "900"))
+    balance_source_stale_threshold_sec = float(os.getenv("HEALTH_MAX_BALANCE_SOURCE_AGE_SEC", "120"))
     pm = PathManager.from_env(PROJECT_ROOT)
 
     refresh_open_order_health()
@@ -111,6 +113,35 @@ def main() -> int:
         "last_reconcile_status": state.last_reconcile_status,
         "last_reconcile_error": state.last_reconcile_error,
     }
+    balance_diag: dict[str, object] = {
+        "source": "unavailable",
+        "reason": "not_checked",
+        "failure_category": "none",
+        "last_success_ts_ms": None,
+        "last_asset_ts_ms": None,
+        "stale": None,
+    }
+    try:
+        broker = BithumbBroker()
+        try:
+            broker.get_balance_snapshot()
+        except Exception:
+            pass
+        raw_diag = broker.get_accounts_validation_diagnostics()
+        if isinstance(raw_diag, dict):
+            balance_diag.update(raw_diag)
+    except Exception as exc:
+        balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+        balance_diag["failure_category"] = "transport_failure"
+    print(
+        "[HEALTHCHECK] BALANCE_SOURCE "
+        f"source={balance_diag.get('source') or '-'} "
+        f"reason={balance_diag.get('reason') or '-'} "
+        f"category={balance_diag.get('failure_category') or '-'} "
+        f"last_success_ts_ms={balance_diag.get('last_success_ts_ms')} "
+        f"last_asset_ts_ms={balance_diag.get('last_asset_ts_ms')} "
+        f"stale={balance_diag.get('stale')}"
+    )
 
     problems: list[str] = []
 
@@ -164,6 +195,27 @@ def main() -> int:
             "no unresolved open orders / no recovery required"
         )
 
+    source_failure_category = str(balance_diag.get("failure_category") or "none")
+    if source_failure_category == "schema_mismatch":
+        problems.append("balance source schema mismatch")
+    elif source_failure_category == "auth_failure":
+        problems.append("balance source auth failure")
+    elif source_failure_category == "transport_failure":
+        problems.append("balance source transport failure")
+    elif source_failure_category == "stale_source":
+        problems.append("balance source stale")
+
+    last_success_ts_ms = balance_diag.get("last_success_ts_ms")
+    if last_success_ts_ms is not None:
+        try:
+            balance_age_sec = max(0.0, (time.time() * 1000 - float(last_success_ts_ms)) / 1000)
+            if balance_age_sec > balance_source_stale_threshold_sec:
+                problems.append(
+                    "balance source stale: "
+                    f"age={balance_age_sec:.1f}s > {balance_source_stale_threshold_sec:.1f}s"
+                )
+        except (TypeError, ValueError):
+            problems.append("balance source stale: invalid last_success_ts_ms")
     if problems:
         notify("healthcheck failed: " + "; ".join(problems))
         print("[HEALTHCHECK] FAIL", "; ".join(problems))

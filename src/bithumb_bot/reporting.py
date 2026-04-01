@@ -12,6 +12,7 @@ from .db_core import ensure_db
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str
+from .broker.bithumb import BithumbBroker
 
 
 @dataclass
@@ -722,12 +723,40 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "pnl_after_fee_total": fee_summary.pnl_after_fee_total,
         },
     }
+    balance_source_diag: dict[str, object] = {
+        "source": "unavailable",
+        "reason": "not_checked",
+        "failure_category": "none",
+        "last_success_ts_ms": None,
+        "last_observed_ts_ms": None,
+        "last_asset_ts_ms": None,
+        "stale": None,
+    }
+    try:
+        broker = BithumbBroker()
+        try:
+            broker.get_balance_snapshot()
+        except Exception:
+            pass
+        raw_diag = broker.get_accounts_validation_diagnostics()
+        if isinstance(raw_diag, dict):
+            balance_source_diag.update(raw_diag)
+    except Exception as exc:
+        balance_source_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    payload["balance_source_diagnostics"] = balance_source_diag
     write_json_atomic(PATH_MANAGER.ops_report_path(), payload)
 
     print("[OPS-REPORT]")
     raw_symbol_info = f" raw_symbol={raw_symbol}" if raw_symbol else ""
     print(
         f"  mode={settings.MODE} market={market}{raw_symbol_info} interval={settings.INTERVAL} db_path={settings.DB_PATH}"
+    )
+    print(
+        "  "
+        f"balance_source={balance_source_diag.get('source') or '-'} "
+        f"reason={balance_source_diag.get('reason') or '-'} "
+        f"category={balance_source_diag.get('failure_category') or '-'} "
+        f"stale={balance_source_diag.get('stale')}"
     )
     print("\n[ORDER-RULE-SNAPSHOT]")
     if "error" in order_rule_snapshot:

@@ -161,12 +161,34 @@ def cmd_status():
     ts = int(row[1])
 
     equity = cash + qty * last_close
+    balance_diag: dict[str, object] = {
+        "source": "not_checked",
+        "reason": "not_checked",
+        "failure_category": "none",
+        "stale": None,
+        "last_success_ts_ms": None,
+        "last_asset_ts_ms": None,
+    }
+    try:
+        broker = DEFAULT_BITHUMB_BROKER_CLASS()
+        raw_diag = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
+        if isinstance(raw_diag, dict):
+            balance_diag.update(raw_diag)
+    except Exception as exc:
+        balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
     raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
     print(f"[STATUS {MARKET} {INTERVAL}{raw_suffix}] at {kst_str(ts)}")
     print(f"  cash_krw={cash:,.0f} (available={cash_available:,.0f}, locked={cash_locked:,.0f})")
     print(f"  asset_qty={qty:.8f} (available={asset_available:.8f}, locked={asset_locked:.8f})")
     print(f"  last_close={last_close:,.0f}")
     print(f"  equity={equity:,.0f} KRW")
+    print(
+        "  "
+        f"balance_source={balance_diag.get('source') or '-'} "
+        f"reason={balance_diag.get('reason') or '-'} "
+        f"category={balance_diag.get('failure_category') or '-'} "
+        f"stale={balance_diag.get('stale')}"
+    )
 
 
 def cmd_trades(limit: int):
@@ -484,6 +506,22 @@ def cmd_health() -> None:
     candle_observed = health.get("last_candle_sync_epoch_sec")
     candle_ts_ms = health.get("last_candle_ts_ms")
     candle_detail = health.get("last_candle_status_detail")
+    balance_diag: dict[str, object] = {
+        "source": "not_checked",
+        "reason": "not_checked",
+        "failure_category": "none",
+        "stale": None,
+        "last_success_ts_ms": None,
+        "last_observed_ts_ms": None,
+        "last_asset_ts_ms": None,
+    }
+    try:
+        broker = DEFAULT_BITHUMB_BROKER_CLASS()
+        raw_diag = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
+        if isinstance(raw_diag, dict):
+            balance_diag.update(raw_diag)
+    except Exception as exc:
+        balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
 
     print("[HEALTH]")
     print("  [HALT-RECOVERY-STATUS]")
@@ -508,6 +546,13 @@ def cmd_health() -> None:
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
     print(f"    resume_safety={resume_safety}")
+    print(
+        "    "
+        f"balance_source={balance_diag.get('source') or '-'} "
+        f"diag_reason={balance_diag.get('reason') or '-'} "
+        f"diag_category={balance_diag.get('failure_category') or '-'} "
+        f"stale={balance_diag.get('stale')}"
+    )
 
     print("  [RISK-SNAPSHOT]")
     print(
@@ -582,6 +627,13 @@ def cmd_health() -> None:
     print(f"  emergency_flatten_blocked={health.get('emergency_flatten_blocked')}")
     print(f"  emergency_flatten_block_reason={health.get('emergency_flatten_block_reason')}")
     print(f"  startup_gate_reason={health['startup_gate_reason']}")
+    print(f"  balance_source={balance_diag.get('source')}")
+    print(f"  balance_source_reason={balance_diag.get('reason')}")
+    print(f"  balance_source_failure_category={balance_diag.get('failure_category')}")
+    print(f"  balance_source_last_success_ts_ms={balance_diag.get('last_success_ts_ms')}")
+    print(f"  balance_source_last_observed_ts_ms={balance_diag.get('last_observed_ts_ms')}")
+    print(f"  balance_source_last_asset_ts_ms={balance_diag.get('last_asset_ts_ms')}")
+    print(f"  balance_source_stale={balance_diag.get('stale')}")
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:

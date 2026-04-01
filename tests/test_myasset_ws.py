@@ -117,6 +117,9 @@ def test_myasset_balance_source_stale_stream_detected() -> None:
 
     with pytest.raises(MyAssetStreamStaleError, match="stream stale"):
         source.fetch_snapshot()
+    diag = source.get_validation_diagnostics()
+    assert diag["failure_category"] == "stale_source"
+    assert diag["stale"] is True
 
 
 def test_myasset_balance_source_wraps_transport_error() -> None:
@@ -130,3 +133,5 @@ def test_myasset_balance_source_wraps_transport_error() -> None:
     )
     with pytest.raises(BrokerTemporaryError, match="websocket snapshot fetch failed"):
         source.fetch_snapshot()
+    diag = source.get_validation_diagnostics()
+    assert diag["failure_category"] == "transport_failure"

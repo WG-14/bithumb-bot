@@ -154,6 +154,20 @@ class MyAssetWsBalanceSource:
         self._subscribe_ticket = subscribe_ticket
         self._conn: MyAssetWsConnection | None = None
         self._last_snapshot: BalanceSnapshot | None = None
+        self._diag: dict[str, object] = {
+            "reason": "not_checked",
+            "failure_category": "none",
+            "source": self.SOURCE_ID,
+            "last_observed_ts_ms": None,
+            "last_asset_ts_ms": None,
+            "last_success_ts_ms": None,
+            "last_failure_ts_ms": None,
+            "last_failure_reason": None,
+            "stale": False,
+        }
+
+    def get_validation_diagnostics(self) -> dict[str, object]:
+        return dict(self._diag)
 
     def _connect_and_subscribe(self) -> MyAssetWsConnection:
         conn = self._connection_factory()
@@ -190,8 +204,18 @@ class MyAssetWsBalanceSource:
         snapshot = BalanceSnapshot(
             source_id=self.SOURCE_ID,
             observed_ts_ms=int(parsed.timestamp_ms),
+            asset_ts_ms=int(parsed.asset_timestamp_ms),
             balance=to_broker_balance(parsed.pair_balances),
         )
+        self._diag = {
+            **self._diag,
+            "reason": "ok",
+            "failure_category": "none",
+            "last_observed_ts_ms": int(parsed.timestamp_ms),
+            "last_asset_ts_ms": int(parsed.asset_timestamp_ms),
+            "last_success_ts_ms": int(self._now_ms()),
+            "stale": False,
+        }
         self._last_snapshot = snapshot
         return snapshot
 
@@ -211,6 +235,21 @@ class MyAssetWsBalanceSource:
                     f"myAsset stream stale: observed_ts_ms={snapshot.observed_ts_ms} stale_after_ms={self._stale_after_ms}"
                 )
             except Exception as exc:
+                failure_category = (
+                    "schema_mismatch"
+                    if isinstance(exc, BrokerSchemaError)
+                    else "stale_source"
+                    if isinstance(exc, MyAssetStreamStaleError)
+                    else "transport_failure"
+                )
+                self._diag = {
+                    **self._diag,
+                    "reason": str(exc).strip() or type(exc).__name__,
+                    "failure_category": failure_category,
+                    "last_failure_reason": str(exc).strip() or type(exc).__name__,
+                    "last_failure_ts_ms": int(self._now_ms()),
+                    "stale": True if failure_category == "stale_source" else bool(self._diag.get("stale")),
+                }
                 if first_exc is None:
                     first_exc = exc
                 self._reconnect()

@@ -1949,6 +1949,67 @@ def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     assert "last_candle_status_detail=startup warming up" in out
 
 
+def test_health_includes_balance_source_diagnostics(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 1.0,
+            "last_candle_status": "ok",
+            "last_candle_sync_epoch_sec": 1.0,
+            "last_candle_ts_ms": 1000,
+            "last_candle_status_detail": "ok",
+            "error_count": 0,
+            "trading_enabled": True,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": None,
+            "halt_new_orders_blocked": False,
+            "halt_reason_code": None,
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr(
+        "bithumb_bot.app.DEFAULT_BITHUMB_BROKER_CLASS",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "myasset_ws_private_stream",
+                    "reason": "myAsset stream stale",
+                    "failure_category": "stale_source",
+                    "stale": True,
+                    "last_success_ts_ms": 1710000000000,
+                    "last_observed_ts_ms": 1710000005000,
+                    "last_asset_ts_ms": 1710000000000,
+                }
+            },
+        )(),
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "balance_source=myasset_ws_private_stream" in out
+    assert "diag_category=stale_source stale=True" in out
+    assert "balance_source_last_asset_ts_ms=1710000000000" in out
+
+
 def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)

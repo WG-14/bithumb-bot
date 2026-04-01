@@ -551,6 +551,7 @@ class BithumbBroker:
             return dict(source.get_validation_diagnostics())
         return {
             "reason": "not_applicable",
+            "failure_category": "none",
             "row_count": 0,
             "currencies": [],
             "missing_required_currencies": [],
@@ -559,6 +560,10 @@ class BithumbBroker:
             "last_failure_reason": None,
             "source": self.get_balance_source_id(),
             "last_observed_ts_ms": None,
+            "last_asset_ts_ms": None,
+            "last_success_ts_ms": None,
+            "last_failure_ts_ms": None,
+            "stale": False,
         }
 
     def get_balance_source_id(self) -> str:

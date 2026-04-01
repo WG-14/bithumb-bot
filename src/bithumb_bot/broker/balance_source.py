@@ -5,13 +5,14 @@ from typing import Callable, Protocol
 
 from ..config import settings
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
-from .base import BrokerBalance
+from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
 
 @dataclass(frozen=True)
 class BalanceSnapshot:
     source_id: str
     observed_ts_ms: int
+    asset_ts_ms: int
     balance: BrokerBalance
 
 
@@ -36,6 +37,7 @@ def fetch_balance_snapshot(broker: object) -> BalanceSnapshot:
     return BalanceSnapshot(
         source_id="legacy_balance_api",
         observed_ts_ms=0,
+        asset_ts_ms=0,
         balance=balance,
     )
 
@@ -45,6 +47,7 @@ class DryRunBalanceSource:
         return BalanceSnapshot(
             source_id="dry_run_static",
             observed_ts_ms=0,
+            asset_ts_ms=0,
             balance=BrokerBalance(
                 cash_available=settings.START_CASH_KRW,
                 cash_locked=0.0,
@@ -77,6 +80,7 @@ class AccountsV1BalanceSource:
         self._to_broker_balance = to_broker_balance
         self._validation_diag: dict[str, object] = {
             "reason": "not_checked",
+            "failure_category": "none",
             "row_count": 0,
             "currencies": [],
             "missing_required_currencies": [],
@@ -85,6 +89,10 @@ class AccountsV1BalanceSource:
             "last_failure_reason": None,
             "source": self.SOURCE_ID,
             "last_observed_ts_ms": None,
+            "last_asset_ts_ms": None,
+            "last_success_ts_ms": None,
+            "last_failure_ts_ms": None,
+            "stale": False,
         }
 
     def get_validation_diagnostics(self) -> dict[str, object]:
@@ -99,8 +107,33 @@ class AccountsV1BalanceSource:
             return "duplicate currency"
         return "schema mismatch"
 
+    @staticmethod
+    def classify_failure_category(exc: Exception) -> str:
+        if isinstance(exc, BrokerSchemaError):
+            return "schema_mismatch"
+        if isinstance(exc, BrokerTemporaryError):
+            return "transport_failure"
+        detail = str(exc).lower()
+        if "auth" in detail or "apikey" in detail or "unauthorized" in detail:
+            return "auth_failure"
+        return "unknown_failure"
+
     def fetch_snapshot(self) -> BalanceSnapshot:
-        response = self._fetch_accounts_raw()
+        observed_ts_ms = self._now_ms()
+        try:
+            response = self._fetch_accounts_raw()
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            self._validation_diag = {
+                **self._validation_diag,
+                "reason": reason,
+                "failure_category": self.classify_failure_category(exc),
+                "last_failure_reason": reason,
+                "last_failure_ts_ms": observed_ts_ms,
+                "last_observed_ts_ms": observed_ts_ms,
+                "stale": bool(self._validation_diag.get("last_success_ts_ms")),
+            }
+            raise
         row_count = len(response) if isinstance(response, list) else 0
         currencies: list[str] = []
         if isinstance(response, list):
@@ -112,7 +145,6 @@ class AccountsV1BalanceSource:
                     currencies.append(token)
 
         parsed_accounts = None
-        observed_ts_ms = self._now_ms()
         try:
             parsed_accounts = self._parse_accounts_response(response)
             pair_balances = self._select_pair_balances(
@@ -135,6 +167,7 @@ class AccountsV1BalanceSource:
             )
             self._validation_diag = {
                 "reason": reason,
+                "failure_category": self.classify_failure_category(exc),
                 "row_count": row_count,
                 "currencies": sorted(set(currencies)),
                 "missing_required_currencies": missing_required_currencies,
@@ -143,11 +176,16 @@ class AccountsV1BalanceSource:
                 "last_failure_reason": reason,
                 "source": self.SOURCE_ID,
                 "last_observed_ts_ms": observed_ts_ms,
+                "last_asset_ts_ms": self._validation_diag.get("last_asset_ts_ms"),
+                "last_success_ts_ms": self._validation_diag.get("last_success_ts_ms"),
+                "last_failure_ts_ms": observed_ts_ms,
+                "stale": bool(self._validation_diag.get("last_success_ts_ms")),
             }
             raise
 
         self._validation_diag = {
             "reason": "ok",
+            "failure_category": "none",
             "row_count": row_count,
             "currencies": sorted(parsed_accounts.balances.keys()) if parsed_accounts is not None else [],
             "missing_required_currencies": [],
@@ -156,9 +194,14 @@ class AccountsV1BalanceSource:
             "last_failure_reason": self._validation_diag.get("last_failure_reason"),
             "source": self.SOURCE_ID,
             "last_observed_ts_ms": observed_ts_ms,
+            "last_asset_ts_ms": observed_ts_ms,
+            "last_success_ts_ms": observed_ts_ms,
+            "last_failure_ts_ms": self._validation_diag.get("last_failure_ts_ms"),
+            "stale": False,
         }
         return BalanceSnapshot(
             source_id=self.SOURCE_ID,
             observed_ts_ms=observed_ts_ms,
+            asset_ts_ms=observed_ts_ms,
             balance=self._to_broker_balance(pair_balances),
         )

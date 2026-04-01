@@ -37,6 +37,24 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
             },
         ),
     )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "ok",
+                    "failure_category": "none",
+                    "stale": False,
+                    "last_success_ts_ms": 1710000000000,
+                    "last_asset_ts_ms": 1710000000000,
+                },
+            },
+        )(),
+    )
 
     conn = ensure_db()
     try:
@@ -107,6 +125,8 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "note=paper fill" in out
     assert "[ORDER-RULE-SNAPSHOT]" in out
     assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
+    assert "balance_source=accounts_v1_rest_snapshot" in out
+    assert "category=none stale=False" in out
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):
@@ -116,6 +136,22 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     monkeypatch.setattr(
         "bithumb_bot.reporting.get_effective_order_rules",
         lambda _pair: (_ for _ in ()).throw(RuntimeError("rules unavailable")),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "myasset_ws_private_stream",
+                    "reason": "myAsset stream stale",
+                    "failure_category": "stale_source",
+                    "stale": True,
+                },
+            },
+        )(),
     )
 
     conn = ensure_db()
@@ -128,3 +164,5 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     assert f"db_path={db_path}" in out
     assert "no strategy_context rows" in out
     assert "failed_to_load=RuntimeError: rules unavailable" in out
+    assert "balance_source=myasset_ws_private_stream" in out
+    assert "category=stale_source stale=True" in out
