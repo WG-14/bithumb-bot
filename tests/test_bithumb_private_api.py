@@ -1224,6 +1224,57 @@ def test_get_fills_prefers_embedded_trade_rows(monkeypatch):
     assert fills[1].fee == pytest.approx(12.0)
 
 
+def test_get_fills_uses_uuid_lookup_when_exchange_order_id_present(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    calls: list[dict[str, object]] = []
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        calls.append({"endpoint": endpoint, "params": params})
+        return {
+            "uuid": "filled-uuid-1",
+            "client_order_id": "cid-uuid-1",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "trades": [],
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+    broker.get_fills(client_order_id="cid-uuid-1", exchange_order_id="filled-uuid-1")
+
+    assert calls[0] == {"endpoint": "/v1/order", "params": {"uuid": "filled-uuid-1"}}
+
+
+def test_get_fills_uses_client_order_id_lookup_when_only_client_order_id_present(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    calls: list[dict[str, object]] = []
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        calls.append({"endpoint": endpoint, "params": params})
+        return {
+            "uuid": "filled-client-1",
+            "client_order_id": "cid-client-1",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "trades": [],
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+    broker.get_fills(client_order_id="cid-client-1", exchange_order_id=None)
+
+    assert calls[0] == {"endpoint": "/v1/order", "params": {"client_order_id": "cid-client-1"}}
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("trades_value", [None, []])
 def test_get_fills_v1_order_handles_missing_or_empty_trades_with_aggregate_fill(monkeypatch, trades_value):
     _configure_live()
@@ -1248,6 +1299,46 @@ def test_get_fills_v1_order_handles_missing_or_empty_trades_with_aggregate_fill(
     assert len(fills) == 1
     assert fills[0].exchange_order_id == "filled-agg-1"
     assert fills[0].qty == pytest.approx(0.05)
+
+
+def test_get_fills_uses_limited_done_scan_fallback_when_direct_lookup_has_no_usable_fill(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    calls: list[dict[str, object]] = []
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        calls.append({"endpoint": endpoint, "params": params})
+        if endpoint == "/v1/order":
+            return {
+                "uuid": "filled-fallback-1",
+                "client_order_id": "cid-fallback-1",
+                "price": "",
+                "volume": "0.05",
+                "remaining_volume": "0.00",
+                "executed_volume": "0.05",
+                "state": "done",
+                "created_at": "2024-01-01T00:00:00+00:00",
+                "trades": [],
+            }
+        return [
+            {
+                "uuid": "filled-fallback-1",
+                "client_order_id": "cid-fallback-1",
+                "price": "149000000",
+                "volume": "0.05",
+                "executed_volume": "0.05",
+                "state": "done",
+                "updated_at": "2024-01-01T00:00:01+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+    fills = broker.get_fills(client_order_id="cid-fallback-1", exchange_order_id="filled-fallback-1")
+
+    assert len(fills) == 1
+    assert fills[0].exchange_order_id == "filled-fallback-1"
+    assert calls[0]["endpoint"] == "/v1/order"
+    assert calls[1]["endpoint"] == "/v1/orders"
 
 
 def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
@@ -1282,6 +1373,29 @@ def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
     assert fills[0].exchange_order_id == "filled-id-1"
 
 
+def test_get_fills_rejects_client_order_id_lookup_mismatch(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-client-mismatch-1",
+            "client_order_id": "other-client-id",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "trades": [],
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="client_order_id mismatch"):
+        broker.get_fills(client_order_id="cid-client-mismatch", exchange_order_id=None)
+
+
 def test_get_fills_rejects_non_list_trades_for_v1_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1298,6 +1412,34 @@ def test_get_fills_rejects_non_list_trades_for_v1_order(monkeypatch):
 
     with pytest.raises(BrokerRejectError, match="trades must be a list"):
         broker.get_fills(client_order_id=None, exchange_order_id="filled-id-1")
+
+
+def test_get_fills_client_order_id_path_does_not_regress_to_done_scan(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    endpoints: list[str] = []
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        endpoints.append(endpoint)
+        if endpoint == "/v1/orders":
+            pytest.fail("unexpected /v1/orders fallback scan for successful client_order_id direct lookup")
+        return {
+            "uuid": "filled-client-regression-1",
+            "client_order_id": "cid-client-regression-1",
+            "price": "149000000",
+            "volume": "0.05",
+            "remaining_volume": "0.00",
+            "executed_volume": "0.05",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "trades": [],
+        }
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+    fills = broker.get_fills(client_order_id="cid-client-regression-1", exchange_order_id=None)
+
+    assert len(fills) == 1
+    assert endpoints == ["/v1/order"]
 
 
 def test_get_order_rejects_exchange_order_id_mismatch(monkeypatch):
@@ -1578,16 +1720,15 @@ def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
     monkeypatch.setattr(
         broker,
         "_get_private",
-        lambda endpoint, params, retry_safe=False: [
-            {
-                "uuid": "filled-1",
-                "side": "ask",
-                "price": "",
-                "volume": "0.05",
-                "executed_volume": "0.05",
-                "state": "done",
-            }
-        ],
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-1",
+            "client_order_id": "cid-1",
+            "side": "ask",
+            "price": "",
+            "volume": "0.05",
+            "executed_volume": "0.05",
+            "state": "done",
+        },
     )
 
     fills = broker.get_fills(client_order_id="cid-1", exchange_order_id=None)
@@ -1602,17 +1743,16 @@ def test_get_fills_uses_avg_price_fallback_for_aggregate_fill(monkeypatch):
     monkeypatch.setattr(
         broker,
         "_get_private",
-        lambda endpoint, params, retry_safe=False: [
-            {
-                "uuid": "filled-2",
-                "side": "ask",
-                "price": "",
-                "avg_price": "151000000",
-                "volume": "0.03",
-                "executed_volume": "0.03",
-                "state": "done",
-            }
-        ],
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-2",
+            "client_order_id": "cid-2",
+            "side": "ask",
+            "price": "",
+            "avg_price": "151000000",
+            "volume": "0.03",
+            "executed_volume": "0.03",
+            "state": "done",
+        },
     )
 
     fills = broker.get_fills(client_order_id="cid-2", exchange_order_id=None)

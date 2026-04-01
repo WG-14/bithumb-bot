@@ -1218,25 +1218,54 @@ class BithumbBroker:
         if self.dry_run:
             return []
 
+        requested_client_order_id = str(client_order_id or "").strip()
+        requested_exchange_order_id = str(exchange_order_id or "").strip()
+
         rows: list[dict[str, object]] = []
-        if exchange_order_id:
-            data = self._get_private("/v1/order", {"uuid": str(exchange_order_id)}, retry_safe=True)
-            self._journal_read_summary(path="/v1/order(fills)", data=data)
-            if isinstance(data, dict):
-                rows = [data]
-        else:
-            data = self._get_private(
-                "/v1/orders",
-                {"market": self._market(), "state": "done", "limit": 100},
-                retry_safe=True,
+        fallback_scan_allowed = False
+        if requested_exchange_order_id or requested_client_order_id:
+            params = self._build_v1_order_lookup_params(
+                client_order_id=requested_client_order_id,
+                exchange_order_id=requested_exchange_order_id,
             )
-            self._journal_read_summary(path="/v1/orders(fills)", data=data)
-            if isinstance(data, list):
-                rows = [row for row in data if isinstance(row, dict)]
+            data = self._get_private("/v1/order", params, retry_safe=True)
+            self._journal_read_summary(path="/v1/order(fills)", data=data)
+            if not isinstance(data, dict):
+                raise BrokerRejectError(
+                    "fill lookup response schema mismatch: "
+                    f"unexpected /v1/order payload type={type(data).__name__}"
+                )
+            response_client_order_id, response_exchange_order_id = self._resolve_v1_order_identifiers(
+                data,
+                fallback_client_order_id=requested_client_order_id,
+            )
+            if (
+                requested_exchange_order_id
+                and response_exchange_order_id
+                and requested_exchange_order_id != response_exchange_order_id
+            ):
+                raise BrokerRejectError(
+                    "fill lookup response exchange_order_id mismatch: "
+                    f"requested={requested_exchange_order_id} response={response_exchange_order_id}"
+                )
+            if (
+                requested_client_order_id
+                and response_client_order_id
+                and requested_client_order_id != response_client_order_id
+            ):
+                raise BrokerRejectError(
+                    "fill lookup response client_order_id mismatch: "
+                    f"requested={requested_client_order_id} response={response_client_order_id}"
+                )
+            rows = [data]
+            fallback_scan_allowed = True
+        else:
+            fallback_scan_allowed = True
 
         fills: list[BrokerFill] = []
+        need_fallback_scan = not rows
         for row in rows:
-            if exchange_order_id and row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
+            if row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
                 raise BrokerRejectError("/v1/order schema mismatch: trades must be a list when present")
             normalized = self._normalize_order_row(row)
             trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
@@ -1244,20 +1273,27 @@ class BithumbBroker:
                 for index, trade in enumerate(trades):
                     if not isinstance(trade, dict):
                         continue
-                    qty = self._number(trade, "volume", "qty", "units_traded")
+                    qty = self._strict_optional_number(trade, "volume", context="/v1/order.trades")
                     price = self._resolve_fill_price(trade, normalized_row=normalized)
-                    if qty <= 0 or price is None:
+                    if qty is None or qty <= 0:
                         continue
+                    if price is None:
+                        raise BrokerRejectError("/v1/order.trades schema mismatch: missing required numeric field 'price'")
                     fee = self._extract_fill_fee(
                         trade,
                         context="trade",
                         qty=qty,
                         price=price,
                     )
-                    ts = self._parse_ts(trade.get("created_at") or trade.get("timestamp") or normalized["updated_ts"])
+                    ts_raw = trade.get("created_at")
+                    ts = (
+                        self._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
+                        if ts_raw not in (None, "")
+                        else int(normalized["updated_ts"])
+                    )
                     trade_client_order_id, _ = self._resolve_order_identifiers(
                         trade,
-                        fallback_client_order_id=client_order_id or row.get("client_order_id") or "",
+                        fallback_client_order_id=requested_client_order_id or row.get("client_order_id") or "",
                     )
                     fills.append(
                         BrokerFill(
@@ -1265,7 +1301,7 @@ class BithumbBroker:
                             fill_id=str(trade.get("uuid") or trade.get("id") or f"{normalized['uuid']}:{index}:{ts}"),
                             fill_ts=ts,
                             price=float(price),
-                            qty=qty,
+                            qty=float(qty),
                             fee=fee,
                             exchange_order_id=str(normalized["uuid"]),
                         )
@@ -1274,9 +1310,11 @@ class BithumbBroker:
 
             qty_filled = float(normalized["executed_volume"])
             if qty_filled <= 0:
+                need_fallback_scan = fallback_scan_allowed
                 continue
             price = self._resolve_fill_price(row, normalized_row=normalized)
             if price is None:
+                need_fallback_scan = fallback_scan_allowed
                 continue
             ts = int(normalized["updated_ts"])
             fee = self._extract_fill_fee(
@@ -1287,8 +1325,8 @@ class BithumbBroker:
             )
             aggregate_client_order_id, aggregate_exchange_order_id = self._resolve_order_identifiers(
                 row,
-                fallback_client_order_id=client_order_id or "",
-                fallback_exchange_order_id=str(normalized["uuid"]),
+                fallback_client_order_id=requested_client_order_id or "",
+                fallback_exchange_order_id=str(normalized.get("uuid") or ""),
             )
             fills.append(
                 BrokerFill(
@@ -1301,6 +1339,41 @@ class BithumbBroker:
                     exchange_order_id=aggregate_exchange_order_id,
                 )
             )
+        if not fills and fallback_scan_allowed and need_fallback_scan:
+            data = self._get_private(
+                "/v1/orders",
+                {"market": self._market(), "state": "done", "limit": 100},
+                retry_safe=True,
+            )
+            self._journal_read_summary(path="/v1/orders(fills)", data=data)
+            if isinstance(data, list):
+                scanned_rows = [row for row in data if isinstance(row, dict)]
+                for row in scanned_rows:
+                    row_client_order_id, row_exchange_order_id = self._resolve_order_identifiers(row)
+                    if requested_exchange_order_id and row_exchange_order_id != requested_exchange_order_id:
+                        continue
+                    if requested_client_order_id and row_client_order_id != requested_client_order_id:
+                        continue
+                    normalized = self._normalize_order_row(row)
+                    qty_filled = float(normalized["executed_volume"])
+                    if qty_filled <= 0:
+                        continue
+                    price = self._resolve_fill_price(row, normalized_row=normalized)
+                    if price is None:
+                        continue
+                    ts = int(normalized["updated_ts"])
+                    fee = self._extract_fill_fee(row, context="aggregate-fallback", qty=qty_filled, price=price)
+                    fills.append(
+                        BrokerFill(
+                            client_order_id=row_client_order_id or requested_client_order_id,
+                            fill_id=f"{normalized['uuid']}:aggregate:{ts}",
+                            fill_ts=ts,
+                            price=float(price),
+                            qty=qty_filled,
+                            fee=fee,
+                            exchange_order_id=row_exchange_order_id or str(normalized["uuid"]),
+                        )
+                    )
         return fills
 
     def get_balance(self) -> BrokerBalance:
