@@ -116,10 +116,21 @@ class _ResumeFilledReplayBroker:
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return []
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
@@ -727,10 +738,21 @@ def test_resume_live_clears_post_trade_reconcile_halt_after_flatten(tmp_path, mo
         def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
             return []
 
-        def get_open_orders(self) -> list[BrokerOrder]:
+        def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
             return []
 
-        def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+        def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
             return []
 
         def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:

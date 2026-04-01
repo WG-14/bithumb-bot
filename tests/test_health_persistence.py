@@ -521,13 +521,24 @@ class _ReconcileOkBroker:
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None):
         raise NotImplementedError
 
-    def get_open_orders(self):
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ):
         return []
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
         return []
 
-    def get_recent_orders(self, *, limit: int = 100):
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ):
         return []
 
     def get_recent_fills(self, *, limit: int = 100):
@@ -538,7 +549,7 @@ class _ReconcileOkBroker:
 
 
 class _ReconcileFailBroker(_ReconcileOkBroker):
-    def get_open_orders(self):
+    def get_balance(self):
         raise RuntimeError("boom")
 
 

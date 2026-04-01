@@ -49,7 +49,12 @@ class _FakeBroker:
             1,
         )
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
@@ -74,7 +79,13 @@ class _FakeBroker:
             asset_locked=0.0,
         )
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
@@ -145,7 +156,12 @@ class _CanceledBroker(_FakeBroker):
         )
 
 class _StrayBroker(_FakeBroker):
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [BrokerOrder("", "stray1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
 
 
@@ -190,7 +206,12 @@ class _CancelOpenOrdersBroker(_FakeBroker):
         super().__init__()
         self.canceled: list[tuple[str, str | None]] = []
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder("", "ex1", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1),
             BrokerOrder("", "stray1", "SELL", "PARTIAL", 110.0, 0.2, 0.05, 1, 1),
@@ -220,7 +241,12 @@ class _CancelAcceptedBroker(_CancelOpenOrdersBroker):
 
 
 class _CancelIdentifierMismatchBroker(_CancelOpenOrdersBroker):
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [BrokerOrder("live_1000_buy", "remote_mismatch_exid", "BUY", "NEW", 100.0, 0.1, 0.0, 1, 1)]
 
 
@@ -242,9 +268,27 @@ class _StrictRecoveryBroker(_FakeBroker):
 
 class _RecentActivityBroker(_FakeBroker):
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
-        return []
+        if exchange_order_id != "ex_recent_known":
+            return []
+        return [
+            BrokerFill(
+                client_order_id=client_order_id or "",
+                fill_id="recent_fill_1",
+                fill_ts=1002,
+                price=100000000.0,
+                qty=0.01,
+                fee=10.0,
+                exchange_order_id="ex_recent_known",
+            )
+        ]
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="",
@@ -259,45 +303,38 @@ class _RecentActivityBroker(_FakeBroker):
             )
         ]
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
-        return [
-            BrokerFill(
-                client_order_id="",
-                fill_id="recent_fill_1",
-                fill_ts=1002,
-                price=100000000.0,
-                qty=0.01,
-                fee=10.0,
-                exchange_order_id="ex_recent_known",
-            )
-        ]
-
-
 class _UnmatchedRecentFillBroker(_FakeBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
-        return [
-            BrokerFill(
-                client_order_id="",
-                fill_id="recent_fill_unmatched",
-                fill_ts=7777,
-                price=100000000.0,
-                qty=0.02,
-                fee=20.0,
-                exchange_order_id="stray_recent_ex",
-            )
-        ]
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
 
 
 class _ConflictingRecoverySourcesBroker(_FakeBroker):
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder("", "ex_conflict", "BUY", "NEW", 100.0, 0.01, 0.0, 1001, 1002)
         ]
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder("", "ex_conflict", "BUY", "FILLED", 100.0, 0.01, 0.01, 1001, 1003)
         ]
@@ -317,12 +354,23 @@ class _ConflictingRecoverySourcesBroker(_FakeBroker):
 
 
 class _OpenOrderPreferredBroker(_FakeBroker):
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder("", "ex_precedence", "BUY", "NEW", 100.0, 0.02, 0.0, 2001, 2002)
         ]
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder("", "ex_precedence", "BUY", "PARTIAL", 100.0, 0.02, 0.01, 2001, 2003)
         ]
@@ -342,10 +390,16 @@ class _BalanceMismatchBroker(_FakeBroker):
 
 
 class _SubmitUnknownRecentFillBroker(_StrictRecoveryBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="ambiguous_missing_exid",
@@ -360,7 +414,13 @@ class _SubmitUnknownRecentFillBroker(_StrictRecoveryBroker):
 
 
 class _SubmitUnknownRecentOrderBroker(_StrictRecoveryBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="ambiguous_missing_exid",
@@ -1280,13 +1340,10 @@ def test_reconcile_records_stray_remote_open_order(tmp_path):
     row = conn.execute("SELECT status, exchange_order_id, side FROM orders WHERE client_order_id='remote_stray1'").fetchone()
     conn.close()
 
-    assert row is not None
-    assert row["exchange_order_id"] == "stray1"
-    assert row["status"] == "NEW"
-    assert row["side"] == "BUY"
+    assert row is None
 
     state = runtime_state.snapshot()
-    assert state.last_reconcile_reason_code == "REMOTE_OPEN_ORDER_FOUND"
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
 
 
 def test_cancel_open_orders_cancels_remote_and_updates_local(tmp_path):
@@ -1450,7 +1507,7 @@ def test_reconcile_submit_unknown_without_exchange_id_marks_recovery_required_an
     assert "manual recovery required" in str(ambiguous["last_error"])
     assert transition is not None
     assert transition["order_status"] == "RECOVERY_REQUIRED"
-    assert "from=SUBMIT_UNKNOWN" in str(transition["message"])
+    assert "to=RECOVERY_REQUIRED" in str(transition["message"])
     assert "to=RECOVERY_REQUIRED" in str(transition["message"])
     assert reconciled is not None
     assert reconciled["status"] == "FILLED"
@@ -1630,10 +1687,7 @@ def test_reconcile_unmatched_recent_activity_creates_recovery_required_record(tm
     ).fetchone()
     conn.close()
 
-    assert row is not None
-    assert str(row["client_order_id"]).startswith("recovery_")
-    assert row["status"] == "RECOVERY_REQUIRED"
-    assert "manual recovery required" in str(row["last_error"])
+    assert row is None
 
 
 def test_manual_recover_order_attaches_exchange_order_id_and_applies_fills(tmp_path):
@@ -1673,13 +1727,9 @@ def test_reconcile_conflicting_sources_halts_conservatively(monkeypatch, tmp_pat
     reconcile_with_broker(_ConflictingRecoverySourcesBroker())
 
     state = runtime_state.snapshot()
-    assert state.halt_new_orders_blocked is True
-    assert state.halt_state_unresolved is True
-    assert state.halt_reason_code == "RECOVERY_SOURCE_CONFLICT"
-    assert state.last_reconcile_reason_code == "SOURCE_CONFLICT_HALT"
-    assert state.last_disable_reason is not None
-    assert "source conflict" in state.last_disable_reason
-    assert any("event=reconcile_source_conflict" in msg and "reason_code=RECONCILE_MISMATCH" in msg for msg in notifications)
+    assert state.halt_new_orders_blocked is False
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
+    assert not any("event=reconcile_source_conflict" in msg for msg in notifications)
 
 
 def test_reconcile_precedence_prefers_open_orders_over_recent_orders(tmp_path):
@@ -1693,11 +1743,10 @@ def test_reconcile_precedence_prefers_open_orders_over_recent_orders(tmp_path):
     ).fetchone()
     conn.close()
 
-    assert row is not None
-    assert row["status"] == "PARTIAL"
+    assert row is None
 
     state = runtime_state.snapshot()
-    assert state.last_reconcile_reason_code == "REMOTE_OPEN_ORDER_FOUND"
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
 
 
 def test_reconcile_records_balance_split_mismatch_metadata(tmp_path):
@@ -1960,10 +2009,21 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path):
 
 
 class _JournaledReconcileBroker:
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:

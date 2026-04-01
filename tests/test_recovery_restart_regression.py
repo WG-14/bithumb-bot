@@ -49,13 +49,21 @@ class _NoopBroker:
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return []
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
-        return []
-
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_balance(self) -> BrokerBalance:
@@ -69,7 +77,7 @@ class _RecentFillBroker(_NoopBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         return BrokerOrder(client_order_id, exchange_order_id or "ex-partial", "BUY", self.status, 100.0, 1.0, 1.0, 1, 1)
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="",
@@ -90,19 +98,6 @@ class _AggregateDuplicateFillBroker(_NoopBroker):
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
-                client_order_id=client_order_id or "",
-                fill_id="trade-fill-1",
-                fill_ts=200,
-                price=100.0,
-                qty=1.0,
-                fee=0.0,
-                exchange_order_id=exchange_order_id or "ex-dup",
-            )
-        ]
-
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
-        return [
-            BrokerFill(
                 client_order_id="",
                 fill_id="ex-dup:aggregate:201",
                 fill_ts=201,
@@ -118,7 +113,7 @@ class _TerminalFillReplayBroker(_NoopBroker):
     def __init__(self, *, balance: BrokerBalance | None = None) -> None:
         self._balance = balance or BrokerBalance(cash_available=1000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="",
@@ -139,7 +134,7 @@ class _FilledFlatReplayBroker(_NoopBroker):
     def __init__(self, *, balance: BrokerBalance) -> None:
         self._balance = balance
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="",
@@ -169,7 +164,7 @@ class _RecentSellMissingPriceBroker(_NoopBroker):
     def __init__(self, *, repeat_count: int = 1) -> None:
         self._repeat_count = max(1, int(repeat_count))
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         fills: list[BrokerFill] = []
         for idx in range(self._repeat_count):
             fills.append(
@@ -183,11 +178,11 @@ class _RecentSellMissingPriceBroker(_NoopBroker):
                     exchange_order_id="ex-reconcile-sell",
                 )
             )
-        return fills[:limit]
+        return fills
 
 
 class _RecentSellValidPriceBroker(_NoopBroker):
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="",
@@ -223,7 +218,7 @@ class _FailAfterWriteBroker(_NoopBroker):
 
 
 class _SubmitUnknownRecentFillBroker(_NoopBroker):
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="submit_timeout_restart",
@@ -238,7 +233,13 @@ class _SubmitUnknownRecentFillBroker(_NoopBroker):
 
 
 class _SubmitUnknownRecentOrderBroker(_NoopBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="submit_timeout_restart",
@@ -257,7 +258,13 @@ class _SubmitUnknownRecentOrderBroker(_NoopBroker):
 
 
 class _SubmitUnknownStrongCorrelationBroker(_NoopBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="submit_timeout_restart",
@@ -274,7 +281,13 @@ class _SubmitUnknownStrongCorrelationBroker(_NoopBroker):
 
 
 class _SubmitUnknownWeakMetadataCorrelationBroker(_NoopBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="submit_timeout_restart",
@@ -290,7 +303,13 @@ class _SubmitUnknownWeakMetadataCorrelationBroker(_NoopBroker):
         ]
 
 class _SubmitUnknownMultipleStrongCandidatesBroker(_NoopBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="submit_timeout_restart",
@@ -318,7 +337,13 @@ class _SubmitUnknownMultipleStrongCandidatesBroker(_NoopBroker):
 
 
 class _SubmitUnknownIncompatibleCorrelationBroker(_NoopBroker):
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return [
             BrokerOrder(
                 client_order_id="submit_timeout_restart",
@@ -420,7 +445,12 @@ class _CancelRaceBroker(_NoopBroker):
     def __init__(self) -> None:
         self.remote_status = "NEW"
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         if self.remote_status == "CANCELED":
             return []
         return [BrokerOrder("", "ex-cancel-race", "BUY", "NEW", 100.0, 1.0, 0.0, 1, 1)]
@@ -1104,7 +1134,7 @@ def test_reconcile_recent_sell_valid_price_applies_and_flattens_position(isolate
             "SELECT status, qty_filled FROM orders WHERE client_order_id='reconcile_sell_valid_price'"
         ).fetchone()
         trade_row = conn.execute(
-            "SELECT price, asset_after, cash_after FROM trades WHERE note LIKE 'reconcile recent%' ORDER BY id DESC LIMIT 1"
+            "SELECT price, asset_after, cash_after FROM trades WHERE note LIKE 'reconcile%' ORDER BY id DESC LIMIT 1"
         ).fetchone()
     finally:
         conn.close()
@@ -1634,7 +1664,7 @@ def test_reconcile_recent_fill_success_clears_prior_locked_post_trade_halt(isola
             def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
                 return BrokerOrder(client_order_id, exchange_order_id or "ex-partial", "SELL", "FILLED", 100.0, 1.0, 1.0, 1, 1)
 
-            def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+            def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
                 return [
                     BrokerFill(
                         client_order_id="",

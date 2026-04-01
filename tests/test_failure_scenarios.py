@@ -42,10 +42,21 @@ class _NoopBroker:
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return []
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         return []
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
@@ -59,7 +70,7 @@ class _FillRecoveryBroker(_NoopBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         return BrokerOrder(client_order_id, exchange_order_id or "ex-partial", "BUY", "FILLED", 100.0, 1.0, 1.0, 1, 1)
 
-    def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
         return [
             BrokerFill(
                 client_order_id="",

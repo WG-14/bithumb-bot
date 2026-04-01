@@ -912,6 +912,74 @@ def _capture_broker_read_journal(metadata: dict[str, int | str], broker: Broker)
         metadata["broker_read_journal"] = str(compact)[:500]
 
 
+def _known_identifier_sets(local_rows: list[object]) -> tuple[list[str], list[str]]:
+    exchange_ids: set[str] = set()
+    client_ids: set[str] = set()
+    for row in local_rows:
+        exchange_id = str(row["exchange_order_id"] or "").strip()
+        client_id = str(row["client_order_id"] or "").strip()
+        if exchange_id:
+            exchange_ids.add(exchange_id)
+        if client_id:
+            client_ids.add(client_id)
+    return sorted(exchange_ids), sorted(client_ids)
+
+
+def _get_recent_orders_for_known_ids(
+    broker: Broker,
+    *,
+    limit: int,
+    exchange_order_ids: list[str],
+    client_order_ids: list[str],
+) -> list[BrokerOrder]:
+    if not exchange_order_ids and not client_order_ids:
+        return []
+    try:
+        return broker.get_recent_orders(
+            limit=limit,
+            exchange_order_ids=exchange_order_ids,
+            client_order_ids=client_order_ids,
+        )
+    except TypeError:
+        try:
+            return broker.get_recent_orders(limit=limit)
+        except TypeError:
+            return broker.get_recent_orders()
+
+
+def _get_open_orders_for_known_ids(
+    broker: Broker,
+    *,
+    exchange_order_ids: list[str],
+    client_order_ids: list[str],
+) -> list[BrokerOrder]:
+    if not exchange_order_ids and not client_order_ids:
+        return []
+    try:
+        return broker.get_open_orders(
+            exchange_order_ids=exchange_order_ids,
+            client_order_ids=client_order_ids,
+        )
+    except TypeError:
+        return broker.get_open_orders()
+
+
+def _get_recent_fills_for_known_orders(
+    broker: Broker,
+    *,
+    exchange_order_ids: list[str],
+    client_order_ids_without_exchange_id: list[str],
+) -> list[BrokerFill]:
+    fills_by_id: dict[str, BrokerFill] = {}
+    for exchange_order_id in exchange_order_ids:
+        for fill in broker.get_fills(exchange_order_id=exchange_order_id):
+            fills_by_id[str(fill.fill_id)] = fill
+    for client_order_id in client_order_ids_without_exchange_id:
+        for fill in broker.get_fills(client_order_id=client_order_id):
+            fills_by_id[str(fill.fill_id)] = fill
+    return list(fills_by_id.values())
+
+
 def _clear_reconcile_halt_if_safe(
     *,
     conn,
@@ -1003,8 +1071,25 @@ def reconcile_with_broker(broker: Broker) -> None:
             f"SELECT client_order_id, submit_attempt_id, exchange_order_id, side, qty_req, status FROM orders WHERE status IN ({placeholders})",
             LOCAL_RECONCILE_STATUSES,
         ).fetchall()
-        recent_orders = broker.get_recent_orders(limit=100)
-        recent_fills = broker.get_recent_fills(limit=100)
+        known_exchange_order_ids, known_client_order_ids = _known_identifier_sets(local_open)
+        client_order_ids_without_exchange_id = sorted(
+            {
+                str(row["client_order_id"])
+                for row in local_open
+                if not str(row["exchange_order_id"] or "").strip()
+            }
+        )
+        recent_orders = _get_recent_orders_for_known_ids(
+            broker,
+            limit=100,
+            exchange_order_ids=known_exchange_order_ids,
+            client_order_ids=known_client_order_ids,
+        )
+        recent_fills = _get_recent_fills_for_known_orders(
+            broker,
+            exchange_order_ids=known_exchange_order_ids,
+            client_order_ids_without_exchange_id=client_order_ids_without_exchange_id,
+        )
         for row in local_open:
             oid = row["client_order_id"]
             if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
@@ -1103,7 +1188,11 @@ def reconcile_with_broker(broker: Broker) -> None:
                     note=f"reconcile exchange_order_id={remote.exchange_order_id}",
                 )
 
-        remote_open = broker.get_open_orders()
+        remote_open = _get_open_orders_for_known_ids(
+            broker,
+            exchange_order_ids=known_exchange_order_ids,
+            client_order_ids=known_client_order_ids,
+        )
         trusted_open_exchange_ids = {
             str(order.exchange_order_id)
             for order in remote_open
