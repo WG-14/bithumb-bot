@@ -646,6 +646,45 @@ class BithumbBroker:
         return parsed
 
     @staticmethod
+    def _required_non_negative_decimal(payload: dict[str, object], key: str, *, context: str) -> Decimal:
+        raw = payload.get(key)
+        if raw in (None, ""):
+            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field '{key}'")
+        try:
+            parsed = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
+        if not parsed.is_finite():
+            raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
+        if parsed < 0:
+            raise BrokerRejectError(f"{context} schema mismatch: negative numeric field '{key}'={raw}")
+        return parsed
+
+    @classmethod
+    def _parse_accounts_payload(cls, data: object) -> dict[str, tuple[Decimal, Decimal]]:
+        context = "/v1/accounts"
+        if not isinstance(data, list):
+            raise BrokerRejectError(f"{context} schema mismatch: expected array payload, got {type(data).__name__}")
+
+        accounts: dict[str, tuple[Decimal, Decimal]] = {}
+        for index, row in enumerate(data):
+            row_context = f"{context}[{index}]"
+            if not isinstance(row, dict):
+                raise BrokerRejectError(f"{row_context} schema mismatch: expected object row, got {type(row).__name__}")
+
+            raw_currency = row.get("currency")
+            currency = str(raw_currency).strip().upper() if raw_currency is not None else ""
+            if not currency:
+                raise BrokerRejectError(f"{row_context} schema mismatch: missing required text field 'currency'")
+            if currency in accounts:
+                raise BrokerRejectError(f"{row_context} schema mismatch: duplicate currency row '{currency}'")
+
+            balance = cls._required_non_negative_decimal(row, "balance", context=row_context)
+            locked = cls._required_non_negative_decimal(row, "locked", context=row_context)
+            accounts[currency] = (balance, locked)
+        return accounts
+
+    @staticmethod
     def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
         if raw in (None, ""):
             raise BrokerRejectError(f"{context} schema mismatch: missing required timestamp field '{field_name}'")
@@ -1447,21 +1486,23 @@ class BithumbBroker:
         if self.dry_run:
             return BrokerBalance(cash_available=settings.START_CASH_KRW, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
         order_currency, payment_currency = self._pair()
-        data = self._get_private("/v1/accounts", {}, retry_safe=True)
-        self._journal_read_summary(path="/v1/accounts", data=data)
-        rows = data if isinstance(data, list) else []
-        accounts: dict[str, dict[str, object]] = {
-            str(row.get("currency") or "").upper(): row
-            for row in rows
-            if isinstance(row, dict)
-        }
-        cash = accounts.get(payment_currency.upper(), {})
-        asset = accounts.get(order_currency.upper(), {})
+        response = self._get_private("/v1/accounts", {}, retry_safe=True)
+        self._journal_read_summary(path="/v1/accounts", data=response)
+        accounts = self._parse_accounts_payload(response)
+
+        quote_currency = payment_currency.upper()
+        base_currency = order_currency.upper()
+        if quote_currency not in accounts:
+            raise BrokerRejectError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
+        if base_currency not in accounts:
+            raise BrokerRejectError(f"/v1/accounts schema mismatch: missing base currency row '{base_currency}'")
+        cash_balance, cash_locked = accounts[quote_currency]
+        asset_balance, asset_locked = accounts[base_currency]
         return BrokerBalance(
-            cash_available=self._number(cash, "balance", "available_balance"),
-            cash_locked=self._number(cash, "locked", "in_use", "locked_balance"),
-            asset_available=self._number(asset, "balance", "available_balance"),
-            asset_locked=self._number(asset, "locked", "in_use", "locked_balance"),
+            cash_available=float(cash_balance),
+            cash_locked=float(cash_locked),
+            asset_available=float(asset_balance),
+            asset_locked=float(asset_locked),
         )
 
     def get_recent_orders(

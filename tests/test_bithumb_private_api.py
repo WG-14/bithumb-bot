@@ -298,6 +298,138 @@ def test_balance_parses_available_and_locked(monkeypatch):
 
 
 
+def test_balance_rejects_non_array_payload(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: {"currency": "KRW"})
+
+    with pytest.raises(BrokerRejectError, match=r"/v1/accounts schema mismatch: expected array payload"):
+        broker.get_balance()
+
+
+def test_balance_rejects_non_object_row(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [{"currency": "KRW", "balance": "1000", "locked": "0"}, "bad-row"],
+    )
+
+    with pytest.raises(BrokerRejectError, match=r"/v1/accounts\[1\] schema mismatch: expected object row"):
+        broker.get_balance()
+
+
+@pytest.mark.parametrize("currency", [None, "", "   "])
+def test_balance_rejects_missing_or_empty_currency(monkeypatch, currency):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": currency, "balance": "1000", "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.01"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing required text field 'currency'"):
+        broker.get_balance()
+
+
+@pytest.mark.parametrize("field", ["balance", "locked"])
+def test_balance_rejects_missing_required_numeric_fields(monkeypatch, field):
+    _configure_live()
+    broker = BithumbBroker()
+    krw_row = {"currency": "KRW", "balance": "1000", "locked": "25"}
+    del krw_row[field]
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [krw_row, {"currency": "BTC", "balance": "0.1", "locked": "0.02"}],
+    )
+
+    with pytest.raises(BrokerRejectError, match=rf"missing required numeric field '{field}'"):
+        broker.get_balance()
+
+
+@pytest.mark.parametrize("bad_value", ["abc", object()])
+def test_balance_rejects_non_numeric_values(monkeypatch, bad_value):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": bad_value, "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="invalid numeric field 'balance'"):
+        broker.get_balance()
+
+
+@pytest.mark.parametrize("bad_value", ["-1", "-0.0001", "NaN", "Infinity", "-Infinity"])
+def test_balance_rejects_negative_or_non_finite_values(monkeypatch, bad_value):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": bad_value, "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="schema mismatch: (negative|non-finite) numeric field 'balance'"):
+        broker.get_balance()
+
+
+def test_balance_rejects_duplicate_currency_rows(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "0"},
+            {"currency": "KRW", "balance": "2000", "locked": "0"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="duplicate currency row 'KRW'"):
+        broker.get_balance()
+
+
+def test_balance_rejects_missing_pair_currency_rows(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [{"currency": "KRW", "balance": "1000", "locked": "0"}],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing base currency row 'BTC'"):
+        broker.get_balance()
+
+
+def test_balance_rejects_missing_quote_currency_row(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [{"currency": "BTC", "balance": "0.1", "locked": "0.02"}],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing quote currency row 'KRW'"):
+        broker.get_balance()
+
+
 def test_order_chance_uses_private_v1_endpoint(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
