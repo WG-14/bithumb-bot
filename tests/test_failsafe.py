@@ -257,6 +257,8 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
+    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", lambda _cfg: None)
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
     monkeypatch.setattr(
@@ -325,11 +327,11 @@ def test_run_loop_calls_market_preflight_before_live_startup(monkeypatch):
     _prepare_run_loop(monkeypatch)
     called = {"n": 0}
 
-    def _market_preflight(_cfg):
+    def _market_runtime(_cfg):
         called["n"] += 1
         raise ValueError("market gate")
 
-    monkeypatch.setattr("bithumb_bot.config.validate_market_preflight", _market_preflight)
+    monkeypatch.setattr("bithumb_bot.engine.validate_market_runtime", _market_runtime)
     monkeypatch.setattr(
         "bithumb_bot.engine.BithumbBroker",
         lambda: (_ for _ in ()).throw(AssertionError("broker must not be constructed")),
@@ -601,7 +603,6 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
     object.__setattr__(settings, "KILL_SWITCH", True)
     object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
-    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("bithumb_bot.engine._get_exposure_snapshot", lambda _now_ms: (False, True))
@@ -1013,7 +1014,6 @@ def test_run_loop_daily_loss_breach_with_no_position_records_no_position_flatten
 def test_run_loop_position_loss_breach_flatten_failure_marks_unresolved(monkeypatch):
     _prepare_run_loop(monkeypatch, asset_qty=0.03)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
-    monkeypatch.setattr("bithumb_bot.engine.validate_live_mode_preflight", lambda _cfg: None)
 
     monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
     monkeypatch.setattr(
