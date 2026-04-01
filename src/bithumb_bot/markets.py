@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from threading import Lock
 import time
 import httpx
@@ -56,34 +57,8 @@ class MarketCatalogClient:
 
         items: list[MarketInfo] = []
         for row in payload:
-            if not isinstance(row, dict):
-                raise MarketCatalogError(f"unexpected market catalog row type: {type(row).__name__}")
-            market = _require_catalog_field(row=row, field="market", required=True)
-            canonical = parse_documented_market_code(market)
-
-            korean_name = _require_catalog_field(
-                row=row,
-                field="korean_name",
-                required=is_details,
-            )
-            english_name = _require_catalog_field(
-                row=row,
-                field="english_name",
-                required=is_details,
-            )
-            market_warning = _require_catalog_field(
-                row=row,
-                field="market_warning",
-                required=is_details,
-            )
-            items.append(
-                MarketInfo(
-                    market=canonical,
-                    korean_name=korean_name,
-                    english_name=english_name,
-                    market_warning=market_warning,
-                )
-            )
+            item = parse_market_catalog_row_details(row) if is_details else parse_market_catalog_row(row)
+            items.append(item)
         return items
 
 
@@ -188,12 +163,54 @@ def _as_optional_str(value: object, *, field: str) -> str | None:
     return text or None
 
 
-def _require_catalog_field(*, row: dict[str, object], field: str, required: bool) -> str | None:
+_CATALOG_MARKET_CODE_PATTERN = re.compile(r"^[A-Z0-9]+-[A-Z0-9]+$")
+
+
+def parse_exchange_market_catalog_code(market: object) -> str:
+    if not isinstance(market, str):
+        raise MarketCatalogError(f"market catalog field 'market' must be string: type={type(market).__name__}")
+    if not market:
+        raise MarketCatalogError("missing required field: market (empty)")
+    if not _CATALOG_MARKET_CODE_PATTERN.fullmatch(market):
+        raise MarketCatalogError(f"invalid market code format: {market!r}")
+    return market
+
+
+def _require_catalog_str_field(*, row: dict[str, object], field: str) -> str:
     if field not in row:
-        if required:
-            raise MarketCatalogError(f"market catalog required field missing: {field!r} row={row}")
-        return None
-    return _as_optional_str(row.get(field), field=field)
+        raise MarketCatalogError(f"missing required field: {field}")
+    value = _as_optional_str(row.get(field), field=field)
+    if value is None:
+        raise MarketCatalogError(f"missing required field: {field} (empty)")
+    return value
+
+
+def parse_market_catalog_row(row: object) -> MarketInfo:
+    if not isinstance(row, dict):
+        raise MarketCatalogError(f"non-object row: type={type(row).__name__}")
+    if "market" not in row:
+        raise MarketCatalogError("missing required field: market")
+    market = parse_exchange_market_catalog_code(row.get("market"))
+    korean_name = _require_catalog_str_field(row=row, field="korean_name")
+    english_name = _require_catalog_str_field(row=row, field="english_name")
+    return MarketInfo(market=market, korean_name=korean_name, english_name=english_name)
+
+
+def parse_market_catalog_row_details(row: object) -> MarketInfo:
+    if not isinstance(row, dict):
+        raise MarketCatalogError(f"non-object row: type={type(row).__name__}")
+    if "market" not in row:
+        raise MarketCatalogError("missing required field: market")
+    market = parse_exchange_market_catalog_code(row.get("market"))
+    korean_name = _require_catalog_str_field(row=row, field="korean_name")
+    english_name = _require_catalog_str_field(row=row, field="english_name")
+    market_warning = _require_catalog_str_field(row=row, field="market_warning")
+    return MarketInfo(
+        market=market,
+        korean_name=korean_name,
+        english_name=english_name,
+        market_warning=market_warning,
+    )
 
 
 def parse_user_market_input(market: str, *, default_quote: str = "KRW") -> str:

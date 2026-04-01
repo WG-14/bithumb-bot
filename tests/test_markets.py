@@ -204,7 +204,7 @@ def test_catalog_fetch_raises_on_network_error(monkeypatch) -> None:
 
 def test_catalog_fetch_raises_on_schema_mismatch_field_type(monkeypatch) -> None:
     _reset_fake_client()
-    _FakeClient.payload = [{"market": "KRW-BTC", "english_name": 123}]
+    _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": 123}]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
     with pytest.raises(PublicApiSchemaError, match="english_name"):
@@ -216,16 +216,16 @@ def test_catalog_fetch_raises_when_row_is_not_dict(monkeypatch) -> None:
     _FakeClient.payload = ["KRW-BTC"]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
-    with pytest.raises(MarketCatalogError, match="row type"):
+    with pytest.raises(MarketCatalogError, match="non-object row"):
         MarketCatalogClient().fetch_markets()
 
 
 def test_catalog_fetch_raises_when_required_market_field_missing(monkeypatch) -> None:
     _reset_fake_client()
-    _FakeClient.payload = [{"english_name": "Bitcoin"}]
+    _FakeClient.payload = [{"korean_name": "비트코인", "english_name": "Bitcoin"}]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
-    with pytest.raises(MarketCatalogError, match="required field missing"):
+    with pytest.raises(MarketCatalogError, match="missing required field: market"):
         MarketCatalogClient().fetch_markets()
 
 
@@ -234,21 +234,46 @@ def test_catalog_fetch_raises_when_detail_fields_missing_with_is_details_true(mo
     _FakeClient.payload = [{"market": "KRW-BTC"}]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
-    with pytest.raises(MarketCatalogError, match="required field missing"):
+    with pytest.raises(MarketCatalogError, match="missing required field: korean_name"):
         MarketCatalogClient().fetch_markets(is_details=True)
 
 
-def test_catalog_fetch_allows_optional_detail_fields_with_is_details_false(monkeypatch) -> None:
+def test_catalog_fetch_requires_names_with_is_details_false(monkeypatch) -> None:
     _reset_fake_client()
     _FakeClient.payload = [{"market": "KRW-BTC"}]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
-    items = MarketCatalogClient().fetch_markets(is_details=False)
+    with pytest.raises(MarketCatalogError, match="missing required field: korean_name"):
+        MarketCatalogClient().fetch_markets(is_details=False)
 
-    assert items[0].market == "KRW-BTC"
-    assert items[0].korean_name is None
-    assert items[0].english_name is None
-    assert items[0].market_warning is None
+
+def test_catalog_fetch_rejects_invalid_market_code_format(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "BTC_KRW", "korean_name": "비트코인", "english_name": "Bitcoin"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="invalid market code format"):
+        MarketCatalogClient().fetch_markets()
+
+
+def test_catalog_fetch_rejects_missing_english_name_with_is_details_false(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인"}]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="missing required field: english_name"):
+        MarketCatalogClient().fetch_markets(is_details=False)
+
+
+def test_catalog_fetch_rejects_market_warning_type_mismatch_with_is_details_true(monkeypatch) -> None:
+    _reset_fake_client()
+    _FakeClient.payload = [
+        {"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin", "market_warning": 1}
+    ]
+    monkeypatch.setattr("httpx.Client", _FakeClient)
+
+    with pytest.raises(MarketCatalogError, match="market_warning"):
+        MarketCatalogClient().fetch_markets(is_details=True)
 
 
 def test_extract_api_error_parses_known_shape() -> None:
@@ -276,7 +301,7 @@ def test_canonical_market_id_rejects_flipped_legacy_alias_even_when_tokens_look_
 
 def test_get_market_registry_uses_cache(monkeypatch) -> None:
     _reset_fake_client()
-    _FakeClient.payload = [{"market": "KRW-BTC"}]
+    _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin"}]
     monkeypatch.setattr("httpx.Client", _FakeClient)
 
     first = get_market_registry(refresh=True)
