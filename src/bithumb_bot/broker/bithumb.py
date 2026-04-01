@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN
 import math
 from urllib.parse import urlencode
 from typing import TypedDict
@@ -20,6 +20,7 @@ from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
 from ..markets import canonical_market_id
 from ..observability import format_log_kv
 from .base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
+from .accounts_v1 import parse_accounts_response, select_pair_balances, to_broker_balance
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -676,44 +677,10 @@ class BithumbBroker:
             raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
         return parsed
 
-    @staticmethod
-    def _required_non_negative_decimal(payload: dict[str, object], key: str, *, context: str) -> Decimal:
-        raw = payload.get(key)
-        if raw in (None, ""):
-            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field '{key}'")
-        try:
-            parsed = Decimal(str(raw))
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
-        if not parsed.is_finite():
-            raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
-        if parsed < 0:
-            raise BrokerRejectError(f"{context} schema mismatch: negative numeric field '{key}'={raw}")
-        return parsed
-
-    @classmethod
-    def _parse_accounts_payload(cls, data: object) -> dict[str, tuple[Decimal, Decimal]]:
-        context = "/v1/accounts"
-        if not isinstance(data, list):
-            raise BrokerRejectError(f"{context} schema mismatch: expected array payload, got {type(data).__name__}")
-
-        accounts: dict[str, tuple[Decimal, Decimal]] = {}
-        for index, row in enumerate(data):
-            row_context = f"{context}[{index}]"
-            if not isinstance(row, dict):
-                raise BrokerRejectError(f"{row_context} schema mismatch: expected object row, got {type(row).__name__}")
-
-            raw_currency = row.get("currency")
-            currency = str(raw_currency).strip().upper() if raw_currency is not None else ""
-            if not currency:
-                raise BrokerRejectError(f"{row_context} schema mismatch: missing required text field 'currency'")
-            if currency in accounts:
-                raise BrokerRejectError(f"{row_context} schema mismatch: duplicate currency row '{currency}'")
-
-            balance = cls._required_non_negative_decimal(row, "balance", context=row_context)
-            locked = cls._required_non_negative_decimal(row, "locked", context=row_context)
-            accounts[currency] = (balance, locked)
-        return accounts
+    def fetch_accounts_raw(self) -> object:
+        response = self._get_private("/v1/accounts", {}, retry_safe=True)
+        self._journal_read_summary(path="/v1/accounts", data=response)
+        return response
 
     @staticmethod
     def _classify_accounts_validation_reason(exc: Exception) -> str:
@@ -1526,8 +1493,7 @@ class BithumbBroker:
         if self.dry_run:
             return BrokerBalance(cash_available=settings.START_CASH_KRW, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
         order_currency, payment_currency = self._pair()
-        response = self._get_private("/v1/accounts", {}, retry_safe=True)
-        self._journal_read_summary(path="/v1/accounts", data=response)
+        response = self.fetch_accounts_raw()
         row_count = len(response) if isinstance(response, list) else 0
         currencies: list[str] = []
         if isinstance(response, list):
@@ -1537,60 +1503,47 @@ class BithumbBroker:
                 token = str(row.get("currency") or "").strip().upper()
                 if token:
                     currencies.append(token)
-        accounts: dict[str, tuple[Decimal, Decimal]]
+        parsed_accounts = None
         try:
-            accounts = self._parse_accounts_payload(response)
+            parsed_accounts = parse_accounts_response(response)
+            cash_balance, cash_locked, asset_balance, asset_locked = select_pair_balances(
+                parsed_accounts,
+                order_currency=order_currency,
+                payment_currency=payment_currency,
+            )
         except Exception as exc:
             reason = self._classify_accounts_validation_reason(exc)
+            missing_required_currencies: list[str] = []
+            error_text = str(exc)
+            if "missing quote currency row '" in error_text:
+                missing_required_currencies.append(payment_currency.upper())
+            if "missing base currency row '" in error_text:
+                missing_required_currencies.append(order_currency.upper())
             self._accounts_validation_diag = {
                 "reason": reason,
                 "row_count": row_count,
                 "currencies": sorted(set(currencies)),
-                "missing_required_currencies": [],
+                "missing_required_currencies": missing_required_currencies,
                 "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
                 "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
                 "last_failure_reason": reason,
             }
             raise
 
-        quote_currency = payment_currency.upper()
-        base_currency = order_currency.upper()
-        missing_required_currencies: list[str] = []
-        if quote_currency not in accounts:
-            missing_required_currencies.append(quote_currency)
-        if base_currency not in accounts:
-            missing_required_currencies.append(base_currency)
-        if missing_required_currencies:
-            reason = "required currency missing"
-            self._accounts_validation_diag = {
-                "reason": reason,
-                "row_count": row_count,
-                "currencies": sorted(accounts.keys()),
-                "missing_required_currencies": missing_required_currencies,
-                "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
-                "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
-                "last_failure_reason": reason,
-            }
-            if quote_currency in missing_required_currencies:
-                raise BrokerRejectError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
-            raise BrokerRejectError(f"/v1/accounts schema mismatch: missing base currency row '{base_currency}'")
-
         self._accounts_validation_diag = {
             "reason": "ok",
             "row_count": row_count,
-            "currencies": sorted(accounts.keys()),
+            "currencies": sorted(parsed_accounts.balances.keys()) if parsed_accounts is not None else [],
             "missing_required_currencies": [],
             "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
             "last_success_reason": "ok",
             "last_failure_reason": self._accounts_validation_diag.get("last_failure_reason"),
         }
-        cash_balance, cash_locked = accounts[quote_currency]
-        asset_balance, asset_locked = accounts[base_currency]
-        return BrokerBalance(
-            cash_available=float(cash_balance),
-            cash_locked=float(cash_locked),
-            asset_available=float(asset_balance),
-            asset_locked=float(asset_locked),
+        return to_broker_balance(
+            cash_balance=cash_balance,
+            cash_locked=cash_locked,
+            asset_balance=asset_balance,
+            asset_locked=asset_locked,
         )
 
     def get_recent_orders(

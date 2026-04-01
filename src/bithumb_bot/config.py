@@ -102,7 +102,8 @@ def _fetch_accounts_payload_for_preflight(*, api_key: str, api_secret: str, base
 
 
 def validate_accounts_preflight(cfg: Settings) -> None:
-    from .broker.bithumb import BithumbBroker, classify_private_api_error
+    from .broker.accounts_v1 import parse_accounts_response, select_pair_balances
+    from .broker.bithumb import classify_private_api_error
 
     canonical_market = normalize_market_id(str(cfg.PAIR or ""))
     quote_currency, base_currency = canonical_market.split("-", 1)
@@ -138,32 +139,29 @@ def validate_accounts_preflight(cfg: Settings) -> None:
     duplicate_currencies = sorted({token for token in currencies if currencies.count(token) > 1})
 
     try:
-        accounts = BithumbBroker._parse_accounts_payload(response)
+        parsed_accounts = parse_accounts_response(response)
+        select_pair_balances(
+            parsed_accounts,
+            order_currency=base_currency,
+            payment_currency=quote_currency,
+        )
     except Exception as exc:
         detail_lower = str(exc).lower()
-        reason = "duplicate currency" if "duplicate currency row" in detail_lower else "schema mismatch"
-        reason_code = (
-            "ACCOUNTS_DUPLICATE_CURRENCY"
-            if reason == "duplicate currency"
-            else "ACCOUNTS_SCHEMA_MISMATCH"
-        )
+        if "missing quote currency row" in detail_lower or "missing base currency row" in detail_lower:
+            reason = "required currency missing"
+            reason_code = "ACCOUNTS_REQUIRED_CURRENCY_MISSING"
+        else:
+            reason = "duplicate currency" if "duplicate currency row" in detail_lower else "schema mismatch"
+            reason_code = (
+                "ACCOUNTS_DUPLICATE_CURRENCY"
+                if reason == "duplicate currency"
+                else "ACCOUNTS_SCHEMA_MISMATCH"
+            )
         raise AccountsPreflightValidationError(
-            "/v1/accounts preflight schema mismatch: "
+            "/v1/accounts preflight validation failed: "
             f"reason={reason} reason_code={reason_code} row_count={row_count} "
             f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} detail={exc}"
         ) from exc
-
-    missing: list[str] = []
-    if quote_currency not in accounts:
-        missing.append(quote_currency)
-    if base_currency not in accounts:
-        missing.append(base_currency)
-    if missing:
-        raise AccountsPreflightValidationError(
-            "/v1/accounts preflight required currency missing: "
-            f"reason=required currency missing reason_code=ACCOUNTS_REQUIRED_CURRENCY_MISSING market={canonical_market} "
-            f"row_count={row_count} currencies={','.join(sorted(accounts.keys()))} missing={','.join(missing)}"
-        )
 
 
 def resolve_db_path_from_env(mode: str) -> str:

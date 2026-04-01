@@ -297,6 +297,55 @@ def test_balance_parses_available_and_locked(monkeypatch):
     assert bal.asset_locked == 0.02
 
 
+def test_balance_uses_split_accounts_layers(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        broker,
+        "fetch_accounts_raw",
+        lambda: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+            {"currency": "BTC", "balance": "0.1", "locked": "0.02"},
+        ],
+    )
+
+    from bithumb_bot.broker.accounts_v1 import ParsedAccounts
+
+    def _fake_parse(data):
+        calls.append("parse")
+        assert isinstance(data, list)
+        return ParsedAccounts(
+            balances={
+                "KRW": (Decimal("1000"), Decimal("25")),
+                "BTC": (Decimal("0.1"), Decimal("0.02")),
+            },
+            row_count=2,
+            currencies=("BTC", "KRW"),
+            duplicate_currencies=(),
+        )
+
+    def _fake_select(accounts, *, order_currency, payment_currency):
+        calls.append("select")
+        assert order_currency == "BTC"
+        assert payment_currency == "KRW"
+        return (
+            accounts.balances["KRW"][0],
+            accounts.balances["KRW"][1],
+            accounts.balances["BTC"][0],
+            accounts.balances["BTC"][1],
+        )
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.parse_accounts_response", _fake_parse)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.select_pair_balances", _fake_select)
+
+    bal = broker.get_balance()
+
+    assert calls == ["parse", "select"]
+    assert bal.cash_available == 1000.0
+    assert bal.asset_available == 0.1
+
 
 def test_balance_rejects_non_array_payload(monkeypatch):
     _configure_live()
