@@ -96,6 +96,11 @@ def test_fetch_ticker_sends_markets_param() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/ticker"
         assert request.url.params.get("markets") == "KRW-BTC,KRW-ETH"
+        assert "page" not in request.url.params
+        assert "cursor" not in request.url.params
+        assert request.headers.get("Authorization") is None
+        assert request.headers.get("Api-Key") is None
+        assert request.headers.get("X-Auth-Token") is None
         return httpx.Response(200, json=[_sample_ticker(), _sample_ticker() | {"market": "KRW-ETH"}])
 
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
@@ -110,3 +115,21 @@ def test_fetch_ticker_rejects_response_market_mismatch() -> None:
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
         with pytest.raises(PublicApiSchemaError, match="ticker response market mismatch"):
             fetch_ticker(client, markets=["KRW-BTC"])
+
+
+def test_ticker_contract_uses_markets_csv_string_input_without_private_auth() -> None:
+    """문서 계약: /v1/ticker는 markets CSV를 사용하고 public 호출이어야 한다."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/ticker"
+        assert request.url.params.get("markets") == "KRW-BTC,KRW-ETH"
+        assert sorted(request.url.params.keys()) == ["markets"]
+        assert request.headers.get("Authorization") is None
+        assert request.headers.get("Api-Key") is None
+        assert request.headers.get("X-Auth-Token") is None
+        return httpx.Response(200, json=[_sample_ticker(), _sample_ticker() | {"market": "KRW-ETH"}])
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
+        snapshots = fetch_ticker(client, markets="KRW-BTC, KRW-ETH")
+
+    assert [item.market for item in snapshots] == ["KRW-BTC", "KRW-ETH"]

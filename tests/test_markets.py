@@ -149,6 +149,20 @@ class TestMarketCatalogSchemaContract:
         assert items[0].market == "KRW-BTC"
         assert _FakeClient.requests[0] == {"path": "/v1/market/all", "params": {"isDetails": "true"}}
 
+    def test_fetch_market_all_defaults_to_isdetails_false_without_paging_params(self, monkeypatch) -> None:
+        """문서 계약: /v1/market/all 기본 호출은 isDetails=false 단일 파라미터를 사용한다."""
+        _reset_fake_client()
+        _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin"}]
+        monkeypatch.setattr("httpx.Client", _FakeClient)
+
+        items = MarketCatalogClient().fetch_markets()
+
+        assert [item.market for item in items] == ["KRW-BTC"]
+        assert _FakeClient.requests[0]["path"] == "/v1/market/all"
+        assert _FakeClient.requests[0]["params"] == {"isDetails": "false"}
+        assert "page" not in _FakeClient.requests[0]["params"]
+        assert "cursor" not in _FakeClient.requests[0]["params"]
+
     def test_rejects_payload_type_drift(self, monkeypatch) -> None:
         _reset_fake_client()
         _FakeClient.payload = {"market": "KRW-BTC"}
@@ -189,6 +203,27 @@ class TestMarketCatalogSchemaContract:
         monkeypatch.setattr("httpx.Client", _FakeClient)
 
         with pytest.raises(MarketCatalogError, match="market_warning"):
+            MarketCatalogClient().fetch_markets(is_details=True)
+
+    def test_market_all_details_mode_parses_market_warning_field(self, monkeypatch) -> None:
+        """문서 계약: 상세 모드에서 market_warning 같은 상세 필드를 파싱한다."""
+        _reset_fake_client()
+        _FakeClient.payload = [
+            {"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin", "market_warning": "CAUTION"}
+        ]
+        monkeypatch.setattr("httpx.Client", _FakeClient)
+
+        items = MarketCatalogClient().fetch_markets(is_details=True)
+
+        assert len(items) == 1
+        assert items[0].market_warning == "CAUTION"
+
+    def test_market_all_details_mode_missing_market_warning_fails_schema_contract(self, monkeypatch) -> None:
+        _reset_fake_client()
+        _FakeClient.payload = [{"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin"}]
+        monkeypatch.setattr("httpx.Client", _FakeClient)
+
+        with pytest.raises(MarketCatalogError, match="missing required field: market_warning"):
             MarketCatalogClient().fetch_markets(is_details=True)
 
     def test_retries_transient_error_but_not_schema_error(self, monkeypatch) -> None:
