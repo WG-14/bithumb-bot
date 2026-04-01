@@ -764,6 +764,7 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
             "volume": "0.05",
             "remaining_volume": "0.00",
             "executed_volume": "0.05",
+            "created_at": "2024-01-01T00:00:00+00:00",
             "state": "done",
         }
 
@@ -775,12 +776,11 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
     assert order.status == "FILLED"
     assert order.qty_req == pytest.approx(0.05)
     assert order.qty_filled == pytest.approx(0.05)
-    assert order.raw == {
-        "market": "KRW-BTC",
-        "ord_type": "limit",
-        "client_order_id": "exchange-cid-3",
-        "uuid": "filled-1",
-    }
+    assert order.raw is not None
+    assert order.raw["market"] == "KRW-BTC"
+    assert order.raw["ord_type"] == "limit"
+    assert order.raw["client_order_id"] == "exchange-cid-3"
+    assert order.raw["uuid"] == "filled-1"
 
 
 def test_get_order_supports_client_order_id_lookup(monkeypatch):
@@ -801,6 +801,7 @@ def test_get_order_supports_client_order_id_lookup(monkeypatch):
             "volume": "0.02",
             "remaining_volume": "0.01",
             "executed_volume": "0.01",
+            "created_at": "2024-01-01T00:00:00+00:00",
             "state": "wait",
         }
 
@@ -811,12 +812,11 @@ def test_get_order_supports_client_order_id_lookup(monkeypatch):
     assert call == {"endpoint": "/v1/order", "params": {"client_order_id": "cid-client-only"}}
     assert order.exchange_order_id == "filled-by-client-1"
     assert order.client_order_id == "cid-client-only"
-    assert order.raw == {
-        "market": "KRW-BTC",
-        "ord_type": "limit",
-        "client_order_id": "cid-client-only",
-        "uuid": "filled-by-client-1",
-    }
+    assert order.raw is not None
+    assert order.raw["market"] == "KRW-BTC"
+    assert order.raw["ord_type"] == "limit"
+    assert order.raw["client_order_id"] == "cid-client-only"
+    assert order.raw["uuid"] == "filled-by-client-1"
 
 
 def test_get_order_requires_at_least_one_identifier():
@@ -840,7 +840,7 @@ def test_get_order_raises_on_response_identifier_mismatch(monkeypatch):
         broker.get_order(client_order_id="cid-identifier-missing", exchange_order_id="ex-identifier-missing")
 
 
-def test_get_order_preserves_order_id_when_uuid_missing(monkeypatch):
+def test_get_order_rejects_legacy_alias_identifier_only_response(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     monkeypatch.setattr(
@@ -848,27 +848,122 @@ def test_get_order_preserves_order_id_when_uuid_missing(monkeypatch):
         "_get_private",
         lambda endpoint, params, retry_safe=False: {
             "order_id": "order-id-only-1",
-            "client_order_id": "cid-order-id-only",
+            "coid": "cid-order-id-only",
             "market": "KRW-BTC",
             "ord_type": "limit",
             "side": "bid",
             "price": "149000000",
             "volume": "0.03",
             "remaining_volume": "0.03",
+            "created_at": "2024-01-01T00:00:00+00:00",
             "state": "wait",
         },
     )
 
-    order = broker.get_order(client_order_id="cid-order-id-only")
+    with pytest.raises(BrokerRejectError, match="missing both uuid and client_order_id"):
+        broker.get_order(client_order_id="cid-order-id-only")
 
-    assert order.exchange_order_id == "order-id-only-1"
-    assert order.raw == {
-        "market": "KRW-BTC",
-        "ord_type": "limit",
-        "client_order_id": "cid-order-id-only",
-        "uuid": "order-id-only-1",
-        "order_id": "order-id-only-1",
-    }
+
+def test_get_order_rejects_unknown_state(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-unknown-state-1",
+            "client_order_id": "cid-unknown-state",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "bid",
+            "price": "149000000",
+            "volume": "0.03",
+            "remaining_volume": "0.03",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "mystery",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="unknown state"):
+        broker.get_order(client_order_id="cid-unknown-state")
+
+
+def test_get_order_rejects_invalid_numeric_fields(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-bad-number-1",
+            "client_order_id": "cid-bad-number",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "ask",
+            "price": "bad-price",
+            "volume": "0.03",
+            "remaining_volume": "0.03",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "wait",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="invalid numeric field"):
+        broker.get_order(client_order_id="cid-bad-number")
+
+
+def test_get_order_rejects_non_list_trades(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-bad-trades-1",
+            "client_order_id": "cid-bad-trades",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "ask",
+            "price": "149000000",
+            "volume": "0.03",
+            "remaining_volume": "0.01",
+            "executed_volume": "0.02",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "wait",
+            "trades": {"uuid": "invalid"},
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="trades must be a list"):
+        broker.get_order(client_order_id="cid-bad-trades")
+
+
+@pytest.mark.parametrize("executed_funds", [None, "4470000"])
+def test_get_order_accepts_optional_executed_funds(monkeypatch, executed_funds):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        payload = {
+            "uuid": "filled-executed-funds-1",
+            "client_order_id": "cid-executed-funds",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "ask",
+            "price": "149000000",
+            "volume": "0.03",
+            "remaining_volume": "0.0",
+            "executed_volume": "0.03",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "state": "done",
+        }
+        if executed_funds is not None:
+            payload["executed_funds"] = executed_funds
+        return payload
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+    order = broker.get_order(client_order_id="cid-executed-funds")
+    assert order.status == "FILLED"
 
 
 def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
@@ -997,6 +1092,24 @@ def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
     assert fills[0].exchange_order_id == "filled-id-1"
 
 
+def test_get_fills_rejects_non_list_trades_for_v1_order(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "filled-id-1",
+            "client_order_id": "cid-parent",
+            "state": "done",
+            "trades": {"uuid": "bad"},
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="trades must be a list"):
+        broker.get_fills(client_order_id=None, exchange_order_id="filled-id-1")
+
+
 def test_get_order_rejects_exchange_order_id_mismatch(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1010,6 +1123,7 @@ def test_get_order_rejects_exchange_order_id_mismatch(monkeypatch):
             "side": "bid",
             "volume": "0.1",
             "remaining_volume": "0.1",
+            "created_at": "2024-01-01T00:00:00+00:00",
         },
     )
 

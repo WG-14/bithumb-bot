@@ -450,6 +450,23 @@ class BithumbBroker:
 
         return client_order_id, exchange_order_id
 
+    def _resolve_v1_order_identifiers(
+        self,
+        row: dict[str, object],
+        *,
+        fallback_client_order_id: str | None = None,
+        fallback_exchange_order_id: str | None = None,
+    ) -> tuple[str, str]:
+        exchange_order_id = self._clean_identifier(row.get("uuid"))
+        if not exchange_order_id:
+            exchange_order_id = self._clean_identifier(fallback_exchange_order_id)
+
+        client_order_id = self._clean_identifier(row.get("client_order_id"))
+        if not client_order_id:
+            client_order_id = self._clean_identifier(fallback_client_order_id)
+
+        return client_order_id, exchange_order_id
+
     def _journal_read_summary(self, *, path: str, data: dict[str, object] | list[object] | None) -> None:
         payload = data or {}
         rows: object
@@ -581,6 +598,57 @@ class BithumbBroker:
         return 0.0
 
     @staticmethod
+    def _required_number(payload: dict[str, object], key: str, *, context: str) -> float:
+        raw = payload.get(key)
+        if raw in (None, ""):
+            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field '{key}'")
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
+        if not math.isfinite(parsed):
+            raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
+        return parsed
+
+    @staticmethod
+    def _strict_optional_number(payload: dict[str, object], key: str, *, context: str) -> float | None:
+        raw = payload.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise BrokerRejectError(f"{context} schema mismatch: invalid numeric field '{key}'={raw}") from exc
+        if not math.isfinite(parsed):
+            raise BrokerRejectError(f"{context} schema mismatch: non-finite numeric field '{key}'={raw}")
+        return parsed
+
+    @staticmethod
+    def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
+        if raw in (None, ""):
+            raise BrokerRejectError(f"{context} schema mismatch: missing required timestamp field '{field_name}'")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            text = str(raw).strip()
+            try:
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                dt = datetime.fromisoformat(text)
+            except ValueError as exc:
+                raise BrokerRejectError(
+                    f"{context} schema mismatch: invalid timestamp field '{field_name}'={raw}"
+                ) from exc
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        if not math.isfinite(value):
+            raise BrokerRejectError(f"{context} schema mismatch: non-finite timestamp field '{field_name}'={raw}")
+        if value > 1_000_000_000_000:
+            return int(value)
+        return int(value * 1000)
+
+    @staticmethod
     def _optional_number(payload: dict[str, object], *keys: str) -> float | None:
         for key in keys:
             raw = payload.get(key)
@@ -689,6 +757,47 @@ class BithumbBroker:
             "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
         }
 
+    def _normalize_v1_order_row_strict(self, row: dict[str, object]) -> dict[str, object]:
+        context = "/v1/order"
+        volume = self._required_number(row, "volume", context=context)
+        remaining = self._required_number(row, "remaining_volume", context=context)
+        executed = self._strict_optional_number(row, "executed_volume", context=context)
+        if executed is None:
+            executed = max(0.0, volume - remaining)
+
+        price = self._strict_optional_number(row, "price", context=context)
+        state = str(row.get("state") or "").strip().lower()
+        if state not in {"wait", "watch", "done", "cancel"}:
+            raise BrokerRejectError(f"{context} schema mismatch: unknown state '{row.get('state')}'")
+
+        raw_trades = row.get("trades")
+        if raw_trades is None:
+            trades: list[object] = []
+        elif isinstance(raw_trades, list):
+            trades = raw_trades
+        else:
+            raise BrokerRejectError(f"{context} schema mismatch: trades must be a list when present")
+
+        created_ts = self._strict_parse_ts(row.get("created_at"), field_name="created_at", context=context)
+        updated_raw = row.get("updated_at")
+        updated_ts = (
+            self._strict_parse_ts(updated_raw, field_name="updated_at", context=context)
+            if updated_raw not in (None, "")
+            else created_ts
+        )
+        return {
+            "side": self._normalize_order_side(str(row.get("side")), default="BUY"),
+            "state": state,
+            "price": price,
+            "volume": volume,
+            "remaining_volume": remaining,
+            "executed_volume": executed,
+            "created_ts": created_ts,
+            "updated_ts": updated_ts,
+            "trades": trades,
+            "executed_funds": self._strict_optional_number(row, "executed_funds", context=context),
+        }
+
     @staticmethod
     def _raw_order_fields(
         row: dict[str, object],
@@ -747,6 +856,33 @@ class BithumbBroker:
                 fallback_client_order_id=resolved_client_order_id,
             ),
         )
+
+    @staticmethod
+    def _raw_v1_order_fields(row: dict[str, object]) -> dict[str, object]:
+        raw: dict[str, object] = {}
+        for key in (
+            "market",
+            "ord_type",
+            "uuid",
+            "client_order_id",
+            "state",
+            "side",
+            "price",
+            "volume",
+            "remaining_volume",
+            "executed_volume",
+            "executed_funds",
+            "paid_fee",
+            "locked",
+            "created_at",
+            "updated_at",
+            "trades_count",
+        ):
+            if row.get(key) not in (None, ""):
+                raw[key] = row[key]
+        if isinstance(row.get("trades"), list):
+            raw["trades"] = row["trades"]
+        return raw
 
     def get_order_chance(self, *, market: str | None = None) -> dict[str, object]:
         response = self._get_private(
@@ -1001,11 +1137,8 @@ class BithumbBroker:
                 f"unexpected /v1/order payload type={type(data).__name__}"
             )
         self._journal_read_summary(path="/v1/order", data=data)
-        response_has_identifier = any(
-            self._clean_identifier(data.get(key))
-            for key in ("uuid", "order_id", "client_order_id", "coid")
-        )
-        resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
+        response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
+        resolved_client_order_id, resolved_exchange_order_id = self._resolve_v1_order_identifiers(
             data,
             fallback_client_order_id=requested_client_order_id,
         )
@@ -1027,28 +1160,29 @@ class BithumbBroker:
         if not response_has_identifier:
             raise BrokerRejectError(
                 "order lookup response schema mismatch: "
-                "missing both uuid/order_id and client_order_id in response"
+                "missing both uuid and client_order_id in response"
             )
-        order = self._order_from_v2_row(
-            data,
-            client_order_id=resolved_client_order_id,
-            exchange_order_id=resolved_exchange_order_id,
-        )
-        order_raw = self._raw_order_fields(
-            data,
-            fallback_client_order_id=resolved_client_order_id,
-            fallback_exchange_order_id=resolved_exchange_order_id,
-        )
+        normalized = self._normalize_v1_order_row_strict(data)
+        state = str(normalized["state"])
+        qty_req = float(normalized["volume"])
+        qty_filled = float(normalized["executed_volume"])
+        if state in {"wait", "watch"}:
+            status = "PARTIAL" if qty_filled > 0 else "NEW"
+        elif state == "done":
+            status = "FILLED"
+        else:
+            status = "FILLED" if qty_req > 0 and qty_filled >= qty_req else "CANCELED"
+        order_raw = self._raw_v1_order_fields(data)
         return BrokerOrder(
             client_order_id=resolved_client_order_id,
-            exchange_order_id=resolved_exchange_order_id or order.exchange_order_id,
-            side=order.side,
-            status=order.status,
-            price=order.price,
-            qty_req=order.qty_req,
-            qty_filled=order.qty_filled,
-            created_ts=order.created_ts,
-            updated_ts=order.updated_ts,
+            exchange_order_id=resolved_exchange_order_id,
+            side=str(normalized["side"]),
+            status=status,
+            price=float(normalized["price"]) if normalized["price"] is not None else None,
+            qty_req=qty_req,
+            qty_filled=qty_filled,
+            created_ts=int(normalized["created_ts"]),
+            updated_ts=int(normalized["updated_ts"]),
             raw=order_raw,
         )
 
@@ -1090,6 +1224,8 @@ class BithumbBroker:
 
         fills: list[BrokerFill] = []
         for row in rows:
+            if exchange_order_id and row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
+                raise BrokerRejectError("/v1/order schema mismatch: trades must be a list when present")
             normalized = self._normalize_order_row(row)
             trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
             if trades:
