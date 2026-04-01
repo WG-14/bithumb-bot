@@ -28,7 +28,12 @@ from .base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
-from .accounts_v1 import parse_accounts_response, select_pair_balances, to_broker_balance
+from .accounts_v1 import (
+    AccountsRequiredCurrencyMissingError,
+    parse_accounts_response,
+    select_pair_balances,
+    to_broker_balance,
+)
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -730,11 +735,11 @@ class BithumbBroker:
 
     @staticmethod
     def _classify_accounts_validation_reason(exc: Exception) -> str:
+        if isinstance(exc, AccountsRequiredCurrencyMissingError):
+            return "required currency missing"
         detail = str(exc).lower()
         if "duplicate currency row" in detail:
             return "duplicate currency"
-        if "missing quote currency row" in detail or "missing base currency row" in detail:
-            return "required currency missing"
         return "schema mismatch"
 
     @staticmethod
@@ -1587,12 +1592,17 @@ class BithumbBroker:
                 missing_required_currencies.append(payment_currency.upper())
             if "missing base currency row '" in error_text:
                 missing_required_currencies.append(order_currency.upper())
+            duplicate_currencies = (
+                list(parsed_accounts.duplicate_currencies)
+                if parsed_accounts is not None
+                else sorted({token for token in currencies if currencies.count(token) > 1})
+            )
             self._accounts_validation_diag = {
                 "reason": reason,
                 "row_count": row_count,
                 "currencies": sorted(set(currencies)),
                 "missing_required_currencies": missing_required_currencies,
-                "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
+                "duplicate_currencies": duplicate_currencies,
                 "last_success_reason": self._accounts_validation_diag.get("last_success_reason"),
                 "last_failure_reason": reason,
             }
@@ -1603,7 +1613,7 @@ class BithumbBroker:
             "row_count": row_count,
             "currencies": sorted(parsed_accounts.balances.keys()) if parsed_accounts is not None else [],
             "missing_required_currencies": [],
-            "duplicate_currencies": sorted({token for token in currencies if currencies.count(token) > 1}),
+            "duplicate_currencies": list(parsed_accounts.duplicate_currencies) if parsed_accounts is not None else [],
             "last_success_reason": "ok",
             "last_failure_reason": self._accounts_validation_diag.get("last_failure_reason"),
         }

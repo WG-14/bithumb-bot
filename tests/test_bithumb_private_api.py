@@ -323,12 +323,16 @@ def test_accounts_rest_balance_uses_split_accounts_layers(monkeypatch):
         ],
     )
 
-    from bithumb_bot.broker.accounts_v1 import PairBalances, ParsedAccounts
+    from bithumb_bot.broker.accounts_v1 import AccountRow, PairBalances, ParsedAccounts
 
     def _fake_parse(data):
         calls.append("parse")
         assert isinstance(data, list)
         return ParsedAccounts(
+            rows=(
+                AccountRow(currency="KRW", balance=Decimal("1000"), locked=Decimal("25")),
+                AccountRow(currency="BTC", balance=Decimal("0.1"), locked=Decimal("0.02")),
+            ),
             balances={
                 "KRW": (Decimal("1000"), Decimal("25")),
                 "BTC": (Decimal("0.1"), Decimal("0.02")),

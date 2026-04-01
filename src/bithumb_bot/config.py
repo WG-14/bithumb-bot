@@ -102,7 +102,11 @@ def _fetch_accounts_payload_for_preflight(*, api_key: str, api_secret: str, base
 
 
 def validate_accounts_preflight(cfg: Settings) -> None:
-    from .broker.accounts_v1 import parse_accounts_response, select_pair_balances
+    from .broker.accounts_v1 import (
+        AccountsRequiredCurrencyMissingError,
+        parse_accounts_response,
+        select_pair_balances,
+    )
     from .broker.bithumb import classify_private_api_error
 
     canonical_market = normalize_market_id(str(cfg.PAIR or ""))
@@ -147,7 +151,7 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         )
     except Exception as exc:
         detail_lower = str(exc).lower()
-        if "missing quote currency row" in detail_lower or "missing base currency row" in detail_lower:
+        if isinstance(exc, AccountsRequiredCurrencyMissingError):
             reason = "required currency missing"
             reason_code = "ACCOUNTS_REQUIRED_CURRENCY_MISSING"
         else:
