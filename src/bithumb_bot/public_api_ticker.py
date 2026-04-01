@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 import httpx
 
-from .markets import canonical_market_id
+from .markets import ExchangeMarketCodeError, parse_documented_market_code
 from .public_api import PublicApiSchemaError, get_public_json
 
 
@@ -60,11 +60,11 @@ def normalize_ticker_markets(markets: str | Iterable[str]) -> str:
     normalized: list[str] = []
     seen: set[str] = set()
     for market in raw_items:
-        canonical = canonical_market_id(str(market).strip())
-        if canonical in seen:
+        canonical_market = parse_documented_market_code(str(market).strip())
+        if canonical_market in seen:
             continue
-        seen.add(canonical)
-        normalized.append(canonical)
+        seen.add(canonical_market)
+        normalized.append(canonical_market)
 
     if not normalized:
         raise ValueError("markets must include at least one non-empty market")
@@ -91,7 +91,7 @@ def parse_ticker_payload(payload: object) -> list[TickerSnapshot]:
 
         snapshots.append(
             TickerSnapshot(
-                market=_require_str(row=item, field="market"),
+                market=parse_documented_market_code(_require_str(row=item, field="market")),
                 trade_price=_require_number(row=item, field="trade_price"),
                 high_price=_require_number(row=item, field="high_price"),
                 low_price=_require_number(row=item, field="low_price"),
@@ -102,7 +102,45 @@ def parse_ticker_payload(payload: object) -> list[TickerSnapshot]:
     return snapshots
 
 
+def _validate_batch_market_response(
+    *,
+    requested_markets_csv: str,
+    snapshots: list[TickerSnapshot],
+    endpoint: str,
+) -> list[TickerSnapshot]:
+    requested_market_set = {parse_documented_market_code(token) for token in requested_markets_csv.split(",")}
+    returned_market_set = {parse_documented_market_code(snapshot.market) for snapshot in snapshots}
+    if len(snapshots) != len(requested_market_set) or returned_market_set != requested_market_set:
+        raise PublicApiSchemaError(
+            "ticker response market mismatch "
+            f"endpoint={endpoint} "
+            f"requested_markets={sorted(requested_market_set)} "
+            f"returned_markets={sorted(returned_market_set)} "
+            f"returned_count={len(snapshots)}"
+        )
+    return snapshots
+
+
 def fetch_ticker(client: httpx.Client, *, markets: str | Iterable[str]) -> list[TickerSnapshot]:
-    params = {"markets": normalize_ticker_markets(markets)}
-    payload = get_public_json(client, "/v1/ticker", params=params)
-    return parse_ticker_payload(payload)
+    endpoint = "/v1/ticker"
+    try:
+        requested_markets_csv = normalize_ticker_markets(markets)
+    except ExchangeMarketCodeError as exc:
+        raise PublicApiSchemaError(
+            f"ticker request market validation failed endpoint={endpoint} detail={exc}"
+        ) from exc
+
+    params = {"markets": requested_markets_csv}
+    payload = get_public_json(client, endpoint, params=params)
+    try:
+        snapshots = parse_ticker_payload(payload)
+        return _validate_batch_market_response(
+            requested_markets_csv=requested_markets_csv,
+            snapshots=snapshots,
+            endpoint=endpoint,
+        )
+    except ExchangeMarketCodeError as exc:
+        raise PublicApiSchemaError(
+            "ticker response market validation failed "
+            f"endpoint={endpoint} requested_markets={requested_markets_csv} detail={exc}"
+        ) from exc

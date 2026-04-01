@@ -8,12 +8,6 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _stub_market_canonicalization(monkeypatch):
-    normalize = lambda pair: str(pair).replace("_", "-").upper()
-    monkeypatch.setattr(order_rules, "canonical_market_id", normalize)
-
-
-@pytest.fixture(autouse=True)
 def _reset_settings():
     old = {
         "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
@@ -81,7 +75,7 @@ def test_fetch_exchange_order_rules_strict_parse_accepts_documented_payload(monk
         lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: valid_doc_shaped_response | {"market": valid_doc_shaped_response["market"] | {"id": market}}})(),
     )
 
-    rules = order_rules.fetch_exchange_order_rules("BTC_KRW")
+    rules = order_rules.fetch_exchange_order_rules("BTC-KRW")
 
     assert rules.market_id == "BTC-KRW"
     assert rules.bid_min_total_krw == 5000.0
@@ -114,18 +108,12 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
     assert parsed.maker_ask_fee == 0.0025
 
 
-def test_parse_order_chance_response_matches_market_by_normalized_equivalence(valid_doc_shaped_response):
+def test_parse_order_chance_response_rejects_noncanonical_requested_market(valid_doc_shaped_response):
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="BTC_KRW")
 
 
-def test_parse_order_chance_response_does_not_depend_on_public_market_registry(valid_doc_shaped_response, monkeypatch):
-    monkeypatch.setattr(
-        order_rules,
-        "canonical_market_id",
-        lambda _market: (_ for _ in ()).throw(RuntimeError("public registry unavailable")),
-    )
-
+def test_parse_order_chance_response_does_not_depend_on_public_market_registry(valid_doc_shaped_response):
     parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="KRW-BTC")
 
     assert parsed.market_id == "KRW-BTC"
@@ -155,6 +143,16 @@ def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch, mar
 
     with pytest.raises(order_rules.OrderChanceMarketMismatchError, match="market.id mismatch"):
         order_rules.fetch_exchange_order_rules("KRW-BTC")
+
+
+def test_fetch_exchange_order_rules_rejects_noncanonical_request_market(monkeypatch, valid_doc_shaped_response):
+    monkeypatch.setattr(
+        order_rules,
+        "BithumbBroker",
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: valid_doc_shaped_response})(),
+    )
+    with pytest.raises(order_rules.OrderChanceSchemaError, match="must be canonical QUOTE-BASE"):
+        order_rules.fetch_exchange_order_rules("BTC_KRW")
 
 
 def test_fetch_exchange_order_rules_fails_when_required_field_is_missing(monkeypatch, missing_required_field_response):
@@ -244,7 +242,7 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
         ),
     )
 
-    resolved = order_rules.get_effective_order_rules("BTC_KRW")
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
 
     assert resolved.rules.min_qty == 0.0001
     assert resolved.rules.qty_step == 0.0001
@@ -284,7 +282,7 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     warnings: list[str] = []
     monkeypatch.setattr(order_rules, "notify", lambda msg: warnings.append(msg))
 
-    resolved = order_rules.get_effective_order_rules("BTC_KRW")
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
 
     assert resolved.rules.min_qty == 0.0002
     assert resolved.rules.qty_step == 0.0005
@@ -325,8 +323,8 @@ def test_get_effective_order_rules_cached_result_preserves_source_metadata(monke
         ),
     )
 
-    first = order_rules.get_effective_order_rules("BTC_KRW")
-    second = order_rules.get_effective_order_rules("BTC_KRW")
+    first = order_rules.get_effective_order_rules("KRW-BTC")
+    second = order_rules.get_effective_order_rules("KRW-BTC")
 
     assert first.source["bid_min_total_krw"] == "chance_doc"
     assert second.source["bid_min_total_krw"] == "chance_doc"

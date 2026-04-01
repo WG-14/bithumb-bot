@@ -564,6 +564,24 @@ def test_order_chance_uses_private_v1_endpoint(monkeypatch):
     }
 
 
+def test_order_chance_rejects_noncanonical_market_before_request(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: calls.append(
+            {"endpoint": endpoint, "params": params, "retry_safe": retry_safe}
+        ),
+    )
+
+    with pytest.raises(BrokerRejectError, match="canonical QUOTE-BASE"):
+        broker.get_order_chance(market="BTC_KRW")
+    assert calls == []
+
+
 def test_order_chance_keeps_market_param_and_auth_query_hash(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"market": {"id": "KRW-BTC"}})]

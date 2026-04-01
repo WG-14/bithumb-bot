@@ -17,7 +17,7 @@ import httpx
 
 from ..config import settings
 from ..marketdata import fetch_orderbook_top, validated_best_quote_ask_price
-from ..markets import canonical_market_id
+from ..markets import ExchangeMarketCodeError, canonical_market_id, parse_documented_market_code
 from ..observability import format_log_kv
 from .base import (
     BrokerBalance,
@@ -1095,9 +1095,16 @@ class BithumbBroker:
         return raw
 
     def get_order_chance(self, *, market: str | None = None) -> dict[str, object]:
+        try:
+            requested_market = parse_documented_market_code(market or self._market())
+        except ExchangeMarketCodeError as exc:
+            raise BrokerRejectError(
+                "/v1/orders/chance request market must use canonical QUOTE-BASE "
+                f"(e.g., KRW-BTC), got {market!r}"
+            ) from exc
         response = self._get_private(
             "/v1/orders/chance",
-            {"market": market or self._market()},
+            {"market": requested_market},
             retry_safe=True,
         )
         if not isinstance(response, dict):

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
-from ..markets import canonical_market_id, parse_documented_market_code
+from ..markets import ExchangeMarketCodeError, canonical_market_id, parse_documented_market_code
 from ..notifier import notify
 from .bithumb import BithumbBroker, classify_private_api_error
 
@@ -286,7 +286,12 @@ def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDer
 
 
 def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
-    market = canonical_market_id(pair)
+    try:
+        market = parse_documented_market_code(pair)
+    except ExchangeMarketCodeError as exc:
+        raise OrderChanceSchemaError(
+            f"/v1/orders/chance request market must be canonical QUOTE-BASE: {pair!r}"
+        ) from exc
     payload = BithumbBroker().get_order_chance(market=market)
 
     if not isinstance(payload, dict):

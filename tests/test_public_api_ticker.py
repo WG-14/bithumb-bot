@@ -43,14 +43,17 @@ def test_parse_ticker_payload_success() -> None:
     assert tickers[0].trade_price == 110.0
 
 
-def test_normalize_ticker_markets_accepts_comma_string(monkeypatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_ticker.canonical_market_id", lambda market: market.strip().upper())
+def test_normalize_ticker_markets_accepts_comma_string() -> None:
     assert normalize_ticker_markets("krw-btc, KRW-ETH") == "KRW-BTC,KRW-ETH"
 
 
-def test_normalize_ticker_markets_accepts_iterable_and_dedupes(monkeypatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_ticker.canonical_market_id", lambda market: market.strip().upper())
+def test_normalize_ticker_markets_accepts_iterable_and_dedupes() -> None:
     assert normalize_ticker_markets(["krw-btc", "KRW-BTC", "krw-eth"]) == "KRW-BTC,KRW-ETH"
+
+
+def test_normalize_ticker_markets_rejects_noncanonical_format() -> None:
+    with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
+        normalize_ticker_markets(["BTC_KRW"])
 
 
 def test_parse_ticker_payload_fails_when_required_field_missing() -> None:
@@ -67,9 +70,7 @@ def test_parse_ticker_payload_fails_on_type_mismatch() -> None:
         parse_ticker_payload([payload])
 
 
-def test_fetch_ticker_raises_on_non_json_response(monkeypatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_ticker.canonical_market_id", lambda market: market.strip().upper())
-
+def test_fetch_ticker_raises_on_non_json_response() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"<html>not-json</html>")
 
@@ -78,9 +79,7 @@ def test_fetch_ticker_raises_on_non_json_response(monkeypatch) -> None:
             fetch_ticker(client, markets=["KRW-BTC"])
 
 
-def test_fetch_ticker_raises_on_http_error(monkeypatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_ticker.canonical_market_id", lambda market: market.strip().upper())
-
+def test_fetch_ticker_raises_on_http_error() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": {"name": "server_error", "message": "retry"}})
 
@@ -89,14 +88,21 @@ def test_fetch_ticker_raises_on_http_error(monkeypatch) -> None:
             fetch_ticker(client, markets="KRW-BTC")
 
 
-def test_fetch_ticker_sends_markets_param(monkeypatch) -> None:
-    monkeypatch.setattr("bithumb_bot.public_api_ticker.canonical_market_id", lambda market: market.strip().upper())
-
+def test_fetch_ticker_sends_markets_param() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/ticker"
         assert request.url.params.get("markets") == "KRW-BTC,KRW-ETH"
-        return httpx.Response(200, json=[_sample_ticker()])
+        return httpx.Response(200, json=[_sample_ticker(), _sample_ticker() | {"market": "KRW-ETH"}])
 
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
         tickers = fetch_ticker(client, markets=["krw-btc", "krw-eth"])
-    assert len(tickers) == 1
+    assert len(tickers) == 2
+
+
+def test_fetch_ticker_rejects_response_market_mismatch() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_sample_ticker() | {"market": "KRW-ETH"}])
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.bithumb.com") as client:
+        with pytest.raises(PublicApiSchemaError, match="ticker response market mismatch"):
+            fetch_ticker(client, markets=["KRW-BTC"])
