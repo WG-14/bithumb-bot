@@ -10,6 +10,7 @@ from bithumb_bot.public_api_ticker import (
     fetch_ticker,
     normalize_single_ticker_market,
     normalize_ticker_markets,
+    parse_ticker_response_payload,
     parse_ticker_lite_payload,
     parse_ticker_payload,
 )
@@ -47,6 +48,31 @@ def test_parse_ticker_lite_payload_success_with_required_subset_fields() -> None
     assert tickers[0].trade_price == 110.0
 
 
+def test_parse_ticker_response_payload_success_with_documented_fields() -> None:
+    rows = parse_ticker_response_payload([_sample_ticker()])
+    assert len(rows) == 1
+    assert rows[0].market == "KRW-BTC"
+    assert rows[0].trade_date == "20260331"
+    assert rows[0].acc_trade_price_24h == 223_456.0
+
+
+def test_parse_ticker_lite_payload_derives_from_full_response_rows() -> None:
+    payload = [_sample_ticker()]
+    rows = parse_ticker_response_payload(payload)
+    snapshots = parse_ticker_lite_payload(payload)
+    assert snapshots[0].market == rows[0].market
+    assert snapshots[0].trade_price == rows[0].trade_price
+    assert snapshots[0].high_price == rows[0].high_price
+    assert snapshots[0].low_price == rows[0].low_price
+    assert snapshots[0].acc_trade_volume_24h == rows[0].acc_trade_volume_24h
+
+
+def test_parse_ticker_lite_payload_ignores_unknown_extra_fields() -> None:
+    payload = _sample_ticker() | {"unknown_future_field": {"k": "v"}}
+    snapshots = parse_ticker_lite_payload([payload])
+    assert snapshots[0].market == "KRW-BTC"
+
+
 def test_normalize_ticker_markets_accepts_comma_string() -> None:
     assert normalize_ticker_markets("krw-btc, KRW-ETH") == "KRW-BTC,KRW-ETH"
 
@@ -71,8 +97,8 @@ def test_normalize_single_ticker_market_requires_exactly_one_market() -> None:
 
 def test_parse_ticker_lite_payload_fails_when_required_field_missing() -> None:
     payload = _sample_ticker()
-    del payload["trade_price"]
-    with pytest.raises(PublicApiSchemaError, match="missing_fields=trade_price"):
+    del payload["trade_date"]
+    with pytest.raises(PublicApiSchemaError, match="missing_fields=trade_date"):
         parse_ticker_lite_payload([payload])
 
 

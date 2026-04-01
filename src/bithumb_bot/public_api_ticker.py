@@ -9,13 +9,58 @@ from .markets import ExchangeMarketCodeError, parse_documented_market_code
 from .public_api import PublicApiSchemaError, get_public_json
 
 
-_REQUIRED_FIELDS = (
+_DOCUMENTED_TICKER_FIELDS = (
     "market",
-    "trade_price",
+    "trade_date",
+    "trade_time",
+    "trade_date_kst",
+    "trade_time_kst",
+    "trade_timestamp",
+    "opening_price",
     "high_price",
     "low_price",
+    "trade_price",
+    "prev_closing_price",
+    "change",
+    "change_price",
+    "signed_change_price",
+    "change_rate",
+    "signed_change_rate",
+    "acc_trade_price",
+    "acc_trade_price_24h",
+    "acc_trade_volume",
     "acc_trade_volume_24h",
 )
+
+
+@dataclass(frozen=True)
+class TickerResponseRow:
+    """Full documented /v1/ticker response row model.
+
+    This keeps the official row shape intact so future strategy/reporting/alert layers
+    can consume richer ticker context without re-parsing raw payloads.
+    """
+
+    market: str
+    trade_date: str
+    trade_time: str
+    trade_date_kst: str
+    trade_time_kst: str
+    trade_timestamp: int
+    opening_price: float
+    high_price: float
+    low_price: float
+    trade_price: float
+    prev_closing_price: float
+    change: str
+    change_price: float
+    signed_change_price: float
+    change_rate: float
+    signed_change_rate: float
+    acc_trade_price: float
+    acc_trade_price_24h: float
+    acc_trade_volume: float
+    acc_trade_volume_24h: float
 
 
 @dataclass(frozen=True)
@@ -31,6 +76,16 @@ class TickerLiteSnapshot:
     high_price: float
     low_price: float
     acc_trade_volume_24h: float
+
+    @classmethod
+    def from_response_row(cls, row: TickerResponseRow) -> "TickerLiteSnapshot":
+        return cls(
+            market=row.market,
+            trade_price=row.trade_price,
+            high_price=row.high_price,
+            low_price=row.low_price,
+            acc_trade_volume_24h=row.acc_trade_volume_24h,
+        )
 
 
 def _require_number(*, row: dict[str, Any], field: str) -> float:
@@ -52,6 +107,15 @@ def _require_str(*, row: dict[str, Any], field: str) -> str:
     if not text:
         raise PublicApiSchemaError(f"ticker schema mismatch field={field} expected=non-empty str")
     return text
+
+
+def _require_int(*, row: dict[str, Any], field: str) -> int:
+    value = row.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PublicApiSchemaError(
+            f"ticker schema mismatch field={field} expected=int actual={type(value).__name__}"
+        )
+    return value
 
 
 def normalize_ticker_markets(markets: str | Iterable[str]) -> str:
@@ -84,11 +148,11 @@ def normalize_single_ticker_market(market: str) -> str:
     return canonical_market
 
 
-def parse_ticker_lite_payload(payload: object) -> list[TickerLiteSnapshot]:
+def parse_ticker_response_payload(payload: object) -> list[TickerResponseRow]:
     if not isinstance(payload, list):
         raise PublicApiSchemaError(f"ticker schema mismatch expected=list actual={type(payload).__name__}")
 
-    snapshots: list[TickerLiteSnapshot] = []
+    rows: list[TickerResponseRow] = []
     for item in payload:
         if not isinstance(item, dict):
             raise PublicApiSchemaError(
@@ -96,23 +160,43 @@ def parse_ticker_lite_payload(payload: object) -> list[TickerLiteSnapshot]:
                 f"actual_item={type(item).__name__}"
             )
 
-        missing = [field for field in _REQUIRED_FIELDS if field not in item]
+        missing = [field for field in _DOCUMENTED_TICKER_FIELDS if field not in item]
         if missing:
             raise PublicApiSchemaError(
                 f"ticker schema mismatch missing_fields={','.join(missing)}"
             )
 
-        snapshots.append(
-            TickerLiteSnapshot(
+        rows.append(
+            TickerResponseRow(
                 market=parse_documented_market_code(_require_str(row=item, field="market")),
-                trade_price=_require_number(row=item, field="trade_price"),
+                trade_date=_require_str(row=item, field="trade_date"),
+                trade_time=_require_str(row=item, field="trade_time"),
+                trade_date_kst=_require_str(row=item, field="trade_date_kst"),
+                trade_time_kst=_require_str(row=item, field="trade_time_kst"),
+                trade_timestamp=_require_int(row=item, field="trade_timestamp"),
+                opening_price=_require_number(row=item, field="opening_price"),
                 high_price=_require_number(row=item, field="high_price"),
                 low_price=_require_number(row=item, field="low_price"),
+                trade_price=_require_number(row=item, field="trade_price"),
+                prev_closing_price=_require_number(row=item, field="prev_closing_price"),
+                change=_require_str(row=item, field="change"),
+                change_price=_require_number(row=item, field="change_price"),
+                signed_change_price=_require_number(row=item, field="signed_change_price"),
+                change_rate=_require_number(row=item, field="change_rate"),
+                signed_change_rate=_require_number(row=item, field="signed_change_rate"),
+                acc_trade_price=_require_number(row=item, field="acc_trade_price"),
+                acc_trade_price_24h=_require_number(row=item, field="acc_trade_price_24h"),
+                acc_trade_volume=_require_number(row=item, field="acc_trade_volume"),
                 acc_trade_volume_24h=_require_number(row=item, field="acc_trade_volume_24h"),
             )
         )
 
-    return snapshots
+    return rows
+
+
+def parse_ticker_lite_payload(payload: object) -> list[TickerLiteSnapshot]:
+    rows = parse_ticker_response_payload(payload)
+    return [TickerLiteSnapshot.from_response_row(row) for row in rows]
 
 
 def parse_ticker_payload(payload: object) -> list[TickerLiteSnapshot]:
