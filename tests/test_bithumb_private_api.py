@@ -311,7 +311,7 @@ def test_balance_uses_split_accounts_layers(monkeypatch):
         ],
     )
 
-    from bithumb_bot.broker.accounts_v1 import ParsedAccounts
+    from bithumb_bot.broker.accounts_v1 import PairBalances, ParsedAccounts
 
     def _fake_parse(data):
         calls.append("parse")
@@ -330,11 +330,11 @@ def test_balance_uses_split_accounts_layers(monkeypatch):
         calls.append("select")
         assert order_currency == "BTC"
         assert payment_currency == "KRW"
-        return (
-            accounts.balances["KRW"][0],
-            accounts.balances["KRW"][1],
-            accounts.balances["BTC"][0],
-            accounts.balances["BTC"][1],
+        return PairBalances(
+            cash_balance=accounts.balances["KRW"][0],
+            cash_locked=accounts.balances["KRW"][1],
+            asset_balance=accounts.balances["BTC"][0],
+            asset_locked=accounts.balances["BTC"][1],
         )
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.parse_accounts_response", _fake_parse)

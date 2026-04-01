@@ -14,6 +14,22 @@ class ParsedAccounts:
     duplicate_currencies: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PairBalances:
+    cash_balance: Decimal
+    cash_locked: Decimal
+    asset_balance: Decimal
+    asset_locked: Decimal
+
+    @property
+    def cash_total(self) -> Decimal:
+        return self.cash_balance + self.cash_locked
+
+    @property
+    def asset_total(self) -> Decimal:
+        return self.asset_balance + self.asset_locked
+
+
 def _required_non_negative_decimal(payload: dict[str, object], key: str, *, context: str) -> Decimal:
     raw = payload.get(key)
     if raw in (None, ""):
@@ -67,7 +83,7 @@ def select_pair_balances(
     *,
     order_currency: str,
     payment_currency: str,
-) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+) -> PairBalances:
     quote_currency = payment_currency.strip().upper()
     base_currency = order_currency.strip().upper()
     missing_required_currencies: list[str] = []
@@ -83,13 +99,18 @@ def select_pair_balances(
 
     cash_balance, cash_locked = accounts.balances[quote_currency]
     asset_balance, asset_locked = accounts.balances[base_currency]
-    return cash_balance, cash_locked, asset_balance, asset_locked
+    return PairBalances(
+        cash_balance=cash_balance,
+        cash_locked=cash_locked,
+        asset_balance=asset_balance,
+        asset_locked=asset_locked,
+    )
 
 
-def to_broker_balance(*, cash_balance: Decimal, cash_locked: Decimal, asset_balance: Decimal, asset_locked: Decimal) -> BrokerBalance:
+def to_broker_balance(pair_balances: PairBalances) -> BrokerBalance:
     return BrokerBalance(
-        cash_available=float(cash_balance),
-        cash_locked=float(cash_locked),
-        asset_available=float(asset_balance),
-        asset_locked=float(asset_locked),
+        cash_available=float(pair_balances.cash_balance),
+        cash_locked=float(pair_balances.cash_locked),
+        asset_available=float(pair_balances.asset_balance),
+        asset_locked=float(pair_balances.asset_locked),
     )

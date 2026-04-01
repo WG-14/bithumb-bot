@@ -1506,7 +1506,7 @@ class BithumbBroker:
         parsed_accounts = None
         try:
             parsed_accounts = parse_accounts_response(response)
-            cash_balance, cash_locked, asset_balance, asset_locked = select_pair_balances(
+            pair_balances = select_pair_balances(
                 parsed_accounts,
                 order_currency=order_currency,
                 payment_currency=payment_currency,
@@ -1539,12 +1539,7 @@ class BithumbBroker:
             "last_success_reason": "ok",
             "last_failure_reason": self._accounts_validation_diag.get("last_failure_reason"),
         }
-        return to_broker_balance(
-            cash_balance=cash_balance,
-            cash_locked=cash_locked,
-            asset_balance=asset_balance,
-            asset_locked=asset_locked,
-        )
+        return to_broker_balance(pair_balances)
 
     def get_recent_orders(
         self,
