@@ -618,7 +618,7 @@ def test_recent_orders_includes_done_and_cancel_states(monkeypatch):
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
-    recent = broker.get_recent_orders(limit=10)
+    recent = broker.get_recent_orders(limit=10, exchange_order_ids=["open-1", "filled-1", "cancel-1"])
 
     by_id = {str(order.exchange_order_id): order for order in recent}
     assert by_id["open-1"].status == "NEW"
@@ -640,16 +640,26 @@ def test_get_open_orders_uses_wait_state(monkeypatch):
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
-    open_orders = broker.get_open_orders()
+    open_orders = broker.get_open_orders(exchange_order_ids=["open-1"])
 
     assert call == {
         "endpoint": "/v1/orders",
-        "params": {"market": "KRW-BTC", "state": "wait", "limit": 100},
+        "params": {"uuids": ["open-1"], "state": "wait", "page": 1, "order_by": "desc"},
     }
     assert len(open_orders) == 1
     assert open_orders[0].exchange_order_id == "open-1"
     assert open_orders[0].side == "BUY"
 
+
+def test_v1_orders_broad_scan_is_rejected_without_identifiers() -> None:
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(BrokerRejectError, match="requires identifiers"):
+        broker.get_open_orders()
+
+    with pytest.raises(BrokerRejectError, match="requires identifiers"):
+        broker.get_recent_orders(limit=5)
 
 
 def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(monkeypatch):
@@ -1192,7 +1202,7 @@ def test_get_open_orders_preserves_raw_market_and_ord_type(monkeypatch):
         ],
     )
 
-    rows = broker.get_open_orders()
+    rows = broker.get_open_orders(exchange_order_ids=["open-raw-1"])
 
     assert len(rows) == 1
     assert rows[0].raw is not None
@@ -1230,7 +1240,7 @@ def test_recent_orders_maps_exchange_and_client_identifiers_consistently(monkeyp
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
-    rows = broker.get_recent_orders(limit=5)
+    rows = broker.get_recent_orders(limit=5, exchange_order_ids=["open-consistent-1"])
 
     assert len(rows) == 1
     assert rows[0].exchange_order_id == "open-consistent-1"
@@ -1344,7 +1354,7 @@ def test_get_fills_v1_order_handles_missing_or_empty_trades_with_aggregate_fill(
     assert fills[0].qty == pytest.approx(0.05)
 
 
-def test_get_fills_uses_limited_done_scan_fallback_when_direct_lookup_has_no_usable_fill(monkeypatch):
+def test_get_fills_rejects_when_direct_lookup_has_no_usable_fill_and_scan_is_disabled(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     calls: list[dict[str, object]] = []
@@ -1381,12 +1391,11 @@ def test_get_fills_uses_limited_done_scan_fallback_when_direct_lookup_has_no_usa
         ]
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
-    fills = broker.get_fills(client_order_id="cid-fallback-1", exchange_order_id="filled-fallback-1")
+    with pytest.raises(BrokerRejectError, match="broad /v1/orders done scan fallback is disabled"):
+        broker.get_fills(client_order_id="cid-fallback-1", exchange_order_id="filled-fallback-1")
 
-    assert len(fills) == 1
-    assert fills[0].exchange_order_id == "filled-fallback-1"
     assert calls[0]["endpoint"] == "/v1/order"
-    assert calls[1]["endpoint"] == "/v1/orders"
+    assert len(calls) == 1
 
 
 def test_get_fills_maps_identifiers_from_trade_and_order_rows(monkeypatch):
@@ -1886,9 +1895,8 @@ def test_get_fills_skips_aggregate_fill_when_price_missing(monkeypatch):
         },
     )
 
-    fills = broker.get_fills(client_order_id="cid-1", exchange_order_id=None)
-
-    assert fills == []
+    with pytest.raises(BrokerRejectError, match="done scan fallback is disabled"):
+        broker.get_fills(client_order_id="cid-1", exchange_order_id=None)
 
 
 def test_get_fills_skips_aggregate_fill_without_timestamps_even_when_avg_price_exists(monkeypatch):
@@ -1910,9 +1918,8 @@ def test_get_fills_skips_aggregate_fill_without_timestamps_even_when_avg_price_e
         },
     )
 
-    fills = broker.get_fills(client_order_id="cid-2", exchange_order_id=None)
-
-    assert fills == []
+    with pytest.raises(BrokerRejectError, match="done scan fallback is disabled"):
+        broker.get_fills(client_order_id="cid-2", exchange_order_id=None)
 
 
 
@@ -1952,7 +1959,7 @@ def test_recent_orders_journal_summary_captures_sample_order_ids(monkeypatch):
 
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
-    broker.get_recent_orders(limit=10)
+    broker.get_recent_orders(limit=10, exchange_order_ids=["filled-1"])
     summary = broker.get_read_journal_summary()
 
     assert "/v1/orders(done)" in summary

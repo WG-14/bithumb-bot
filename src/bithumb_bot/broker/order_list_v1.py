@@ -193,20 +193,3 @@ def build_order_list_params(
         order_by=normalized_order_by,
     ).to_params()
 
-
-def build_legacy_order_scan_params(*, market: str, state: str, limit: int) -> dict[str, object]:
-    normalized_market = clean_identifier(market)
-    if not normalized_market:
-        raise ValueError("market is required")
-    normalized_state = clean_identifier(state).lower()
-    if normalized_state not in V1_ORDER_STATES:
-        raise ValueError(f"state must be one of {sorted(V1_ORDER_STATES)}")
-    normalized_limit = int(limit)
-    if normalized_limit < 1:
-        raise ValueError("limit must be >= 1")
-    # TODO: remove legacy market/state scan once all /v1/orders callers migrate to documented identifier lookup.
-    return {
-        "market": normalized_market,
-        "state": normalized_state,
-        "limit": normalized_limit,
-    }

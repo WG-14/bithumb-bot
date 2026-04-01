@@ -27,7 +27,7 @@ from .order_lookup_v1 import (
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
-from .order_list_v1 import build_legacy_order_scan_params, parse_v1_order_list_row
+from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
 from .order_payloads import build_order_payload, normalize_order_side, validate_client_order_id
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
@@ -1179,20 +1179,37 @@ class BithumbBroker:
             raw=order_raw,
         )
 
-    def get_open_orders(self) -> list[BrokerOrder]:
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         if self.dry_run:
             return []
+        if not exchange_order_ids and not client_order_ids:
+            raise BrokerRejectError(
+                "open order lookup requires identifiers; broad /v1/orders market/state scans are disabled"
+            )
         data = self._get_private(
             "/v1/orders",
-            build_legacy_order_scan_params(market=self._market(), state="wait", limit=100),
+            build_order_list_params(
+                uuids=exchange_order_ids,
+                client_order_ids=client_order_ids,
+                state="wait",
+                page=1,
+                order_by="desc",
+            ),
             retry_safe=True,
         )
         self._journal_read_summary(path="/v1/orders(open_orders)", data=data)
-        rows = data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
+
         out: list[BrokerOrder] = []
-        for row in rows:
+        for row in data:
             if not isinstance(row, dict):
-                continue
+                raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
             normalized = parse_v1_order_list_row(row)
             qty_req = float(normalized.volume)
             qty_filled = float(normalized.executed_volume)
@@ -1261,7 +1278,7 @@ class BithumbBroker:
             rows = [data]
             fallback_scan_allowed = True
         else:
-            fallback_scan_allowed = True
+            return []
 
         fills: list[BrokerFill] = []
         need_fallback_scan = not rows
@@ -1351,40 +1368,9 @@ class BithumbBroker:
                 )
             )
         if not fills and fallback_scan_allowed and need_fallback_scan:
-            data = self._get_private(
-                "/v1/orders",
-                build_legacy_order_scan_params(market=self._market(), state="done", limit=100),
-                retry_safe=True,
+            raise BrokerRejectError(
+                "fill lookup requires /v1/order trade payload completeness; broad /v1/orders done scan fallback is disabled"
             )
-            self._journal_read_summary(path="/v1/orders(fills)", data=data)
-            if isinstance(data, list):
-                scanned_rows = [row for row in data if isinstance(row, dict)]
-                for row in scanned_rows:
-                    row_client_order_id, row_exchange_order_id = self._resolve_order_identifiers(row)
-                    if requested_exchange_order_id and row_exchange_order_id != requested_exchange_order_id:
-                        continue
-                    if requested_client_order_id and row_client_order_id != requested_client_order_id:
-                        continue
-                    normalized = parse_v1_order_list_row(row)
-                    qty_filled = float(normalized.executed_volume)
-                    if qty_filled <= 0:
-                        continue
-                    price = float(normalized.price) if normalized.price > 0 else None
-                    if price is None:
-                        continue
-                    ts = int(normalized.updated_ts)
-                    fee = self._extract_fill_fee(row, context="aggregate-fallback", qty=qty_filled, price=price)
-                    fills.append(
-                        BrokerFill(
-                            client_order_id=row_client_order_id or requested_client_order_id,
-                            fill_id=f"{normalized.uuid}:aggregate:{ts}",
-                            fill_ts=ts,
-                            price=float(price),
-                            qty=qty_filled,
-                            fee=fee,
-                            exchange_order_id=row_exchange_order_id or str(normalized.uuid),
-                        )
-                    )
         return fills
 
     def get_balance(self) -> BrokerBalance:
@@ -1408,28 +1394,40 @@ class BithumbBroker:
             asset_locked=self._number(asset, "locked", "in_use", "locked_balance"),
         )
 
-    def get_recent_orders(self, *, limit: int = 100) -> list[BrokerOrder]:
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
         lim = max(0, int(limit))
         if lim == 0:
             return []
+        if not exchange_order_ids and not client_order_ids:
+            raise BrokerRejectError(
+                "recent order lookup requires identifiers; broad /v1/orders market/state scans are disabled"
+            )
 
         snapshots: dict[str, BrokerOrder] = {}
         for state, journal_path in (("wait", "/v1/orders(open_orders)"), ("done", "/v1/orders(done)"), ("cancel", "/v1/orders(cancel)")):
-            try:
-                data = self._get_private(
-                    "/v1/orders",
-                    build_legacy_order_scan_params(market=self._market(), state=state, limit=max(lim, 100)),
-                    retry_safe=True,
-                )
-            except (BrokerRejectError, BrokerTemporaryError):
-                if state == "wait":
-                    raise
-                break
+            data = self._get_private(
+                "/v1/orders",
+                build_order_list_params(
+                    uuids=exchange_order_ids,
+                    client_order_ids=client_order_ids,
+                    state=state,
+                    page=1,
+                    order_by="desc",
+                ),
+                retry_safe=True,
+            )
             self._journal_read_summary(path=journal_path, data=data)
-            rows = data if isinstance(data, list) else []
-            for row in rows:
+            if not isinstance(data, list):
+                raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
+            for row in data:
                 if not isinstance(row, dict):
-                    continue
+                    raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
                 normalized = parse_v1_order_list_row(row)
                 qty_req = float(normalized.volume)
                 qty_filled = float(normalized.executed_volume)

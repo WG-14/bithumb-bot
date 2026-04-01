@@ -114,6 +114,7 @@ def test_get_recent_orders_fails_fast_on_contract_violation_row(monkeypatch: pyt
 
     def _fake_get(endpoint: str, params: dict[str, object], retry_safe: bool = False):
         assert endpoint == "/v1/orders"
+        assert params.get("uuids") == ["ex-1"]
         if params.get("state") == "wait":
             return [
                 {
@@ -135,4 +136,4 @@ def test_get_recent_orders_fails_fast_on_contract_violation_row(monkeypatch: pyt
     monkeypatch.setattr(broker, "_get_private", _fake_get)
 
     with pytest.raises(BrokerRejectError, match="/v1/orders schema mismatch: unknown state"):
-        broker.get_recent_orders(limit=5)
+        broker.get_recent_orders(limit=5, exchange_order_ids=["ex-1"])
