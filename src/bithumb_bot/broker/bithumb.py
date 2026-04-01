@@ -769,7 +769,13 @@ class BithumbBroker:
                 return float(candidate)
         return None
 
-    def _normalize_order_row(self, row: dict[str, object]) -> dict[str, object]:
+    def _normalize_v2_order_row(self, row: dict[str, object]) -> dict[str, object]:
+        """Lenient normalization for /v2/orders response rows.
+
+        /v2 orders submit/cancel responses are not part of the strict /v1 read-schema
+        contract and may omit fields. This helper is intentionally tolerant and is
+        scoped to v2 response shaping only.
+        """
         volume = self._number(row, "volume", "units")
         remaining = self._number(row, "remaining_volume", "units_remaining")
         executed = self._number(row, "executed_volume")
@@ -785,6 +791,31 @@ class BithumbBroker:
             "executed_volume": executed,
             "created_ts": self._parse_ts(row.get("created_at") or row.get("timestamp")),
             "updated_ts": self._parse_ts(row.get("updated_at") or row.get("created_at") or row.get("timestamp")),
+            "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
+        }
+
+    def _normalize_v1_order_row_lenient_for_fills(self, row: dict[str, object]) -> dict[str, object]:
+        """Compatibility fallback for /v1/order fill aggregation.
+
+        Strict parsing is always preferred for /v1/order and /v1/orders.
+        This lenient path exists only for legacy cases where `/v1/order` omits
+        trade-level fills but still exposes aggregate executed fields.
+        """
+        volume = self._number(row, "volume")
+        remaining = self._number(row, "remaining_volume")
+        executed = self._number(row, "executed_volume")
+        if executed <= 0 and volume > 0 and remaining >= 0:
+            executed = max(0.0, volume - remaining)
+        return {
+            "uuid": str(row.get("uuid") or ""),
+            "side": self._normalize_order_side(str(row.get("side")), default="BUY"),
+            "state": str(row.get("state") or ""),
+            "price": self._resolve_fill_price(row),
+            "volume": volume,
+            "remaining_volume": remaining,
+            "executed_volume": executed,
+            "created_ts": self._parse_ts(row.get("created_at")),
+            "updated_ts": self._parse_ts(row.get("updated_at") or row.get("created_at")),
             "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
         }
 
@@ -828,7 +859,7 @@ class BithumbBroker:
         )
 
     @staticmethod
-    def _raw_order_fields(
+    def _raw_v2_order_fields(
         row: dict[str, object],
         *,
         fallback_client_order_id: str | None = None,
@@ -853,7 +884,7 @@ class BithumbBroker:
         client_order_id: str = "",
         exchange_order_id: str = "",
     ) -> BrokerOrder:
-        normalized = self._normalize_order_row(row)
+        normalized = self._normalize_v2_order_row(row)
         resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
             row,
             fallback_client_order_id=client_order_id,
@@ -880,7 +911,7 @@ class BithumbBroker:
             qty_filled,
             int(normalized["created_ts"]),
             int(normalized["updated_ts"]),
-            self._raw_order_fields(
+            self._raw_v2_order_fields(
                 row,
                 fallback_client_order_id=resolved_client_order_id,
             ),
@@ -1035,7 +1066,7 @@ class BithumbBroker:
                 "order submit response client_order_id mismatch: "
                 f"requested={validated_client_order_id} response={resolved_client_order_id}"
             )
-        raw = self._raw_order_fields(
+        raw = self._raw_v2_order_fields(
             response_row if isinstance(response_row, dict) else {},
             fallback_client_order_id=validated_client_order_id,
         )
@@ -1121,7 +1152,7 @@ class BithumbBroker:
             )
 
         now = int(time.time() * 1000)
-        response_raw = self._raw_order_fields(
+        response_raw = self._raw_v2_order_fields(
             response_row if isinstance(response_row, dict) else {},
             fallback_client_order_id=order.client_order_id,
             fallback_exchange_order_id=resolved_exchange_order_id or order.exchange_order_id or "",
@@ -1281,56 +1312,51 @@ class BithumbBroker:
         requested_client_order_id = str(client_order_id or "").strip()
         requested_exchange_order_id = str(exchange_order_id or "").strip()
 
-        rows: list[dict[str, object]] = []
-        fallback_scan_allowed = False
-        if requested_exchange_order_id or requested_client_order_id:
-            params = build_v1_order_lookup_params(
-                client_order_id=requested_client_order_id,
-                exchange_order_id=requested_exchange_order_id,
-            )
-            data = self._get_private("/v1/order", params, retry_safe=True)
-            self._journal_read_summary(path="/v1/order(fills)", data=data)
-            if not isinstance(data, dict):
-                raise BrokerRejectError(
-                    "fill lookup response schema mismatch: "
-                    f"unexpected /v1/order payload type={type(data).__name__}"
-                )
-            response_ids = resolve_v1_order_identifiers(
-                data,
-                fallback_client_order_id=requested_client_order_id,
-            )
-            response_client_order_id = response_ids.client_order_id
-            response_exchange_order_id = response_ids.exchange_order_id
-            if (
-                requested_exchange_order_id
-                and response_exchange_order_id
-                and requested_exchange_order_id != response_exchange_order_id
-            ):
-                raise BrokerRejectError(
-                    "fill lookup response exchange_order_id mismatch: "
-                    f"requested={requested_exchange_order_id} response={response_exchange_order_id}"
-                )
-            if (
-                requested_client_order_id
-                and response_client_order_id
-                and requested_client_order_id != response_client_order_id
-            ):
-                raise BrokerRejectError(
-                    "fill lookup response client_order_id mismatch: "
-                    f"requested={requested_client_order_id} response={response_client_order_id}"
-                )
-            rows = [data]
-            fallback_scan_allowed = True
-        else:
+        if not (requested_exchange_order_id or requested_client_order_id):
             return []
+        params = build_v1_order_lookup_params(
+            client_order_id=requested_client_order_id,
+            exchange_order_id=requested_exchange_order_id,
+        )
+        data = self._get_private("/v1/order", params, retry_safe=True)
+        self._journal_read_summary(path="/v1/order(fills)", data=data)
+        if not isinstance(data, dict):
+            raise BrokerRejectError(
+                "fill lookup response schema mismatch: "
+                f"unexpected /v1/order payload type={type(data).__name__}"
+            )
+        response_ids = resolve_v1_order_identifiers(
+            data,
+            fallback_client_order_id=requested_client_order_id,
+        )
+        response_client_order_id = response_ids.client_order_id
+        response_exchange_order_id = response_ids.exchange_order_id
+        if (
+            requested_exchange_order_id
+            and response_exchange_order_id
+            and requested_exchange_order_id != response_exchange_order_id
+        ):
+            raise BrokerRejectError(
+                "fill lookup response exchange_order_id mismatch: "
+                f"requested={requested_exchange_order_id} response={response_exchange_order_id}"
+            )
+        if (
+            requested_client_order_id
+            and response_client_order_id
+            and requested_client_order_id != response_client_order_id
+        ):
+            raise BrokerRejectError(
+                "fill lookup response client_order_id mismatch: "
+                f"requested={requested_client_order_id} response={response_client_order_id}"
+            )
 
         fills: list[BrokerFill] = []
-        need_fallback_scan = not rows
-        for row in rows:
+        requires_removed_legacy_scan = False
+        for row in [data]:
             if row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
                 raise BrokerRejectError("/v1/order schema mismatch: trades must be a list when present")
             require_v1_known_state(row.get("state"), context="/v1/order")
-            normalized = self._normalize_order_row(row)
+            normalized = self._normalize_v1_order_row_lenient_for_fills(row)
             trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
             if trades:
                 for index, trade in enumerate(trades):
@@ -1370,11 +1396,11 @@ class BithumbBroker:
 
             qty_filled = float(normalized["executed_volume"])
             if qty_filled <= 0:
-                need_fallback_scan = fallback_scan_allowed
+                requires_removed_legacy_scan = True
                 continue
             price = self._resolve_fill_price(row, normalized_row=normalized)
             if price is None:
-                need_fallback_scan = fallback_scan_allowed
+                requires_removed_legacy_scan = True
                 continue
             updated_raw = row.get("updated_at")
             created_raw = row.get("created_at")
@@ -1386,7 +1412,7 @@ class BithumbBroker:
                 else:
                     raise BrokerRejectError("/v1/order schema mismatch: missing required timestamp field 'created_at'")
             except BrokerRejectError:
-                need_fallback_scan = fallback_scan_allowed
+                requires_removed_legacy_scan = True
                 continue
             fee = self._extract_fill_fee(
                 row,
@@ -1411,7 +1437,7 @@ class BithumbBroker:
                     exchange_order_id=aggregate_exchange_order_id,
                 )
             )
-        if not fills and fallback_scan_allowed and need_fallback_scan:
+        if not fills and requires_removed_legacy_scan:
             raise BrokerRejectError(
                 "fill lookup requires /v1/order trade payload completeness; broad /v1/orders done scan fallback is disabled"
             )
@@ -1507,21 +1533,6 @@ class BithumbBroker:
         out = list(snapshots.values())
         out.sort(key=lambda order: int(order.updated_ts), reverse=True)
         return out[:lim]
-
-    def _broker_order_from_open_row(self, row: dict, *, now_ts: int) -> BrokerOrder:
-        normalized = self._normalize_order_row({**row, "created_at": row.get("created_at") or now_ts})
-        return BrokerOrder(
-            client_order_id="",
-            exchange_order_id=str(normalized["uuid"]),
-            side=str(normalized.side),
-            status="PARTIAL" if float(normalized["executed_volume"]) > 0 else "NEW",
-            price=float(normalized.price) if normalized.price is not None else None,
-            qty_req=float(normalized["volume"]),
-            qty_filled=float(normalized["executed_volume"]),
-            created_ts=int(normalized["created_ts"] or now_ts),
-            updated_ts=int(normalized["updated_ts"] or now_ts),
-            raw=self._raw_order_fields(row),
-        )
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         fills = self.get_fills(client_order_id=None, exchange_order_id=None)
