@@ -33,6 +33,8 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
         price=100.0,
         qty=2.0,
         fee=2.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=101,
         note="entry",
     )
     assert buy_trade is not None
@@ -47,6 +49,11 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
         price=110.0,
         qty=1.0,
         fee=1.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=101,
+        exit_decision_id=202,
+        exit_reason="opposite signal",
+        exit_rule_name="opposite_cross",
         note="exit_partial",
     )
     assert sell_trade_1 is not None
@@ -61,6 +68,11 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
         price=120.0,
         qty=1.0,
         fee=1.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=101,
+        exit_decision_id=203,
+        exit_reason="max holding reached",
+        exit_rule_name="max_holding_time",
         note="exit_final",
     )
     assert sell_trade_2 is not None
@@ -76,7 +88,12 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
             net_pnl,
             holding_time_sec,
             entry_fill_id,
-            exit_fill_id
+            exit_fill_id,
+            strategy_name,
+            entry_decision_id,
+            exit_decision_id,
+            exit_reason,
+            exit_rule_name
         FROM trade_lifecycles
         ORDER BY id ASC
         """
@@ -95,6 +112,11 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert float(rows[0]["holding_time_sec"]) == pytest.approx(60.0)
     assert rows[0]["entry_fill_id"] == "fill_entry_1"
     assert rows[0]["exit_fill_id"] == "fill_exit_1"
+    assert rows[0]["strategy_name"] == "sma_with_filter"
+    assert int(rows[0]["entry_decision_id"]) == 101
+    assert int(rows[0]["exit_decision_id"]) == 202
+    assert rows[0]["exit_reason"] == "opposite signal"
+    assert rows[0]["exit_rule_name"] == "opposite_cross"
 
     assert rows[1]["entry_client_order_id"] == "entry_1"
     assert rows[1]["exit_client_order_id"] == "exit_2"
@@ -105,12 +127,18 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert float(rows[1]["holding_time_sec"]) == pytest.approx(120.0)
     assert rows[1]["entry_fill_id"] == "fill_entry_1"
     assert rows[1]["exit_fill_id"] == "fill_exit_2"
+    assert rows[1]["strategy_name"] == "sma_with_filter"
+    assert int(rows[1]["entry_decision_id"]) == 101
+    assert int(rows[1]["exit_decision_id"]) == 203
+    assert rows[1]["exit_reason"] == "max holding reached"
+    assert rows[1]["exit_rule_name"] == "max_holding_time"
 
     assert open_lots == 0
 
 
 def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     conn = ensure_db(str(tmp_path / "schema.sqlite"))
+    trade_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
     lot_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(open_position_lots)").fetchall()}
     lifecycle_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_lifecycles)").fetchall()}
     conn.close()
@@ -123,6 +151,15 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "holding_time_sec" in lifecycle_cols
     assert "entry_client_order_id" in lifecycle_cols
     assert "exit_client_order_id" in lifecycle_cols
+    assert "client_order_id" in trade_cols
+    assert "strategy_name" in trade_cols
+    assert "entry_decision_id" in trade_cols
+    assert "exit_decision_id" in trade_cols
+    assert "exit_reason" in trade_cols
+    assert "exit_rule_name" in trade_cols
+    assert "exit_decision_id" in lifecycle_cols
+    assert "exit_reason" in lifecycle_cols
+    assert "exit_rule_name" in lifecycle_cols
 
 
 def test_sell_without_known_entry_writes_unknown_lifecycle_row(tmp_path):

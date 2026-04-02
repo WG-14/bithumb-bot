@@ -105,10 +105,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             fee REAL NOT NULL,
             cash_after REAL NOT NULL,
             asset_after REAL NOT NULL,
+            client_order_id TEXT,
+            strategy_name TEXT,
+            entry_decision_id INTEGER,
+            exit_decision_id INTEGER,
+            exit_reason TEXT,
+            exit_rule_name TEXT,
             note TEXT
         )
         """
     )
+    _ensure_column(conn, "trades", "client_order_id", "client_order_id TEXT")
+    _ensure_column(conn, "trades", "strategy_name", "strategy_name TEXT")
+    _ensure_column(conn, "trades", "entry_decision_id", "entry_decision_id INTEGER")
+    _ensure_column(conn, "trades", "exit_decision_id", "exit_decision_id INTEGER")
+    _ensure_column(conn, "trades", "exit_reason", "exit_reason TEXT")
+    _ensure_column(conn, "trades", "exit_rule_name", "exit_rule_name TEXT")
 
     conn.execute(
         """
@@ -396,6 +408,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             price REAL,
             qty_req REAL NOT NULL,
             qty_filled REAL NOT NULL DEFAULT 0,
+            strategy_name TEXT,
+            entry_decision_id INTEGER,
+            exit_decision_id INTEGER,
+            decision_reason TEXT,
+            exit_rule_name TEXT,
             created_ts INTEGER NOT NULL,
             updated_ts INTEGER NOT NULL,
             last_error TEXT
@@ -404,6 +421,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "orders", "submit_attempt_id", "submit_attempt_id TEXT")
+    _ensure_column(conn, "orders", "strategy_name", "strategy_name TEXT")
+    _ensure_column(conn, "orders", "entry_decision_id", "entry_decision_id INTEGER")
+    _ensure_column(conn, "orders", "exit_decision_id", "exit_decision_id INTEGER")
+    _ensure_column(conn, "orders", "decision_reason", "decision_reason TEXT")
+    _ensure_column(conn, "orders", "exit_rule_name", "exit_rule_name TEXT")
 
     conn.execute(
         """
@@ -596,6 +618,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             holding_time_sec REAL NOT NULL,
             strategy_name TEXT,
             entry_decision_id INTEGER,
+            exit_decision_id INTEGER,
+            exit_reason TEXT,
+            exit_rule_name TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
@@ -605,6 +630,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "trade_lifecycles", "exit_fill_id", "exit_fill_id TEXT")
     _ensure_column(conn, "trade_lifecycles", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trade_lifecycles", "entry_decision_id", "entry_decision_id INTEGER")
+    _ensure_column(conn, "trade_lifecycles", "exit_decision_id", "exit_decision_id INTEGER")
+    _ensure_column(conn, "trade_lifecycles", "exit_reason", "exit_reason TEXT")
+    _ensure_column(conn, "trade_lifecycles", "exit_rule_name", "exit_rule_name TEXT")
 
     conn.execute(
         """

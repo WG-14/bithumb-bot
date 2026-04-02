@@ -31,9 +31,21 @@ def apply_fill_lifecycle(
     price: float,
     qty: float,
     fee: float,
+    strategy_name: str | None = None,
+    entry_decision_id: int | None = None,
+    exit_decision_id: int | None = None,
+    exit_reason: str | None = None,
+    exit_rule_name: str | None = None,
 ) -> None:
     if side == "BUY":
-        decision_id, strategy_name = _find_entry_decision(conn, fill_ts=int(fill_ts))
+        resolved_entry_decision_id = entry_decision_id
+        resolved_strategy_name = strategy_name
+        if resolved_entry_decision_id is None or resolved_strategy_name is None:
+            lookup_decision_id, lookup_strategy_name = _find_entry_decision(conn, fill_ts=int(fill_ts))
+            if resolved_entry_decision_id is None:
+                resolved_entry_decision_id = lookup_decision_id
+            if resolved_strategy_name is None:
+                resolved_strategy_name = lookup_strategy_name
         conn.execute(
             """
             INSERT INTO open_position_lots(
@@ -58,8 +70,8 @@ def apply_fill_lifecycle(
                 float(price),
                 float(qty),
                 float(fee),
-                strategy_name,
-                decision_id,
+                resolved_strategy_name,
+                resolved_entry_decision_id,
             ),
         )
         return
@@ -132,8 +144,11 @@ def apply_fill_lifecycle(
                 net_pnl,
                 holding_time_sec,
                 strategy_name,
-                entry_decision_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_decision_id,
+                exit_decision_id,
+                exit_reason,
+                exit_rule_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -152,8 +167,11 @@ def apply_fill_lifecycle(
                 float(fee_total),
                 float(net_pnl),
                 float(holding_time_seconds),
-                lot["strategy_name"],
-                lot["entry_decision_id"],
+                strategy_name or lot["strategy_name"],
+                entry_decision_id if entry_decision_id is not None else lot["entry_decision_id"],
+                exit_decision_id,
+                exit_reason,
+                exit_rule_name,
             ),
         )
 
@@ -192,8 +210,11 @@ def apply_fill_lifecycle(
                 net_pnl,
                 holding_time_sec,
                 strategy_name,
-                entry_decision_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_decision_id,
+                exit_decision_id,
+                exit_reason,
+                exit_rule_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -212,8 +233,11 @@ def apply_fill_lifecycle(
                 float(fallback_exit_fee),
                 float(-fallback_exit_fee),
                 0.0,
-                None,
-                None,
+                strategy_name,
+                entry_decision_id,
+                exit_decision_id,
+                exit_reason,
+                exit_rule_name,
             ),
         )
 

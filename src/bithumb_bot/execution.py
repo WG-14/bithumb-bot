@@ -30,7 +30,12 @@ def record_order_if_missing(
     qty_req: float,
     submit_attempt_id: str | None = None,
     price: float | None,
-    ts_ms: int,
+    strategy_name: str | None = None,
+    entry_decision_id: int | None = None,
+    exit_decision_id: int | None = None,
+    decision_reason: str | None = None,
+    exit_rule_name: str | None = None,
+    ts_ms: int | None = None,
     status: str = "NEW",
 ) -> None:
     exists = conn.execute(
@@ -45,8 +50,13 @@ def record_order_if_missing(
         qty_req=qty_req,
         submit_attempt_id=submit_attempt_id,
         price=price,
+        strategy_name=strategy_name,
+        entry_decision_id=entry_decision_id,
+        exit_decision_id=exit_decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
         status=status,
-        ts_ms=ts_ms,
+        ts_ms=(int(ts_ms) if ts_ms is not None else None),
         conn=conn,
     )
 
@@ -127,6 +137,11 @@ def apply_fill_and_trade(
     price: float,
     qty: float,
     fee: float,
+    strategy_name: str | None = None,
+    entry_decision_id: int | None = None,
+    exit_decision_id: int | None = None,
+    exit_reason: str | None = None,
+    exit_rule_name: str | None = None,
     note: str | None = None,
 ) -> dict[str, Any] | None:
     eps = 1e-12
@@ -215,12 +230,33 @@ def apply_fill_and_trade(
         return None
 
     order = conn.execute(
-        "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+        """
+        SELECT
+            qty_req,
+            qty_filled,
+            strategy_name,
+            entry_decision_id,
+            exit_decision_id,
+            decision_reason,
+            exit_rule_name
+        FROM orders
+        WHERE client_order_id=?
+        """,
         (client_order_id,),
     ).fetchone()
+    order_strategy_name: str | None = None
+    order_entry_decision_id: int | None = None
+    order_exit_decision_id: int | None = None
+    order_decision_reason: str | None = None
+    order_exit_rule_name: str | None = None
     if order is not None:
         qty_req = float(order["qty_req"])
         qty_filled = float(order["qty_filled"])
+        order_strategy_name = str(order["strategy_name"]) if order["strategy_name"] is not None else None
+        order_entry_decision_id = int(order["entry_decision_id"]) if order["entry_decision_id"] is not None else None
+        order_exit_decision_id = int(order["exit_decision_id"]) if order["exit_decision_id"] is not None else None
+        order_decision_reason = str(order["decision_reason"]) if order["decision_reason"] is not None else None
+        order_exit_rule_name = str(order["exit_rule_name"]) if order["exit_rule_name"] is not None else None
         fill_tol = order_fill_tolerance(qty_req)
         projected_qty = qty_filled + float(qty)
         _LOG.info(
@@ -304,10 +340,19 @@ def apply_fill_and_trade(
         asset_available=max(asset_available_after, 0.0),
         asset_locked=max(asset_locked_after, 0.0),
     )
+    effective_strategy_name = strategy_name or order_strategy_name
+    effective_entry_decision_id = entry_decision_id if entry_decision_id is not None else order_entry_decision_id
+    effective_exit_decision_id = exit_decision_id if exit_decision_id is not None else order_exit_decision_id
+    effective_exit_reason = exit_reason or order_decision_reason
+    effective_exit_rule_name = exit_rule_name or order_exit_rule_name
+
     trade_row = conn.execute(
         """
-        INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO trades(
+            ts, pair, interval, side, price, qty, fee, cash_after, asset_after,
+            client_order_id, strategy_name, entry_decision_id, exit_decision_id, exit_reason, exit_rule_name, note
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             int(fill_ts),
@@ -319,6 +364,12 @@ def apply_fill_and_trade(
             float(fee),
             float(cash_after),
             float(asset_after),
+            str(client_order_id),
+            effective_strategy_name,
+            effective_entry_decision_id,
+            effective_exit_decision_id,
+            effective_exit_reason if side == "SELL" else None,
+            effective_exit_rule_name if side == "SELL" else None,
             note,
         ),
     )
@@ -334,6 +385,11 @@ def apply_fill_and_trade(
         price=float(price),
         qty=float(qty),
         fee=float(fee),
+        strategy_name=effective_strategy_name,
+        entry_decision_id=effective_entry_decision_id,
+        exit_decision_id=effective_exit_decision_id,
+        exit_reason=(effective_exit_reason if side == "SELL" else None),
+        exit_rule_name=(effective_exit_rule_name if side == "SELL" else None),
     )
     notify(
         format_event(

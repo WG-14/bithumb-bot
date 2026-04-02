@@ -382,6 +382,11 @@ def create_order(
     side: str,
     qty_req: float,
     price: float | None,
+    strategy_name: str | None = None,
+    entry_decision_id: int | None = None,
+    exit_decision_id: int | None = None,
+    decision_reason: str | None = None,
+    exit_rule_name: str | None = None,
     status: str = "NEW",
     ts_ms: int | None = None,
     conn: sqlite3.Connection | None = None,
@@ -393,11 +398,27 @@ def create_order(
         conn.execute(
             """
             INSERT INTO orders(
-                client_order_id, submit_attempt_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+                client_order_id, submit_attempt_id, exchange_order_id, status, side, price, qty_req, qty_filled,
+                strategy_name, entry_decision_id, exit_decision_id, decision_reason, exit_rule_name,
+                created_ts, updated_ts, last_error
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, NULL)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
-            (client_order_id, submit_attempt_id, status, side, price, float(qty_req), ts, ts),
+            (
+                client_order_id,
+                submit_attempt_id,
+                status,
+                side,
+                price,
+                float(qty_req),
+                strategy_name,
+                (int(entry_decision_id) if entry_decision_id is not None else None),
+                (int(exit_decision_id) if exit_decision_id is not None else None),
+                decision_reason,
+                exit_rule_name,
+                ts,
+                ts,
+            ),
         )
         _record_order_event(
             conn,

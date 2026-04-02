@@ -735,6 +735,10 @@ def _submit_via_standard_path(
     market_price: float,
     reference_price: float | None,
     top_of_book_summary: dict[str, float | str] | None,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
 ):
     symbol = settings.PAIR
     payload = {
@@ -771,6 +775,11 @@ def _submit_via_standard_path(
         side=side,
         qty_req=qty,
         price=None,
+        strategy_name=strategy_name,
+        entry_decision_id=(decision_id if side == "BUY" else None),
+        exit_decision_id=(decision_id if side == "SELL" else None),
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
         ts_ms=ts,
         status="PENDING_SUBMIT",
     )
@@ -1034,7 +1043,17 @@ def _submit_via_standard_path(
     return order
 
 
-def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: float) -> dict | None:
+def live_execute_signal(
+    broker: Broker,
+    signal: str,
+    ts: int,
+    market_price: float,
+    *,
+    strategy_name: str | None = None,
+    decision_id: int | None = None,
+    decision_reason: str | None = None,
+    exit_rule_name: str | None = None,
+) -> dict | None:
     conn = ensure_db()
     try:
         init_portfolio(conn)
@@ -1321,6 +1340,10 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
             market_price=market_price,
             reference_price=reference_price,
             top_of_book_summary=top_of_book_summary,
+            strategy_name=(strategy_name or settings.STRATEGY_NAME),
+            decision_id=decision_id,
+            decision_reason=decision_reason,
+            exit_rule_name=exit_rule_name,
         )
         if order is None:
             return None
@@ -1372,6 +1395,11 @@ def live_execute_signal(broker: Broker, signal: str, ts: int, market_price: floa
                 price=fill.price,
                 qty=fill.qty,
                 fee=fill.fee,
+                strategy_name=(strategy_name or settings.STRATEGY_NAME),
+                entry_decision_id=(decision_id if side == "BUY" else None),
+                exit_decision_id=(decision_id if side == "SELL" else None),
+                exit_reason=(decision_reason if side == "SELL" else None),
+                exit_rule_name=(exit_rule_name if side == "SELL" else None),
                 note=f"live exchange_order_id={order.exchange_order_id}",
             ) or trade
 

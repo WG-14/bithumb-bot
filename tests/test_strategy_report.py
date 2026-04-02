@@ -31,6 +31,7 @@ def _insert_lifecycle(
     net_pnl: float,
     fee_total: float,
     holding_time_sec: float,
+    exit_rule_name: str | None = None,
 ) -> None:
     gross_pnl = float(net_pnl) + float(fee_total)
     conn.execute(
@@ -38,8 +39,8 @@ def _insert_lifecycle(
         INSERT INTO trade_lifecycles(
             id, pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
             entry_fill_id, exit_fill_id, entry_ts, exit_ts, matched_qty, entry_price, exit_price,
-            gross_pnl, fee_total, net_pnl, holding_time_sec, strategy_name, entry_decision_id
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            gross_pnl, fee_total, net_pnl, holding_time_sec, strategy_name, entry_decision_id, exit_rule_name
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         """,
         (
             lifecycle_id,
@@ -58,6 +59,7 @@ def _insert_lifecycle(
             net_pnl,
             holding_time_sec,
             strategy_name,
+            exit_rule_name,
         ),
     )
 
@@ -81,6 +83,7 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
             net_pnl=100.0,
             fee_total=10.0,
             holding_time_sec=60.0,
+            exit_rule_name="opposite_cross",
         )
         _insert_lifecycle(
             conn,
@@ -91,6 +94,7 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
             net_pnl=-40.0,
             fee_total=8.0,
             holding_time_sec=120.0,
+            exit_rule_name="opposite_cross",
         )
         _insert_lifecycle(
             conn,
@@ -101,6 +105,7 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
             net_pnl=30.0,
             fee_total=5.0,
             holding_time_sec=30.0,
+            exit_rule_name="max_holding_time",
         )
         conn.commit()
 
@@ -144,6 +149,34 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
     assert "[STRATEGY-PERFORMANCE-REPORT]" in out
     assert "strategy_A,opposite_cross" in out
     assert "strategy_B,max_holding_time" in out
+
+
+def test_strategy_report_uses_lifecycle_exit_rule_without_decision_lookup(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "strategy-report-direct-exit-rule.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=10,
+            strategy_name="strategy_C",
+            pair="BTC_KRW",
+            exit_ts=4_100,
+            net_pnl=12.0,
+            fee_total=1.0,
+            holding_time_sec=45.0,
+            exit_rule_name="time_stop",
+        )
+        conn.commit()
+        stats = fetch_strategy_performance_stats(conn, group_by=("strategy_name", "exit_rule_name"))
+    finally:
+        conn.close()
+
+    assert len(stats) == 1
+    assert stats[0].strategy_name == "strategy_C"
+    assert stats[0].exit_rule_name == "time_stop"
 
 
 def test_strategy_report_handles_empty_data_gracefully(tmp_path, monkeypatch, capsys):

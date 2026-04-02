@@ -47,7 +47,16 @@ def _get_fill_price(signal: str) -> float | None:
     return None
 
 
-def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
+def paper_execute(
+    signal: str,
+    ts: int,
+    price: float,
+    *,
+    strategy_name: str | None = None,
+    decision_id: int | None = None,
+    decision_reason: str | None = None,
+    exit_rule_name: str | None = None,
+) -> dict[str, Any] | None:
     fill_price = _get_fill_price(signal)
     if fill_price is None:
         return None
@@ -169,6 +178,11 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             side=side,
             qty_req=float(trade_qty),
             price=float(fill_price),
+            strategy_name=(strategy_name or settings.STRATEGY_NAME),
+            entry_decision_id=(decision_id if side == "BUY" else None),
+            exit_decision_id=(decision_id if side == "SELL" else None),
+            decision_reason=decision_reason,
+            exit_rule_name=exit_rule_name,
             ts_ms=int(ts),
         )
 
@@ -181,6 +195,11 @@ def paper_execute(signal: str, ts: int, price: float) -> dict[str, Any] | None:
             price=float(fill_price),
             qty=float(trade_qty),
             fee=float(fee),
+            strategy_name=(strategy_name or settings.STRATEGY_NAME),
+            entry_decision_id=(decision_id if side == "BUY" else None),
+            exit_decision_id=(decision_id if side == "SELL" else None),
+            exit_reason=(decision_reason if side == "SELL" else None),
+            exit_rule_name=(exit_rule_name if side == "SELL" else None),
             note=note,
         )
 

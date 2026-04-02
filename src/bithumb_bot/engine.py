@@ -1523,16 +1523,27 @@ def run_loop(short_n: int, long_n: int) -> None:
             runtime_state.mark_processed_candle(candle_ts_ms=int(r["ts"]), now_epoch_sec=now)
 
             conn = ensure_db()
+            decision_id: int | None = None
+            decision_reason_for_trade: str | None = None
+            decision_exit_rule_name: str | None = None
+            decision_strategy_name_for_trade: str | None = None
             try:
                 context = dict(r)
                 strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
+                exit_ctx = context.get("exit")
+                if isinstance(exit_ctx, dict):
+                    raw_rule = exit_ctx.get("rule")
+                    if raw_rule is not None:
+                        decision_exit_rule_name = str(raw_rule)
+                decision_reason_for_trade = reason
+                decision_strategy_name_for_trade = strategy_name
                 candle_ts_raw = context.get("ts")
                 market_price_raw = context.get("last_close")
                 confidence_raw = context.get("confidence")
                 try:
-                    record_strategy_decision(
+                    decision_id = record_strategy_decision(
                         conn,
                         decision_ts=int(now * 1000),
                         strategy_name=strategy_name,
@@ -1560,12 +1571,39 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             trade = None
             if settings.MODE == "paper":
-                trade = paper_execute(r["signal"], r["ts"], r["last_close"])
+                try:
+                    trade = paper_execute(
+                        r["signal"],
+                        r["ts"],
+                        r["last_close"],
+                        strategy_name=decision_strategy_name_for_trade,
+                        decision_id=decision_id,
+                        decision_reason=decision_reason_for_trade,
+                        exit_rule_name=decision_exit_rule_name,
+                    )
+                except TypeError as exc:
+                    compat_err = str(exc)
+                    if "unexpected keyword argument" not in compat_err:
+                        raise
+                    trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
                 try:
-                    trade = live_execute_signal(
-                        broker, r["signal"], r["ts"], r["last_close"]
-                    )
+                    try:
+                        trade = live_execute_signal(
+                            broker,
+                            r["signal"],
+                            r["ts"],
+                            r["last_close"],
+                            strategy_name=decision_strategy_name_for_trade,
+                            decision_id=decision_id,
+                            decision_reason=decision_reason_for_trade,
+                            exit_rule_name=decision_exit_rule_name,
+                        )
+                    except TypeError as exc:
+                        compat_err = str(exc)
+                        if "unexpected keyword argument" not in compat_err:
+                            raise
+                        trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
                 except BrokerError as e:
                     _halt_trading(
                         _halt_reason(

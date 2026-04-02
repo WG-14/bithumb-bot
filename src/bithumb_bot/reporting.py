@@ -415,6 +415,7 @@ def fetch_strategy_performance_stats(
             tl.fee_total,
             tl.holding_time_sec,
             COALESCE(
+                tl.exit_rule_name,
                 json_extract(
                     (
                         SELECT sd.context_json
