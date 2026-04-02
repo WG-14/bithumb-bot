@@ -2404,6 +2404,18 @@ def main(argv: list[str] | None = None) -> int:
         default="strategy_name,exit_rule_name",
         help="comma-separated axes: strategy_name,exit_rule_name,pair",
     )
+    strategy_report.add_argument(
+        "--observation-window-bars",
+        type=int,
+        default=5,
+        help="blocked-entry 관측 구간(봉 개수), 기본 5",
+    )
+    strategy_report.add_argument(
+        "--min-observation-sample",
+        type=int,
+        default=10,
+        help="blocked-entry 관측 최소 표본 수(미만이면 insufficient sample 표시)",
+    )
     strategy_report.add_argument("--json", action="store_true")
 
     r = sub.add_parser("run")
@@ -2471,6 +2483,8 @@ def main(argv: list[str] | None = None) -> int:
             from_ts_ms=from_ts_ms,
             to_ts_ms=to_ts_ms,
             group_by=group_by,
+            observation_window_bars=max(1, int(args.observation_window_bars)),
+            min_observation_sample=max(1, int(args.min_observation_sample)),
             as_json=bool(args.json),
         )
     elif args.cmd == "report":

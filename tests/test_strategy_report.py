@@ -9,6 +9,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.reporting import (
     cmd_strategy_report,
+    fetch_filter_effectiveness_summary,
     fetch_lifecycle_close_summary,
     fetch_strategy_performance_stats,
 )
@@ -402,6 +403,7 @@ def test_strategy_report_prints_lifecycle_close_summary_block(tmp_path, monkeypa
     out = capsys.readouterr().out
     assert "[lifecycle_close_summary: by_exit_rule]" in out
     assert "opposite_cross,cross under triggered,1" in out
+    assert "[filter_effectiveness]" in out
 
 
 def test_strategy_report_handles_empty_data_gracefully(tmp_path, monkeypatch, capsys):
@@ -482,3 +484,168 @@ def test_strategy_report_rejects_reversed_date_range(capsys):
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
     assert "--from-date must be earlier than or equal to --to-date" in err
+
+
+def test_filter_effectiveness_summary_counts_single_multi_and_hold(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "strategy-report-filter-effectiveness.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO candles(ts, pair, interval, open, high, low, close, volume)
+            VALUES
+                (60000, 'BTC_KRW', '1m', 100, 100, 100, 100, 1),
+                (120000, 'BTC_KRW', '1m', 101, 101, 101, 101, 1),
+                (180000, 'BTC_KRW', '1m', 98, 98, 98, 98, 1),
+                (240000, 'BTC_KRW', '1m', 105, 105, 105, 105, 1)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                id, decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES
+                (1, 60000, 'strategy_H', 'HOLD', 'filtered entry: gap', 60000, 100, NULL, ?),
+                (2, 120000, 'strategy_H', 'HOLD', 'filtered entry: gap,volatility', 120000, 101, NULL, ?),
+                (3, 180000, 'strategy_H', 'BUY', 'entry', 180000, 98, NULL, ?),
+                (4, 240000, 'strategy_H', 'HOLD', 'position held', 240000, 105, NULL, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "decision_type": "BLOCKED_ENTRY",
+                        "base_signal": "BUY",
+                        "pair": "BTC_KRW",
+                        "interval": "1m",
+                        "blocked_filters": ["gap"],
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "decision_type": "BLOCKED_ENTRY",
+                        "base_signal": "BUY",
+                        "pair": "BTC_KRW",
+                        "interval": "1m",
+                        "blocked_filters": ["gap", "volatility"],
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "decision_type": "BUY",
+                        "base_signal": "BUY",
+                        "pair": "BTC_KRW",
+                        "interval": "1m",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "decision_type": "HOLD",
+                        "base_signal": "HOLD",
+                        "pair": "BTC_KRW",
+                        "interval": "1m",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=60,
+            strategy_name="strategy_H",
+            pair="BTC_KRW",
+            exit_ts=1200,
+            net_pnl=3.0,
+            fee_total=1.0,
+            holding_time_sec=10.0,
+            exit_rule_name="time_stop",
+        )
+        conn.execute("UPDATE trade_lifecycles SET entry_decision_id=3 WHERE id=60")
+        conn.commit()
+
+        summary = fetch_filter_effectiveness_summary(
+            conn,
+            strategy_name="strategy_H",
+            pair="BTC_KRW",
+            observation_window_bars=1,
+            min_observation_sample=3,
+        )
+    finally:
+        conn.close()
+
+    assert summary.total_entry_candidates == 3
+    assert summary.executed_entry_count == 1
+    assert summary.blocked_entry_count == 2
+    assert summary.hold_decision_count == 1
+    assert summary.blocked_by_filter == {"gap": 2, "volatility": 1}
+    assert summary.multi_filter_blocked_count == 1
+    assert summary.observation.observed_count == 2
+    assert summary.observation.avoided_loss_count == 1
+    assert summary.observation.opportunity_missed_count == 1
+    assert summary.observation.insufficient_sample is True
+
+
+def test_strategy_report_json_includes_filter_effectiveness_and_insufficient_sample_warning(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = str(tmp_path / "strategy-report-filter-effectiveness-json.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO candles(ts, pair, interval, open, high, low, close, volume)
+            VALUES
+                (2000, 'BTC_KRW', '1m', 100, 100, 100, 100, 1),
+                (2060, 'BTC_KRW', '1m', 99, 99, 99, 99, 1)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                id, decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES
+                (21, 2000, 'strategy_I', 'HOLD', 'filtered entry: gap', 2000, 100, NULL, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "decision_type": "BLOCKED_ENTRY",
+                        "base_signal": "BUY",
+                        "pair": "BTC_KRW",
+                        "interval": "1m",
+                        "blocked_filters": ["gap"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_strategy_report(
+        strategy_name="strategy_I",
+        exit_rule_name=None,
+        pair="BTC_KRW",
+        from_ts_ms=None,
+        to_ts_ms=None,
+        group_by=("strategy_name", "exit_rule_name"),
+        observation_window_bars=1,
+        min_observation_sample=2,
+        as_json=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+    section = payload["filter_effectiveness"]
+
+    assert section["entry_candidate_summary"]["blocked_entry_count"] == 1
+    assert section["entry_candidate_summary"]["blocked_by_filter"] == {"gap": 1}
+    assert section["blocked_observation_window"]["insufficient_sample"] is True
+    assert any("insufficient sample" in note for note in section["notes"])

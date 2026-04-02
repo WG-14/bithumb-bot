@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from statistics import median
 
+from .analytics_context import _load_context_json
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
-from .utils_time import kst_str
+from .utils_time import kst_str, parse_interval_sec
 from .broker.bithumb import BithumbBroker
 
 
@@ -91,6 +92,31 @@ class DecisionTelemetrySummary:
     interval: str
     block_reason: str
     count: int
+
+
+@dataclass
+class FilterObservationSummary:
+    observation_window_bars: int
+    observed_count: int
+    insufficient_sample: bool
+    sample_threshold: int
+    avg_return_bps: float | None
+    median_return_bps: float | None
+    avoided_loss_count: int
+    opportunity_missed_count: int
+    flat_or_unknown_count: int
+
+
+@dataclass
+class FilterEffectivenessSummary:
+    total_entry_candidates: int
+    executed_entry_count: int
+    blocked_entry_count: int
+    hold_decision_count: int
+    blocked_by_filter: dict[str, int]
+    multi_filter_blocked_count: int
+    observation: FilterObservationSummary
+    notes: list[str]
 
 
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
@@ -229,6 +255,195 @@ def fetch_decision_telemetry_summary(
         )
         for row in rows
     ]
+
+
+def _extract_blocked_filters(context_json: str | None) -> list[str]:
+    context = _load_context_json(context_json)
+    raw_filters = context.get("blocked_filters")
+    if not isinstance(raw_filters, list):
+        return []
+    normalized: list[str] = []
+    for item in raw_filters:
+        text = str(item).strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _extract_decision_type(context_json: str | None, fallback_signal: str) -> str:
+    context = _load_context_json(context_json)
+    decision_type = str(context.get("decision_type") or "").strip()
+    if decision_type:
+        return decision_type
+    return str(fallback_signal or "").strip().upper() or "UNKNOWN"
+
+
+def fetch_filter_effectiveness_summary(
+    conn: sqlite3.Connection,
+    *,
+    strategy_name: str | None = None,
+    pair: str | None = None,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    observation_window_bars: int = 5,
+    min_observation_sample: int = 10,
+) -> FilterEffectivenessSummary:
+    filters: list[str] = []
+    params: list[object] = []
+    if strategy_name:
+        filters.append("COALESCE(sd.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(json_extract(sd.context_json, '$.pair'), '<unknown>') = ?")
+        params.append(str(pair))
+    if from_ts_ms is not None:
+        filters.append("sd.decision_ts >= ?")
+        params.append(int(from_ts_ms))
+    if to_ts_ms is not None:
+        filters.append("sd.decision_ts <= ?")
+        params.append(int(to_ts_ms))
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    decision_rows = conn.execute(
+        f"""
+        SELECT
+            sd.id,
+            sd.decision_ts,
+            sd.signal,
+            sd.strategy_name,
+            sd.candle_ts,
+            sd.market_price,
+            sd.context_json
+        FROM strategy_decisions sd
+        {where_clause}
+        ORDER BY sd.decision_ts ASC, sd.id ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    total_entry_candidates = 0
+    hold_decision_count = 0
+    blocked_entry_count = 0
+    multi_filter_blocked_count = 0
+    blocked_by_filter: dict[str, int] = {}
+    blocked_rows: list[sqlite3.Row] = []
+
+    for row in decision_rows:
+        context = _load_context_json(row["context_json"])
+        base_signal = str(context.get("base_signal") or "").strip().upper()
+        decision_type = _extract_decision_type(row["context_json"], str(row["signal"] or ""))
+        if base_signal == "BUY":
+            total_entry_candidates += 1
+        if decision_type == "HOLD":
+            hold_decision_count += 1
+        if decision_type == "BLOCKED_ENTRY":
+            blocked_entry_count += 1
+            blocked_rows.append(row)
+            blocked_filters = _extract_blocked_filters(row["context_json"])
+            if len(blocked_filters) >= 2:
+                multi_filter_blocked_count += 1
+            for blocked_filter in blocked_filters:
+                blocked_by_filter[blocked_filter] = blocked_by_filter.get(blocked_filter, 0) + 1
+
+    executed_entry_count = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM trade_lifecycles tl
+            LEFT JOIN strategy_decisions sd ON sd.id = tl.entry_decision_id
+            {where_clause}
+            """,
+            tuple(params),
+        ).fetchone()[0]
+        or 0
+    )
+
+    candle_rows = conn.execute("SELECT ts, close FROM candles ORDER BY ts ASC").fetchall()
+    close_by_ts: dict[int, float] = {}
+    for candle in candle_rows:
+        ts_raw = candle["ts"]
+        close_raw = candle["close"]
+        if ts_raw is None or close_raw is None:
+            continue
+        close_by_ts[int(ts_raw)] = float(close_raw)
+
+    observation_bars = max(1, int(observation_window_bars))
+    default_interval_ms = parse_interval_sec(settings.INTERVAL) * 1000
+    observed_returns_bps: list[float] = []
+    avoided_loss_count = 0
+    opportunity_missed_count = 0
+    flat_or_unknown_count = 0
+
+    for row in blocked_rows:
+        context = _load_context_json(row["context_json"])
+        interval_text = str(context.get("interval") or settings.INTERVAL)
+        try:
+            interval_ms = parse_interval_sec(interval_text) * 1000
+        except ValueError:
+            interval_ms = default_interval_ms
+
+        decision_price = float(row["market_price"]) if row["market_price"] is not None else None
+        decision_candle_ts = int(row["candle_ts"]) if row["candle_ts"] is not None else None
+        if decision_price is None or decision_price <= 0 or decision_candle_ts is None:
+            flat_or_unknown_count += 1
+            continue
+
+        target_ts = decision_candle_ts + (interval_ms * observation_bars)
+        observed_price = close_by_ts.get(target_ts)
+        if observed_price is None or observed_price <= 0:
+            flat_or_unknown_count += 1
+            continue
+
+        return_bps = ((observed_price - decision_price) / decision_price) * 10000.0
+        observed_returns_bps.append(return_bps)
+        if return_bps < 0:
+            avoided_loss_count += 1
+        elif return_bps > 0:
+            opportunity_missed_count += 1
+        else:
+            flat_or_unknown_count += 1
+
+    avg_return_bps = (
+        float(sum(observed_returns_bps) / len(observed_returns_bps)) if observed_returns_bps else None
+    )
+    median_return_bps = median(observed_returns_bps) if observed_returns_bps else None
+    sample_threshold = max(1, int(min_observation_sample))
+    insufficient_sample = len(observed_returns_bps) < sample_threshold
+
+    notes: list[str] = []
+    if total_entry_candidates <= 0:
+        notes.append("no BUY entry candidates found in strategy_decisions window")
+    if blocked_entry_count <= 0:
+        notes.append("no BLOCKED_ENTRY decisions found in strategy_decisions window")
+    if insufficient_sample:
+        notes.append(
+            "insufficient sample for blocked-entry observation window "
+            f"(observed={len(observed_returns_bps)}, threshold={sample_threshold})"
+        )
+    notes.append(
+        "observation metric is descriptive only; blocked candidates are not counterfactual realized pnl"
+    )
+
+    return FilterEffectivenessSummary(
+        total_entry_candidates=total_entry_candidates,
+        executed_entry_count=executed_entry_count,
+        blocked_entry_count=blocked_entry_count,
+        hold_decision_count=hold_decision_count,
+        blocked_by_filter=dict(sorted(blocked_by_filter.items(), key=lambda item: (-item[1], item[0]))),
+        multi_filter_blocked_count=multi_filter_blocked_count,
+        observation=FilterObservationSummary(
+            observation_window_bars=observation_bars,
+            observed_count=len(observed_returns_bps),
+            insufficient_sample=insufficient_sample,
+            sample_threshold=sample_threshold,
+            avg_return_bps=avg_return_bps,
+            median_return_bps=median_return_bps,
+            avoided_loss_count=avoided_loss_count,
+            opportunity_missed_count=opportunity_missed_count,
+            flat_or_unknown_count=flat_or_unknown_count,
+        ),
+        notes=notes,
+    )
 
 
 def summarize_fee_diagnostics(
@@ -796,6 +1011,8 @@ def cmd_strategy_report(
     from_ts_ms: int | None,
     to_ts_ms: int | None,
     group_by: tuple[str, ...] | list[str] | None,
+    observation_window_bars: int = 5,
+    min_observation_sample: int = 10,
     as_json: bool = False,
 ) -> None:
     conn = ensure_db()
@@ -817,6 +1034,15 @@ def cmd_strategy_report(
                 pair=pair,
                 from_ts_ms=from_ts_ms,
                 to_ts_ms=to_ts_ms,
+            )
+            filter_effectiveness = fetch_filter_effectiveness_summary(
+                conn,
+                strategy_name=strategy_name,
+                pair=pair,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                observation_window_bars=observation_window_bars,
+                min_observation_sample=min_observation_sample,
             )
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
@@ -893,7 +1119,33 @@ def cmd_strategy_report(
             ],
             "notes": close_notes,
         },
-        "notes": ([] if stats else ["no trade_lifecycles rows matched the given filters"]) + close_notes,
+        "filter_effectiveness": {
+            "entry_candidate_summary": {
+                "total_entry_candidates": filter_effectiveness.total_entry_candidates,
+                "executed_entry_count": filter_effectiveness.executed_entry_count,
+                "blocked_entry_count": filter_effectiveness.blocked_entry_count,
+                "hold_decision_count": filter_effectiveness.hold_decision_count,
+                "multi_filter_blocked_count": filter_effectiveness.multi_filter_blocked_count,
+                "blocked_by_filter": filter_effectiveness.blocked_by_filter,
+            },
+            "blocked_observation_window": {
+                "window_bars": filter_effectiveness.observation.observation_window_bars,
+                "observed_count": filter_effectiveness.observation.observed_count,
+                "insufficient_sample": filter_effectiveness.observation.insufficient_sample,
+                "sample_threshold": filter_effectiveness.observation.sample_threshold,
+                "avg_return_bps": filter_effectiveness.observation.avg_return_bps,
+                "median_return_bps": filter_effectiveness.observation.median_return_bps,
+                "avoided_loss_count": filter_effectiveness.observation.avoided_loss_count,
+                "opportunity_missed_count": filter_effectiveness.observation.opportunity_missed_count,
+                "flat_or_unknown_count": filter_effectiveness.observation.flat_or_unknown_count,
+            },
+            "notes": filter_effectiveness.notes,
+        },
+        "notes": (
+            ([] if stats else ["no trade_lifecycles rows matched the given filters"])
+            + close_notes
+            + filter_effectiveness.notes
+        ),
     }
     write_json_atomic(PATH_MANAGER.strategy_validation_report_path(), payload)
 
@@ -915,30 +1167,29 @@ def cmd_strategy_report(
     if not stats:
         print("  no matched trade_lifecycles rows")
         print("  tip: 실행 구간/전략명/청산 규칙 필터를 완화하거나 lifecycle 데이터 생성 여부를 확인하세요.")
-        return
-
-    print(
-        "  "
-        "strategy_name,exit_rule_name,pair,trade_count,win_rate,average_gain,average_loss,"
-        "realized_gross_pnl,fee_total,realized_net_pnl,expectancy_per_trade,holding_avg_sec,"
-        "holding_min_sec,holding_max_sec,entry_reason_linked_count,exit_reason_linked_count,"
-        "entry_reason_sample,exit_reason_sample"
-    )
-    for stat in stats:
-        holding_avg = "-" if stat.holding_time_avg_sec is None else f"{stat.holding_time_avg_sec:.2f}"
-        holding_min = "-" if stat.holding_time_min_sec is None else f"{stat.holding_time_min_sec:.2f}"
-        holding_max = "-" if stat.holding_time_max_sec is None else f"{stat.holding_time_max_sec:.2f}"
-        entry_reason_sample = stat.entry_reason_sample or "-"
-        exit_reason_sample = stat.exit_reason_sample or "-"
+    else:
         print(
             "  "
-            f"{stat.strategy_name},{stat.exit_rule_name},{stat.pair},{stat.trade_count},"
-            f"{stat.win_rate:.4f},{stat.avg_gain:.2f},{stat.avg_loss:.2f},{stat.realized_gross_pnl:.2f},"
-            f"{stat.fee_total:.2f},{stat.realized_net_pnl:.2f},{stat.expectancy_per_trade:.2f},"
-            f"{holding_avg},{holding_min},{holding_max},"
-            f"{stat.entry_reason_linked_count},{stat.exit_reason_linked_count},"
-            f"{entry_reason_sample},{exit_reason_sample}"
+            "strategy_name,exit_rule_name,pair,trade_count,win_rate,average_gain,average_loss,"
+            "realized_gross_pnl,fee_total,realized_net_pnl,expectancy_per_trade,holding_avg_sec,"
+            "holding_min_sec,holding_max_sec,entry_reason_linked_count,exit_reason_linked_count,"
+            "entry_reason_sample,exit_reason_sample"
         )
+        for stat in stats:
+            holding_avg = "-" if stat.holding_time_avg_sec is None else f"{stat.holding_time_avg_sec:.2f}"
+            holding_min = "-" if stat.holding_time_min_sec is None else f"{stat.holding_time_min_sec:.2f}"
+            holding_max = "-" if stat.holding_time_max_sec is None else f"{stat.holding_time_max_sec:.2f}"
+            entry_reason_sample = stat.entry_reason_sample or "-"
+            exit_reason_sample = stat.exit_reason_sample or "-"
+            print(
+                "  "
+                f"{stat.strategy_name},{stat.exit_rule_name},{stat.pair},{stat.trade_count},"
+                f"{stat.win_rate:.4f},{stat.avg_gain:.2f},{stat.avg_loss:.2f},{stat.realized_gross_pnl:.2f},"
+                f"{stat.fee_total:.2f},{stat.realized_net_pnl:.2f},{stat.expectancy_per_trade:.2f},"
+                f"{holding_avg},{holding_min},{holding_max},"
+                f"{stat.entry_reason_linked_count},{stat.exit_reason_linked_count},"
+                f"{entry_reason_sample},{exit_reason_sample}"
+            )
 
     print("  [lifecycle_close_summary: by_exit_rule]")
     print("  exit_rule_name,exit_reason_bucket,trade_count,win_rate,realized_net_pnl,avg_hold_time_sec")
@@ -965,6 +1216,39 @@ def cmd_strategy_report(
             )
 
     for note in close_notes:
+        print(f"  note: {note}")
+    print("  [filter_effectiveness]")
+    print(
+        "  "
+        f"entry_candidates={filter_effectiveness.total_entry_candidates} "
+        f"executed_entries={filter_effectiveness.executed_entry_count} "
+        f"blocked_entries={filter_effectiveness.blocked_entry_count} "
+        f"hold_decisions={filter_effectiveness.hold_decision_count} "
+        f"multi_filter_blocked={filter_effectiveness.multi_filter_blocked_count}"
+    )
+    print("  filter,blocked_count")
+    if not filter_effectiveness.blocked_by_filter:
+        print("  -,-")
+    else:
+        for filter_name, blocked_count in filter_effectiveness.blocked_by_filter.items():
+            print(f"  {filter_name},{blocked_count}")
+    print(
+        "  "
+        f"blocked_window_bars={filter_effectiveness.observation.observation_window_bars} "
+        f"observed_count={filter_effectiveness.observation.observed_count} "
+        f"insufficient_sample={1 if filter_effectiveness.observation.insufficient_sample else 0} "
+        f"sample_threshold={filter_effectiveness.observation.sample_threshold} "
+        f"avg_return_bps={_fmt_rate(filter_effectiveness.observation.avg_return_bps, as_bps=True)} "
+        f"median_return_bps={_fmt_rate(filter_effectiveness.observation.median_return_bps, as_bps=True)}"
+    )
+    print(
+        "  "
+        f"blocked_window_outcome="
+        f"avoided_loss:{filter_effectiveness.observation.avoided_loss_count},"
+        f"opportunity_missed:{filter_effectiveness.observation.opportunity_missed_count},"
+        f"flat_or_unknown:{filter_effectiveness.observation.flat_or_unknown_count}"
+    )
+    for note in filter_effectiveness.notes:
         print(f"  note: {note}")
 
 
