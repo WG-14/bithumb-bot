@@ -43,6 +43,7 @@ uv run bithumb-bot explain --short 7 --long 30
 uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
+uv run bithumb-bot decision-telemetry --limit 200
 uv run bithumb-bot run --short 7 --long 30
 ```
 

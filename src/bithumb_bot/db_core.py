@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import resolve_db_path, settings
 from .sqlite_resilience import configure_connection
+from .decision_context import normalize_strategy_decision_context
 
 
 def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
@@ -662,6 +663,17 @@ def record_strategy_decision(
     context: dict[str, Any] | None,
     confidence: float | None = None,
 ) -> int:
+    normalized_context = normalize_strategy_decision_context(
+        context=context,
+        signal=str(signal),
+        reason=str(reason),
+        strategy_name=str(strategy_name),
+        pair=str(settings.PAIR),
+        interval=str(settings.INTERVAL),
+        decision_ts=int(decision_ts),
+        candle_ts=None if candle_ts is None else int(candle_ts),
+        market_price=None if market_price is None else float(market_price),
+    )
     row = conn.execute(
         """
         INSERT INTO strategy_decisions(
@@ -677,7 +689,7 @@ def record_strategy_decision(
             None if candle_ts is None else int(candle_ts),
             None if market_price is None else float(market_price),
             None if confidence is None else float(confidence),
-            json.dumps(context or {}, ensure_ascii=False, sort_keys=True),
+            json.dumps(normalized_context, ensure_ascii=False, sort_keys=True),
         ),
     )
     return int(row.lastrowid)

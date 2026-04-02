@@ -36,7 +36,13 @@ from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
-from .reporting import cmd_fee_diagnostics, cmd_ops_report, cmd_strategy_report, parse_kst_date_range_to_ts_ms
+from .reporting import (
+    cmd_decision_telemetry,
+    cmd_fee_diagnostics,
+    cmd_ops_report,
+    cmd_strategy_report,
+    parse_kst_date_range_to_ts_ms,
+)
 from .storage_io import write_json_atomic
 
 import httpx
@@ -2363,6 +2369,12 @@ def main(argv: list[str] | None = None) -> int:
     ops = sub.add_parser("ops-report", help="operator observability report")
     ops.add_argument("--limit", type=int, default=20)
 
+    decision_telemetry = sub.add_parser(
+        "decision-telemetry",
+        help="summary of HOLD/blocked decision telemetry",
+    )
+    decision_telemetry.add_argument("--limit", type=int, default=200)
+
     fee_diag = sub.add_parser(
         "fee-diagnostics",
         help="validate real fee application against recent fills/roundtrips",
@@ -2430,6 +2442,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_fills(args.limit)
     elif args.cmd == "ops-report":
         cmd_ops_report(limit=max(1, int(args.limit)))
+    elif args.cmd == "decision-telemetry":
+        cmd_decision_telemetry(limit=max(1, int(args.limit)))
     elif args.cmd == "fee-diagnostics":
         cmd_fee_diagnostics(
             fill_limit=max(1, int(args.fill_limit)),

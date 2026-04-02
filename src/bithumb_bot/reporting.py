@@ -67,6 +67,16 @@ class FeeDiagnosticSummary:
     notes: list[str]
 
 
+@dataclass
+class DecisionTelemetrySummary:
+    decision_type: str
+    strategy_name: str
+    pair: str
+    interval: str
+    block_reason: str
+    count: int
+
+
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
     rows = conn.execute(
         """
@@ -161,6 +171,48 @@ def _fetch_recent_trade_lifecycles(conn: sqlite3.Connection, *, limit: int) -> l
         """,
         (int(limit),),
     ).fetchall()
+
+
+def fetch_decision_telemetry_summary(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+) -> list[DecisionTelemetrySummary]:
+    rows = conn.execute(
+        """
+        SELECT
+            COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
+            COALESCE(json_extract(context_json, '$.strategy_name'), strategy_name, '<unknown>') AS strategy_name,
+            COALESCE(json_extract(context_json, '$.pair'), '<unknown>') AS pair,
+            COALESCE(json_extract(context_json, '$.interval'), '<unknown>') AS interval,
+            COALESCE(
+                json_extract(context_json, '$.block_reason'),
+                json_extract(context_json, '$.entry_reason'),
+                reason
+            ) AS block_reason,
+            COUNT(*) AS decision_count
+        FROM (
+            SELECT *
+            FROM strategy_decisions
+            ORDER BY decision_ts DESC, id DESC
+            LIMIT ?
+        ) recent
+        GROUP BY decision_type, strategy_name, pair, interval, block_reason
+        ORDER BY decision_count DESC, decision_type ASC, strategy_name ASC, pair ASC, interval ASC
+        """,
+        (int(max(1, limit)),),
+    ).fetchall()
+    return [
+        DecisionTelemetrySummary(
+            decision_type=str(row["decision_type"]),
+            strategy_name=str(row["strategy_name"]),
+            pair=str(row["pair"]),
+            interval=str(row["interval"]),
+            block_reason=str(row["block_reason"]),
+            count=int(row["decision_count"] or 0),
+        )
+        for row in rows
+    ]
 
 
 def summarize_fee_diagnostics(
@@ -845,3 +897,27 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"pnl_before_fee={_fmt_float(fee_summary.pnl_before_fee_total, 2)} "
         f"pnl_after_fee={_fmt_float(fee_summary.pnl_after_fee_total, 2)}"
     )
+
+
+def cmd_decision_telemetry(*, limit: int = 200) -> None:
+    conn = ensure_db()
+    try:
+        rows = fetch_decision_telemetry_summary(conn, limit=max(1, int(limit)))
+    finally:
+        conn.close()
+
+    print("[DECISION-TELEMETRY]")
+    print(
+        f"  mode={settings.MODE} pair={settings.PAIR} interval={settings.INTERVAL} "
+        f"strategy={settings.STRATEGY_NAME} window={max(1, int(limit))}"
+    )
+    if not rows:
+        print("  no strategy_decisions rows")
+        return
+    print("  decision_type,strategy_name,pair,interval,block_reason,count")
+    for row in rows:
+        print(
+            "  "
+            f"{row.decision_type},{row.strategy_name},{row.pair},{row.interval},"
+            f"{row.block_reason},{row.count}"
+        )
