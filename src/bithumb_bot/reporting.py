@@ -38,12 +38,17 @@ class StrategyPerformanceStat:
     win_rate: float
     avg_gain: float
     avg_loss: float
-    net_pnl: float
+    realized_gross_pnl: float
+    realized_net_pnl: float
     expectancy_per_trade: float
     fee_total: float
     holding_time_avg_sec: float | None
     holding_time_min_sec: float | None
     holding_time_max_sec: float | None
+    entry_reason_linked_count: int
+    exit_reason_linked_count: int
+    entry_reason_sample: str | None
+    exit_reason_sample: str | None
 
 
 @dataclass
@@ -455,6 +460,26 @@ def fetch_strategy_performance_stats(
     to_ts_ms: int | None = None,
     group_by: tuple[str, ...] | list[str] | None = None,
 ) -> list[StrategyPerformanceStat]:
+    lifecycle_cols = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(trade_lifecycles)").fetchall()
+    }
+    required_cols = {
+        "pair",
+        "strategy_name",
+        "exit_ts",
+        "gross_pnl",
+        "fee_total",
+        "net_pnl",
+        "holding_time_sec",
+    }
+    missing_cols = sorted(required_cols - lifecycle_cols)
+    if missing_cols:
+        raise RuntimeError(
+            "trade_lifecycles schema missing required realized-pnl columns: "
+            + ", ".join(missing_cols)
+        )
+
     group_axes = _normalize_group_by(group_by)
 
     lifecycle_base = """
@@ -463,9 +488,21 @@ def fetch_strategy_performance_stats(
             COALESCE(tl.strategy_name, '<unknown>') AS strategy_name,
             COALESCE(tl.pair, '<unknown>') AS pair,
             tl.exit_ts,
+            tl.gross_pnl,
             tl.net_pnl,
             tl.fee_total,
             tl.holding_time_sec,
+            CASE
+                WHEN TRIM(COALESCE(json_extract(esd.context_json, '$.entry_reason'), '')) != ''
+                    THEN TRIM(json_extract(esd.context_json, '$.entry_reason'))
+                ELSE NULL
+            END AS entry_reason,
+            CASE
+                WHEN TRIM(COALESCE(tl.exit_reason, '')) != '' THEN TRIM(tl.exit_reason)
+                WHEN TRIM(COALESCE(json_extract(xsd.context_json, '$.exit.reason'), '')) != ''
+                    THEN TRIM(json_extract(xsd.context_json, '$.exit.reason'))
+                ELSE NULL
+            END AS exit_reason,
             COALESCE(
                 tl.exit_rule_name,
                 json_extract(
@@ -483,6 +520,8 @@ def fetch_strategy_performance_stats(
                 '<unknown>'
             ) AS exit_rule_name
         FROM trade_lifecycles tl
+        LEFT JOIN strategy_decisions esd ON esd.id = tl.entry_decision_id
+        LEFT JOIN strategy_decisions xsd ON xsd.id = tl.exit_decision_id
     """
 
     filters: list[str] = []
@@ -539,11 +578,16 @@ def fetch_strategy_performance_stats(
             COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS win_count,
             COALESCE(AVG(CASE WHEN net_pnl > 0 THEN net_pnl ELSE NULL END), 0.0) AS avg_gain,
             COALESCE(AVG(CASE WHEN net_pnl < 0 THEN net_pnl ELSE NULL END), 0.0) AS avg_loss,
-            COALESCE(SUM(net_pnl), 0.0) AS net_pnl,
+            COALESCE(SUM(gross_pnl), 0.0) AS realized_gross_pnl,
+            COALESCE(SUM(net_pnl), 0.0) AS realized_net_pnl,
             COALESCE(SUM(fee_total), 0.0) AS fee_total,
             AVG(holding_time_sec) AS holding_time_avg_sec,
             MIN(holding_time_sec) AS holding_time_min_sec,
-            MAX(holding_time_sec) AS holding_time_max_sec
+            MAX(holding_time_sec) AS holding_time_max_sec,
+            COALESCE(SUM(CASE WHEN entry_reason IS NOT NULL THEN 1 ELSE 0 END), 0) AS entry_reason_linked_count,
+            COALESCE(SUM(CASE WHEN exit_reason IS NOT NULL THEN 1 ELSE 0 END), 0) AS exit_reason_linked_count,
+            MIN(CASE WHEN entry_reason IS NOT NULL THEN entry_reason ELSE NULL END) AS entry_reason_sample,
+            MIN(CASE WHEN exit_reason IS NOT NULL THEN exit_reason ELSE NULL END) AS exit_reason_sample
         FROM lifecycle_base
         {post_where}
         GROUP BY {group_by_sql}
@@ -571,7 +615,8 @@ def fetch_strategy_performance_stats(
                 win_rate=win_rate,
                 avg_gain=avg_gain,
                 avg_loss=avg_loss,
-                net_pnl=float(row["net_pnl"] or 0.0),
+                realized_gross_pnl=float(row["realized_gross_pnl"] or 0.0),
+                realized_net_pnl=float(row["realized_net_pnl"] or 0.0),
                 expectancy_per_trade=expectancy,
                 fee_total=float(row["fee_total"] or 0.0),
                 holding_time_avg_sec=(
@@ -582,6 +627,14 @@ def fetch_strategy_performance_stats(
                 ),
                 holding_time_max_sec=(
                     None if row["holding_time_max_sec"] is None else float(row["holding_time_max_sec"])
+                ),
+                entry_reason_linked_count=int(row["entry_reason_linked_count"] or 0),
+                exit_reason_linked_count=int(row["exit_reason_linked_count"] or 0),
+                entry_reason_sample=(
+                    None if row["entry_reason_sample"] is None else str(row["entry_reason_sample"])
+                ),
+                exit_reason_sample=(
+                    None if row["exit_reason_sample"] is None else str(row["exit_reason_sample"])
                 ),
             )
         )
@@ -600,15 +653,21 @@ def cmd_strategy_report(
 ) -> None:
     conn = ensure_db()
     try:
-        stats = fetch_strategy_performance_stats(
-            conn,
-            strategy_name=strategy_name,
-            exit_rule_name=exit_rule_name,
-            pair=pair,
-            from_ts_ms=from_ts_ms,
-            to_ts_ms=to_ts_ms,
-            group_by=group_by,
-        )
+        try:
+            stats = fetch_strategy_performance_stats(
+                conn,
+                strategy_name=strategy_name,
+                exit_rule_name=exit_rule_name,
+                pair=pair,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                group_by=group_by,
+            )
+        except RuntimeError as exc:
+            print("[STRATEGY-PERFORMANCE-REPORT]")
+            print(f"  schema_error={exc}")
+            print("  tip: 최신 스키마로 마이그레이션하거나 최신 DB를 사용하세요.")
+            return
     finally:
         conn.close()
 
@@ -632,13 +691,21 @@ def cmd_strategy_report(
                 "win_rate": stat.win_rate,
                 "average_gain": stat.avg_gain,
                 "average_loss": stat.avg_loss,
-                "net_pnl": stat.net_pnl,
-                "expectancy_per_trade": stat.expectancy_per_trade,
+                "realized_gross_pnl": stat.realized_gross_pnl,
                 "fee_total": stat.fee_total,
+                "realized_net_pnl": stat.realized_net_pnl,
+                "expectancy_per_trade": stat.expectancy_per_trade,
+                "net_pnl": stat.realized_net_pnl,
                 "holding_time": {
                     "avg_sec": stat.holding_time_avg_sec,
                     "min_sec": stat.holding_time_min_sec,
                     "max_sec": stat.holding_time_max_sec,
+                },
+                "reason_summary": {
+                    "entry_reason_linked_count": stat.entry_reason_linked_count,
+                    "exit_reason_linked_count": stat.exit_reason_linked_count,
+                    "entry_reason_sample": stat.entry_reason_sample,
+                    "exit_reason_sample": stat.exit_reason_sample,
                 },
             }
             for stat in stats
@@ -651,7 +718,7 @@ def cmd_strategy_report(
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return
 
-    print("[STRATEGY-PERFORMANCE-REPORT]")
+    print("[STRATEGY-PERFORMANCE-REPORT (REALIZED PNL BASIS)]")
     print(
         "  "
         f"group_by={','.join(normalized_group_by)} "
@@ -670,17 +737,24 @@ def cmd_strategy_report(
     print(
         "  "
         "strategy_name,exit_rule_name,pair,trade_count,win_rate,average_gain,average_loss,"
-        "net_pnl,expectancy_per_trade,fee_total,holding_avg_sec,holding_min_sec,holding_max_sec"
+        "realized_gross_pnl,fee_total,realized_net_pnl,expectancy_per_trade,holding_avg_sec,"
+        "holding_min_sec,holding_max_sec,entry_reason_linked_count,exit_reason_linked_count,"
+        "entry_reason_sample,exit_reason_sample"
     )
     for stat in stats:
         holding_avg = "-" if stat.holding_time_avg_sec is None else f"{stat.holding_time_avg_sec:.2f}"
         holding_min = "-" if stat.holding_time_min_sec is None else f"{stat.holding_time_min_sec:.2f}"
         holding_max = "-" if stat.holding_time_max_sec is None else f"{stat.holding_time_max_sec:.2f}"
+        entry_reason_sample = stat.entry_reason_sample or "-"
+        exit_reason_sample = stat.exit_reason_sample or "-"
         print(
             "  "
             f"{stat.strategy_name},{stat.exit_rule_name},{stat.pair},{stat.trade_count},"
-            f"{stat.win_rate:.4f},{stat.avg_gain:.2f},{stat.avg_loss:.2f},{stat.net_pnl:.2f},"
-            f"{stat.expectancy_per_trade:.2f},{stat.fee_total:.2f},{holding_avg},{holding_min},{holding_max}"
+            f"{stat.win_rate:.4f},{stat.avg_gain:.2f},{stat.avg_loss:.2f},{stat.realized_gross_pnl:.2f},"
+            f"{stat.fee_total:.2f},{stat.realized_net_pnl:.2f},{stat.expectancy_per_trade:.2f},"
+            f"{holding_avg},{holding_min},{holding_max},"
+            f"{stat.entry_reason_linked_count},{stat.exit_reason_linked_count},"
+            f"{entry_reason_sample},{exit_reason_sample}"
         )
 
 
@@ -756,7 +830,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "buy_notional": stat.buy_notional,
                 "sell_notional": stat.sell_notional,
                 "fee_total": stat.fee_total,
-                "pnl_proxy": stat.pnl_proxy,
+                "pnl_proxy_deprecated": stat.pnl_proxy,
             }
             for stat in strategy_stats
         ],
@@ -835,7 +909,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         print("  no strategy_context rows in order_intent_dedup")
         print("  tip: strategy_context 기반 집계는 주문 intent dedup 데이터가 있어야 계산됩니다.")
     else:
-        print("  strategy_context,order_count,fill_count,buy_notional,sell_notional,fee_total,pnl_proxy")
+        print("  strategy_context,order_count,fill_count,buy_notional,sell_notional,fee_total,pnl_proxy_deprecated")
         for stat in strategy_stats:
             print(
                 "  "
@@ -879,9 +953,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         print(f"  fee_total(last {len(recent_trades)} trades)={_fmt_float(fee_total, 2)}")
 
     print("\n[KNOWN-LIMITATIONS/TODO]")
-    print("  - trades 테이블에 strategy_context/client_order_id가 없어 전략별 확정 손익(realized PnL)은 직접 합산할 수 없습니다.")
-    print("  - 현재는 fills+orders 기반 notional/fee로 pnl_proxy(sell-buy-fee)를 제공합니다.")
-    print("  - TODO: trades에 strategy_context 또는 client_order_id를 저장하면 전략별 realized/unrealized PnL 정확도를 높일 수 있습니다.")
+    print("  - strategy-report는 trade_lifecycles 기반 realized gross/fee/net pnl 집계를 우선 사용하세요.")
+    print("  - ops-report의 strategy_summary는 intent/fill 기반 참고용이며 pnl_proxy_deprecated를 포함합니다.")
     print("\n[FEE-DIAGNOSTICS-SNAPSHOT]")
     print(
         "  "

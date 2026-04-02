@@ -91,15 +91,9 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/live.sqlite \
 
 ## 4) 현재 스키마 기준 제약사항
 
-현재 스키마에서는 `trades`에 `strategy_context`나 `client_order_id`가 없어, **전략별 확정 손익(realized PnL)** 을 정확히 분리 계산하기 어렵습니다.
+`strategy-report`는 `trade_lifecycles`의 canonical linkage(`entry/exit trade id`, `entry/exit fill id`, `strategy_name`)를 사용해 **전략별 확정 손익(realized PnL)** 을 직접 집계합니다.
 
-따라서 현재 리포트는 전략 단위로 아래 대체 지표를 제공합니다.
-
-- 주문 수(`order_count`)
-- 체결 수(`fill_count`)
-- 총 매수/매도 체결대금(`buy_notional`, `sell_notional`)
-- 수수료 합계(`fee_total`)
-- `pnl_proxy = sell - buy - fee`
+`ops-report`의 `strategy_summary`는 여전히 intent/fill 기반 참고치이며, `pnl_proxy_deprecated`(legacy 참고 지표)를 포함합니다. 운영/검증 시 핵심 판단은 `strategy-report`의 realized 지표를 우선 사용하세요.
 
 ## 5) 전략 판단 스냅샷 조회
 
@@ -122,8 +116,6 @@ LIMIT 50;
 
 ## 6) TODO (추가되면 좋은 필드)
 
-- `trades.client_order_id` 또는 `trades.strategy_context`
-  - 전략별 realized/unrealized PnL 정확 집계를 위해 필요
 - 주문/체결과 판단 이벤트의 공통 correlation id
   - 장애 분석/감사 추적 속도 개선
 
@@ -137,10 +129,12 @@ LIMIT 50;
 - `win_rate`
 - `average_gain`
 - `average_loss`
-- `net_pnl`
-- `expectancy_per_trade`
+- `realized_gross_pnl`
 - `fee_total`
+- `realized_net_pnl` (`net_pnl` 호환 필드도 JSON에 유지)
+- `expectancy_per_trade`
 - `holding_time` 요약(`avg/min/max` 초)
+- reason linkage 요약(`entry_reason_linked_count`, `exit_reason_linked_count`, sample)
 
 ### 집계 축/필터
 

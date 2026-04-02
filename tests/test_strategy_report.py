@@ -125,10 +125,13 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
     assert a.win_rate == 0.5
     assert a.avg_gain == 100.0
     assert a.avg_loss == -40.0
-    assert a.net_pnl == 60.0
+    assert a.realized_gross_pnl == 78.0
+    assert a.realized_net_pnl == 60.0
     assert a.expectancy_per_trade == 30.0
     assert a.fee_total == 18.0
     assert a.holding_time_avg_sec == 90.0
+    assert a.exit_reason_linked_count == 0
+    assert a.entry_reason_linked_count == 0
 
     b = by_strategy["strategy_B"]
     assert b.exit_rule_name == "max_holding_time"
@@ -146,7 +149,7 @@ def test_strategy_report_aggregates_strategy_and_exit_rule(tmp_path, monkeypatch
         as_json=False,
     )
     out = capsys.readouterr().out
-    assert "[STRATEGY-PERFORMANCE-REPORT]" in out
+    assert "[STRATEGY-PERFORMANCE-REPORT (REALIZED PNL BASIS)]" in out
     assert "strategy_A,opposite_cross" in out
     assert "strategy_B,max_holding_time" in out
 
@@ -177,6 +180,47 @@ def test_strategy_report_uses_lifecycle_exit_rule_without_decision_lookup(tmp_pa
     assert len(stats) == 1
     assert stats[0].strategy_name == "strategy_C"
     assert stats[0].exit_rule_name == "time_stop"
+    assert stats[0].realized_gross_pnl == pytest.approx(13.0)
+    assert stats[0].realized_net_pnl == pytest.approx(12.0)
+
+
+def test_strategy_report_reason_summary_uses_linked_entry_and_exit_reason(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "strategy-report-reasons.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                id, decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES (11, 1000, 'strategy_D', 'BUY', 'entry', 1000, 0, NULL, ?)
+            """,
+            (json.dumps({"entry_reason": "filtered entry: cost_edge"}, ensure_ascii=False),),
+        )
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=20,
+            strategy_name="strategy_D",
+            pair="BTC_KRW",
+            exit_ts=4_200,
+            net_pnl=5.0,
+            fee_total=1.0,
+            holding_time_sec=15.0,
+            exit_rule_name="time_stop",
+        )
+        conn.execute("UPDATE trade_lifecycles SET entry_decision_id=11, exit_reason='max holding reached' WHERE id=20")
+        conn.commit()
+        stats = fetch_strategy_performance_stats(conn, group_by=("strategy_name",))
+    finally:
+        conn.close()
+
+    assert len(stats) == 1
+    assert stats[0].entry_reason_linked_count == 1
+    assert stats[0].exit_reason_linked_count == 1
+    assert stats[0].entry_reason_sample == "filtered entry: cost_edge"
+    assert stats[0].exit_reason_sample == "max holding reached"
 
 
 def test_strategy_report_handles_empty_data_gracefully(tmp_path, monkeypatch, capsys):
@@ -198,6 +242,48 @@ def test_strategy_report_handles_empty_data_gracefully(tmp_path, monkeypatch, ca
     )
     out = capsys.readouterr().out
     assert "no matched trade_lifecycles rows" in out
+
+
+def test_strategy_report_schema_error_for_legacy_db_without_realized_columns(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "legacy-strategy-report.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            """
+            CREATE TABLE trade_lifecycles (
+                id INTEGER PRIMARY KEY,
+                pair TEXT NOT NULL,
+                strategy_name TEXT,
+                exit_ts INTEGER NOT NULL
+            )
+            """
+        )
+        conn.commit()
+        with pytest.raises(RuntimeError, match="missing required realized-pnl columns"):
+            fetch_strategy_performance_stats(conn, group_by=("strategy_name", "exit_rule_name"))
+    finally:
+        conn.close()
+
+    ensure_db(db_path).close()
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.fetch_strategy_performance_stats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced schema mismatch")),
+    )
+    cmd_strategy_report(
+        strategy_name=None,
+        exit_rule_name=None,
+        pair=None,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        group_by=("strategy_name", "exit_rule_name"),
+        as_json=False,
+    )
+    out = capsys.readouterr().out
+    assert "schema_error=forced schema mismatch" in out
 
 def test_strategy_report_rejects_invalid_date_format(capsys):
     with pytest.raises(SystemExit) as excinfo:
