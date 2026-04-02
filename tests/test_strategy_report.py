@@ -7,7 +7,11 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.reporting import cmd_strategy_report, fetch_strategy_performance_stats
+from bithumb_bot.reporting import (
+    cmd_strategy_report,
+    fetch_lifecycle_close_summary,
+    fetch_strategy_performance_stats,
+)
 from bithumb_bot.app import main as app_main
 
 def _insert_sell_decision(conn, *, decision_ts: int, strategy_name: str, rule: str) -> None:
@@ -221,6 +225,183 @@ def test_strategy_report_reason_summary_uses_linked_entry_and_exit_reason(tmp_pa
     assert stats[0].exit_reason_linked_count == 1
     assert stats[0].entry_reason_sample == "filtered entry: cost_edge"
     assert stats[0].exit_reason_sample == "max holding reached"
+
+
+def test_lifecycle_close_summary_aggregates_by_exit_rule_and_entry_exit_combo(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "strategy-report-close-summary.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                id, decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES (101, 1000, 'strategy_E', 'BUY', 'entry', 1000, 0, NULL, ?)
+            """,
+            (json.dumps({"entry": {"rule": "sma_cross_entry"}}, ensure_ascii=False),),
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                id, decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES (102, 2000, 'strategy_E', 'BUY', 'entry', 2000, 0, NULL, ?)
+            """,
+            (json.dumps({"entry": {"rule": "dip_buy_entry"}}, ensure_ascii=False),),
+        )
+
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=30,
+            strategy_name="strategy_E",
+            pair="BTC_KRW",
+            exit_ts=5_000,
+            net_pnl=70.0,
+            fee_total=3.0,
+            holding_time_sec=100.0,
+            exit_rule_name="opposite_cross",
+        )
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=31,
+            strategy_name="strategy_E",
+            pair="BTC_KRW",
+            exit_ts=6_000,
+            net_pnl=-20.0,
+            fee_total=2.0,
+            holding_time_sec=140.0,
+            exit_rule_name="opposite_cross",
+        )
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=32,
+            strategy_name="strategy_E",
+            pair="BTC_KRW",
+            exit_ts=7_000,
+            net_pnl=15.0,
+            fee_total=1.0,
+            holding_time_sec=70.0,
+            exit_rule_name="max_holding_time",
+        )
+
+        conn.execute(
+            """
+            UPDATE trade_lifecycles
+            SET entry_decision_id=101, exit_reason='cross under triggered'
+            WHERE id=30
+            """
+        )
+        conn.execute(
+            """
+            UPDATE trade_lifecycles
+            SET entry_decision_id=102, exit_reason='cross under triggered'
+            WHERE id=31
+            """
+        )
+        conn.execute(
+            """
+            UPDATE trade_lifecycles
+            SET entry_decision_id=101, exit_reason='time stop reached'
+            WHERE id=32
+            """
+        )
+        conn.commit()
+
+        by_exit_rule, by_entry_exit, notes = fetch_lifecycle_close_summary(conn, min_sample_size=2)
+    finally:
+        conn.close()
+
+    opposite_cross_rows = [
+        row
+        for row in by_exit_rule
+        if row.exit_rule_name == "opposite_cross" and row.exit_reason_bucket == "cross under triggered"
+    ]
+    assert len(opposite_cross_rows) == 1
+    opposite = opposite_cross_rows[0]
+    assert opposite.trade_count == 2
+    assert opposite.win_rate == pytest.approx(0.5)
+    assert opposite.realized_net_pnl == pytest.approx(50.0)
+    assert opposite.avg_hold_time_sec == pytest.approx(120.0)
+
+    combos = {
+        (row.entry_rule_name, row.exit_rule_name, row.exit_reason_bucket): row
+        for row in by_entry_exit
+    }
+    assert ("sma_cross_entry", "opposite_cross", "cross under triggered") in combos
+    assert ("dip_buy_entry", "opposite_cross", "cross under triggered") in combos
+    assert any("max_holding_time/time stop reached" in note for note in notes)
+
+
+def test_lifecycle_close_summary_handles_legacy_missing_exit_reason_bucket(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "strategy-report-legacy-exit-reason.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=40,
+            strategy_name="strategy_F",
+            pair="BTC_KRW",
+            exit_ts=8_000,
+            net_pnl=-5.0,
+            fee_total=1.0,
+            holding_time_sec=20.0,
+            exit_rule_name="time_stop",
+        )
+        conn.execute("UPDATE trade_lifecycles SET exit_reason=NULL WHERE id=40")
+        conn.commit()
+        by_exit_rule, _by_entry_exit, notes = fetch_lifecycle_close_summary(conn, min_sample_size=2)
+    finally:
+        conn.close()
+
+    legacy_rows = [
+        row
+        for row in by_exit_rule
+        if row.exit_rule_name == "time_stop" and row.exit_reason_bucket == "<legacy_missing_exit_reason>"
+    ]
+    assert len(legacy_rows) == 1
+    assert legacy_rows[0].trade_count == 1
+    assert any("low-sample exit buckets present" in note for note in notes)
+
+
+def test_strategy_report_prints_lifecycle_close_summary_block(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "strategy-report-lifecycle-close-print.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        _insert_lifecycle(
+            conn,
+            lifecycle_id=50,
+            strategy_name="strategy_G",
+            pair="BTC_KRW",
+            exit_ts=9_000,
+            net_pnl=10.0,
+            fee_total=1.0,
+            holding_time_sec=30.0,
+            exit_rule_name="opposite_cross",
+        )
+        conn.execute("UPDATE trade_lifecycles SET exit_reason='cross under triggered' WHERE id=50")
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_strategy_report(
+        strategy_name=None,
+        exit_rule_name=None,
+        pair=None,
+        from_ts_ms=None,
+        to_ts_ms=None,
+        group_by=("strategy_name", "exit_rule_name"),
+        as_json=False,
+    )
+    out = capsys.readouterr().out
+    assert "[lifecycle_close_summary: by_exit_rule]" in out
+    assert "opposite_cross,cross under triggered,1" in out
 
 
 def test_strategy_report_handles_empty_data_gracefully(tmp_path, monkeypatch, capsys):

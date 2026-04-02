@@ -52,6 +52,17 @@ class StrategyPerformanceStat:
 
 
 @dataclass
+class LifecycleCloseStat:
+    entry_rule_name: str
+    exit_rule_name: str
+    exit_reason_bucket: str
+    trade_count: int
+    win_rate: float
+    realized_net_pnl: float
+    avg_hold_time_sec: float | None
+
+
+@dataclass
 class FeeDiagnosticSummary:
     fill_count: int
     fills_with_notional: int
@@ -641,6 +652,142 @@ def fetch_strategy_performance_stats(
     return stats
 
 
+def fetch_lifecycle_close_summary(
+    conn: sqlite3.Connection,
+    *,
+    strategy_name: str | None = None,
+    exit_rule_name: str | None = None,
+    pair: str | None = None,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    min_sample_size: int = 3,
+    entry_exit_combo_limit: int = 20,
+) -> tuple[list[LifecycleCloseStat], list[LifecycleCloseStat], list[str]]:
+    lifecycle_base = """
+        SELECT
+            tl.id,
+            COALESCE(tl.strategy_name, '<unknown>') AS strategy_name,
+            COALESCE(tl.pair, '<unknown>') AS pair,
+            tl.exit_ts,
+            tl.net_pnl,
+            tl.holding_time_sec,
+            COALESCE(
+                NULLIF(TRIM(COALESCE(tl.exit_rule_name, '')), ''),
+                NULLIF(TRIM(COALESCE(json_extract(xsd.context_json, '$.exit.rule'), '')), ''),
+                '<unknown_exit_rule>'
+            ) AS exit_rule_name,
+            COALESCE(
+                NULLIF(TRIM(COALESCE(tl.exit_reason, '')), ''),
+                NULLIF(TRIM(COALESCE(json_extract(xsd.context_json, '$.exit.reason'), '')), ''),
+                '<legacy_missing_exit_reason>'
+            ) AS exit_reason_bucket,
+            COALESCE(
+                NULLIF(TRIM(COALESCE(json_extract(esd.context_json, '$.entry.rule'), '')), ''),
+                NULLIF(TRIM(COALESCE(json_extract(esd.context_json, '$.entry_reason'), '')), ''),
+                '<unknown_entry_rule>'
+            ) AS entry_rule_name
+        FROM trade_lifecycles tl
+        LEFT JOIN strategy_decisions esd ON esd.id = tl.entry_decision_id
+        LEFT JOIN strategy_decisions xsd ON xsd.id = tl.exit_decision_id
+    """
+
+    filters: list[str] = []
+    params: list[object] = []
+    if strategy_name:
+        filters.append("COALESCE(tl.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(tl.pair, '<unknown>') = ?")
+        params.append(str(pair))
+    if from_ts_ms is not None:
+        filters.append("tl.exit_ts >= ?")
+        params.append(int(from_ts_ms))
+    if to_ts_ms is not None:
+        filters.append("tl.exit_ts <= ?")
+        params.append(int(to_ts_ms))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    cte = f"WITH lifecycle_base AS ({lifecycle_base} {where_clause})"
+    post_filters: list[str] = []
+    if exit_rule_name:
+        post_filters.append("exit_rule_name = ?")
+        params.append(str(exit_rule_name))
+    post_where = f"WHERE {' AND '.join(post_filters)}" if post_filters else ""
+
+    def _map_rows(rows: list[sqlite3.Row]) -> list[LifecycleCloseStat]:
+        mapped: list[LifecycleCloseStat] = []
+        for row in rows:
+            trade_count = int(row["trade_count"] or 0)
+            win_count = int(row["win_count"] or 0)
+            mapped.append(
+                LifecycleCloseStat(
+                    entry_rule_name=str(row["entry_rule_name"]),
+                    exit_rule_name=str(row["exit_rule_name"]),
+                    exit_reason_bucket=str(row["exit_reason_bucket"]),
+                    trade_count=trade_count,
+                    win_rate=(win_count / trade_count) if trade_count > 0 else 0.0,
+                    realized_net_pnl=float(row["realized_net_pnl"] or 0.0),
+                    avg_hold_time_sec=(
+                        None if row["avg_hold_time_sec"] is None else float(row["avg_hold_time_sec"])
+                    ),
+                )
+            )
+        return mapped
+
+    by_exit_rule_rows = conn.execute(
+        f"""
+        {cte}
+        SELECT
+            '<all>' AS entry_rule_name,
+            exit_rule_name,
+            exit_reason_bucket,
+            COUNT(*) AS trade_count,
+            COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS win_count,
+            COALESCE(SUM(net_pnl), 0.0) AS realized_net_pnl,
+            AVG(holding_time_sec) AS avg_hold_time_sec
+        FROM lifecycle_base
+        {post_where}
+        GROUP BY exit_rule_name, exit_reason_bucket
+        ORDER BY trade_count DESC, realized_net_pnl DESC, exit_rule_name ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    by_entry_exit_rows = conn.execute(
+        f"""
+        {cte}
+        SELECT
+            entry_rule_name,
+            exit_rule_name,
+            exit_reason_bucket,
+            COUNT(*) AS trade_count,
+            COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS win_count,
+            COALESCE(SUM(net_pnl), 0.0) AS realized_net_pnl,
+            AVG(holding_time_sec) AS avg_hold_time_sec
+        FROM lifecycle_base
+        {post_where}
+        GROUP BY entry_rule_name, exit_rule_name, exit_reason_bucket
+        ORDER BY trade_count DESC, realized_net_pnl DESC, entry_rule_name ASC, exit_rule_name ASC
+        LIMIT ?
+        """,
+        (*params, max(1, int(entry_exit_combo_limit))),
+    ).fetchall()
+
+    by_exit_rule = _map_rows(by_exit_rule_rows)
+    by_entry_exit = _map_rows(by_entry_exit_rows)
+
+    notes: list[str] = []
+    threshold = max(1, int(min_sample_size))
+    low_sample_rows = [row for row in by_exit_rule if row.trade_count < threshold]
+    if low_sample_rows:
+        notes.append(
+            "low-sample exit buckets present (trade_count < "
+            f"{threshold}): "
+            + ", ".join(f"{row.exit_rule_name}/{row.exit_reason_bucket}" for row in low_sample_rows[:5])
+        )
+    return by_exit_rule, by_entry_exit, notes
+
+
 def cmd_strategy_report(
     *,
     strategy_name: str | None,
@@ -662,6 +809,14 @@ def cmd_strategy_report(
                 from_ts_ms=from_ts_ms,
                 to_ts_ms=to_ts_ms,
                 group_by=group_by,
+            )
+            close_by_exit_rule, close_by_entry_exit, close_notes = fetch_lifecycle_close_summary(
+                conn,
+                strategy_name=strategy_name,
+                exit_rule_name=exit_rule_name,
+                pair=pair,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
             )
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
@@ -710,7 +865,35 @@ def cmd_strategy_report(
             }
             for stat in stats
         ],
-        "notes": [] if stats else ["no trade_lifecycles rows matched the given filters"],
+        "lifecycle_close_summary": {
+            "low_sample_threshold": 3,
+            "by_exit_rule": [
+                {
+                    "entry_rule_name": row.entry_rule_name,
+                    "exit_rule_name": row.exit_rule_name,
+                    "exit_reason_bucket": row.exit_reason_bucket,
+                    "trade_count": row.trade_count,
+                    "win_rate": row.win_rate,
+                    "realized_net_pnl": row.realized_net_pnl,
+                    "avg_hold_time_sec": row.avg_hold_time_sec,
+                }
+                for row in close_by_exit_rule
+            ],
+            "entry_exit_combinations": [
+                {
+                    "entry_rule_name": row.entry_rule_name,
+                    "exit_rule_name": row.exit_rule_name,
+                    "exit_reason_bucket": row.exit_reason_bucket,
+                    "trade_count": row.trade_count,
+                    "win_rate": row.win_rate,
+                    "realized_net_pnl": row.realized_net_pnl,
+                    "avg_hold_time_sec": row.avg_hold_time_sec,
+                }
+                for row in close_by_entry_exit
+            ],
+            "notes": close_notes,
+        },
+        "notes": ([] if stats else ["no trade_lifecycles rows matched the given filters"]) + close_notes,
     }
     write_json_atomic(PATH_MANAGER.strategy_validation_report_path(), payload)
 
@@ -756,6 +939,33 @@ def cmd_strategy_report(
             f"{stat.entry_reason_linked_count},{stat.exit_reason_linked_count},"
             f"{entry_reason_sample},{exit_reason_sample}"
         )
+
+    print("  [lifecycle_close_summary: by_exit_rule]")
+    print("  exit_rule_name,exit_reason_bucket,trade_count,win_rate,realized_net_pnl,avg_hold_time_sec")
+    for row in close_by_exit_rule[:10]:
+        hold_avg = "-" if row.avg_hold_time_sec is None else f"{row.avg_hold_time_sec:.2f}"
+        print(
+            "  "
+            f"{row.exit_rule_name},{row.exit_reason_bucket},{row.trade_count},{row.win_rate:.4f},"
+            f"{row.realized_net_pnl:.2f},{hold_avg}"
+        )
+
+    if close_by_entry_exit:
+        print("  [lifecycle_close_summary: entry_rule x exit_rule]")
+        print(
+            "  "
+            "entry_rule_name,exit_rule_name,exit_reason_bucket,trade_count,win_rate,realized_net_pnl,avg_hold_time_sec"
+        )
+        for row in close_by_entry_exit[:10]:
+            hold_avg = "-" if row.avg_hold_time_sec is None else f"{row.avg_hold_time_sec:.2f}"
+            print(
+                "  "
+                f"{row.entry_rule_name},{row.exit_rule_name},{row.exit_reason_bucket},{row.trade_count},"
+                f"{row.win_rate:.4f},{row.realized_net_pnl:.2f},{hold_avg}"
+            )
+
+    for note in close_notes:
+        print(f"  note: {note}")
 
 
 def cmd_ops_report(*, limit: int = 20) -> None:
