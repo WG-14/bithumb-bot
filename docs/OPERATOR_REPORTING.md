@@ -175,12 +175,17 @@ MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite \
 - `longest_losing_streak`
 - `time-of-day bucket performance`
 - `market regime bucket performance` (`volatility`/`overextension` 버킷 조합)
+  - `trade_count_share`
+  - `realized_net_pnl_share`
+  - `absolute_pnl_concentration` (|pnl| 기준 레짐 집중도)
+  - `profitable_pnl_concentration` / `loss_pnl_concentration`
 
 ### 경고 규칙
 
 - 표본 부족: `insufficient sample`
 - 상위 거래 의존도 높음: `concentrated pnl`
 - 특정 레짐 편중: `regime skew`
+- 특정 레짐에 pnl 기여가 과도 집중: `regime pnl skew`
 
 ### 실행 예시
 
@@ -191,7 +196,8 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
   --sample-threshold 30 \
   --top-n 3 \
   --concentration-threshold 0.60 \
-  --regime-skew-threshold 0.70
+  --regime-skew-threshold 0.70 \
+  --regime-pnl-skew-threshold 0.70
 ```
 
 JSON 출력이 필요하면 `--json`을 사용합니다.

@@ -2470,6 +2470,7 @@ def main(argv: list[str] | None = None) -> int:
     experiment_report.add_argument("--top-n", type=int, default=3)
     experiment_report.add_argument("--concentration-threshold", type=float, default=0.6)
     experiment_report.add_argument("--regime-skew-threshold", type=float, default=0.7)
+    experiment_report.add_argument("--regime-pnl-skew-threshold", type=float, default=0.7)
     experiment_report.add_argument("--json", action="store_true")
 
     r = sub.add_parser("run")
@@ -2560,6 +2561,7 @@ def main(argv: list[str] | None = None) -> int:
             top_n=max(1, int(args.top_n)),
             concentration_warn_threshold=max(0.0, float(args.concentration_threshold)),
             regime_skew_warn_threshold=max(0.0, float(args.regime_skew_threshold)),
+            regime_pnl_skew_warn_threshold=max(0.0, float(args.regime_pnl_skew_threshold)),
             as_json=bool(args.json),
         )
     elif args.cmd == "report":

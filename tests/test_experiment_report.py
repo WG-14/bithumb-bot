@@ -76,6 +76,7 @@ def test_experiment_report_metrics_and_warnings(tmp_path, monkeypatch):
             top_n=1,
             concentration_warn_threshold=0.5,
             regime_skew_warn_threshold=0.7,
+            regime_pnl_skew_warn_threshold=0.65,
         )
     finally:
         conn.close()
@@ -90,7 +91,15 @@ def test_experiment_report_metrics_and_warnings(tmp_path, monkeypatch):
     assert any("insufficient sample" in warning for warning in summary.warnings)
     assert any("concentrated pnl" in warning for warning in summary.warnings)
     assert any("regime skew" in warning for warning in summary.warnings)
+    assert any("regime pnl skew" in warning for warning in summary.warnings)
     assert any(row.bucket.startswith("vol=high") for row in summary.regime_bucket_rows)
+    high_regime = next(row for row in summary.regime_bucket_rows if row.bucket.startswith("vol=high"))
+    assert high_regime.trade_count_share == 0.8
+    assert high_regime.realized_net_pnl_share == 170.0 / 175.0
+    assert high_regime.absolute_pnl_concentration == 430.0 / 435.0
+    assert high_regime.profitable_pnl_concentration == 300.0 / 305.0
+    assert high_regime.loss_pnl_concentration == 1.0
+    assert summary.regime_pnl_skew_ratio == 430.0 / 435.0
     assert len(summary.time_bucket_rows) >= 1
 
 
@@ -142,6 +151,7 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
         top_n=1,
         concentration_warn_threshold=0.5,
         regime_skew_warn_threshold=0.5,
+        regime_pnl_skew_warn_threshold=0.5,
         as_json=False,
     )
     out = capsys.readouterr().out
@@ -151,6 +161,7 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
     assert "[WARNINGS]" in out
     assert "insufficient sample" in out
     assert "concentrated pnl" in out
+    assert "regime_pnl_skew_ratio" in out
 
     report_path = PATH_MANAGER.report_path("experiment_report")
     assert report_path.exists()
@@ -159,6 +170,11 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
     assert payload["attribution_quality"]["unattributed_trade_count"] == 1
     assert payload["recovery_attribution_quality_signals"]["unresolved_attribution_count"] == 1
     assert payload["recovery_attribution_quality_signals"]["ambiguous_linkage_after_recent_reconcile"] is True
+    assert payload["experiment_expectancy_metrics"]["regime_pnl_skew_ratio"] == 100.0 / 101.0
+    assert (
+        max(row["absolute_pnl_concentration"] for row in payload["market_regime_bucket_performance"])
+        == 100.0 / 101.0
+    )
 
 
 def test_experiment_report_cli_subcommand(tmp_path, monkeypatch, capsys):

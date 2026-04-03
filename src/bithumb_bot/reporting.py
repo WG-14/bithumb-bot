@@ -124,8 +124,13 @@ class FilterEffectivenessSummary:
 class ExperimentBucketStat:
     bucket: str
     trade_count: int
+    trade_count_share: float
     win_rate: float
     realized_net_pnl: float
+    realized_net_pnl_share: float
+    absolute_pnl_concentration: float
+    profitable_pnl_concentration: float
+    loss_pnl_concentration: float
     expectancy_per_trade: float
 
 
@@ -142,6 +147,7 @@ class ExperimentReportSummary:
     sample_threshold: int
     sample_insufficient: bool
     regime_skew_ratio: float
+    regime_pnl_skew_ratio: float
     warnings: list[str]
     time_bucket_rows: list[ExperimentBucketStat]
     regime_bucket_rows: list[ExperimentBucketStat]
@@ -1611,18 +1617,34 @@ def _longest_losing_streak(net_pnls: list[float]) -> int:
     return best
 
 
-def _build_bucket_rows(stats: dict[str, dict[str, float]]) -> list[ExperimentBucketStat]:
+def _build_bucket_rows(
+    stats: dict[str, dict[str, float]],
+    *,
+    total_trade_count: int,
+    total_realized_net_pnl: float,
+    total_abs_pnl: float,
+    total_profit_pnl: float,
+    total_loss_pnl_abs: float,
+) -> list[ExperimentBucketStat]:
     rows: list[ExperimentBucketStat] = []
     for bucket, agg in stats.items():
         count = int(agg.get("trade_count", 0))
         wins = int(agg.get("wins", 0))
         net = float(agg.get("realized_net_pnl", 0.0))
+        abs_pnl = float(agg.get("absolute_pnl", 0.0))
+        profit_pnl = float(agg.get("profit_pnl", 0.0))
+        loss_pnl_abs = float(agg.get("loss_pnl_abs", 0.0))
         rows.append(
             ExperimentBucketStat(
                 bucket=bucket,
                 trade_count=count,
+                trade_count_share=(count / total_trade_count) if total_trade_count > 0 else 0.0,
                 win_rate=(wins / count) if count > 0 else 0.0,
                 realized_net_pnl=net,
+                realized_net_pnl_share=(net / total_realized_net_pnl) if total_realized_net_pnl != 0.0 else 0.0,
+                absolute_pnl_concentration=(abs_pnl / total_abs_pnl) if total_abs_pnl > 0.0 else 0.0,
+                profitable_pnl_concentration=(profit_pnl / total_profit_pnl) if total_profit_pnl > 0.0 else 0.0,
+                loss_pnl_concentration=(loss_pnl_abs / total_loss_pnl_abs) if total_loss_pnl_abs > 0.0 else 0.0,
                 expectancy_per_trade=(net / count) if count > 0 else 0.0,
             )
         )
@@ -1650,6 +1672,7 @@ def fetch_experiment_report_summary(
     sample_threshold: int = 30,
     concentration_warn_threshold: float = 0.6,
     regime_skew_warn_threshold: float = 0.7,
+    regime_pnl_skew_warn_threshold: float = 0.7,
 ) -> ExperimentReportSummary:
     filters: list[str] = []
     params: list[object] = []
@@ -1714,17 +1737,46 @@ def fetch_experiment_report_summary(
         for bucket, target in ((time_bucket, time_stats), (regime_bucket, regime_stats)):
             agg = target.setdefault(
                 bucket,
-                {"trade_count": 0.0, "wins": 0.0, "realized_net_pnl": 0.0},
+                {
+                    "trade_count": 0.0,
+                    "wins": 0.0,
+                    "realized_net_pnl": 0.0,
+                    "absolute_pnl": 0.0,
+                    "profit_pnl": 0.0,
+                    "loss_pnl_abs": 0.0,
+                },
             )
             agg["trade_count"] += 1.0
             if pnl > 0.0:
                 agg["wins"] += 1.0
             agg["realized_net_pnl"] += pnl
+            agg["absolute_pnl"] += abs(pnl)
+            if pnl > 0.0:
+                agg["profit_pnl"] += pnl
+            elif pnl < 0.0:
+                agg["loss_pnl_abs"] += abs(pnl)
 
-    time_bucket_rows = _build_bucket_rows(time_stats)
-    regime_bucket_rows = _build_bucket_rows(regime_stats)
+    total_profit_pnl = float(sum(pnl for pnl in net_pnls if pnl > 0.0))
+    total_loss_pnl_abs = float(sum(abs(pnl) for pnl in net_pnls if pnl < 0.0))
+    time_bucket_rows = _build_bucket_rows(
+        time_stats,
+        total_trade_count=trade_count,
+        total_realized_net_pnl=realized_net_pnl,
+        total_abs_pnl=abs_total,
+        total_profit_pnl=total_profit_pnl,
+        total_loss_pnl_abs=total_loss_pnl_abs,
+    )
+    regime_bucket_rows = _build_bucket_rows(
+        regime_stats,
+        total_trade_count=trade_count,
+        total_realized_net_pnl=realized_net_pnl,
+        total_abs_pnl=abs_total,
+        total_profit_pnl=total_profit_pnl,
+        total_loss_pnl_abs=total_loss_pnl_abs,
+    )
     regime_top_count = max((row.trade_count for row in regime_bucket_rows), default=0)
     regime_skew_ratio = (regime_top_count / trade_count) if trade_count > 0 else 0.0
+    regime_pnl_skew_ratio = max((row.absolute_pnl_concentration for row in regime_bucket_rows), default=0.0)
 
     warnings: list[str] = []
     if trade_count < max(1, int(sample_threshold)):
@@ -1742,6 +1794,11 @@ def fetch_experiment_report_summary(
             f"regime skew: dominant_regime_trade_share={regime_skew_ratio:.2%} "
             f"(threshold={float(regime_skew_warn_threshold):.0%})."
         )
+    if regime_pnl_skew_ratio >= float(regime_pnl_skew_warn_threshold):
+        warnings.append(
+            f"regime pnl skew: dominant_regime_abs_pnl_share={regime_pnl_skew_ratio:.2%} "
+            f"(threshold={float(regime_pnl_skew_warn_threshold):.0%})."
+        )
 
     return ExperimentReportSummary(
         realized_net_pnl=realized_net_pnl,
@@ -1755,6 +1812,7 @@ def fetch_experiment_report_summary(
         sample_threshold=max(1, int(sample_threshold)),
         sample_insufficient=trade_count < max(1, int(sample_threshold)),
         regime_skew_ratio=regime_skew_ratio,
+        regime_pnl_skew_ratio=regime_pnl_skew_ratio,
         warnings=warnings,
         time_bucket_rows=time_bucket_rows,
         regime_bucket_rows=regime_bucket_rows,
@@ -1771,6 +1829,7 @@ def cmd_experiment_report(
     sample_threshold: int = 30,
     concentration_warn_threshold: float = 0.6,
     regime_skew_warn_threshold: float = 0.7,
+    regime_pnl_skew_warn_threshold: float = 0.7,
     as_json: bool = False,
 ) -> None:
     conn = ensure_db()
@@ -1785,6 +1844,7 @@ def cmd_experiment_report(
             sample_threshold=sample_threshold,
             concentration_warn_threshold=concentration_warn_threshold,
             regime_skew_warn_threshold=regime_skew_warn_threshold,
+            regime_pnl_skew_warn_threshold=regime_pnl_skew_warn_threshold,
         )
         attribution_quality = fetch_attribution_quality_summary(
             conn,
@@ -1826,13 +1886,19 @@ def cmd_experiment_report(
             "longest_losing_streak": summary.longest_losing_streak,
             "sample_insufficient": summary.sample_insufficient,
             "regime_skew_ratio": summary.regime_skew_ratio,
+            "regime_pnl_skew_ratio": summary.regime_pnl_skew_ratio,
         },
         "time_of_day_bucket_performance": [
             {
                 "bucket": row.bucket,
                 "trade_count": row.trade_count,
+                "trade_count_share": row.trade_count_share,
                 "win_rate": row.win_rate,
                 "realized_net_pnl": row.realized_net_pnl,
+                "realized_net_pnl_share": row.realized_net_pnl_share,
+                "absolute_pnl_concentration": row.absolute_pnl_concentration,
+                "profitable_pnl_concentration": row.profitable_pnl_concentration,
+                "loss_pnl_concentration": row.loss_pnl_concentration,
                 "expectancy_per_trade": row.expectancy_per_trade,
             }
             for row in summary.time_bucket_rows
@@ -1841,8 +1907,13 @@ def cmd_experiment_report(
             {
                 "bucket": row.bucket,
                 "trade_count": row.trade_count,
+                "trade_count_share": row.trade_count_share,
                 "win_rate": row.win_rate,
                 "realized_net_pnl": row.realized_net_pnl,
+                "realized_net_pnl_share": row.realized_net_pnl_share,
+                "absolute_pnl_concentration": row.absolute_pnl_concentration,
+                "profitable_pnl_concentration": row.profitable_pnl_concentration,
+                "loss_pnl_concentration": row.loss_pnl_concentration,
                 "expectancy_per_trade": row.expectancy_per_trade,
             }
             for row in summary.regime_bucket_rows
@@ -1893,20 +1964,31 @@ def cmd_experiment_report(
     print(f"  expectancy_per_trade={summary.expectancy_per_trade:,.2f}")
     print(f"  max_drawdown_proxy={summary.max_drawdown:,.2f}")
     print(f"  top{summary.top_n}_concentration={summary.top_n_concentration:.2%}")
+    print(f"  regime_pnl_skew_ratio={summary.regime_pnl_skew_ratio:.2%}")
     print(f"  longest_losing_streak={summary.longest_losing_streak}")
     print("[TIME-OF-DAY-BUCKETS]")
-    print("  bucket,trade_count,win_rate,realized_net_pnl,expectancy_per_trade")
+    print(
+        "  bucket,trade_count,trade_count_share,win_rate,realized_net_pnl,realized_net_pnl_share,"
+        "absolute_pnl_concentration,profitable_pnl_concentration,loss_pnl_concentration,expectancy_per_trade"
+    )
     for row in summary.time_bucket_rows:
         print(
             "  "
-            f"{row.bucket},{row.trade_count},{row.win_rate:.4f},{row.realized_net_pnl:.2f},{row.expectancy_per_trade:.2f}"
+            f"{row.bucket},{row.trade_count},{row.trade_count_share:.4f},{row.win_rate:.4f},"
+            f"{row.realized_net_pnl:.2f},{row.realized_net_pnl_share:.4f},{row.absolute_pnl_concentration:.4f},"
+            f"{row.profitable_pnl_concentration:.4f},{row.loss_pnl_concentration:.4f},{row.expectancy_per_trade:.2f}"
         )
     print("[MARKET-REGIME-BUCKETS]")
-    print("  bucket,trade_count,win_rate,realized_net_pnl,expectancy_per_trade")
+    print(
+        "  bucket,trade_count,trade_count_share,win_rate,realized_net_pnl,realized_net_pnl_share,"
+        "absolute_pnl_concentration,profitable_pnl_concentration,loss_pnl_concentration,expectancy_per_trade"
+    )
     for row in summary.regime_bucket_rows:
         print(
             "  "
-            f"{row.bucket},{row.trade_count},{row.win_rate:.4f},{row.realized_net_pnl:.2f},{row.expectancy_per_trade:.2f}"
+            f"{row.bucket},{row.trade_count},{row.trade_count_share:.4f},{row.win_rate:.4f},"
+            f"{row.realized_net_pnl:.2f},{row.realized_net_pnl_share:.4f},{row.absolute_pnl_concentration:.4f},"
+            f"{row.profitable_pnl_concentration:.4f},{row.loss_pnl_concentration:.4f},{row.expectancy_per_trade:.2f}"
         )
     print("[ATTRIBUTION-QUALITY]")
     print(
