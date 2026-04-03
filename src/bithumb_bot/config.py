@@ -819,7 +819,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         resolved = get_effective_order_rules(cfg.PAIR)
         resolved_rules = resolved.rules
         issues.extend(required_rule_issues(resolved_rules))
-        rule_source_issues = required_rule_source_issues(resolved.source)
+        rule_source_issues = required_rule_source_issues(
+            resolved.source,
+            require_price_unit_sources=not cfg.LIVE_DRY_RUN,
+        )
         if rule_source_issues:
             if cfg.LIVE_DRY_RUN:
                 LOG.warning(

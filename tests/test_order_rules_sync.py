@@ -108,6 +108,24 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
     assert parsed.maker_ask_fee == 0.0025
 
 
+def test_parse_order_chance_response_allows_missing_price_unit(valid_doc_shaped_response):
+    payload = valid_doc_shaped_response.copy()
+    market = dict(payload["market"])
+    market["bid"] = {"min_total": "5000"}
+    market["ask"] = {"min_total": "5000"}
+    payload["market"] = market
+
+    parsed = order_rules.parse_order_chance_response(payload, requested_market="KRW-BTC")
+
+    assert parsed.bid.price_unit is None
+    assert parsed.ask.price_unit is None
+    derived = order_rules.derive_order_rules_from_chance(parsed)
+    assert derived.bid_price_unit == 0.0
+    assert derived.ask_price_unit == 0.0
+    assert derived.bid_min_total_krw == 5000.0
+    assert derived.ask_min_total_krw == 5000.0
+
+
 def test_parse_order_chance_response_rejects_noncanonical_requested_market(valid_doc_shaped_response):
     with pytest.raises(ValueError, match="canonical QUOTE-BASE"):
         order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="BTC_KRW")
@@ -263,6 +281,41 @@ def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monk
     assert resolved.source["maker_bid_fee"] == "chance_doc"
     assert resolved.source["maker_ask_fee"] == "chance_doc"
     assert resolved.source["ruleset"] == "merged"
+
+
+def test_get_effective_order_rules_marks_price_unit_source_missing_when_absent(monkeypatch):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+
+    payload = _doc_order_chance_payload()
+    payload["market"]["bid"] = {"min_total": "5000"}
+    payload["market"]["ask"] = {"min_total": "5000"}
+    monkeypatch.setattr(
+        order_rules,
+        "BithumbBroker",
+        lambda: type("_StubBroker", (), {"get_order_chance": lambda _self, market: payload | {"market": payload["market"] | {"id": market}}})(),
+    )
+
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved.rules.bid_min_total_krw == 5000.0
+    assert resolved.rules.ask_min_total_krw == 5000.0
+    assert resolved.rules.bid_price_unit == 0.0
+    assert resolved.rules.ask_price_unit == 0.0
+    assert resolved.source["bid_min_total_krw"] == "chance_doc"
+    assert resolved.source["ask_min_total_krw"] == "chance_doc"
+    assert resolved.source["order_types"] == "chance_doc"
+    assert resolved.source["order_sides"] == "chance_doc"
+    assert resolved.source["bid_fee"] == "chance_doc"
+    assert resolved.source["ask_fee"] == "chance_doc"
+    assert resolved.source["maker_bid_fee"] == "chance_doc"
+    assert resolved.source["maker_ask_fee"] == "chance_doc"
+    assert resolved.source["bid_price_unit"] == "missing"
+    assert resolved.source["ask_price_unit"] == "missing"
 
 
 def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fails(monkeypatch):

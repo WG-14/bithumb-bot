@@ -25,7 +25,7 @@ KNOWN_RULE_SOURCES = frozenset(
 
 @dataclass(frozen=True)
 class OrderChanceSide:
-    price_unit: float
+    price_unit: float | None
     min_total: float
 
 
@@ -160,14 +160,16 @@ def rule_source_for(field: str, source: dict[str, str] | None) -> str:
     return normalized if normalized in KNOWN_RULE_SOURCES else "missing"
 
 
-def required_rule_source_issues(source: dict[str, str] | None) -> list[str]:
+def required_rule_source_issues(
+    source: dict[str, str] | None, *, require_price_unit_sources: bool = True
+) -> list[str]:
     issues: list[str] = []
-    doc_required_fields = (
+    doc_required_fields: tuple[str, ...] = (
         "bid_min_total_krw",
         "ask_min_total_krw",
-        "bid_price_unit",
-        "ask_price_unit",
     )
+    if require_price_unit_sources:
+        doc_required_fields += ("bid_price_unit", "ask_price_unit")
     for field in doc_required_fields:
         field_source = rule_source_for(field, source)
         if field_source != "chance_doc":
@@ -229,6 +231,12 @@ def _require_positive_number(payload: dict[str, Any], key: str, *, where: str) -
     return value
 
 
+def _optional_positive_number(payload: dict[str, Any], key: str, *, where: str) -> float | None:
+    if key not in payload or payload.get(key) is None:
+        return None
+    return _require_positive_number(payload, key, where=where)
+
+
 def parse_order_chance_response(payload: dict[str, Any], *, requested_market: str) -> OrderChanceResponse:
     fee_values = {
         fee_field: _require_positive_number(payload, fee_field, where="response")
@@ -255,11 +263,11 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
         order_types=tuple(str(item) for item in _require_non_empty_list(market, "order_types", where="response.market")),
         order_sides=tuple(str(item) for item in _require_non_empty_list(market, "order_sides", where="response.market")),
         bid=OrderChanceSide(
-            price_unit=_require_positive_number(bid, "price_unit", where="response.market.bid"),
+            price_unit=_optional_positive_number(bid, "price_unit", where="response.market.bid"),
             min_total=_require_positive_number(bid, "min_total", where="response.market.bid"),
         ),
         ask=OrderChanceSide(
-            price_unit=_require_positive_number(ask, "price_unit", where="response.market.ask"),
+            price_unit=_optional_positive_number(ask, "price_unit", where="response.market.ask"),
             min_total=_require_positive_number(ask, "min_total", where="response.market.ask"),
         ),
         bid_fee=fee_values["bid_fee"],
@@ -274,8 +282,8 @@ def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDer
         market_id=response.market_id,
         bid_min_total_krw=response.bid.min_total,
         ask_min_total_krw=response.ask.min_total,
-        bid_price_unit=response.bid.price_unit,
-        ask_price_unit=response.ask.price_unit,
+        bid_price_unit=float(response.bid.price_unit or 0.0),
+        ask_price_unit=float(response.ask.price_unit or 0.0),
         order_types=response.order_types,
         order_sides=response.order_sides,
         bid_fee=response.bid_fee,
@@ -358,8 +366,8 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         "market_id": "chance_doc",
         "bid_min_total_krw": "chance_doc",
         "ask_min_total_krw": "chance_doc",
-        "bid_price_unit": "chance_doc",
-        "ask_price_unit": "chance_doc",
+        "bid_price_unit": "chance_doc" if exchange.bid_price_unit > 0 else "missing",
+        "ask_price_unit": "chance_doc" if exchange.ask_price_unit > 0 else "missing",
         "order_types": "chance_doc",
         "order_sides": "chance_doc",
         "bid_fee": "chance_doc",
