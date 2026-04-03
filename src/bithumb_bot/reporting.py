@@ -160,6 +160,112 @@ class AttributionQualitySummary:
     warnings: list[str]
 
 
+@dataclass
+class RecoveryAttributionSignalSummary:
+    recent_recovery_derived_trade_count: int
+    unresolved_attribution_count: int
+    ambiguous_linkage_after_recent_reconcile: bool | None
+    last_reconcile_epoch_sec: float | None
+
+
+def fetch_recovery_attribution_signal_summary(
+    conn: sqlite3.Connection,
+    *,
+    strategy_name: str | None = None,
+    pair: str | None = None,
+    last_reconcile_epoch_sec: float | None = None,
+) -> RecoveryAttributionSignalSummary:
+    if last_reconcile_epoch_sec is None:
+        row = conn.execute(
+            "SELECT last_reconcile_epoch_sec FROM bot_health WHERE id=1"
+        ).fetchone()
+        if row is not None and row["last_reconcile_epoch_sec"] is not None:
+            last_reconcile_epoch_sec = float(row["last_reconcile_epoch_sec"])
+
+    filters: list[str] = []
+    params: list[object] = []
+    if strategy_name:
+        filters.append("COALESCE(tl.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(tl.pair, '<unknown>') = ?")
+        params.append(str(pair))
+
+    unresolved_where = ""
+    if filters:
+        unresolved_where = f"WHERE {' AND '.join(filters)}"
+
+    unresolved_row = conn.execute(
+        f"""
+        SELECT
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN tl.entry_decision_id IS NULL
+                             OR COALESCE(tl.entry_decision_linkage, '') = 'ambiguous_multi_candidate'
+                             OR COALESCE(tl.entry_decision_linkage, '') LIKE 'degraded_recovery_%'
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS unresolved_attribution_count
+        FROM trade_lifecycles tl
+        {unresolved_where}
+        """,
+        tuple(params),
+    ).fetchone()
+    unresolved_attribution_count = int(unresolved_row["unresolved_attribution_count"] or 0) if unresolved_row else 0
+
+    recent_recovery_derived_trade_count = 0
+    ambiguous_after_recent_reconcile: bool | None = None
+    if last_reconcile_epoch_sec is not None:
+        recent_cutoff_ts_ms = int(float(last_reconcile_epoch_sec) * 1000)
+        recent_filters = list(filters)
+        recent_params = [*params, recent_cutoff_ts_ms]
+        recent_filters.append("tl.exit_ts >= ?")
+        recent_where = f"WHERE {' AND '.join(recent_filters)}"
+        recent_row = conn.execute(
+            f"""
+            SELECT
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(tl.entry_decision_linkage, '') LIKE 'degraded_recovery_%'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS recent_recovery_derived_trade_count,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(tl.entry_decision_linkage, '') = 'ambiguous_multi_candidate'
+                            THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS recent_ambiguous_linkage_count
+            FROM trade_lifecycles tl
+            {recent_where}
+            """,
+            tuple(recent_params),
+        ).fetchone()
+        recent_recovery_derived_trade_count = (
+            int(recent_row["recent_recovery_derived_trade_count"] or 0) if recent_row else 0
+        )
+        ambiguous_after_recent_reconcile = bool(int(recent_row["recent_ambiguous_linkage_count"] or 0)) if recent_row else False
+
+    return RecoveryAttributionSignalSummary(
+        recent_recovery_derived_trade_count=recent_recovery_derived_trade_count,
+        unresolved_attribution_count=unresolved_attribution_count,
+        ambiguous_linkage_after_recent_reconcile=ambiguous_after_recent_reconcile,
+        last_reconcile_epoch_sec=last_reconcile_epoch_sec,
+    )
+
+
 def fetch_attribution_quality_summary(
     conn: sqlite3.Connection,
     *,
@@ -1687,6 +1793,11 @@ def cmd_experiment_report(
             from_ts_ms=from_ts_ms,
             to_ts_ms=to_ts_ms,
         )
+        recovery_attribution_signals = fetch_recovery_attribution_signal_summary(
+            conn,
+            strategy_name=strategy_name,
+            pair=pair,
+        )
     finally:
         conn.close()
 
@@ -1746,6 +1857,16 @@ def cmd_experiment_report(
             "recovery_derived_attribution_ratio": attribution_quality.recovery_derived_attribution_ratio,
             "reason_buckets": attribution_quality.reason_buckets,
         },
+        "recovery_attribution_quality_signals": {
+            "recent_recovery_derived_trade_count": (
+                recovery_attribution_signals.recent_recovery_derived_trade_count
+            ),
+            "unresolved_attribution_count": recovery_attribution_signals.unresolved_attribution_count,
+            "ambiguous_linkage_after_recent_reconcile": (
+                recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile
+            ),
+            "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
+        },
         "warnings": report_warnings,
     }
     write_json_atomic(PATH_MANAGER.report_path("experiment_report"), payload)
@@ -1803,6 +1924,13 @@ def cmd_experiment_report(
         f"legacy_incomplete_row:{attribution_quality.reason_buckets.get('legacy_incomplete_row', 0)},"
         f"recovery_unresolved_linkage:{attribution_quality.reason_buckets.get('recovery_unresolved_linkage', 0)}"
     )
+    print(
+        "  "
+        f"unresolved_attribution_count={recovery_attribution_signals.unresolved_attribution_count} "
+        f"recent_recovery_derived_trade_count={recovery_attribution_signals.recent_recovery_derived_trade_count} "
+        "ambiguous_linkage_after_recent_reconcile="
+        f"{recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile}"
+    )
     if report_warnings:
         print("[WARNINGS]")
         for warning in report_warnings:
@@ -1822,6 +1950,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             roundtrip_limit=max(1, int(limit)),
             estimated_fee_rate=float(settings.FEE_RATE),
         )
+        recovery_attribution_signals = fetch_recovery_attribution_signal_summary(conn)
     finally:
         conn.close()
 
@@ -1900,6 +2029,16 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "pnl_before_fee_total": fee_summary.pnl_before_fee_total,
             "pnl_after_fee_total": fee_summary.pnl_after_fee_total,
         },
+        "recovery_attribution_quality_signals": {
+            "recent_recovery_derived_trade_count": (
+                recovery_attribution_signals.recent_recovery_derived_trade_count
+            ),
+            "unresolved_attribution_count": recovery_attribution_signals.unresolved_attribution_count,
+            "ambiguous_linkage_after_recent_reconcile": (
+                recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile
+            ),
+            "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
+        },
     }
     balance_source_diag: dict[str, object] = {
         "source": "unavailable",
@@ -1935,6 +2074,13 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"reason={balance_source_diag.get('reason') or '-'} "
         f"category={balance_source_diag.get('failure_category') or '-'} "
         f"stale={balance_source_diag.get('stale')}"
+    )
+    print(
+        "  "
+        f"unresolved_attribution_count={recovery_attribution_signals.unresolved_attribution_count} "
+        f"recent_recovery_derived_trade_count={recovery_attribution_signals.recent_recovery_derived_trade_count} "
+        "ambiguous_linkage_after_recent_reconcile="
+        f"{recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile}"
     )
     print("\n[ORDER-RULE-SNAPSHOT]")
     if "error" in order_rule_snapshot:

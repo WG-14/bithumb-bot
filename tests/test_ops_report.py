@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 
+from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
 from bithumb_bot.db_core import ensure_db, init_portfolio
+from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.reporting import cmd_ops_report
 
 
@@ -59,6 +62,12 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     conn = ensure_db()
     try:
         init_portfolio(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={"remote_open_order_found": 0},
+            now_epoch_sec=1000.0,
+        )
         conn.execute(
             """
             INSERT INTO order_intent_dedup(
@@ -110,6 +119,34 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
             """,
             (5, "BTC_KRW", "1m", "BUY", 100000000.0, 0.001, 50.0, 900000.0, 0.001, "paper fill"),
         )
+        conn.execute(
+            """
+            INSERT INTO trade_lifecycles(
+                pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+                entry_ts, exit_ts, matched_qty, entry_price, exit_price, gross_pnl, fee_total, net_pnl,
+                holding_time_sec, strategy_name, entry_decision_id, entry_decision_linkage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "KRW-BTC",
+                1,
+                2,
+                "coid-1",
+                "coid-2",
+                900_000,
+                1_001_000,
+                0.001,
+                100000000.0,
+                100100000.0,
+                100.0,
+                50.0,
+                50.0,
+                60.0,
+                "strategy_ops",
+                None,
+                "degraded_recovery_submit_unknown",
+            ),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -127,6 +164,12 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
     assert "balance_source=accounts_v1_rest_snapshot" in out
     assert "category=none stale=False" in out
+    assert "unresolved_attribution_count=1 recent_recovery_derived_trade_count=1" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    assert payload["recovery_attribution_quality_signals"]["unresolved_attribution_count"] == 1
+    assert payload["recovery_attribution_quality_signals"]["recent_recovery_derived_trade_count"] == 1
+    assert payload["recovery_attribution_quality_signals"]["ambiguous_linkage_after_recent_reconcile"] is False
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from bithumb_bot import runtime_state
 from bithumb_bot.config import PATH_MANAGER, settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.app import main as app_main
@@ -100,8 +101,34 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
 
     conn = ensure_db()
     try:
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={"remote_open_order_found": 0},
+            now_epoch_sec=1000.0,
+        )
         _insert_decision_with_context(conn, decision_id=10, candle_ts=1_710_000_000_000, volatility_ratio=0.010)
         _insert_lifecycle(conn, lifecycle_id=10, entry_decision_id=10, exit_ts=1_710_000_060_000, net_pnl=100.0)
+        conn.execute(
+            """
+            INSERT INTO trade_lifecycles(
+                id, pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+                entry_fill_id, exit_fill_id, entry_ts, exit_ts, matched_qty, entry_price, exit_price,
+                gross_pnl, fee_total, net_pnl, holding_time_sec, strategy_name, entry_decision_id, entry_decision_linkage
+            ) VALUES (?, 'BTC_KRW', ?, ?, ?, ?, NULL, NULL, ?, ?, 1.0, 100.0, 101.0, 1.0, 0.0, 1.0, 60.0, 'strategy_exp', ?, ?)
+            """,
+            (
+                11,
+                11,
+                11,
+                "entry-11",
+                "exit-11",
+                1_000_900,
+                1_001_100,
+                None,
+                "ambiguous_multi_candidate",
+            ),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -120,6 +147,7 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
     out = capsys.readouterr().out
     assert "[EXPERIMENT-REPORT]" in out
     assert "[ATTRIBUTION-QUALITY]" in out
+    assert "unresolved_attribution_count=1" in out
     assert "[WARNINGS]" in out
     assert "insufficient sample" in out
     assert "concentrated pnl" in out
@@ -127,8 +155,10 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
     report_path = PATH_MANAGER.report_path("experiment_report")
     assert report_path.exists()
     payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["attribution_quality"]["total_trade_count"] == 1
-    assert payload["attribution_quality"]["unattributed_trade_count"] == 0
+    assert payload["attribution_quality"]["total_trade_count"] == 2
+    assert payload["attribution_quality"]["unattributed_trade_count"] == 1
+    assert payload["recovery_attribution_quality_signals"]["unresolved_attribution_count"] == 1
+    assert payload["recovery_attribution_quality_signals"]["ambiguous_linkage_after_recent_reconcile"] is True
 
 
 def test_experiment_report_cli_subcommand(tmp_path, monkeypatch, capsys):

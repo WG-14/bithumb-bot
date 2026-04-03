@@ -43,6 +43,7 @@ from .reporting import (
     cmd_ops_report,
     cmd_strategy_report,
     fetch_attribution_quality_summary,
+    fetch_recovery_attribution_signal_summary,
     parse_kst_date_range_to_ts_ms,
 )
 from .storage_io import write_json_atomic
@@ -405,12 +406,21 @@ def cmd_health() -> None:
     health = get_health_status()
     submit_unknown_count = 0
     attribution_quality = None
+    recovery_attribution_signals = None
     conn = ensure_db()
     try:
         row = conn.execute(
             "SELECT COUNT(*) AS submit_unknown_count FROM orders WHERE status='SUBMIT_UNKNOWN'"
         ).fetchone()
         attribution_quality = fetch_attribution_quality_summary(conn)
+        recovery_attribution_signals = fetch_recovery_attribution_signal_summary(
+            conn,
+            last_reconcile_epoch_sec=(
+                float(health["last_reconcile_epoch_sec"])
+                if health.get("last_reconcile_epoch_sec") is not None
+                else None
+            ),
+        )
     finally:
         conn.close()
     if row is not None:
@@ -590,6 +600,14 @@ def cmd_health() -> None:
             f"legacy_incomplete_row:{attribution_quality.reason_buckets.get('legacy_incomplete_row', 0)},"
             f"recovery_unresolved_linkage:{attribution_quality.reason_buckets.get('recovery_unresolved_linkage', 0)}"
         )
+        if recovery_attribution_signals is not None:
+            print(
+                "    "
+                f"unresolved_attribution_count={recovery_attribution_signals.unresolved_attribution_count} "
+                f"recent_recovery_derived_trade_count={recovery_attribution_signals.recent_recovery_derived_trade_count} "
+                "ambiguous_linkage_after_recent_reconcile="
+                f"{recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile}"
+            )
     if has_critical_state:
         print("  [CRITICAL-OPERATOR-SUMMARY]")
         print(
