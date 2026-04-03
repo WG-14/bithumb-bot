@@ -76,6 +76,30 @@ def resolve_db_path(path: str) -> str:
     )
 
 
+def _validate_live_db_path_policy(resolved_db_path: str) -> None:
+    db_path = Path(resolved_db_path).resolve()
+    if PathManager._contains_segment(db_path, "paper"):
+        raise LiveModeValidationError("DB_PATH must not point to a paper-scoped path when MODE=live")
+    if PathManager._is_within(db_path, PROJECT_ROOT.resolve()):
+        raise LiveModeValidationError("DB_PATH must be outside repository when MODE=live")
+
+
+def resolve_db_path_for_mode(path: str, *, mode: str) -> str:
+    resolved = resolve_db_path(path)
+    normalized_mode = str(mode or "").strip().lower() or "paper"
+    if normalized_mode == "live":
+        _validate_live_db_path_policy(resolved)
+    return resolved
+
+
+def resolve_db_path_for_connection(path: str, *, mode: str | None = None) -> str:
+    normalized_mode = str(mode or os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
+    resolved = resolve_db_path_for_mode(path, mode=normalized_mode)
+    if resolved != ":memory:":
+        Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
 class LiveModeValidationError(ValueError):
     pass
 
@@ -177,8 +201,8 @@ def resolve_db_path_from_env(mode: str) -> str:
     if normalized_mode == "live" and (raw_db_path is None or not raw_db_path.strip()):
         raise LiveModeValidationError(LIVE_DB_PATH_REQUIRED_MSG)
     if raw_db_path and raw_db_path.strip():
-        return resolve_db_path(raw_db_path)
-    return str(PATH_MANAGER.primary_db_path())
+        return resolve_db_path_for_mode(raw_db_path, mode=normalized_mode)
+    return resolve_db_path_for_mode(str(PATH_MANAGER.primary_db_path()), mode=normalized_mode)
 
 
 def resolve_strategy_name_from_env() -> str:
@@ -648,14 +672,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
     if db_path_env is None or not db_path_env.strip():
         issues.append(LIVE_DB_PATH_REQUIRED_MSG)
     else:
-        configured_db_path = resolve_db_path(cfg.DB_PATH)
-        if "/paper/" in configured_db_path.replace("\\", "/"):
-            issues.append("DB_PATH must not point to a paper-scoped path when MODE=live")
         try:
-            Path(configured_db_path).resolve().relative_to(PROJECT_ROOT.resolve())
-            issues.append("DB_PATH must be outside repository when MODE=live")
-        except ValueError:
-            pass
+            resolve_db_path_for_mode(cfg.DB_PATH, mode="live")
+        except ValueError as exc:
+            issues.append(str(exc))
 
     lock_path: str | None = None
     try:

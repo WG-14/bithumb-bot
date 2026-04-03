@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from bithumb_bot import config
 import pytest
@@ -32,6 +33,28 @@ def test_connect_rejects_relative_paths() -> None:
         connect("data/test.sqlite")
 
 
+def test_connect_does_not_create_parent_directory_directly(tmp_path: Path) -> None:
+    db_path = (tmp_path / "managed" / "centralized.sqlite").resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        patch("bithumb_bot.db.resolve_db_path_for_connection", return_value=str(db_path)),
+        patch("pathlib.Path.mkdir", side_effect=AssertionError("db connect layer must not mkdir")),
+    ):
+        conn = connect(str(db_path))
+    conn.close()
+
+
+def test_ensure_db_does_not_create_parent_directory_directly(tmp_path: Path) -> None:
+    db_path = (tmp_path / "managed" / "centralized.sqlite").resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with (
+        patch("bithumb_bot.db_core.resolve_db_path_for_connection", return_value=str(db_path)),
+        patch("pathlib.Path.mkdir", side_effect=AssertionError("db open layer must not mkdir")),
+    ):
+        conn = ensure_db(str(db_path))
+    conn.close()
+
+
 def test_settings_db_path_accepts_absolute_path(tmp_path):
     old_db_path = config.settings.DB_PATH
     db_path = (tmp_path / "managed" / "test.sqlite").resolve()
@@ -44,6 +67,13 @@ def test_settings_db_path_accepts_absolute_path(tmp_path):
         object.__setattr__(config.settings, "DB_PATH", old_db_path)
 
     assert db_path.exists()
+
+
+def test_live_db_path_rejects_paper_scoped_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODE", "live")
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.resolve_db_path_for_mode(str((tmp_path / "runtime" / "paper" / "live.sqlite").resolve()), mode="live")
+    assert "paper-scoped path" in str(exc.value)
 
 
 def test_relative_run_lock_path_is_project_root_based(tmp_path, monkeypatch):
