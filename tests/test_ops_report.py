@@ -163,7 +163,7 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "[ORDER-RULE-SNAPSHOT]" in out
     assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
     assert "balance_source=accounts_v1_rest_snapshot" in out
-    assert "category=none stale=False" in out
+    assert "category=none stale=False execution_mode=- quote_currency=- base_currency=-" in out
     assert "unresolved_attribution_count=1 recent_recovery_derived_trade_count=1" in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
@@ -208,4 +208,4 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     assert "no strategy_context rows" in out
     assert "failed_to_load=RuntimeError: rules unavailable" in out
     assert "balance_source=myasset_ws_private_stream" in out
-    assert "category=stale_source stale=True" in out
+    assert "category=stale_source stale=True execution_mode=- quote_currency=- base_currency=-" in out

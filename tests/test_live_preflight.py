@@ -966,6 +966,9 @@ def test_accounts_preflight_schema_error_blocks_live(monkeypatch: pytest.MonkeyP
     assert "reason=schema mismatch" in msg
     assert "ACCOUNTS_SCHEMA_MISMATCH" in msg
     assert "row_count=0" in msg
+    assert "execution_mode=live_dry_run_unarmed" in msg
+    assert "quote_currency=KRW" in msg
+    assert "base_currency=BTC" in msg
 
 
 def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -989,10 +992,14 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
     assert "row_count=1" in msg
     assert "currencies=KRW" in msg
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+    assert "execution_mode=live_real_order_path" in msg
+    assert "base_currency_missing_policy=block_when_base_currency_row_missing" in msg
+    assert "result=fail_real_order_blocked" in msg
 
 
 def test_accounts_preflight_allows_missing_base_currency_in_live_dry_run_unarmed(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
@@ -1003,7 +1010,11 @@ def test_accounts_preflight_allows_missing_base_currency_in_live_dry_run_unarmed
         lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
     )
 
-    config.validate_live_mode_preflight(settings)
+    with caplog.at_level("WARNING"):
+        config.validate_live_mode_preflight(settings)
+    assert "ACCOUNTS_BASE_ROW_MISSING_ALLOWED" in caplog.text
+    assert "result=pass_no_position_allowed" in caplog.text
+    assert "execution_mode=live_dry_run_unarmed" in caplog.text
 
 
 def test_accounts_preflight_still_requires_quote_currency_in_live_dry_run_unarmed(
@@ -1025,6 +1036,8 @@ def test_accounts_preflight_still_requires_quote_currency_in_live_dry_run_unarme
     assert "required currency missing" in msg
     assert "missing quote currency row 'KRW'" in msg
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+    assert "execution_mode=live_dry_run_unarmed" in msg
+    assert "base_currency_missing_policy=allow_zero_position_start_in_dry_run" in msg
 
 
 def test_accounts_preflight_duplicate_currency_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:

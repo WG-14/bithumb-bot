@@ -430,6 +430,8 @@ python3 tools/verify_sqlite_restore.py /var/lib/bithumb-bot/backup/live/db/live.
 - `LIVE_DRY_RUN=false`인 경우 `BITHUMB_API_KEY`, `BITHUMB_API_SECRET` 필수
 - `LIVE_DRY_RUN=false`인 경우 `LIVE_REAL_ORDER_ARMED=true`를 명시해야 실주문 허용
 - `/v1/accounts` preflight에서 quote 통화 row(예: KRW)는 항상 필수이며, `LIVE_DRY_RUN=true` + `LIVE_REAL_ORDER_ARMED=false` 조합에서는 base 통화 row 누락을 0 보유(무포지션 시작)로 해석해 통과 가능
+- 운영자 진단(`broker-diagnose`, `health`, `ops-report`)에서는 `/v1/accounts` 관련 상태를 `execution_mode`, `quote_currency`, `base_currency`, `base_currency_missing_policy`, `preflight_outcome` 필드로 함께 출력한다.  
+  - 예: `preflight_outcome=pass_no_position_allowed`(dry-run 무포지션 허용 통과), `preflight_outcome=fail_real_order_blocked`(실주문 경로 차단)
 - notifier는 반드시 활성/설정되어야 함(`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`)
 - `KILL_SWITCH_LIQUIDATE`는 live preflight 실패 사유가 아니며, kill switch 동작 시 flatten 시도 여부를 제어한다
 

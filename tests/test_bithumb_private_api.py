@@ -342,10 +342,11 @@ def test_accounts_rest_balance_uses_split_accounts_layers(monkeypatch):
             duplicate_currencies=(),
         )
 
-    def _fake_select(accounts, *, order_currency, payment_currency):
+    def _fake_select(accounts, *, order_currency, payment_currency, allow_missing_base=False):
         calls.append("select")
         assert order_currency == "BTC"
         assert payment_currency == "KRW"
+        assert allow_missing_base is False
         return PairBalances(
             cash_balance=accounts.balances["KRW"][0],
             cash_locked=accounts.balances["KRW"][1],
@@ -516,6 +517,10 @@ def test_accounts_rest_balance_records_v1_accounts_diag_on_success(monkeypatch):
     assert diag["missing_required_currencies"] == []
     assert diag["duplicate_currencies"] == []
     assert diag["last_success_reason"] == "ok"
+    assert diag["execution_mode"] == "live_real_order_path"
+    assert diag["quote_currency"] == "KRW"
+    assert diag["base_currency"] == "BTC"
+    assert diag["preflight_outcome"] == "pass"
 
 
 def test_accounts_rest_balance_records_v1_accounts_diag_on_required_currency_missing(monkeypatch):
@@ -539,6 +544,8 @@ def test_accounts_rest_balance_records_v1_accounts_diag_on_required_currency_mis
     assert diag["missing_required_currencies"] == ["BTC"]
     assert diag["duplicate_currencies"] == []
     assert diag["last_failure_reason"] == "required currency missing"
+    assert diag["execution_mode"] == "live_real_order_path"
+    assert diag["preflight_outcome"] == "fail_real_order_blocked"
 
 
 def test_order_chance_uses_private_v1_endpoint(monkeypatch):

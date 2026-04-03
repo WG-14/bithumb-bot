@@ -78,6 +78,19 @@ class AccountsV1BalanceSource:
         self._parse_accounts_response = parse_accounts_response
         self._select_pair_balances = select_pair_balances
         self._to_broker_balance = to_broker_balance
+        self._allow_missing_base = bool(
+            str(settings.MODE).strip().lower() == "live"
+            and bool(settings.LIVE_DRY_RUN)
+            and not bool(settings.LIVE_REAL_ORDER_ARMED)
+        )
+        self._execution_mode = (
+            "live_dry_run_unarmed" if self._allow_missing_base else "live_real_order_path"
+        )
+        self._base_missing_policy = (
+            "allow_zero_position_start_in_dry_run"
+            if self._allow_missing_base
+            else "block_when_base_currency_row_missing"
+        )
         self._validation_diag: dict[str, object] = {
             "reason": "not_checked",
             "failure_category": "none",
@@ -85,6 +98,12 @@ class AccountsV1BalanceSource:
             "currencies": [],
             "missing_required_currencies": [],
             "duplicate_currencies": [],
+            "execution_mode": self._execution_mode,
+            "quote_currency": self._payment_currency,
+            "base_currency": self._order_currency,
+            "base_currency_missing_policy": self._base_missing_policy,
+            "allow_missing_base_currency": self._allow_missing_base,
+            "preflight_outcome": "not_checked",
             "last_success_reason": None,
             "last_failure_reason": None,
             "source": self.SOURCE_ID,
@@ -128,6 +147,7 @@ class AccountsV1BalanceSource:
                 **self._validation_diag,
                 "reason": reason,
                 "failure_category": self.classify_failure_category(exc),
+                "preflight_outcome": "fail_transport_or_schema_unavailable",
                 "last_failure_reason": reason,
                 "last_failure_ts_ms": observed_ts_ms,
                 "last_observed_ts_ms": observed_ts_ms,
@@ -151,6 +171,7 @@ class AccountsV1BalanceSource:
                 parsed_accounts,
                 order_currency=self._order_currency,
                 payment_currency=self._payment_currency,
+                allow_missing_base=self._allow_missing_base,
             )
         except Exception as exc:
             reason = self.classify_validation_reason(exc)
@@ -172,6 +193,12 @@ class AccountsV1BalanceSource:
                 "currencies": sorted(set(currencies)),
                 "missing_required_currencies": missing_required_currencies,
                 "duplicate_currencies": duplicate_currencies,
+                "execution_mode": self._execution_mode,
+                "quote_currency": self._payment_currency,
+                "base_currency": self._order_currency,
+                "base_currency_missing_policy": self._base_missing_policy,
+                "allow_missing_base_currency": self._allow_missing_base,
+                "preflight_outcome": "fail_real_order_blocked",
                 "last_success_reason": self._validation_diag.get("last_success_reason"),
                 "last_failure_reason": reason,
                 "source": self.SOURCE_ID,
@@ -183,6 +210,11 @@ class AccountsV1BalanceSource:
             }
             raise
 
+        base_row_missing_allowed = bool(
+            self._allow_missing_base
+            and parsed_accounts is not None
+            and self._order_currency not in parsed_accounts.balances
+        )
         self._validation_diag = {
             "reason": "ok",
             "failure_category": "none",
@@ -190,6 +222,14 @@ class AccountsV1BalanceSource:
             "currencies": sorted(parsed_accounts.balances.keys()) if parsed_accounts is not None else [],
             "missing_required_currencies": [],
             "duplicate_currencies": list(parsed_accounts.duplicate_currencies) if parsed_accounts is not None else [],
+            "execution_mode": self._execution_mode,
+            "quote_currency": self._payment_currency,
+            "base_currency": self._order_currency,
+            "base_currency_missing_policy": self._base_missing_policy,
+            "allow_missing_base_currency": self._allow_missing_base,
+            "preflight_outcome": (
+                "pass_no_position_allowed" if base_row_missing_allowed else "pass"
+            ),
             "last_success_reason": "ok",
             "last_failure_reason": self._validation_diag.get("last_failure_reason"),
             "source": self.SOURCE_ID,

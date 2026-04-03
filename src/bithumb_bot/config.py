@@ -143,6 +143,14 @@ def validate_accounts_preflight(cfg: Settings) -> None:
 
     canonical_market = normalize_market_id(str(cfg.PAIR or ""))
     quote_currency, base_currency = canonical_market.split("-", 1)
+    is_live_mode = bool(str(cfg.MODE or "").strip().lower() == "live")
+    is_live_dry_run = bool(is_live_mode and cfg.LIVE_DRY_RUN and not cfg.LIVE_REAL_ORDER_ARMED)
+    execution_mode = "live_dry_run_unarmed" if is_live_dry_run else "live_real_order_path"
+    base_missing_policy = (
+        "allow_zero_position_start_in_dry_run"
+        if is_live_dry_run
+        else "block_when_base_currency_row_missing"
+    )
 
     try:
         response = _fetch_accounts_payload_for_preflight(
@@ -156,11 +164,15 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         if code in {"AUTH_SIGN", "PERMISSION"}:
             raise AccountsPreflightValidationError(
                 "/v1/accounts REST snapshot preflight 인증 실패: "
-                f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} detail={detail}"
+                f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} "
+                f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
+                f"base_currency_missing_policy={base_missing_policy} detail={detail}"
             ) from exc
         raise AccountsPreflightValidationError(
             "/v1/accounts REST snapshot preflight transport 실패: "
-            f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} detail={detail}"
+            f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} "
+            f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
+            f"base_currency_missing_policy={base_missing_policy} detail={detail}"
         ) from exc
 
     row_count = len(response) if isinstance(response, list) else 0
@@ -176,13 +188,26 @@ def validate_accounts_preflight(cfg: Settings) -> None:
 
     try:
         parsed_accounts = parse_accounts_response(response)
-        allow_missing_base = bool(cfg.MODE == "live" and cfg.LIVE_DRY_RUN and not cfg.LIVE_REAL_ORDER_ARMED)
+        allow_missing_base = is_live_dry_run
         select_pair_balances(
             parsed_accounts,
             order_currency=base_currency,
             payment_currency=quote_currency,
             allow_missing_base=allow_missing_base,
         )
+        if allow_missing_base and base_currency not in parsed_accounts.balances:
+            LOG.warning(
+                "/v1/accounts preflight passed with zero-position allowance: "
+                "reason=required currency missing reason_code=ACCOUNTS_BASE_ROW_MISSING_ALLOWED "
+                "result=pass_no_position_allowed execution_mode=%s quote_currency=%s base_currency=%s "
+                "base_currency_missing_policy=%s row_count=%s currencies=%s",
+                execution_mode,
+                quote_currency,
+                base_currency,
+                base_missing_policy,
+                row_count,
+                ",".join(sorted(set(currencies))) or "-",
+            )
     except Exception as exc:
         detail_lower = str(exc).lower()
         if isinstance(exc, AccountsRequiredCurrencyMissingError):
@@ -198,7 +223,9 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         raise AccountsPreflightValidationError(
             "/v1/accounts REST snapshot preflight validation failed: "
             f"reason={reason} reason_code={reason_code} row_count={row_count} "
-            f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} detail={exc}"
+            f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} "
+            f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
+            f"base_currency_missing_policy={base_missing_policy} result=fail_real_order_blocked detail={exc}"
         ) from exc
 
 

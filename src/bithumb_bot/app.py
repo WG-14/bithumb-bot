@@ -573,6 +573,14 @@ def cmd_health() -> None:
         f"diag_category={balance_diag.get('failure_category') or '-'} "
         f"stale={balance_diag.get('stale')}"
     )
+    print(
+        "    "
+        f"diag_execution_mode={balance_diag.get('execution_mode') or '-'} "
+        f"quote_currency={balance_diag.get('quote_currency') or '-'} "
+        f"base_currency={balance_diag.get('base_currency') or '-'} "
+        f"base_missing_policy={balance_diag.get('base_currency_missing_policy') or '-'} "
+        f"preflight_outcome={balance_diag.get('preflight_outcome') or '-'}"
+    )
 
     print("  [RISK-SNAPSHOT]")
     print(
@@ -679,6 +687,11 @@ def cmd_health() -> None:
     print(f"  balance_source_last_observed_ts_ms={balance_diag.get('last_observed_ts_ms')}")
     print(f"  balance_source_last_asset_ts_ms={balance_diag.get('last_asset_ts_ms')}")
     print(f"  balance_source_stale={balance_diag.get('stale')}")
+    print(f"  balance_source_execution_mode={balance_diag.get('execution_mode')}")
+    print(f"  balance_source_quote_currency={balance_diag.get('quote_currency')}")
+    print(f"  balance_source_base_currency={balance_diag.get('base_currency')}")
+    print(f"  balance_source_base_currency_missing_policy={balance_diag.get('base_currency_missing_policy')}")
+    print(f"  balance_source_preflight_outcome={balance_diag.get('preflight_outcome')}")
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
@@ -1149,6 +1162,12 @@ def cmd_broker_diagnose() -> None:
             (
                 f"reason={account_validation_reason} row_count={row_count} "
                 f"currencies={currencies} missing_required_currencies={missing} duplicate_currencies={duplicate} "
+                f"execution_mode={account_diag_raw.get('execution_mode') or '-'} "
+                f"quote_currency={account_diag_raw.get('quote_currency') or '-'} "
+                f"base_currency={account_diag_raw.get('base_currency') or '-'} "
+                "base_currency_missing_policy="
+                f"{account_diag_raw.get('base_currency_missing_policy') or '-'} "
+                f"preflight_outcome={account_diag_raw.get('preflight_outcome') or '-'} "
                 f"last_success={account_diag_raw.get('last_success_reason') or '-'} "
                 f"last_failure={account_validation_last_failure_reason}"
             ),

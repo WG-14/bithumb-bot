@@ -1215,6 +1215,8 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] open order query: known_unresolved_count=2" in out
     assert "[PASS] symbol/order rule query" in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
+    assert "execution_mode=- quote_currency=- base_currency=-" in out
+    assert "base_currency_missing_policy=- preflight_outcome=-" in out
     assert "bid_min_total_krw=0.0 (source=chance_doc)" in out
     assert "ask_price_unit=0.0 (source=chance_doc)" in out
     assert "min_qty=0.0001 (source=local_fallback)" in out
@@ -1307,6 +1309,61 @@ def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
     assert "[PASS] live execution mode: MODE=live LIVE_DRY_RUN=True armed=False" in out
     assert "[WARN] symbol/order rule query" in out
     assert "[WARN] open order query" in out
+
+
+def test_broker_diagnose_accounts_policy_context_is_operator_readable(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_live_real_order_armed = settings.LIVE_REAL_ORDER_ARMED
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
+
+        def get_open_orders(self, **_kwargs):
+            return []
+
+        def get_accounts_validation_diagnostics(self):
+            return {
+                "reason": "ok",
+                "failure_category": "none",
+                "row_count": 1,
+                "currencies": ["KRW"],
+                "missing_required_currencies": [],
+                "duplicate_currencies": [],
+                "execution_mode": "live_dry_run_unarmed",
+                "quote_currency": "KRW",
+                "base_currency": "BTC",
+                "base_currency_missing_policy": "allow_zero_position_start_in_dry_run",
+                "preflight_outcome": "pass_no_position_allowed",
+                "last_success_reason": "ok",
+                "last_failure_reason": "required currency missing",
+            }
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("skip rule detail")),
+    )
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", original_live_real_order_armed)
+
+    out = capsys.readouterr().out
+    assert "execution_mode=live_dry_run_unarmed quote_currency=KRW base_currency=BTC" in out
+    assert "base_currency_missing_policy=allow_zero_position_start_in_dry_run" in out
+    assert "preflight_outcome=pass_no_position_allowed" in out
 
 
 def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsys):
@@ -2011,7 +2068,71 @@ def test_health_includes_balance_source_diagnostics(monkeypatch, capsys, tmp_pat
 
     assert "balance_source=myasset_ws_private_stream" in out
     assert "diag_category=stale_source stale=True" in out
+    assert "diag_execution_mode=- quote_currency=- base_currency=- base_missing_policy=- preflight_outcome=-" in out
     assert "balance_source_last_asset_ts_ms=1710000000000" in out
+
+
+def test_health_prints_accounts_preflight_outcome_context(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 1.0,
+            "last_candle_status": "ok",
+            "last_candle_sync_epoch_sec": 1.0,
+            "last_candle_ts_ms": 1000,
+            "last_candle_status_detail": "ok",
+            "error_count": 0,
+            "trading_enabled": False,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": "accounts preflight blocked",
+            "halt_new_orders_blocked": True,
+            "halt_reason_code": "PRECHECK_FAILED",
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (False, []))
+    monkeypatch.setattr(
+        "bithumb_bot.app.DEFAULT_BITHUMB_BROKER_CLASS",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "required currency missing",
+                    "failure_category": "schema_mismatch",
+                    "stale": False,
+                    "execution_mode": "live_real_order_path",
+                    "quote_currency": "KRW",
+                    "base_currency": "BTC",
+                    "base_currency_missing_policy": "block_when_base_currency_row_missing",
+                    "preflight_outcome": "fail_real_order_blocked",
+                }
+            },
+        )(),
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "diag_execution_mode=live_real_order_path quote_currency=KRW base_currency=BTC" in out
+    assert "base_missing_policy=block_when_base_currency_row_missing preflight_outcome=fail_real_order_blocked" in out
+    assert "balance_source_preflight_outcome=fail_real_order_blocked" in out
 
 
 def test_health_summary_flags_unresolved_orders_as_resume_unsafe(capsys, tmp_path):

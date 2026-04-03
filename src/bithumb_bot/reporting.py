@@ -2324,7 +2324,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"balance_source={balance_source_diag.get('source') or '-'} "
         f"reason={balance_source_diag.get('reason') or '-'} "
         f"category={balance_source_diag.get('failure_category') or '-'} "
-        f"stale={balance_source_diag.get('stale')}"
+        f"stale={balance_source_diag.get('stale')} "
+        f"execution_mode={balance_source_diag.get('execution_mode') or '-'} "
+        f"quote_currency={balance_source_diag.get('quote_currency') or '-'} "
+        f"base_currency={balance_source_diag.get('base_currency') or '-'} "
+        f"base_missing_policy={balance_source_diag.get('base_currency_missing_policy') or '-'} "
+        f"preflight_outcome={balance_source_diag.get('preflight_outcome') or '-'}"
     )
     print(
         "  "
