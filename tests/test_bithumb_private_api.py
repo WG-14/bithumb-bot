@@ -288,6 +288,45 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
 
 
 
+def test_private_api_dry_run_allows_read_only_get_requests(monkeypatch):
+    _SequencedClient.actions = [_mk_response(200, [{"currency": "KRW", "balance": "1000", "locked": "0"}])]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(
+        api_key="k",
+        api_secret="s",
+        base_url="https://api.bithumb.com",
+        dry_run=True,
+    )
+    data = api.request("GET", "/v1/accounts", params={}, retry_safe=False)
+
+    assert isinstance(data, list)
+    assert _SequencedClient.calls == 1
+    call = _SequencedClient.requests[0]
+    assert call["endpoint"] == "/v1/accounts"
+    assert str(call["headers"].get("Authorization", "")).startswith("Bearer ")
+
+
+def test_private_api_dry_run_blocks_private_write_requests(monkeypatch):
+    _SequencedClient.actions = [_mk_response(200, {"status": "0000"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(
+        api_key="k",
+        api_secret="s",
+        base_url="https://api.bithumb.com",
+        dry_run=True,
+    )
+    data = api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC"}, retry_safe=False)
+
+    assert data == {}
+    assert _SequencedClient.calls == 0
+
+
 def test_accounts_rest_balance_parses_available_and_locked(monkeypatch):
     _configure_live()
     broker = BithumbBroker()

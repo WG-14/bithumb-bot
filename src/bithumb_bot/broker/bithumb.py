@@ -85,6 +85,10 @@ class BithumbPrivateAPI:
         self.dry_run = dry_run
 
     @staticmethod
+    def _is_read_only_private_request(method: str) -> bool:
+        return str(method or "").strip().upper() == "GET"
+
+    @staticmethod
     def _payload_items(payload: dict[str, object] | None) -> list[tuple[str, str]]:
         if not payload:
             return []
@@ -164,8 +168,6 @@ class BithumbPrivateAPI:
         nonce: str | None = None,
         timestamp: int | None = None,
     ) -> dict[str, str]:
-        if self.dry_run:
-            return {}
         headers = {
             "Authorization": f"Bearer {self._jwt_token(payload, canonical_payload=canonical_payload, nonce=nonce, timestamp=timestamp)}",
             "Accept": "application/json",
@@ -233,12 +235,15 @@ class BithumbPrivateAPI:
         retry_safe: bool = False,
         response_excerpt: callable | None = None,
     ) -> dict | list:
-        if self.dry_run:
+        method = method.upper()
+        if self.dry_run and not self._is_read_only_private_request(method):
+            # LIVE_DRY_RUN safety contract:
+            # - allow read-only private diagnostics (GET) to reach exchange
+            # - block private state-changing requests (POST/DELETE/...) from reaching exchange
             return {}
 
         attempts = 3 if retry_safe else 1
         backoffs = (0.2, 0.5)
-        method = method.upper()
         is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = is_order_submit
