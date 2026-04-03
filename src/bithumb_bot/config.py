@@ -94,9 +94,14 @@ def resolve_db_path_for_mode(path: str, *, mode: str) -> str:
 
 def resolve_db_path_for_connection(path: str, *, mode: str | None = None) -> str:
     normalized_mode = str(mode or os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
+    return resolve_db_path_for_mode(path, mode=normalized_mode)
+
+
+def prepare_db_path_for_connection(path: str, *, mode: str | None = None) -> str:
+    normalized_mode = str(mode or os.getenv("MODE", "paper") or "paper").strip().lower() or "paper"
     resolved = resolve_db_path_for_mode(path, mode=normalized_mode)
     if resolved != ":memory:":
-        Path(resolved).parent.mkdir(parents=True, exist_ok=True)
+        PATH_MANAGER.ensure_parent_dir(Path(resolved))
     return resolved
 
 

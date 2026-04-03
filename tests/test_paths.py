@@ -49,6 +49,15 @@ def test_path_manager_uses_topic_paths(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert pm.log_path("errors", day="2026-03-30") == tmp_path / "logs" / "live" / "errors" / "errors_2026-03-30.log"
 
 
+def test_path_manager_ensure_parent_dir_creates_parent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_roots(monkeypatch, tmp_path, "paper")
+    pm = PathManager.from_env(project_root=tmp_path / "repo")
+    target = pm.data_dir() / "trades" / "subdir" / "db.sqlite"
+    assert not target.parent.exists()
+    pm.ensure_parent_dir(target)
+    assert target.parent.exists()
+
+
 def test_log_path_kinds_are_strictly_partitioned(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _set_roots(monkeypatch, tmp_path, "paper")
     pm = PathManager.from_env(project_root=tmp_path / "repo")

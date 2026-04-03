@@ -4,13 +4,13 @@ import json
 import sqlite3
 from typing import Any
 
-from .config import resolve_db_path_for_connection, settings
+from .config import prepare_db_path_for_connection, settings
 from .sqlite_resilience import configure_connection
 from .decision_context import normalize_strategy_decision_context
 
 
 def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
-    path = resolve_db_path_for_connection(db_path or settings.DB_PATH, mode=settings.MODE)
+    path = prepare_db_path_for_connection(db_path or settings.DB_PATH, mode=settings.MODE)
 
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

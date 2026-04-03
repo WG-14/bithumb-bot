@@ -225,6 +225,9 @@ class PathManager:
         ts = timestamp or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         return self.config.backup_root / self.config.mode / "db" / f"{self.config.mode}.sqlite.{ts}.sqlite"
 
+    def ensure_parent_dir(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
 
 def resolve_managed_path(kind: str, manager: PathManager) -> Path:
     normalized = str(kind or "").strip().lower()

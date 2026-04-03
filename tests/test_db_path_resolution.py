@@ -37,7 +37,7 @@ def test_connect_does_not_create_parent_directory_directly(tmp_path: Path) -> No
     db_path = (tmp_path / "managed" / "centralized.sqlite").resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with (
-        patch("bithumb_bot.db.resolve_db_path_for_connection", return_value=str(db_path)),
+        patch("bithumb_bot.db.prepare_db_path_for_connection", return_value=str(db_path)),
         patch("pathlib.Path.mkdir", side_effect=AssertionError("db connect layer must not mkdir")),
     ):
         conn = connect(str(db_path))
@@ -48,11 +48,27 @@ def test_ensure_db_does_not_create_parent_directory_directly(tmp_path: Path) -> 
     db_path = (tmp_path / "managed" / "centralized.sqlite").resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with (
-        patch("bithumb_bot.db_core.resolve_db_path_for_connection", return_value=str(db_path)),
+        patch("bithumb_bot.db_core.prepare_db_path_for_connection", return_value=str(db_path)),
         patch("pathlib.Path.mkdir", side_effect=AssertionError("db open layer must not mkdir")),
     ):
         conn = ensure_db(str(db_path))
     conn.close()
+
+
+def test_resolve_db_path_for_connection_does_not_prepare_parent(tmp_path: Path) -> None:
+    db_path = (tmp_path / "managed" / "resolve-only.sqlite").resolve()
+    with patch("pathlib.Path.mkdir", side_effect=AssertionError("resolve helper must not mkdir")):
+        resolved = config.resolve_db_path_for_connection(str(db_path), mode="paper")
+    assert resolved == str(db_path)
+    assert not db_path.parent.exists()
+
+
+def test_prepare_db_path_for_connection_prepares_parent_with_path_manager(tmp_path: Path) -> None:
+    db_path = (tmp_path / "managed" / "prepared.sqlite").resolve()
+    with patch.object(type(config.PATH_MANAGER), "ensure_parent_dir") as ensure_parent_dir:
+        resolved = config.prepare_db_path_for_connection(str(db_path), mode="paper")
+    assert resolved == str(db_path)
+    ensure_parent_dir.assert_called_once_with(Path(resolved))
 
 
 def test_settings_db_path_accepts_absolute_path(tmp_path):
