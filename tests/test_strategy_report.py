@@ -9,6 +9,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.reporting import (
     cmd_strategy_report,
+    fetch_attribution_quality_summary,
     fetch_filter_effectiveness_summary,
     fetch_lifecycle_close_summary,
     fetch_strategy_performance_stats,
@@ -649,3 +650,44 @@ def test_strategy_report_json_includes_filter_effectiveness_and_insufficient_sam
     assert section["entry_candidate_summary"]["blocked_by_filter"] == {"gap": 1}
     assert section["blocked_observation_window"]["insufficient_sample"] is True
     assert any("insufficient sample" in note for note in section["notes"])
+    attribution = payload["attribution_quality"]
+    assert attribution["unattributed_trade_count"] == 0
+    assert attribution["ambiguous_linkage_count"] == 0
+
+
+def test_attribution_quality_summary_counts_unattributed_ambiguous_recovery_and_reason_buckets(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "attribution-quality.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO trade_lifecycles(
+                id, pair, entry_trade_id, exit_trade_id, entry_client_order_id, exit_client_order_id,
+                entry_fill_id, exit_fill_id, entry_ts, exit_ts, matched_qty, entry_price, exit_price,
+                gross_pnl, fee_total, net_pnl, holding_time_sec, strategy_name, entry_decision_id,
+                entry_decision_linkage, exit_decision_id, exit_reason, exit_rule_name
+            ) VALUES
+                (1, 'BTC_KRW', 1, 101, 'entry-1', 'exit-1', 'ef-1', 'xf-1', 1000, 2000, 1, 100, 101, 1, 0, 1, 60, 'strategy_Z', NULL, 'unattributed_no_strict_match', NULL, 'x', 'time_stop'),
+                (2, 'BTC_KRW', 2, 102, 'entry-2', 'exit-2', 'ef-2', 'xf-2', 1000, 2000, 1, 100, 99, -1, 0, -1, 60, 'strategy_Z', NULL, 'ambiguous_multi_candidate', NULL, 'x', 'time_stop'),
+                (3, 'BTC_KRW', 3, 103, 'entry-3', 'exit-3', 'ef-3', 'xf-3', 1000, 2000, 1, 100, 99, -1, 0, -1, 60, 'strategy_Z', NULL, 'degraded_recovery_unattributed', NULL, 'x', 'time_stop'),
+                (4, 'BTC_KRW', 4, 104, 'entry-4', 'exit-4', 'ef-4', 'xf-4', 1000, 2000, 1, 100, 102, 2, 0, 2, 60, 'strategy_Z', NULL, NULL, NULL, 'x', 'time_stop'),
+                (5, 'BTC_KRW', 5, 105, 'entry-5', 'exit-5', 'ef-5', 'xf-5', 1000, 2000, 1, 100, 103, 3, 0, 3, 60, 'strategy_Z', 77, 'direct', NULL, 'x', 'time_stop')
+            """
+        )
+        conn.commit()
+        summary = fetch_attribution_quality_summary(conn)
+    finally:
+        conn.close()
+
+    assert summary.total_trade_count == 5
+    assert summary.unattributed_trade_count == 4
+    assert summary.ambiguous_linkage_count == 1
+    assert summary.recovery_derived_attribution_count == 1
+    assert summary.reason_buckets["missing_decision_id"] == 1
+    assert summary.reason_buckets["multiple_candidate_decisions"] == 1
+    assert summary.reason_buckets["legacy_incomplete_row"] == 1
+    assert summary.reason_buckets["recovery_unresolved_linkage"] == 1
+    assert any("unattributed trades present" in warning for warning in summary.warnings)

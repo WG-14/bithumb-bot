@@ -119,12 +119,16 @@ def test_experiment_report_command_writes_report_and_prints_warning(tmp_path, mo
     )
     out = capsys.readouterr().out
     assert "[EXPERIMENT-REPORT]" in out
+    assert "[ATTRIBUTION-QUALITY]" in out
     assert "[WARNINGS]" in out
     assert "insufficient sample" in out
     assert "concentrated pnl" in out
 
     report_path = PATH_MANAGER.report_path("experiment_report")
     assert report_path.exists()
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["attribution_quality"]["total_trade_count"] == 1
+    assert payload["attribution_quality"]["unattributed_trade_count"] == 0
 
 
 def test_experiment_report_cli_subcommand(tmp_path, monkeypatch, capsys):

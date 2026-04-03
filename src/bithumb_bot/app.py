@@ -42,6 +42,7 @@ from .reporting import (
     cmd_fee_diagnostics,
     cmd_ops_report,
     cmd_strategy_report,
+    fetch_attribution_quality_summary,
     parse_kst_date_range_to_ts_ms,
 )
 from .storage_io import write_json_atomic
@@ -403,11 +404,13 @@ def cmd_health() -> None:
     refresh_open_order_health()
     health = get_health_status()
     submit_unknown_count = 0
+    attribution_quality = None
     conn = ensure_db()
     try:
         row = conn.execute(
             "SELECT COUNT(*) AS submit_unknown_count FROM orders WHERE status='SUBMIT_UNKNOWN'"
         ).fetchone()
+        attribution_quality = fetch_attribution_quality_summary(conn)
     finally:
         conn.close()
     if row is not None:
@@ -570,6 +573,23 @@ def cmd_health() -> None:
     )
     print(f"    current_halt_reason={current_halt_reason}")
     print(f"    reconcile_latest={reconcile_latest}")
+    if attribution_quality is not None:
+        print("  [ATTRIBUTION-QUALITY-SNAPSHOT]")
+        print(
+            "    "
+            f"trade_count={attribution_quality.total_trade_count} "
+            f"unattributed_trade_count={attribution_quality.unattributed_trade_count} "
+            f"ambiguous_linkage_count={attribution_quality.ambiguous_linkage_count} "
+            f"recovery_derived_attribution_count={attribution_quality.recovery_derived_attribution_count}"
+        )
+        print(
+            "    "
+            "reason_buckets="
+            f"missing_decision_id:{attribution_quality.reason_buckets.get('missing_decision_id', 0)},"
+            f"multiple_candidate_decisions:{attribution_quality.reason_buckets.get('multiple_candidate_decisions', 0)},"
+            f"legacy_incomplete_row:{attribution_quality.reason_buckets.get('legacy_incomplete_row', 0)},"
+            f"recovery_unresolved_linkage:{attribution_quality.reason_buckets.get('recovery_unresolved_linkage', 0)}"
+        )
     if has_critical_state:
         print("  [CRITICAL-OPERATOR-SUMMARY]")
         print(

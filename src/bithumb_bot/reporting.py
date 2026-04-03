@@ -147,6 +147,162 @@ class ExperimentReportSummary:
     regime_bucket_rows: list[ExperimentBucketStat]
 
 
+@dataclass
+class AttributionQualitySummary:
+    total_trade_count: int
+    unattributed_trade_count: int
+    ambiguous_linkage_count: int
+    recovery_derived_attribution_count: int
+    unattributed_trade_ratio: float
+    ambiguous_linkage_ratio: float
+    recovery_derived_attribution_ratio: float
+    reason_buckets: dict[str, int]
+    warnings: list[str]
+
+
+def fetch_attribution_quality_summary(
+    conn: sqlite3.Connection,
+    *,
+    strategy_name: str | None = None,
+    pair: str | None = None,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+) -> AttributionQualitySummary:
+    filters: list[str] = []
+    params: list[object] = []
+    if strategy_name:
+        filters.append("COALESCE(tl.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(tl.pair, '<unknown>') = ?")
+        params.append(str(pair))
+    if from_ts_ms is not None:
+        filters.append("tl.exit_ts >= ?")
+        params.append(int(from_ts_ms))
+    if to_ts_ms is not None:
+        filters.append("tl.exit_ts <= ?")
+        params.append(int(to_ts_ms))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total_trade_count,
+            COALESCE(SUM(CASE WHEN tl.entry_decision_id IS NULL THEN 1 ELSE 0 END), 0) AS unattributed_trade_count,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN COALESCE(tl.entry_decision_linkage, '') = 'ambiguous_multi_candidate' THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS ambiguous_linkage_count,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN COALESCE(tl.entry_decision_linkage, '') LIKE 'degraded_recovery_%' THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS recovery_derived_attribution_count,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN tl.entry_decision_id IS NULL
+                             AND COALESCE(tl.entry_decision_linkage, '') IN (
+                                 'unattributed',
+                                 'unattributed_missing_strategy',
+                                 'unattributed_no_strict_match',
+                                 'unattributed_unknown_entry'
+                             )
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS reason_missing_decision_id,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN COALESCE(tl.entry_decision_linkage, '') = 'ambiguous_multi_candidate' THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS reason_multiple_candidate_decisions,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN tl.entry_decision_id IS NULL
+                             AND TRIM(COALESCE(tl.entry_decision_linkage, '')) = ''
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS reason_legacy_incomplete_row,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN COALESCE(tl.entry_decision_linkage, '') LIKE 'degraded_recovery_%' THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS reason_recovery_unresolved_linkage
+        FROM trade_lifecycles tl
+        {where_clause}
+        """,
+        tuple(params),
+    ).fetchone()
+    total_trade_count = int(row["total_trade_count"] or 0) if row is not None else 0
+    unattributed_trade_count = int(row["unattributed_trade_count"] or 0) if row is not None else 0
+    ambiguous_linkage_count = int(row["ambiguous_linkage_count"] or 0) if row is not None else 0
+    recovery_derived_count = int(row["recovery_derived_attribution_count"] or 0) if row is not None else 0
+    denominator = total_trade_count if total_trade_count > 0 else 1
+    reason_buckets = {
+        "missing_decision_id": int(row["reason_missing_decision_id"] or 0) if row is not None else 0,
+        "multiple_candidate_decisions": (
+            int(row["reason_multiple_candidate_decisions"] or 0) if row is not None else 0
+        ),
+        "legacy_incomplete_row": int(row["reason_legacy_incomplete_row"] or 0) if row is not None else 0,
+        "recovery_unresolved_linkage": (
+            int(row["reason_recovery_unresolved_linkage"] or 0) if row is not None else 0
+        ),
+    }
+    warnings: list[str] = []
+    if total_trade_count <= 0:
+        warnings.append("no trade_lifecycles rows matched the filter window; attribution quality unavailable.")
+    if unattributed_trade_count > 0:
+        warnings.append(
+            f"unattributed trades present: {unattributed_trade_count}/{total_trade_count} "
+            f"({(unattributed_trade_count / denominator):.2%})."
+        )
+    if ambiguous_linkage_count > 0:
+        warnings.append(
+            f"ambiguous decision linkage present: {ambiguous_linkage_count}/{total_trade_count} "
+            f"({(ambiguous_linkage_count / denominator):.2%})."
+        )
+    if recovery_derived_count > 0:
+        warnings.append(
+            "recovery-derived attribution present: "
+            f"{recovery_derived_count}/{total_trade_count} ({(recovery_derived_count / denominator):.2%})."
+        )
+    return AttributionQualitySummary(
+        total_trade_count=total_trade_count,
+        unattributed_trade_count=unattributed_trade_count,
+        ambiguous_linkage_count=ambiguous_linkage_count,
+        recovery_derived_attribution_count=recovery_derived_count,
+        unattributed_trade_ratio=unattributed_trade_count / denominator,
+        ambiguous_linkage_ratio=ambiguous_linkage_count / denominator,
+        recovery_derived_attribution_ratio=recovery_derived_count / denominator,
+        reason_buckets=reason_buckets,
+        warnings=warnings,
+    )
+
+
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
     rows = conn.execute(
         """
@@ -1072,6 +1228,13 @@ def cmd_strategy_report(
                 observation_window_bars=observation_window_bars,
                 min_observation_sample=min_observation_sample,
             )
+            attribution_quality = fetch_attribution_quality_summary(
+                conn,
+                strategy_name=strategy_name,
+                pair=pair,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+            )
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
             print(f"  schema_error={exc}")
@@ -1169,10 +1332,22 @@ def cmd_strategy_report(
             },
             "notes": filter_effectiveness.notes,
         },
+        "attribution_quality": {
+            "total_trade_count": attribution_quality.total_trade_count,
+            "unattributed_trade_count": attribution_quality.unattributed_trade_count,
+            "ambiguous_linkage_count": attribution_quality.ambiguous_linkage_count,
+            "recovery_derived_attribution_count": attribution_quality.recovery_derived_attribution_count,
+            "unattributed_trade_ratio": attribution_quality.unattributed_trade_ratio,
+            "ambiguous_linkage_ratio": attribution_quality.ambiguous_linkage_ratio,
+            "recovery_derived_attribution_ratio": attribution_quality.recovery_derived_attribution_ratio,
+            "reason_buckets": attribution_quality.reason_buckets,
+            "warnings": attribution_quality.warnings,
+        },
         "notes": (
             ([] if stats else ["no trade_lifecycles rows matched the given filters"])
             + close_notes
             + filter_effectiveness.notes
+            + attribution_quality.warnings
         ),
     }
     write_json_atomic(PATH_MANAGER.strategy_validation_report_path(), payload)
@@ -1278,6 +1453,31 @@ def cmd_strategy_report(
     )
     for note in filter_effectiveness.notes:
         print(f"  note: {note}")
+    print("  [attribution_quality]")
+    print(
+        "  "
+        f"trade_count={attribution_quality.total_trade_count} "
+        f"unattributed_trade_count={attribution_quality.unattributed_trade_count} "
+        f"ambiguous_linkage_count={attribution_quality.ambiguous_linkage_count} "
+        f"recovery_derived_attribution_count={attribution_quality.recovery_derived_attribution_count}"
+    )
+    print(
+        "  "
+        f"ratios="
+        f"unattributed:{attribution_quality.unattributed_trade_ratio:.2%},"
+        f"ambiguous:{attribution_quality.ambiguous_linkage_ratio:.2%},"
+        f"recovery_derived:{attribution_quality.recovery_derived_attribution_ratio:.2%}"
+    )
+    print(
+        "  "
+        "reason_buckets="
+        f"missing_decision_id:{attribution_quality.reason_buckets.get('missing_decision_id', 0)},"
+        f"multiple_candidate_decisions:{attribution_quality.reason_buckets.get('multiple_candidate_decisions', 0)},"
+        f"legacy_incomplete_row:{attribution_quality.reason_buckets.get('legacy_incomplete_row', 0)},"
+        f"recovery_unresolved_linkage:{attribution_quality.reason_buckets.get('recovery_unresolved_linkage', 0)}"
+    )
+    for warning in attribution_quality.warnings:
+        print(f"  warning: {warning}")
 
 
 def _max_drawdown_from_trade_sequence(net_pnls: list[float]) -> float:
@@ -1480,9 +1680,17 @@ def cmd_experiment_report(
             concentration_warn_threshold=concentration_warn_threshold,
             regime_skew_warn_threshold=regime_skew_warn_threshold,
         )
+        attribution_quality = fetch_attribution_quality_summary(
+            conn,
+            strategy_name=strategy_name,
+            pair=pair,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+        )
     finally:
         conn.close()
 
+    report_warnings = summary.warnings + attribution_quality.warnings
     payload = {
         "mode": settings.MODE,
         "market": settings.PAIR,
@@ -1528,7 +1736,17 @@ def cmd_experiment_report(
             }
             for row in summary.regime_bucket_rows
         ],
-        "warnings": summary.warnings,
+        "attribution_quality": {
+            "total_trade_count": attribution_quality.total_trade_count,
+            "unattributed_trade_count": attribution_quality.unattributed_trade_count,
+            "ambiguous_linkage_count": attribution_quality.ambiguous_linkage_count,
+            "recovery_derived_attribution_count": attribution_quality.recovery_derived_attribution_count,
+            "unattributed_trade_ratio": attribution_quality.unattributed_trade_ratio,
+            "ambiguous_linkage_ratio": attribution_quality.ambiguous_linkage_ratio,
+            "recovery_derived_attribution_ratio": attribution_quality.recovery_derived_attribution_ratio,
+            "reason_buckets": attribution_quality.reason_buckets,
+        },
+        "warnings": report_warnings,
     }
     write_json_atomic(PATH_MANAGER.report_path("experiment_report"), payload)
 
@@ -1569,9 +1787,25 @@ def cmd_experiment_report(
             "  "
             f"{row.bucket},{row.trade_count},{row.win_rate:.4f},{row.realized_net_pnl:.2f},{row.expectancy_per_trade:.2f}"
         )
-    if summary.warnings:
+    print("[ATTRIBUTION-QUALITY]")
+    print(
+        "  "
+        f"trade_count={attribution_quality.total_trade_count} "
+        f"unattributed_trade_count={attribution_quality.unattributed_trade_count} "
+        f"ambiguous_linkage_count={attribution_quality.ambiguous_linkage_count} "
+        f"recovery_derived_attribution_count={attribution_quality.recovery_derived_attribution_count}"
+    )
+    print(
+        "  "
+        "reason_buckets="
+        f"missing_decision_id:{attribution_quality.reason_buckets.get('missing_decision_id', 0)},"
+        f"multiple_candidate_decisions:{attribution_quality.reason_buckets.get('multiple_candidate_decisions', 0)},"
+        f"legacy_incomplete_row:{attribution_quality.reason_buckets.get('legacy_incomplete_row', 0)},"
+        f"recovery_unresolved_linkage:{attribution_quality.reason_buckets.get('recovery_unresolved_linkage', 0)}"
+    )
+    if report_warnings:
         print("[WARNINGS]")
-        for warning in summary.warnings:
+        for warning in report_warnings:
             print(f"  - {warning}")
 
 
