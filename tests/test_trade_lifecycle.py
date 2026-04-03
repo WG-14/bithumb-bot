@@ -91,6 +91,7 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
             exit_fill_id,
             strategy_name,
             entry_decision_id,
+            entry_decision_linkage,
             exit_decision_id,
             exit_reason,
             exit_rule_name
@@ -114,6 +115,7 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert rows[0]["exit_fill_id"] == "fill_exit_1"
     assert rows[0]["strategy_name"] == "sma_with_filter"
     assert int(rows[0]["entry_decision_id"]) == 101
+    assert rows[0]["entry_decision_linkage"] == "direct"
     assert int(rows[0]["exit_decision_id"]) == 202
     assert rows[0]["exit_reason"] == "opposite signal"
     assert rows[0]["exit_rule_name"] == "opposite_cross"
@@ -129,6 +131,7 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert rows[1]["exit_fill_id"] == "fill_exit_2"
     assert rows[1]["strategy_name"] == "sma_with_filter"
     assert int(rows[1]["entry_decision_id"]) == 101
+    assert rows[1]["entry_decision_linkage"] == "direct"
     assert int(rows[1]["exit_decision_id"]) == 203
     assert rows[1]["exit_reason"] == "max holding reached"
     assert rows[1]["exit_rule_name"] == "max_holding_time"
@@ -157,7 +160,9 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "exit_decision_id" in trade_cols
     assert "exit_reason" in trade_cols
     assert "exit_rule_name" in trade_cols
+    assert "entry_decision_linkage" in lot_cols
     assert "exit_decision_id" in lifecycle_cols
+    assert "entry_decision_linkage" in lifecycle_cols
     assert "exit_reason" in lifecycle_cols
     assert "exit_rule_name" in lifecycle_cols
 
@@ -199,3 +204,113 @@ def test_sell_without_known_entry_writes_unknown_lifecycle_row(tmp_path):
     assert float(row["gross_pnl"]) == pytest.approx(0.0)
     assert float(row["fee_total"]) == pytest.approx(0.1)
     assert float(row["net_pnl"]) == pytest.approx(-0.1)
+
+
+def test_buy_without_direct_decision_uses_strict_single_fallback_match(tmp_path):
+    conn = ensure_db(str(tmp_path / "strict_match.sqlite"))
+    fill_ts = 1_700_000_100_000
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 5_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+    )
+    _record_order(conn, client_order_id="entry_strict", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_strict",
+        side="BUY",
+        fill_id="fill_entry_strict",
+        fill_ts=fill_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+    )
+    row = conn.execute(
+        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_strict'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert int(row["entry_decision_id"]) == 1
+    assert row["entry_decision_linkage"] == "fallback_strict_match"
+
+
+def test_buy_fallback_does_not_misattributed_other_strategy_or_pair(tmp_path):
+    conn = ensure_db(str(tmp_path / "no_misattribution.sqlite"))
+    fill_ts = 1_700_000_200_000
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 1_000, "other_strategy", '{"pair":"KRW-BTC"}'),
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 2_000, "sma_with_filter", '{"pair":"KRW-ETH"}'),
+    )
+    _record_order(conn, client_order_id="entry_unattributed", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_unattributed",
+        side="BUY",
+        fill_id="fill_entry_unattributed",
+        fill_ts=fill_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+    )
+    row = conn.execute(
+        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_unattributed'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["entry_decision_id"] is None
+    assert row["entry_decision_linkage"] == "unattributed_no_strict_match"
+
+
+def test_buy_fallback_marks_ambiguous_when_multiple_strict_candidates(tmp_path):
+    conn = ensure_db(str(tmp_path / "ambiguous_fallback.sqlite"))
+    fill_ts = 1_700_000_300_000
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 2_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+    )
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 1_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+    )
+    _record_order(conn, client_order_id="entry_ambiguous", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_ambiguous",
+        side="BUY",
+        fill_id="fill_entry_ambiguous",
+        fill_ts=fill_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+    )
+    row = conn.execute(
+        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_ambiguous'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["entry_decision_id"] is None
+    assert row["entry_decision_linkage"] == "ambiguous_multi_candidate"

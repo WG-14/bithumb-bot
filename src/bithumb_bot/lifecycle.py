@@ -3,20 +3,56 @@ from __future__ import annotations
 import sqlite3
 
 
-def _find_entry_decision(conn: sqlite3.Connection, *, fill_ts: int) -> tuple[int | None, str | None]:
+_ENTRY_DECISION_FALLBACK_LOOKBACK_MS = 15 * 60 * 1000
+
+
+def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int) -> str | None:
     row = conn.execute(
+        """
+        SELECT strategy_name
+        FROM strategy_decisions
+        WHERE id=?
+        LIMIT 1
+        """,
+        (int(decision_id),),
+    ).fetchone()
+    if row is None or row["strategy_name"] is None:
+        return None
+    return str(row["strategy_name"])
+
+
+def _find_entry_decision(
+    conn: sqlite3.Connection,
+    *,
+    fill_ts: int,
+    pair: str,
+    strategy_name: str | None,
+) -> tuple[int | None, str | None, str]:
+    if strategy_name is None or not str(strategy_name).strip():
+        return None, None, "unattributed_missing_strategy"
+
+    lower_ts = max(0, int(fill_ts) - _ENTRY_DECISION_FALLBACK_LOOKBACK_MS)
+    rows = conn.execute(
         """
         SELECT id, strategy_name
         FROM strategy_decisions
-        WHERE signal='BUY' AND decision_ts <= ?
+        WHERE signal='BUY'
+          AND strategy_name=?
+          AND decision_ts BETWEEN ? AND ?
+          AND json_extract(context_json, '$.pair')=?
         ORDER BY decision_ts DESC, id DESC
-        LIMIT 1
+        LIMIT 2
         """,
-        (int(fill_ts),),
-    ).fetchone()
-    if row is None:
-        return None, None
-    return int(row["id"]), str(row["strategy_name"])
+        (str(strategy_name), lower_ts, int(fill_ts), str(pair)),
+    ).fetchall()
+
+    if not rows:
+        return None, str(strategy_name), "unattributed_no_strict_match"
+    if len(rows) > 1:
+        return None, str(strategy_name), "ambiguous_multi_candidate"
+
+    row = rows[0]
+    return int(row["id"]), str(row["strategy_name"]), "fallback_strict_match"
 
 
 def apply_fill_lifecycle(
@@ -40,12 +76,20 @@ def apply_fill_lifecycle(
     if side == "BUY":
         resolved_entry_decision_id = entry_decision_id
         resolved_strategy_name = strategy_name
-        if resolved_entry_decision_id is None or resolved_strategy_name is None:
-            lookup_decision_id, lookup_strategy_name = _find_entry_decision(conn, fill_ts=int(fill_ts))
-            if resolved_entry_decision_id is None:
-                resolved_entry_decision_id = lookup_decision_id
+        resolved_entry_decision_linkage = "direct" if resolved_entry_decision_id is not None else "unattributed"
+        if resolved_entry_decision_id is not None and resolved_strategy_name is None:
+            resolved_strategy_name = _load_strategy_for_decision_id(conn, decision_id=int(resolved_entry_decision_id))
+        if resolved_entry_decision_id is None:
+            lookup_decision_id, lookup_strategy_name, lookup_linkage = _find_entry_decision(
+                conn,
+                fill_ts=int(fill_ts),
+                pair=str(pair),
+                strategy_name=resolved_strategy_name,
+            )
+            resolved_entry_decision_id = lookup_decision_id
             if resolved_strategy_name is None:
                 resolved_strategy_name = lookup_strategy_name
+            resolved_entry_decision_linkage = lookup_linkage
         conn.execute(
             """
             INSERT INTO open_position_lots(
@@ -58,8 +102,9 @@ def apply_fill_lifecycle(
                 qty_open,
                 entry_fee_total,
                 strategy_name,
-                entry_decision_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_decision_id,
+                entry_decision_linkage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -72,6 +117,7 @@ def apply_fill_lifecycle(
                 float(fee),
                 resolved_strategy_name,
                 resolved_entry_decision_id,
+                resolved_entry_decision_linkage,
             ),
         )
         return
@@ -91,7 +137,8 @@ def apply_fill_lifecycle(
             qty_open,
             entry_fee_total,
             strategy_name,
-            entry_decision_id
+            entry_decision_id,
+            entry_decision_linkage
         FROM open_position_lots
         WHERE pair=? AND qty_open > 0
         ORDER BY entry_ts ASC, id ASC
@@ -145,10 +192,11 @@ def apply_fill_lifecycle(
                 holding_time_sec,
                 strategy_name,
                 entry_decision_id,
+                entry_decision_linkage,
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -169,6 +217,7 @@ def apply_fill_lifecycle(
                 float(holding_time_seconds),
                 strategy_name or lot["strategy_name"],
                 entry_decision_id if entry_decision_id is not None else lot["entry_decision_id"],
+                ("direct" if entry_decision_id is not None else lot["entry_decision_linkage"]),
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name,
@@ -211,10 +260,11 @@ def apply_fill_lifecycle(
                 holding_time_sec,
                 strategy_name,
                 entry_decision_id,
+                entry_decision_linkage,
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -235,6 +285,7 @@ def apply_fill_lifecycle(
                 0.0,
                 strategy_name,
                 entry_decision_id,
+                "unattributed_unknown_entry",
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name,

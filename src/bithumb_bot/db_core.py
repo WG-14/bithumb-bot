@@ -580,6 +580,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
             entry_decision_id INTEGER,
+            entry_decision_linkage TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
         """
@@ -589,6 +590,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "open_position_lots", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "open_position_lots", "entry_decision_id", "entry_decision_id INTEGER")
+    _ensure_column(conn, "open_position_lots", "entry_decision_linkage", "entry_decision_linkage TEXT")
 
     conn.execute(
         """
@@ -619,6 +621,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             holding_time_sec REAL NOT NULL,
             strategy_name TEXT,
             entry_decision_id INTEGER,
+            entry_decision_linkage TEXT,
             exit_decision_id INTEGER,
             exit_reason TEXT,
             exit_rule_name TEXT,
@@ -631,6 +634,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "trade_lifecycles", "exit_fill_id", "exit_fill_id TEXT")
     _ensure_column(conn, "trade_lifecycles", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trade_lifecycles", "entry_decision_id", "entry_decision_id INTEGER")
+    _ensure_column(conn, "trade_lifecycles", "entry_decision_linkage", "entry_decision_linkage TEXT")
     _ensure_column(conn, "trade_lifecycles", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "trade_lifecycles", "exit_reason", "exit_reason TEXT")
     _ensure_column(conn, "trade_lifecycles", "exit_rule_name", "exit_rule_name TEXT")
