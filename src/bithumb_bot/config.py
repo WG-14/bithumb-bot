@@ -176,10 +176,12 @@ def validate_accounts_preflight(cfg: Settings) -> None:
 
     try:
         parsed_accounts = parse_accounts_response(response)
+        allow_missing_base = bool(cfg.MODE == "live" and cfg.LIVE_DRY_RUN and not cfg.LIVE_REAL_ORDER_ARMED)
         select_pair_balances(
             parsed_accounts,
             order_currency=base_currency,
             payment_currency=quote_currency,
+            allow_missing_base=allow_missing_base,
         )
     except Exception as exc:
         detail_lower = str(exc).lower()

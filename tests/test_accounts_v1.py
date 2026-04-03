@@ -89,6 +89,22 @@ def test_v1_accounts_select_pair_balances_requires_pair_currencies():
         select_pair_balances(parsed, order_currency="BTC", payment_currency="KRW")
 
 
+def test_v1_accounts_select_pair_balances_can_treat_missing_base_as_zero_when_explicitly_allowed() -> None:
+    parsed = parse_accounts_response([{"currency": "KRW", "balance": "1000", "locked": "10"}])
+
+    pair = select_pair_balances(
+        parsed,
+        order_currency="BTC",
+        payment_currency="KRW",
+        allow_missing_base=True,
+    )
+
+    assert pair.cash_balance == Decimal("1000")
+    assert pair.cash_locked == Decimal("10")
+    assert pair.asset_balance == Decimal("0")
+    assert pair.asset_locked == Decimal("0")
+
+
 def test_v1_accounts_to_broker_balance_maps_values():
     mapped = to_broker_balance(
         PairBalances(

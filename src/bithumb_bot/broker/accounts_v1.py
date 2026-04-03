@@ -155,22 +155,22 @@ def select_pair_balances(
     *,
     order_currency: str,
     payment_currency: str,
+    allow_missing_base: bool = False,
 ) -> PairBalances:
     quote_currency = payment_currency.strip().upper()
     base_currency = order_currency.strip().upper()
-    missing_required_currencies: list[str] = []
     if quote_currency not in accounts.balances:
-        missing_required_currencies.append(quote_currency)
-    if base_currency not in accounts.balances:
-        missing_required_currencies.append(base_currency)
-
-    if missing_required_currencies:
-        if quote_currency in missing_required_currencies:
-            raise AccountsRequiredCurrencyMissingError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
-        raise AccountsRequiredCurrencyMissingError(f"/v1/accounts schema mismatch: missing base currency row '{base_currency}'")
+        raise AccountsRequiredCurrencyMissingError(f"/v1/accounts schema mismatch: missing quote currency row '{quote_currency}'")
 
     cash_balance, cash_locked = accounts.balances[quote_currency]
-    asset_balance, asset_locked = accounts.balances[base_currency]
+    if base_currency in accounts.balances:
+        asset_balance, asset_locked = accounts.balances[base_currency]
+    elif allow_missing_base:
+        asset_balance = Decimal("0")
+        asset_locked = Decimal("0")
+    else:
+        raise AccountsRequiredCurrencyMissingError(f"/v1/accounts schema mismatch: missing base currency row '{base_currency}'")
+
     return PairBalances(
         cash_balance=cash_balance,
         cash_locked=cash_locked,

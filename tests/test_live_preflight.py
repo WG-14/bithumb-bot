@@ -970,6 +970,10 @@ def test_accounts_preflight_schema_error_blocks_live(monkeypatch: pytest.MonkeyP
 
 def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
     monkeypatch.setattr(
         config,
         "_fetch_accounts_payload_for_preflight",
@@ -984,6 +988,42 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
     assert "reason=required currency missing" in msg
     assert "row_count=1" in msg
     assert "currencies=KRW" in msg
+    assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+
+
+def test_accounts_preflight_allows_missing_base_currency_in_live_dry_run_unarmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
+    )
+
+    config.validate_live_mode_preflight(settings)
+
+
+def test_accounts_preflight_still_requires_quote_currency_in_live_dry_run_unarmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "BTC", "balance": "0.1", "locked": "0"}],
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "required currency missing" in msg
+    assert "missing quote currency row 'KRW'" in msg
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
 
 
