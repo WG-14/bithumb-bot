@@ -7,7 +7,11 @@ from datetime import datetime, time, timedelta, timezone
 from statistics import median
 from typing import Any
 
-from .analytics_context import _load_context_json, normalize_analysis_context_from_lifecycle_row
+from .analytics_context import (
+    _load_context_json,
+    normalize_analysis_context_from_decision_row,
+    normalize_analysis_context_from_lifecycle_row,
+)
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
@@ -106,6 +110,10 @@ class FilterObservationSummary:
     avoided_loss_count: int
     opportunity_missed_count: int
     flat_or_unknown_count: int
+    return_distribution_bps: dict[str, float | None]
+    blocked_outcome_by_filter: dict[str, dict[str, float | int | bool | None]]
+    blocked_outcome_by_signal_strength: dict[str, dict[str, float | int | bool | None]]
+    blocked_outcome_by_market_bucket: dict[str, dict[str, float | int | bool | None]]
 
 
 @dataclass
@@ -574,6 +582,68 @@ def _extract_decision_type(context_json: str | None, fallback_signal: str) -> st
     return str(fallback_signal or "").strip().upper() or "UNKNOWN"
 
 
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    ratio = min(1.0, max(0.0, float(q)))
+    index = int(round((len(ordered) - 1) * ratio))
+    return float(ordered[index])
+
+
+def _build_return_distribution(values: list[float]) -> dict[str, float | None]:
+    return {
+        "min_bps": float(min(values)) if values else None,
+        "p10_bps": _percentile(values, 0.10),
+        "median_bps": median(values) if values else None,
+        "p90_bps": _percentile(values, 0.90),
+        "max_bps": float(max(values)) if values else None,
+        "avg_bps": float(sum(values) / len(values)) if values else None,
+    }
+
+
+def _empty_outcome_bucket() -> dict[str, float | int | bool | None]:
+    return {
+        "blocked_count": 0,
+        "observed_count": 0,
+        "avoided_loss_count": 0,
+        "opportunity_missed_count": 0,
+        "flat_or_unknown_count": 0,
+        "avoided_loss_ratio": None,
+        "opportunity_missed_ratio": None,
+        "flat_or_unknown_ratio": None,
+        "avg_return_bps": None,
+        "median_return_bps": None,
+        "insufficient_sample": True,
+    }
+
+
+def _finalize_outcome_breakdown(
+    source: dict[str, dict[str, float | int | bool | None | list[float]]],
+    *,
+    sample_threshold: int,
+) -> dict[str, dict[str, float | int | bool | None]]:
+    finalized: dict[str, dict[str, float | int | bool | None]] = {}
+    for key in sorted(source):
+        bucket = dict(source[key])
+        blocked_count = int(bucket.get("blocked_count") or 0)
+        observed_count = int(bucket.get("observed_count") or 0)
+        avoided_count = int(bucket.get("avoided_loss_count") or 0)
+        missed_count = int(bucket.get("opportunity_missed_count") or 0)
+        flat_count = int(bucket.get("flat_or_unknown_count") or 0)
+        returns = list(bucket.get("_returns") or [])
+        denominator = blocked_count if blocked_count > 0 else 1
+        bucket["avoided_loss_ratio"] = avoided_count / denominator
+        bucket["opportunity_missed_ratio"] = missed_count / denominator
+        bucket["flat_or_unknown_ratio"] = flat_count / denominator
+        bucket["avg_return_bps"] = float(sum(returns) / len(returns)) if returns else None
+        bucket["median_return_bps"] = median(returns) if returns else None
+        bucket["insufficient_sample"] = observed_count < sample_threshold
+        bucket.pop("_returns", None)
+        finalized[key] = bucket
+    return finalized
+
+
 def fetch_filter_effectiveness_summary(
     conn: sqlite3.Connection,
     *,
@@ -665,10 +735,15 @@ def fetch_filter_effectiveness_summary(
 
     observation_bars = max(1, int(observation_window_bars))
     default_interval_ms = parse_interval_sec(settings.INTERVAL) * 1000
+    sample_threshold = max(1, int(min_observation_sample))
     observed_returns_bps: list[float] = []
     avoided_loss_count = 0
     opportunity_missed_count = 0
     flat_or_unknown_count = 0
+    blocked_returns_by_filter: dict[str, list[float]] = {}
+    blocked_outcome_by_filter: dict[str, dict[str, float | int | bool | None | list[float]]] = {}
+    blocked_outcome_by_signal_strength: dict[str, dict[str, float | int | bool | None | list[float]]] = {}
+    blocked_outcome_by_market_bucket: dict[str, dict[str, float | int | bool | None | list[float]]] = {}
 
     for row in blocked_rows:
         context = _load_context_json(row["context_json"])
@@ -678,33 +753,79 @@ def fetch_filter_effectiveness_summary(
         except ValueError:
             interval_ms = default_interval_ms
 
+        blocked_filters = _extract_blocked_filters(row["context_json"])
+        if not blocked_filters:
+            blocked_filters = ["<unspecified>"]
+        signal_strength_label = str(context.get("signal_strength_label") or "unknown").strip().lower() or "unknown"
+        analysis = normalize_analysis_context_from_decision_row(row)
+        market_bucket = str(analysis.get("buckets", {}).get("volatility") or "unknown")
         decision_price = float(row["market_price"]) if row["market_price"] is not None else None
         decision_candle_ts = int(row["candle_ts"]) if row["candle_ts"] is not None else None
+        observed_return_bps: float | None = None
+        outcome_label = "flat_or_unknown"
         if decision_price is None or decision_price <= 0 or decision_candle_ts is None:
             flat_or_unknown_count += 1
-            continue
-
-        target_ts = decision_candle_ts + (interval_ms * observation_bars)
-        observed_price = close_by_ts.get(target_ts)
-        if observed_price is None or observed_price <= 0:
-            flat_or_unknown_count += 1
-            continue
-
-        return_bps = ((observed_price - decision_price) / decision_price) * 10000.0
-        observed_returns_bps.append(return_bps)
-        if return_bps < 0:
-            avoided_loss_count += 1
-        elif return_bps > 0:
-            opportunity_missed_count += 1
         else:
-            flat_or_unknown_count += 1
+            target_ts = decision_candle_ts + (interval_ms * observation_bars)
+            observed_price = close_by_ts.get(target_ts)
+            if observed_price is None or observed_price <= 0:
+                flat_or_unknown_count += 1
+            else:
+                observed_return_bps = ((observed_price - decision_price) / decision_price) * 10000.0
+                observed_returns_bps.append(observed_return_bps)
+                if observed_return_bps < 0:
+                    avoided_loss_count += 1
+                    outcome_label = "avoided_loss"
+                elif observed_return_bps > 0:
+                    opportunity_missed_count += 1
+                    outcome_label = "opportunity_missed"
+                else:
+                    flat_or_unknown_count += 1
+
+        for filter_name in blocked_filters:
+            filter_bucket = blocked_outcome_by_filter.setdefault(filter_name, _empty_outcome_bucket())
+            filter_bucket["blocked_count"] = int(filter_bucket["blocked_count"]) + 1
+            filter_bucket[outcome_label + "_count"] = int(filter_bucket[outcome_label + "_count"]) + 1
+            if observed_return_bps is not None:
+                filter_bucket["observed_count"] = int(filter_bucket["observed_count"]) + 1
+                filter_bucket.setdefault("_returns", []).append(observed_return_bps)
+                blocked_returns_by_filter.setdefault(filter_name, []).append(observed_return_bps)
+
+        for label, bucket_source in (
+            (signal_strength_label, blocked_outcome_by_signal_strength),
+            (market_bucket, blocked_outcome_by_market_bucket),
+        ):
+            target_bucket = bucket_source.setdefault(label, _empty_outcome_bucket())
+            target_bucket["blocked_count"] = int(target_bucket["blocked_count"]) + 1
+            target_bucket[outcome_label + "_count"] = int(target_bucket[outcome_label + "_count"]) + 1
+            if observed_return_bps is not None:
+                target_bucket["observed_count"] = int(target_bucket["observed_count"]) + 1
+                target_bucket.setdefault("_returns", []).append(observed_return_bps)
 
     avg_return_bps = (
         float(sum(observed_returns_bps) / len(observed_returns_bps)) if observed_returns_bps else None
     )
     median_return_bps = median(observed_returns_bps) if observed_returns_bps else None
-    sample_threshold = max(1, int(min_observation_sample))
     insufficient_sample = len(observed_returns_bps) < sample_threshold
+    return_distribution_bps = _build_return_distribution(observed_returns_bps)
+    blocked_return_distribution_by_filter = {
+        key: _build_return_distribution(values) for key, values in sorted(blocked_returns_by_filter.items())
+    }
+    finalized_blocked_by_filter = _finalize_outcome_breakdown(
+        blocked_outcome_by_filter,
+        sample_threshold=sample_threshold,
+    )
+    for key, distribution in blocked_return_distribution_by_filter.items():
+        if key in finalized_blocked_by_filter:
+            finalized_blocked_by_filter[key]["return_distribution_bps"] = distribution
+    finalized_by_signal_strength = _finalize_outcome_breakdown(
+        blocked_outcome_by_signal_strength,
+        sample_threshold=sample_threshold,
+    )
+    finalized_by_market_bucket = _finalize_outcome_breakdown(
+        blocked_outcome_by_market_bucket,
+        sample_threshold=sample_threshold,
+    )
 
     notes: list[str] = []
     if total_entry_candidates <= 0:
@@ -719,6 +840,7 @@ def fetch_filter_effectiveness_summary(
     notes.append(
         "observation metric is descriptive only; blocked candidates are not counterfactual realized pnl"
     )
+    notes.append("blocked outcome breakdowns are explanatory observations, not execution or realized-pnl claims")
 
     return FilterEffectivenessSummary(
         total_entry_candidates=total_entry_candidates,
@@ -737,6 +859,10 @@ def fetch_filter_effectiveness_summary(
             avoided_loss_count=avoided_loss_count,
             opportunity_missed_count=opportunity_missed_count,
             flat_or_unknown_count=flat_or_unknown_count,
+            return_distribution_bps=return_distribution_bps,
+            blocked_outcome_by_filter=finalized_blocked_by_filter,
+            blocked_outcome_by_signal_strength=finalized_by_signal_strength,
+            blocked_outcome_by_market_bucket=finalized_by_market_bucket,
         ),
         notes=notes,
     )
@@ -1438,10 +1564,14 @@ def cmd_strategy_report(
                 "sample_threshold": filter_effectiveness.observation.sample_threshold,
                 "avg_return_bps": filter_effectiveness.observation.avg_return_bps,
                 "median_return_bps": filter_effectiveness.observation.median_return_bps,
+                "return_distribution_bps": filter_effectiveness.observation.return_distribution_bps,
                 "avoided_loss_count": filter_effectiveness.observation.avoided_loss_count,
                 "opportunity_missed_count": filter_effectiveness.observation.opportunity_missed_count,
                 "flat_or_unknown_count": filter_effectiveness.observation.flat_or_unknown_count,
             },
+            "blocked_outcome_by_filter": filter_effectiveness.observation.blocked_outcome_by_filter,
+            "blocked_outcome_by_signal_strength": filter_effectiveness.observation.blocked_outcome_by_signal_strength,
+            "blocked_outcome_by_market_bucket": filter_effectiveness.observation.blocked_outcome_by_market_bucket,
             "notes": filter_effectiveness.notes,
         },
         "attribution_quality": {
@@ -1563,6 +1693,45 @@ def cmd_strategy_report(
         f"opportunity_missed:{filter_effectiveness.observation.opportunity_missed_count},"
         f"flat_or_unknown:{filter_effectiveness.observation.flat_or_unknown_count}"
     )
+    print(
+        "  "
+        f"blocked_return_distribution_bps="
+        f"min:{_fmt_rate(filter_effectiveness.observation.return_distribution_bps.get('min_bps'), as_bps=True)},"
+        f"p10:{_fmt_rate(filter_effectiveness.observation.return_distribution_bps.get('p10_bps'), as_bps=True)},"
+        f"median:{_fmt_rate(filter_effectiveness.observation.return_distribution_bps.get('median_bps'), as_bps=True)},"
+        f"p90:{_fmt_rate(filter_effectiveness.observation.return_distribution_bps.get('p90_bps'), as_bps=True)},"
+        f"max:{_fmt_rate(filter_effectiveness.observation.return_distribution_bps.get('max_bps'), as_bps=True)}"
+    )
+    print("  [blocked_outcome_by_signal_strength]")
+    print(
+        "  signal_strength,blocked_count,observed_count,avoided_loss_ratio,"
+        "opportunity_missed_ratio,flat_or_unknown_ratio"
+    )
+    if not filter_effectiveness.observation.blocked_outcome_by_signal_strength:
+        print("  -,-,-,-,-,-")
+    else:
+        for bucket, stats in filter_effectiveness.observation.blocked_outcome_by_signal_strength.items():
+            print(
+                "  "
+                f"{bucket},{stats['blocked_count']},{stats['observed_count']},"
+                f"{stats['avoided_loss_ratio']:.4f},{stats['opportunity_missed_ratio']:.4f},"
+                f"{stats['flat_or_unknown_ratio']:.4f}"
+            )
+    print("  [blocked_outcome_by_market_bucket]")
+    print(
+        "  market_bucket,blocked_count,observed_count,avoided_loss_ratio,"
+        "opportunity_missed_ratio,flat_or_unknown_ratio"
+    )
+    if not filter_effectiveness.observation.blocked_outcome_by_market_bucket:
+        print("  -,-,-,-,-,-")
+    else:
+        for bucket, stats in filter_effectiveness.observation.blocked_outcome_by_market_bucket.items():
+            print(
+                "  "
+                f"{bucket},{stats['blocked_count']},{stats['observed_count']},"
+                f"{stats['avoided_loss_ratio']:.4f},{stats['opportunity_missed_ratio']:.4f},"
+                f"{stats['flat_or_unknown_ratio']:.4f}"
+            )
     for note in filter_effectiveness.notes:
         print(f"  note: {note}")
     print("  [attribution_quality]")

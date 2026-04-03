@@ -589,6 +589,15 @@ def test_filter_effectiveness_summary_counts_single_multi_and_hold(tmp_path, mon
     assert summary.observation.avoided_loss_count == 1
     assert summary.observation.opportunity_missed_count == 1
     assert summary.observation.insufficient_sample is True
+    assert summary.observation.return_distribution_bps["min_bps"] == pytest.approx(-297.029702970297)
+    assert summary.observation.return_distribution_bps["max_bps"] == pytest.approx(100.0)
+    assert summary.observation.blocked_outcome_by_filter["gap"]["blocked_count"] == 2
+    assert summary.observation.blocked_outcome_by_filter["gap"]["avoided_loss_ratio"] == pytest.approx(0.5)
+    assert summary.observation.blocked_outcome_by_filter["volatility"]["avoided_loss_ratio"] == pytest.approx(1.0)
+    assert summary.observation.blocked_outcome_by_signal_strength["unknown"]["blocked_count"] == 2
+    assert summary.observation.blocked_outcome_by_market_bucket["unknown"]["blocked_count"] == 2
+    assert any("descriptive only" in note for note in summary.notes)
+    assert any("explanatory observations" in note for note in summary.notes)
 
 
 def test_strategy_report_json_includes_filter_effectiveness_and_insufficient_sample_warning(
@@ -649,7 +658,12 @@ def test_strategy_report_json_includes_filter_effectiveness_and_insufficient_sam
     assert section["entry_candidate_summary"]["blocked_entry_count"] == 1
     assert section["entry_candidate_summary"]["blocked_by_filter"] == {"gap": 1}
     assert section["blocked_observation_window"]["insufficient_sample"] is True
+    assert section["blocked_observation_window"]["return_distribution_bps"]["median_bps"] is None
+    assert section["blocked_outcome_by_filter"]["gap"]["blocked_count"] == 1
+    assert section["blocked_outcome_by_signal_strength"]["unknown"]["blocked_count"] == 1
+    assert section["blocked_outcome_by_market_bucket"]["unknown"]["blocked_count"] == 1
     assert any("insufficient sample" in note for note in section["notes"])
+    assert any("descriptive only" in note for note in section["notes"])
     attribution = payload["attribution_quality"]
     assert attribution["unattributed_trade_count"] == 0
     assert attribution["ambiguous_linkage_count"] == 0
