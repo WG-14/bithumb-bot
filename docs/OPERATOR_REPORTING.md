@@ -5,7 +5,7 @@
 - "얼마 벌었는가?"
 - "왜 이런 주문/체결 판단이 나왔는가?"
 
-핵심 명령은 `ops-report`, `fee-diagnostics` 입니다.
+핵심 명령은 `ops-report`, `fee-diagnostics`, `experiment-report` 입니다.
 
 ## 1) 필요한 환경변수
 
@@ -158,3 +158,40 @@ MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite \
 ```
 
 데이터가 부족하거나 필터에 일치하는 거래가 없으면 실패(exit non-zero) 대신 설명 가능한 메시지를 출력합니다.
+
+## 8) 소액 live 기대값 검증 리포트 (`experiment-report`)
+
+`experiment-report`는 운영 안정성 지표(`ops-report`/`health`/`recovery-report`)와 분리된 **실험 해석용 리포트**입니다.  
+특히 "10,000 KRW 소액 live 실험에서 현재 전략의 기대값이 있는가?"를 보수적으로 판단하기 위한 지표를 제공합니다.
+
+### 제공 지표
+
+- `realized_net_pnl`
+- `trade_count` (sample size)
+- `win_rate`
+- `expectancy_per_trade`
+- `max_drawdown_proxy` (trade 순서 누적 손익 기준)
+- `top-N concentration` (소수 거래 의존도)
+- `longest_losing_streak`
+- `time-of-day bucket performance`
+- `market regime bucket performance` (`volatility`/`overextension` 버킷 조합)
+
+### 경고 규칙
+
+- 표본 부족: `insufficient sample`
+- 상위 거래 의존도 높음: `concentrated pnl`
+- 특정 레짐 편중: `regime skew`
+
+### 실행 예시
+
+```bash
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
+  uv run bithumb-bot experiment-report \
+  --from-date 2026-03-01 --to-date 2026-03-31 \
+  --sample-threshold 30 \
+  --top-n 3 \
+  --concentration-threshold 0.60 \
+  --regime-skew-threshold 0.70
+```
+
+JSON 출력이 필요하면 `--json`을 사용합니다.

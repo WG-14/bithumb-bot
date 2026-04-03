@@ -37,6 +37,7 @@ from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
 from .reporting import (
+    cmd_experiment_report,
     cmd_decision_telemetry,
     cmd_fee_diagnostics,
     cmd_ops_report,
@@ -2418,6 +2419,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     strategy_report.add_argument("--json", action="store_true")
 
+    experiment_report = sub.add_parser(
+        "experiment-report",
+        help="expectancy validation report for small live experiments",
+        description="Report realized PnL/sample distribution/time-regime bias for experiment interpretation.",
+    )
+    experiment_report.add_argument("--strategy-name")
+    experiment_report.add_argument("--pair")
+    experiment_report.add_argument("--from-date", help="KST date (YYYY-MM-DD)")
+    experiment_report.add_argument("--to-date", help="KST date (YYYY-MM-DD)")
+    experiment_report.add_argument("--sample-threshold", type=int, default=30)
+    experiment_report.add_argument("--top-n", type=int, default=3)
+    experiment_report.add_argument("--concentration-threshold", type=float, default=0.6)
+    experiment_report.add_argument("--regime-skew-threshold", type=float, default=0.7)
+    experiment_report.add_argument("--json", action="store_true")
+
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
@@ -2485,6 +2501,27 @@ def main(argv: list[str] | None = None) -> int:
             group_by=group_by,
             observation_window_bars=max(1, int(args.observation_window_bars)),
             min_observation_sample=max(1, int(args.min_observation_sample)),
+            as_json=bool(args.json),
+        )
+    elif args.cmd == "experiment-report":
+        try:
+            from_ts_ms, to_ts_ms = parse_kst_date_range_to_ts_ms(
+                from_date=args.from_date,
+                to_date=args.to_date,
+            )
+        except ValueError:
+            p.error("invalid date format for --from-date/--to-date; expected YYYY-MM-DD")
+        if from_ts_ms is not None and to_ts_ms is not None and from_ts_ms > to_ts_ms:
+            p.error("--from-date must be earlier than or equal to --to-date")
+        cmd_experiment_report(
+            strategy_name=args.strategy_name,
+            pair=args.pair,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            sample_threshold=max(1, int(args.sample_threshold)),
+            top_n=max(1, int(args.top_n)),
+            concentration_warn_threshold=max(0.0, float(args.concentration_threshold)),
+            regime_skew_warn_threshold=max(0.0, float(args.regime_skew_threshold)),
             as_json=bool(args.json),
         )
     elif args.cmd == "report":

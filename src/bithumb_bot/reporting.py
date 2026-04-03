@@ -5,8 +5,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from statistics import median
+from typing import Any
 
-from .analytics_context import _load_context_json
+from .analytics_context import _load_context_json, normalize_analysis_context_from_lifecycle_row
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
@@ -117,6 +118,33 @@ class FilterEffectivenessSummary:
     multi_filter_blocked_count: int
     observation: FilterObservationSummary
     notes: list[str]
+
+
+@dataclass
+class ExperimentBucketStat:
+    bucket: str
+    trade_count: int
+    win_rate: float
+    realized_net_pnl: float
+    expectancy_per_trade: float
+
+
+@dataclass
+class ExperimentReportSummary:
+    realized_net_pnl: float
+    trade_count: int
+    win_rate: float
+    expectancy_per_trade: float
+    max_drawdown: float
+    top_n_concentration: float
+    top_n: int
+    longest_losing_streak: int
+    sample_threshold: int
+    sample_insufficient: bool
+    regime_skew_ratio: float
+    warnings: list[str]
+    time_bucket_rows: list[ExperimentBucketStat]
+    regime_bucket_rows: list[ExperimentBucketStat]
 
 
 def _fetch_strategy_stats(conn: sqlite3.Connection) -> list[StrategyStat]:
@@ -1250,6 +1278,301 @@ def cmd_strategy_report(
     )
     for note in filter_effectiveness.notes:
         print(f"  note: {note}")
+
+
+def _max_drawdown_from_trade_sequence(net_pnls: list[float]) -> float:
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for pnl in net_pnls:
+        equity += float(pnl)
+        peak = max(peak, equity)
+        drawdown = peak - equity
+        if drawdown > max_dd:
+            max_dd = drawdown
+    return max_dd
+
+
+def _longest_losing_streak(net_pnls: list[float]) -> int:
+    streak = 0
+    best = 0
+    for pnl in net_pnls:
+        if float(pnl) < 0.0:
+            streak += 1
+            best = max(best, streak)
+        else:
+            streak = 0
+    return best
+
+
+def _build_bucket_rows(stats: dict[str, dict[str, float]]) -> list[ExperimentBucketStat]:
+    rows: list[ExperimentBucketStat] = []
+    for bucket, agg in stats.items():
+        count = int(agg.get("trade_count", 0))
+        wins = int(agg.get("wins", 0))
+        net = float(agg.get("realized_net_pnl", 0.0))
+        rows.append(
+            ExperimentBucketStat(
+                bucket=bucket,
+                trade_count=count,
+                win_rate=(wins / count) if count > 0 else 0.0,
+                realized_net_pnl=net,
+                expectancy_per_trade=(net / count) if count > 0 else 0.0,
+            )
+        )
+    rows.sort(key=lambda row: (-row.trade_count, row.bucket))
+    return rows
+
+
+def _classify_regime_bucket(analysis: dict[str, Any]) -> str:
+    buckets = analysis.get("buckets") if isinstance(analysis.get("buckets"), dict) else {}
+    volatility = str(buckets.get("volatility") or "unknown")
+    extension = str(buckets.get("overextension") or "unknown")
+    if volatility == "unknown" and extension == "unknown":
+        return "unknown"
+    return f"vol={volatility}|ext={extension}"
+
+
+def fetch_experiment_report_summary(
+    conn: sqlite3.Connection,
+    *,
+    from_ts_ms: int | None = None,
+    to_ts_ms: int | None = None,
+    strategy_name: str | None = None,
+    pair: str | None = None,
+    top_n: int = 3,
+    sample_threshold: int = 30,
+    concentration_warn_threshold: float = 0.6,
+    regime_skew_warn_threshold: float = 0.7,
+) -> ExperimentReportSummary:
+    filters: list[str] = []
+    params: list[object] = []
+    if from_ts_ms is not None:
+        filters.append("tl.exit_ts >= ?")
+        params.append(int(from_ts_ms))
+    if to_ts_ms is not None:
+        filters.append("tl.exit_ts <= ?")
+        params.append(int(to_ts_ms))
+    if strategy_name:
+        filters.append("COALESCE(tl.strategy_name, '<unknown>') = ?")
+        params.append(str(strategy_name))
+    if pair:
+        filters.append("COALESCE(tl.pair, '<unknown>') = ?")
+        params.append(str(pair))
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    rows = conn.execute(
+        f"""
+        SELECT
+            tl.id,
+            tl.entry_ts,
+            tl.exit_ts,
+            tl.net_pnl,
+            esd.context_json AS entry_context_json,
+            xsd.context_json AS exit_context_json
+        FROM trade_lifecycles tl
+        LEFT JOIN strategy_decisions esd ON esd.id = tl.entry_decision_id
+        LEFT JOIN strategy_decisions xsd ON xsd.id = tl.exit_decision_id
+        {where_clause}
+        ORDER BY tl.exit_ts ASC, tl.id ASC
+        """,
+        tuple(params),
+    ).fetchall()
+
+    net_pnls = [float(row["net_pnl"] or 0.0) for row in rows]
+    trade_count = len(net_pnls)
+    wins = sum(1 for pnl in net_pnls if pnl > 0.0)
+    realized_net_pnl = float(sum(net_pnls))
+    expectancy = (realized_net_pnl / trade_count) if trade_count > 0 else 0.0
+    max_drawdown = _max_drawdown_from_trade_sequence(net_pnls)
+    longest_streak = _longest_losing_streak(net_pnls)
+
+    abs_total = float(sum(abs(pnl) for pnl in net_pnls))
+    top_sorted = sorted((abs(pnl) for pnl in net_pnls), reverse=True)
+    top_n_value = max(1, int(top_n))
+    top_n_total = float(sum(top_sorted[:top_n_value]))
+    top_n_concentration = (top_n_total / abs_total) if abs_total > 0.0 else 0.0
+
+    time_stats: dict[str, dict[str, float]] = {}
+    regime_stats: dict[str, dict[str, float]] = {}
+    for row in rows:
+        pnl = float(row["net_pnl"] or 0.0)
+        analysis = normalize_analysis_context_from_lifecycle_row(
+            row,
+            entry_context_json=row["entry_context_json"],
+            exit_context_json=row["exit_context_json"],
+        )
+        buckets = analysis.get("buckets") if isinstance(analysis.get("buckets"), dict) else {}
+        time_bucket = str(buckets.get("time_of_day") or "unknown")
+        regime_bucket = _classify_regime_bucket(analysis)
+        for bucket, target in ((time_bucket, time_stats), (regime_bucket, regime_stats)):
+            agg = target.setdefault(
+                bucket,
+                {"trade_count": 0.0, "wins": 0.0, "realized_net_pnl": 0.0},
+            )
+            agg["trade_count"] += 1.0
+            if pnl > 0.0:
+                agg["wins"] += 1.0
+            agg["realized_net_pnl"] += pnl
+
+    time_bucket_rows = _build_bucket_rows(time_stats)
+    regime_bucket_rows = _build_bucket_rows(regime_stats)
+    regime_top_count = max((row.trade_count for row in regime_bucket_rows), default=0)
+    regime_skew_ratio = (regime_top_count / trade_count) if trade_count > 0 else 0.0
+
+    warnings: list[str] = []
+    if trade_count < max(1, int(sample_threshold)):
+        warnings.append(
+            f"insufficient sample: trade_count={trade_count} < threshold={int(sample_threshold)}; "
+            "avoid strong expectancy conclusions."
+        )
+    if top_n_concentration >= float(concentration_warn_threshold):
+        warnings.append(
+            f"concentrated pnl: top{top_n_value}_abs_trade_contribution={top_n_concentration:.2%} "
+            f"(threshold={float(concentration_warn_threshold):.0%})."
+        )
+    if regime_skew_ratio >= float(regime_skew_warn_threshold):
+        warnings.append(
+            f"regime skew: dominant_regime_trade_share={regime_skew_ratio:.2%} "
+            f"(threshold={float(regime_skew_warn_threshold):.0%})."
+        )
+
+    return ExperimentReportSummary(
+        realized_net_pnl=realized_net_pnl,
+        trade_count=trade_count,
+        win_rate=(wins / trade_count) if trade_count > 0 else 0.0,
+        expectancy_per_trade=expectancy,
+        max_drawdown=max_drawdown,
+        top_n_concentration=top_n_concentration,
+        top_n=top_n_value,
+        longest_losing_streak=longest_streak,
+        sample_threshold=max(1, int(sample_threshold)),
+        sample_insufficient=trade_count < max(1, int(sample_threshold)),
+        regime_skew_ratio=regime_skew_ratio,
+        warnings=warnings,
+        time_bucket_rows=time_bucket_rows,
+        regime_bucket_rows=regime_bucket_rows,
+    )
+
+
+def cmd_experiment_report(
+    *,
+    strategy_name: str | None,
+    pair: str | None,
+    from_ts_ms: int | None,
+    to_ts_ms: int | None,
+    top_n: int = 3,
+    sample_threshold: int = 30,
+    concentration_warn_threshold: float = 0.6,
+    regime_skew_warn_threshold: float = 0.7,
+    as_json: bool = False,
+) -> None:
+    conn = ensure_db()
+    try:
+        summary = fetch_experiment_report_summary(
+            conn,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            strategy_name=strategy_name,
+            pair=pair,
+            top_n=top_n,
+            sample_threshold=sample_threshold,
+            concentration_warn_threshold=concentration_warn_threshold,
+            regime_skew_warn_threshold=regime_skew_warn_threshold,
+        )
+    finally:
+        conn.close()
+
+    payload = {
+        "mode": settings.MODE,
+        "market": settings.PAIR,
+        "filters": {
+            "strategy_name": strategy_name,
+            "pair": pair,
+            "from_ts_ms": from_ts_ms,
+            "to_ts_ms": to_ts_ms,
+            "sample_threshold": summary.sample_threshold,
+            "top_n": summary.top_n,
+        },
+        "operational_stability_boundary": {
+            "note": "ops-report/health/recovery 지표와 분리된 실험용 expectancy 검증 리포트입니다."
+        },
+        "experiment_expectancy_metrics": {
+            "realized_net_pnl": summary.realized_net_pnl,
+            "trade_count": summary.trade_count,
+            "win_rate": summary.win_rate,
+            "expectancy_per_trade": summary.expectancy_per_trade,
+            "max_drawdown_proxy": summary.max_drawdown,
+            "top_n_concentration": summary.top_n_concentration,
+            "longest_losing_streak": summary.longest_losing_streak,
+            "sample_insufficient": summary.sample_insufficient,
+            "regime_skew_ratio": summary.regime_skew_ratio,
+        },
+        "time_of_day_bucket_performance": [
+            {
+                "bucket": row.bucket,
+                "trade_count": row.trade_count,
+                "win_rate": row.win_rate,
+                "realized_net_pnl": row.realized_net_pnl,
+                "expectancy_per_trade": row.expectancy_per_trade,
+            }
+            for row in summary.time_bucket_rows
+        ],
+        "market_regime_bucket_performance": [
+            {
+                "bucket": row.bucket,
+                "trade_count": row.trade_count,
+                "win_rate": row.win_rate,
+                "realized_net_pnl": row.realized_net_pnl,
+                "expectancy_per_trade": row.expectancy_per_trade,
+            }
+            for row in summary.regime_bucket_rows
+        ],
+        "warnings": summary.warnings,
+    }
+    write_json_atomic(PATH_MANAGER.report_path("experiment_report"), payload)
+
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[EXPERIMENT-REPORT]")
+    print(
+        "  "
+        f"strategy_name={strategy_name or '<all>'} "
+        f"pair={pair or '<all>'} "
+        f"from_ts_ms={from_ts_ms if from_ts_ms is not None else '<none>'} "
+        f"to_ts_ms={to_ts_ms if to_ts_ms is not None else '<none>'}"
+    )
+    print("[BOUNDARY]")
+    print("  ops_stability_metrics=separate (use ops-report/health/recovery)")
+    print("  expectancy_validation_metrics=below")
+    print("[EXPECTANCY]")
+    print(f"  realized_net_pnl={summary.realized_net_pnl:,.2f}")
+    print(f"  trade_count={summary.trade_count}")
+    print(f"  win_rate={summary.win_rate:.2%}")
+    print(f"  expectancy_per_trade={summary.expectancy_per_trade:,.2f}")
+    print(f"  max_drawdown_proxy={summary.max_drawdown:,.2f}")
+    print(f"  top{summary.top_n}_concentration={summary.top_n_concentration:.2%}")
+    print(f"  longest_losing_streak={summary.longest_losing_streak}")
+    print("[TIME-OF-DAY-BUCKETS]")
+    print("  bucket,trade_count,win_rate,realized_net_pnl,expectancy_per_trade")
+    for row in summary.time_bucket_rows:
+        print(
+            "  "
+            f"{row.bucket},{row.trade_count},{row.win_rate:.4f},{row.realized_net_pnl:.2f},{row.expectancy_per_trade:.2f}"
+        )
+    print("[MARKET-REGIME-BUCKETS]")
+    print("  bucket,trade_count,win_rate,realized_net_pnl,expectancy_per_trade")
+    for row in summary.regime_bucket_rows:
+        print(
+            "  "
+            f"{row.bucket},{row.trade_count},{row.win_rate:.4f},{row.realized_net_pnl:.2f},{row.expectancy_per_trade:.2f}"
+        )
+    if summary.warnings:
+        print("[WARNINGS]")
+        for warning in summary.warnings:
+            print(f"  - {warning}")
 
 
 def cmd_ops_report(*, limit: int = 20) -> None:
