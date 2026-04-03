@@ -37,6 +37,8 @@ uv run python bot.py recovery-report
 
 - `.env.example` 복사만으로는 live preflight를 통과하지 못할 수 있다. live에서 `DB_PATH` 명시, `MAX_ORDER_KRW/MAX_DAILY_LOSS_KRW/MAX_DAILY_ORDER_COUNT > 0`, `MAX_ORDERBOOK_SPREAD_BPS/MAX_MARKET_SLIPPAGE_BPS/LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS > 0`(유한값), notifier 설정이 필요하다.
 - live에서는 paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`)가 설정되어 있으면 preflight가 거부된다.
+- `/v1/accounts` 점검 정책: `quote` 통화 row(예: KRW)는 **항상 필수**다. `live dry-run`(`LIVE_DRY_RUN=true`, `LIVE_REAL_ORDER_ARMED=false`)에서는 `base` 통화 row 누락을 0 보유(무포지션 시작)로 허용할 수 있다.
+- 실주문 경로(`LIVE_DRY_RUN=false` + `LIVE_REAL_ORDER_ARMED=true`)에서는 `/v1/accounts` 점검이 더 엄격하며, `base` 통화 row 누락은 preflight 차단 사유다.
 - API 키 권한/출금 비활성/IP whitelist 상태는 코드 자동 검증이 아니라 수동 점검 항목이다.
 
 ## 3) API 키/권한 + notifier 체크

@@ -1366,6 +1366,61 @@ def test_broker_diagnose_accounts_policy_context_is_operator_readable(monkeypatc
     assert "preflight_outcome=pass_no_position_allowed" in out
 
 
+def test_broker_diagnose_accounts_policy_context_shows_real_order_block(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_live_real_order_armed = settings.LIVE_REAL_ORDER_ARMED
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1000000.0, 0.0, 0.0, 0.0)
+
+        def get_open_orders(self, **_kwargs):
+            return []
+
+        def get_accounts_validation_diagnostics(self):
+            return {
+                "reason": "required currency missing",
+                "failure_category": "schema_mismatch",
+                "row_count": 1,
+                "currencies": ["KRW"],
+                "missing_required_currencies": ["BTC"],
+                "duplicate_currencies": [],
+                "execution_mode": "live_real_order_path",
+                "quote_currency": "KRW",
+                "base_currency": "BTC",
+                "base_currency_missing_policy": "block_when_base_currency_row_missing",
+                "preflight_outcome": "fail_real_order_blocked",
+                "last_success_reason": "ok",
+                "last_failure_reason": "required currency missing",
+            }
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("skip rule detail")),
+    )
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", original_live_real_order_armed)
+
+    out = capsys.readouterr().out
+    assert "execution_mode=live_real_order_path quote_currency=KRW base_currency=BTC" in out
+    assert "base_currency_missing_policy=block_when_base_currency_row_missing" in out
+    assert "preflight_outcome=fail_real_order_blocked" in out
+
+
 def test_broker_diagnose_config_failure_is_critical(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE

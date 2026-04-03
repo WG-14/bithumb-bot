@@ -992,6 +992,7 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
     assert "row_count=1" in msg
     assert "currencies=KRW" in msg
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
+    assert "missing base currency row 'BTC'" in msg
     assert "execution_mode=live_real_order_path" in msg
     assert "base_currency_missing_policy=block_when_base_currency_row_missing" in msg
     assert "result=fail_real_order_blocked" in msg

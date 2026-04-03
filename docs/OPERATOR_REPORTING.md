@@ -62,6 +62,27 @@ BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit
 4. `[RECENT-TRADES-OPERATIONS]` 확인
    - `fee`, `cash_after`, `asset_after`, `note` 점검
 
+## 3-0) `/v1/accounts` preflight 진단 해석 (live 운영 필수)
+
+`broker-diagnose`와 `health`는 `/v1/accounts` preflight 관련 컨텍스트를 함께 출력합니다.
+
+- `execution_mode`
+  - `live_dry_run_unarmed`: live dry-run 경로
+  - `live_real_order_path`: 실주문 경로
+- `quote_currency`, `base_currency`
+- `base_currency_missing_policy`
+  - `allow_zero_position_start_in_dry_run`
+  - `block_when_base_currency_row_missing`
+- `preflight_outcome`
+  - `pass_no_position_allowed`
+  - `fail_real_order_blocked`
+
+운영 해석 기준:
+
+- live dry-run에서는 `quote_currency` row가 존재하면, `base_currency` row 누락 상태(무포지션 시작)도 `pass_no_position_allowed`로 통과할 수 있습니다.
+- `quote_currency` row 누락은 dry-run/실주문 구분 없이 preflight 실패입니다.
+- 실주문 전환(`LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true`) 전에는 동일 계정에서 `base_currency_missing_policy=block_when_base_currency_row_missing` 기준으로 다시 점검되는 것을 전제로 해야 합니다.
+
 ## 3-1) 수수료 반영 진단 (`fee-diagnostics`)
 
 실제 체결 수수료 반영 상태를 빠르게 검증하려면 `fee-diagnostics`를 사용합니다.
