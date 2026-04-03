@@ -143,6 +143,7 @@ def apply_fill_and_trade(
     exit_reason: str | None = None,
     exit_rule_name: str | None = None,
     note: str | None = None,
+    allow_entry_decision_fallback: bool = True,
 ) -> dict[str, Any] | None:
     eps = 1e-12
 
@@ -390,6 +391,7 @@ def apply_fill_and_trade(
         exit_decision_id=effective_exit_decision_id,
         exit_reason=(effective_exit_reason if side == "SELL" else None),
         exit_rule_name=(effective_exit_rule_name if side == "SELL" else None),
+        allow_entry_decision_fallback=allow_entry_decision_fallback,
     )
     notify(
         format_event(

@@ -314,3 +314,36 @@ def test_buy_fallback_marks_ambiguous_when_multiple_strict_candidates(tmp_path):
     assert row is not None
     assert row["entry_decision_id"] is None
     assert row["entry_decision_linkage"] == "ambiguous_multi_candidate"
+
+
+def test_buy_recovery_mode_keeps_degraded_unattributed_without_fallback(tmp_path):
+    conn = ensure_db(str(tmp_path / "recovery_degraded.sqlite"))
+    fill_ts = 1_700_000_400_000
+    conn.execute(
+        """
+        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+        VALUES (?, ?, 'BUY', 'entry', ?)
+        """,
+        (fill_ts - 1_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+    )
+    _record_order(conn, client_order_id="entry_recovery_mode", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_recovery_mode",
+        side="BUY",
+        fill_id="fill_entry_recovery_mode",
+        fill_ts=fill_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+        allow_entry_decision_fallback=False,
+    )
+    row = conn.execute(
+        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_recovery_mode'"
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["entry_decision_id"] is None
+    assert row["entry_decision_linkage"] == "degraded_recovery_unattributed"

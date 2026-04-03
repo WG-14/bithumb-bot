@@ -72,6 +72,7 @@ def apply_fill_lifecycle(
     exit_decision_id: int | None = None,
     exit_reason: str | None = None,
     exit_rule_name: str | None = None,
+    allow_entry_decision_fallback: bool = True,
 ) -> None:
     if side == "BUY":
         resolved_entry_decision_id = entry_decision_id
@@ -79,7 +80,7 @@ def apply_fill_lifecycle(
         resolved_entry_decision_linkage = "direct" if resolved_entry_decision_id is not None else "unattributed"
         if resolved_entry_decision_id is not None and resolved_strategy_name is None:
             resolved_strategy_name = _load_strategy_for_decision_id(conn, decision_id=int(resolved_entry_decision_id))
-        if resolved_entry_decision_id is None:
+        if resolved_entry_decision_id is None and allow_entry_decision_fallback:
             lookup_decision_id, lookup_strategy_name, lookup_linkage = _find_entry_decision(
                 conn,
                 fill_ts=int(fill_ts),
@@ -90,6 +91,8 @@ def apply_fill_lifecycle(
             if resolved_strategy_name is None:
                 resolved_strategy_name = lookup_strategy_name
             resolved_entry_decision_linkage = lookup_linkage
+        elif resolved_entry_decision_id is None and not allow_entry_decision_fallback:
+            resolved_entry_decision_linkage = "degraded_recovery_unattributed"
         conn.execute(
             """
             INSERT INTO open_position_lots(

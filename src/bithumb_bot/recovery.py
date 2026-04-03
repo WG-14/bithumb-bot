@@ -591,6 +591,12 @@ def _apply_recent_fills(
                     remote_exchange_order_id=(remote_exchange_id or None),
                 ):
                     local = local_by_client
+                elif (
+                    not remote_exchange_id
+                    and local_exchange
+                    and str(local_by_client["status"]) not in {"SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+                ):
+                    local = local_by_client
                 else:
                     weak_match_client_order_id = str(local_by_client["client_order_id"])
 
@@ -646,6 +652,7 @@ def _apply_recent_fills(
             qty=fill.qty,
             fee=fill.fee,
             note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
+            allow_entry_decision_fallback=False,
         )
         applied = True
 
@@ -839,6 +846,7 @@ def _try_resolve_submit_unknown_from_recent_activity(
             qty=fill.qty,
             fee=fill.fee,
             note=f"reconcile submit_unknown recent exchange_order_id={matched_exchange_order_id or '<none>'}",
+            allow_entry_decision_fallback=False,
         )
         applied_fill = True
 
@@ -1275,6 +1283,7 @@ def reconcile_with_broker(broker: Broker) -> None:
                     qty=fill.qty,
                     fee=fill.fee,
                     note=f"reconcile exchange_order_id={remote.exchange_order_id}",
+                    allow_entry_decision_fallback=False,
                 )
 
         remote_open = _get_open_orders_for_known_ids(
@@ -1484,6 +1493,7 @@ def recover_order_with_exchange_id(
                 qty=fill.qty,
                 fee=fill.fee,
                 note=f"manual recovery exchange_order_id={resolved_exchange_order_id}",
+                allow_entry_decision_fallback=False,
             )
 
         if remote.status in LOCAL_RECONCILE_STATUSES:
