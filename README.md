@@ -50,6 +50,29 @@ uv run bithumb-bot run --short 7 --long 30
 
 - 운영자 전략/손익 검증 절차: `docs/OPERATOR_REPORTING.md`
 
+## smoke/manual DB 검증 경로 정책
+
+- smoke/manual 실행에서 생성/변경되는 SQLite는 운영 거래 원장 성격(`data/<mode>/trades`)으로 취급합니다.
+- 따라서 레포 내부 상대경로(`./tmp`, `./data`, `./backups`) DB를 사용하지 말고, **절대경로 + 레포 외부** DB만 사용하세요.
+- `tools/oms_smoke.py`는 repo-local DB를 차단합니다. 기본 경로는 `DB_PATH` env이며, 필요 시 `--db-path`로 절대경로를 주입하세요.
+
+예시(임시 검증 DB를 레포 외부 temp dir에 생성):
+
+```bash
+tmp_dir="$(mktemp -d)"
+MODE=paper \
+RUN_ROOT="$tmp_dir/run" DATA_ROOT="$tmp_dir/data" LOG_ROOT="$tmp_dir/logs" BACKUP_ROOT="$tmp_dir/backup" ENV_ROOT="$tmp_dir/env" \
+DB_PATH="$tmp_dir/data/paper/trades/paper.sqlite" \
+uv run bithumb-bot sync
+MODE=paper DB_PATH="$tmp_dir/data/paper/trades/paper.sqlite" uv run python tools/oms_smoke.py
+```
+
+- 검증 후 레포 오염 여부를 점검하려면:
+
+```bash
+./scripts/check_repo_runtime_artifacts.sh
+```
+
 ## 경로 정책 (PathManager 기준)
 
 - 저장 규칙 기준 문서:

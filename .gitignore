@@ -36,9 +36,11 @@ venv/
 # =========================
 data/
 tmp/
+archive/
 .cache/
 *.log
 *.pid
+# SQLite/DB runtime artifacts (manual/smoke/test outputs must stay outside repo)
 *.sqlite
 *.sqlite3
 *.db
