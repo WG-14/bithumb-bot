@@ -566,6 +566,8 @@ class BithumbBroker:
             "base_currency": None,
             "base_currency_missing_policy": None,
             "allow_missing_base_currency": False,
+            "flat_start_allowed": False,
+            "flat_start_reason": "not_available",
             "preflight_outcome": "not_checked",
             "last_success_reason": None,
             "last_failure_reason": None,

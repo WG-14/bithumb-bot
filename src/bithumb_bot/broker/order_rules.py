@@ -180,6 +180,17 @@ def required_rule_source_issues(
     return issues
 
 
+def optional_rule_source_warnings(source: dict[str, str] | None) -> list[str]:
+    warnings: list[str] = []
+    for field in ("bid_price_unit", "ask_price_unit"):
+        field_source = rule_source_for(field, source)
+        if field_source != "chance_doc":
+            warnings.append(
+                f"{field} source is {field_source}; limit price tick normalization may be pass-through"
+            )
+    return warnings
+
+
 def _local_fallback_constraints() -> LocalFallbackConstraints:
     return LocalFallbackConstraints(
         min_qty=float(settings.LIVE_MIN_ORDER_QTY),

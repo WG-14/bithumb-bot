@@ -692,6 +692,8 @@ def cmd_health() -> None:
     print(f"  balance_source_base_currency={balance_diag.get('base_currency')}")
     print(f"  balance_source_base_currency_missing_policy={balance_diag.get('base_currency_missing_policy')}")
     print(f"  balance_source_preflight_outcome={balance_diag.get('preflight_outcome')}")
+    print(f"  balance_source_flat_start_allowed={balance_diag.get('flat_start_allowed')}")
+    print(f"  balance_source_flat_start_reason={balance_diag.get('flat_start_reason')}")
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
@@ -1168,6 +1170,8 @@ def cmd_broker_diagnose() -> None:
                 "base_currency_missing_policy="
                 f"{account_diag_raw.get('base_currency_missing_policy') or '-'} "
                 f"preflight_outcome={account_diag_raw.get('preflight_outcome') or '-'} "
+                f"flat_start_allowed={account_diag_raw.get('flat_start_allowed')} "
+                f"flat_start_reason={account_diag_raw.get('flat_start_reason') or '-'} "
                 f"last_success={account_diag_raw.get('last_success_reason') or '-'} "
                 f"last_failure={account_validation_last_failure_reason}"
             ),

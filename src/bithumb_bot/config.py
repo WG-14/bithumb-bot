@@ -146,11 +146,14 @@ def validate_accounts_preflight(cfg: Settings) -> None:
     is_live_mode = bool(str(cfg.MODE or "").strip().lower() == "live")
     is_live_dry_run = bool(is_live_mode and cfg.LIVE_DRY_RUN and not cfg.LIVE_REAL_ORDER_ARMED)
     execution_mode = "live_dry_run_unarmed" if is_live_dry_run else "live_real_order_path"
-    base_missing_policy = (
-        "allow_zero_position_start_in_dry_run"
-        if is_live_dry_run
-        else "block_when_base_currency_row_missing"
-    )
+    flat_start_allowed, flat_start_reason = _flat_start_safety_for_accounts_preflight()
+    allow_missing_base = bool(is_live_dry_run or flat_start_allowed)
+    if is_live_dry_run:
+        base_missing_policy = "allow_zero_position_start_in_dry_run"
+    elif allow_missing_base:
+        base_missing_policy = "allow_flat_start_when_no_open_or_unresolved_exposure"
+    else:
+        base_missing_policy = "block_when_base_currency_row_missing"
 
     try:
         response = _fetch_accounts_payload_for_preflight(
@@ -188,7 +191,6 @@ def validate_accounts_preflight(cfg: Settings) -> None:
 
     try:
         parsed_accounts = parse_accounts_response(response)
-        allow_missing_base = is_live_dry_run
         select_pair_balances(
             parsed_accounts,
             order_currency=base_currency,
@@ -200,11 +202,13 @@ def validate_accounts_preflight(cfg: Settings) -> None:
                 "/v1/accounts preflight passed with zero-position allowance: "
                 "reason=required currency missing reason_code=ACCOUNTS_BASE_ROW_MISSING_ALLOWED "
                 "result=pass_no_position_allowed execution_mode=%s quote_currency=%s base_currency=%s "
-                "base_currency_missing_policy=%s row_count=%s currencies=%s",
+                "base_currency_missing_policy=%s flat_start_allowed=%s flat_start_reason=%s row_count=%s currencies=%s",
                 execution_mode,
                 quote_currency,
                 base_currency,
                 base_missing_policy,
+                int(flat_start_allowed),
+                flat_start_reason,
                 row_count,
                 ",".join(sorted(set(currencies))) or "-",
             )
@@ -225,8 +229,37 @@ def validate_accounts_preflight(cfg: Settings) -> None:
             f"reason={reason} reason_code={reason_code} row_count={row_count} "
             f"currencies={','.join(sorted(set(currencies)))} duplicate_currencies={','.join(duplicate_currencies)} "
             f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
-            f"base_currency_missing_policy={base_missing_policy} result=fail_real_order_blocked detail={exc}"
+            f"base_currency_missing_policy={base_missing_policy} flat_start_allowed={1 if flat_start_allowed else 0} "
+            f"flat_start_reason={flat_start_reason} result=fail_real_order_blocked detail={exc}"
         ) from exc
+
+
+def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
+    if str(settings.MODE).strip().lower() != "live":
+        return False, "non_live_mode"
+    if bool(settings.LIVE_DRY_RUN) or not bool(settings.LIVE_REAL_ORDER_ARMED):
+        return False, "not_real_order_path"
+    from .db_core import ensure_db
+
+    conn = ensure_db()
+    try:
+        unresolved_row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            """
+        ).fetchone()
+        unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)
+        if unresolved_count > 0:
+            return False, f"local_unresolved_or_open_orders={unresolved_count}"
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+        if abs(asset_qty) > 1e-12:
+            return False, f"local_position_present={asset_qty:.12f}"
+    finally:
+        conn.close()
+    return True, "flat_start_safe"
 
 
 def resolve_db_path_from_env(mode: str) -> str:
@@ -801,6 +834,7 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
 
     from .broker.order_rules import (
         get_effective_order_rules,
+        optional_rule_source_warnings,
         required_rule_issues,
         required_rule_source_issues,
     )
@@ -821,7 +855,7 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.extend(required_rule_issues(resolved_rules))
         rule_source_issues = required_rule_source_issues(
             resolved.source,
-            require_price_unit_sources=not cfg.LIVE_DRY_RUN,
+            require_price_unit_sources=False,
         )
         if rule_source_issues:
             if cfg.LIVE_DRY_RUN:
@@ -831,6 +865,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 )
             else:
                 issues.extend(rule_source_issues)
+        source_warnings = optional_rule_source_warnings(resolved.source)
+        if source_warnings:
+            LOG.warning(
+                "live preflight warning: optional order-rule source gaps detected: %s",
+                "; ".join(source_warnings),
+            )
     except Exception as exc:
         issues.append(f"failed to resolve order rules: {type(exc).__name__}: {exc}")
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from ..config import settings
+from ..db_core import ensure_db
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -70,6 +71,7 @@ class AccountsV1BalanceSource:
         parse_accounts_response: Callable[[object], object],
         select_pair_balances: Callable[..., object],
         to_broker_balance: Callable[[object], BrokerBalance],
+        evaluate_flat_start_safety: Callable[[], tuple[bool, str]] | None = None,
     ) -> None:
         self._fetch_accounts_raw = fetch_accounts_raw
         self._order_currency = str(order_currency).strip().upper()
@@ -78,18 +80,30 @@ class AccountsV1BalanceSource:
         self._parse_accounts_response = parse_accounts_response
         self._select_pair_balances = select_pair_balances
         self._to_broker_balance = to_broker_balance
+        self._evaluate_flat_start_safety = evaluate_flat_start_safety or _default_flat_start_safety_check
         self._allow_missing_base = bool(
             str(settings.MODE).strip().lower() == "live"
             and bool(settings.LIVE_DRY_RUN)
             and not bool(settings.LIVE_REAL_ORDER_ARMED)
         )
+        self._allow_missing_base_on_flat_start = bool(
+            str(settings.MODE).strip().lower() == "live"
+            and not bool(settings.LIVE_DRY_RUN)
+            and bool(settings.LIVE_REAL_ORDER_ARMED)
+        )
+        self._flat_start_allowed = False
+        self._flat_start_reason = "not_checked"
         self._execution_mode = (
             "live_dry_run_unarmed" if self._allow_missing_base else "live_real_order_path"
         )
         self._base_missing_policy = (
             "allow_zero_position_start_in_dry_run"
             if self._allow_missing_base
-            else "block_when_base_currency_row_missing"
+            else (
+                "allow_flat_start_when_no_open_or_unresolved_exposure"
+                if self._allow_missing_base_on_flat_start
+                else "block_when_base_currency_row_missing"
+            )
         )
         self._validation_diag: dict[str, object] = {
             "reason": "not_checked",
@@ -103,6 +117,8 @@ class AccountsV1BalanceSource:
             "base_currency": self._order_currency,
             "base_currency_missing_policy": self._base_missing_policy,
             "allow_missing_base_currency": self._allow_missing_base,
+            "flat_start_allowed": self._flat_start_allowed,
+            "flat_start_reason": self._flat_start_reason,
             "preflight_outcome": "not_checked",
             "last_success_reason": None,
             "last_failure_reason": None,
@@ -139,6 +155,15 @@ class AccountsV1BalanceSource:
 
     def fetch_snapshot(self) -> BalanceSnapshot:
         observed_ts_ms = self._now_ms()
+        allow_missing_base = self._allow_missing_base
+        if self._allow_missing_base_on_flat_start:
+            self._flat_start_allowed, self._flat_start_reason = self._evaluate_flat_start_safety()
+            allow_missing_base = self._flat_start_allowed
+        else:
+            self._flat_start_allowed = False
+            self._flat_start_reason = (
+                "dry_run_unarmed_allowance" if self._allow_missing_base else "not_applicable"
+            )
         try:
             response = self._fetch_accounts_raw()
         except Exception as exc:
@@ -147,6 +172,8 @@ class AccountsV1BalanceSource:
                 **self._validation_diag,
                 "reason": reason,
                 "failure_category": self.classify_failure_category(exc),
+                "flat_start_allowed": self._flat_start_allowed,
+                "flat_start_reason": self._flat_start_reason,
                 "preflight_outcome": "fail_transport_or_schema_unavailable",
                 "last_failure_reason": reason,
                 "last_failure_ts_ms": observed_ts_ms,
@@ -171,7 +198,7 @@ class AccountsV1BalanceSource:
                 parsed_accounts,
                 order_currency=self._order_currency,
                 payment_currency=self._payment_currency,
-                allow_missing_base=self._allow_missing_base,
+                allow_missing_base=allow_missing_base,
             )
         except Exception as exc:
             reason = self.classify_validation_reason(exc)
@@ -197,7 +224,9 @@ class AccountsV1BalanceSource:
                 "quote_currency": self._payment_currency,
                 "base_currency": self._order_currency,
                 "base_currency_missing_policy": self._base_missing_policy,
-                "allow_missing_base_currency": self._allow_missing_base,
+                "allow_missing_base_currency": allow_missing_base,
+                "flat_start_allowed": self._flat_start_allowed,
+                "flat_start_reason": self._flat_start_reason,
                 "preflight_outcome": "fail_real_order_blocked",
                 "last_success_reason": self._validation_diag.get("last_success_reason"),
                 "last_failure_reason": reason,
@@ -211,7 +240,7 @@ class AccountsV1BalanceSource:
             raise
 
         base_row_missing_allowed = bool(
-            self._allow_missing_base
+            allow_missing_base
             and parsed_accounts is not None
             and self._order_currency not in parsed_accounts.balances
         )
@@ -226,7 +255,9 @@ class AccountsV1BalanceSource:
             "quote_currency": self._payment_currency,
             "base_currency": self._order_currency,
             "base_currency_missing_policy": self._base_missing_policy,
-            "allow_missing_base_currency": self._allow_missing_base,
+            "allow_missing_base_currency": allow_missing_base,
+            "flat_start_allowed": self._flat_start_allowed,
+            "flat_start_reason": self._flat_start_reason,
             "preflight_outcome": (
                 "pass_no_position_allowed" if base_row_missing_allowed else "pass"
             ),
@@ -245,3 +276,26 @@ class AccountsV1BalanceSource:
             asset_ts_ms=observed_ts_ms,
             balance=self._to_broker_balance(pair_balances),
         )
+
+
+def _default_flat_start_safety_check() -> tuple[bool, str]:
+    conn = ensure_db()
+    try:
+        unresolved_row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            """
+        ).fetchone()
+        unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)
+        if unresolved_count > 0:
+            return False, f"local_unresolved_or_open_orders={unresolved_count}"
+
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+        if abs(asset_qty) > 1e-12:
+            return False, f"local_position_present={asset_qty:.12f}"
+    finally:
+        conn.close()
+    return True, "flat_start_safe"

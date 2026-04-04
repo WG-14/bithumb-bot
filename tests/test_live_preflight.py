@@ -800,6 +800,7 @@ def test_live_preflight_blocks_startup_on_required_currency_missing(
         "_fetch_accounts_payload_for_preflight",
         lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
     )
+    monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (False, "not_flat_start"))
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
@@ -982,6 +983,7 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
         "_fetch_accounts_payload_for_preflight",
         lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
     )
+    monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (False, "not_flat_start"))
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
@@ -996,6 +998,52 @@ def test_accounts_preflight_required_currency_missing_blocks_live(monkeypatch: p
     assert "execution_mode=live_real_order_path" in msg
     assert "base_currency_missing_policy=block_when_base_currency_row_missing" in msg
     assert "result=fail_real_order_blocked" in msg
+
+
+def test_accounts_preflight_allows_missing_base_currency_in_live_armed_flat_start(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (True, "flat_start_safe"))
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_live_mode_preflight(settings)
+    assert "ACCOUNTS_BASE_ROW_MISSING_ALLOWED" in caplog.text
+    assert "base_currency_missing_policy=allow_flat_start_when_no_open_or_unresolved_exposure" in caplog.text
+    assert "flat_start_allowed=1" in caplog.text
+
+
+def test_accounts_preflight_missing_base_currency_blocks_live_armed_when_not_flat_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(config, "_flat_start_safety_for_accounts_preflight", lambda: (False, "local_unresolved_or_open_orders=1"))
+    monkeypatch.setattr(
+        config,
+        "_fetch_accounts_payload_for_preflight",
+        lambda **_kwargs: [{"currency": "KRW", "balance": "1000000", "locked": "0"}],
+    )
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+    msg = str(exc.value)
+    assert "required currency missing" in msg
+    assert "flat_start_allowed=0" in msg
+    assert "flat_start_reason=local_unresolved_or_open_orders=1" in msg
 
 
 def test_accounts_preflight_allows_missing_base_currency_in_live_dry_run_unarmed(
@@ -1039,6 +1087,48 @@ def test_accounts_preflight_still_requires_quote_currency_in_live_dry_run_unarme
     assert "ACCOUNTS_REQUIRED_CURRENCY_MISSING" in msg
     assert "execution_mode=live_dry_run_unarmed" in msg
     assert "base_currency_missing_policy=allow_zero_position_start_in_dry_run" in msg
+
+
+def test_live_preflight_allows_missing_price_unit_sources_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    monkeypatch.setattr(
+        order_rules,
+        "get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                market_id="KRW-BTC",
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=0.0,
+                ask_price_unit=0.0,
+                min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+                qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+                min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+                max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "missing",
+                "ask_price_unit": "missing",
+            },
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        config.validate_live_mode_preflight(settings)
+    assert "optional order-rule source gaps detected" in caplog.text
 
 
 def test_accounts_preflight_duplicate_currency_blocks_live(monkeypatch: pytest.MonkeyPatch) -> None:

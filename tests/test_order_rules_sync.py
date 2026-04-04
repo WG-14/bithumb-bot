@@ -413,6 +413,30 @@ def test_required_rule_source_issues_requires_chance_doc_for_side_constraints() 
     )
     assert len(issues) == 3
     assert "bid_min_total_krw source must be chance_doc" in issues[0]
+    assert "ask_min_total_krw source must be chance_doc" in issues[1]
+
+    relaxed = order_rules.required_rule_source_issues(
+        {
+            "bid_min_total_krw": "chance_doc",
+            "ask_min_total_krw": "chance_doc",
+            "bid_price_unit": "missing",
+            "ask_price_unit": "local_fallback",
+        },
+        require_price_unit_sources=False,
+    )
+    assert relaxed == []
+
+
+def test_optional_rule_source_warnings_reports_price_unit_gaps() -> None:
+    warnings = order_rules.optional_rule_source_warnings(
+        {
+            "bid_price_unit": "missing",
+            "ask_price_unit": "local_fallback",
+        }
+    )
+    assert len(warnings) == 2
+    assert "bid_price_unit source is missing" in warnings[0]
+    assert "ask_price_unit source is local_fallback" in warnings[1]
 
 
 def test_side_price_unit_and_limit_price_normalization_are_side_aware() -> None:
