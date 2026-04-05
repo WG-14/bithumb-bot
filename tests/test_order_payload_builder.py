@@ -17,7 +17,7 @@ def test_build_limit_order_payload_uses_doc_fields() -> None:
     assert payload == {
         "market": "KRW-BTC",
         "side": "bid",
-        "ord_type": "limit",
+        "order_type": "limit",
         "volume": "0.1",
         "price": "10000",
     }
@@ -33,7 +33,7 @@ def test_build_market_buy_payload_uses_doc_fields() -> None:
     assert payload == {
         "market": "KRW-BTC",
         "side": "bid",
-        "ord_type": "price",
+        "order_type": "price",
         "price": "10000",
     }
 
@@ -48,7 +48,7 @@ def test_build_market_sell_payload_uses_doc_fields() -> None:
     assert payload == {
         "market": "KRW-BTC",
         "side": "ask",
-        "ord_type": "market",
+        "order_type": "market",
         "volume": "0.1",
     }
 

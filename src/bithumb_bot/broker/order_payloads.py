@@ -52,7 +52,7 @@ def build_order_payload(
     payload: dict[str, str] = {
         "market": str(market),
         "side": normalized_side,
-        "ord_type": ord_type_token,
+        "order_type": ord_type_token,
     }
     if ord_type_token == "limit":
         if not volume or not price:

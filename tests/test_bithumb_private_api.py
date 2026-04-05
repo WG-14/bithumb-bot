@@ -767,7 +767,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "bid",
         "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
-        "ord_type": "price",
+        "order_type": "price",
     }
 
 
@@ -865,7 +865,7 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "ask",
         "volume": "0.4321",
-        "ord_type": "market",
+        "order_type": "market",
     }
 
 
@@ -898,10 +898,11 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "side": "bid",
         "volume": "0.4",
         "price": "149500000",
-        "ord_type": "limit",
+        "order_type": "limit",
     }
     assert order.raw == {
         "market": "KRW-BTC",
+        "order_type": "limit",
         "ord_type": "limit",
         "client_order_id": "cid-3",
     }
@@ -931,6 +932,7 @@ def test_place_order_preserves_local_client_order_id_when_response_omits_it(monk
     assert "client_order_id" not in call["payload"]
     assert order.raw == {
         "market": "KRW-BTC",
+        "order_type": "limit",
         "ord_type": "limit",
         "client_order_id": "cid-omit",
     }
@@ -1051,6 +1053,55 @@ def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):
     with pytest.raises(BrokerRejectError, match="order notional below side minimum for limit order"):
         broker.place_order(client_order_id="cid-lmt-min", side="SELL", qty=0.00001, price=100000000)
 
+
+
+def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 10.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=99_999_990.0, ask_price=99_999_990.0),
+    )
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"uuid": "mkt-unit-1"}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    broker.place_order(client_order_id="cid-mkt-unit", side="BUY", qty=0.0002, price=None)
+
+    assert call["endpoint"] == "/v2/orders"
+    assert call["payload"] == {
+        "market": "KRW-BTC",
+        "side": "bid",
+        "price": "19990",
+        "order_type": "price",
+    }
 
 
 def test_recent_orders_includes_done_and_cancel_states(monkeypatch):

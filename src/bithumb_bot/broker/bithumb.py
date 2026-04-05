@@ -1028,9 +1028,11 @@ class BithumbBroker:
         fallback_exchange_order_id: str | None = None,
     ) -> dict[str, object]:
         raw: dict[str, object] = {}
-        for key in ("market", "ord_type", "client_order_id"):
+        for key in ("market", "ord_type", "order_type", "client_order_id"):
             if row.get(key) not in (None, ""):
                 raw[key] = row[key]
+        if "ord_type" not in raw and raw.get("order_type") not in (None, ""):
+            raw["ord_type"] = raw["order_type"]
         if row.get("order_id") not in (None, ""):
             raw["order_id"] = row["order_id"]
         if "client_order_id" not in raw and fallback_client_order_id:
@@ -1156,6 +1158,9 @@ class BithumbBroker:
                         f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
                     ) from exc
                 notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
+                bid_price_unit = self._decimal_from_value(side_price_unit(rules=rules, side=order_side))
+                if bid_price_unit > 0:
+                    notional = (notional / bid_price_unit).to_integral_value(rounding=ROUND_DOWN) * bid_price_unit
                 min_total = side_min_total_krw(rules=rules, side=order_side)
                 if min_total > 0 and notional < self._decimal_from_value(min_total):
                     raise BrokerRejectError(
@@ -1211,7 +1216,7 @@ class BithumbBroker:
                 "[ORDER_SUBMIT] broker payload",
                 market=payload.get("market"),
                 side=normalized_side,
-                ord_type=payload.get("ord_type"),
+                order_type=payload.get("order_type"),
                 volume=payload.get("volume"),
                 price=payload.get("price"),
                 payload=payload,
@@ -1241,7 +1246,8 @@ class BithumbBroker:
             fallback_client_order_id=validated_client_order_id,
         )
         raw.setdefault("market", payload.get("market"))
-        raw.setdefault("ord_type", payload.get("ord_type"))
+        raw.setdefault("order_type", payload.get("order_type"))
+        raw.setdefault("ord_type", payload.get("order_type"))
         return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, qty, 0.0, now, now, raw)
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
