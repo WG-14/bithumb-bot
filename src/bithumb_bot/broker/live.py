@@ -18,6 +18,8 @@ from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
 from ..oms import (
+    MAX_CLIENT_ORDER_ID_LENGTH,
+    build_client_order_id,
     TERMINAL_ORDER_STATUSES,
     build_order_intent_key,
     claim_order_intent_dedup,
@@ -238,7 +240,19 @@ def _submit_attempt_id() -> str:
 
 
 def _client_order_id(*, ts: int, side: str, submit_attempt_id: str) -> str:
-    return f"live_{ts}_{side.lower()}_{submit_attempt_id}"
+    client_order_id = build_client_order_id(
+        mode="live",
+        side=side,
+        intent_ts=int(ts),
+        submit_attempt_id=submit_attempt_id,
+    )
+    if len(client_order_id) > MAX_CLIENT_ORDER_ID_LENGTH:
+        raise ValueError(
+            "client_order_id length overflow before broker submit: "
+            f"len={len(client_order_id)} limit={MAX_CLIENT_ORDER_ID_LENGTH} "
+            f"client_order_id={client_order_id}"
+        )
+    return client_order_id
 
 
 def _as_bps(value: float, base: float) -> float:

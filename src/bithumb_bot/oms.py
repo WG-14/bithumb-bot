@@ -373,6 +373,50 @@ def new_client_order_id(prefix: str = "cli") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+MAX_CLIENT_ORDER_ID_LENGTH = 36
+_CLIENT_ORDER_ID_TOKEN_FALLBACK = "x"
+_CLIENT_ORDER_ID_SUFFIX_LENGTH = 8
+_CLIENT_ORDER_ID_HEX = set("0123456789abcdef")
+
+
+def _client_order_token(value: str, *, fallback: str, max_len: int) -> str:
+    token = "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+    if not token:
+        token = fallback
+    return token[:max_len]
+
+
+def _client_order_suffix(*, submit_attempt_id: str | None, nonce: str | None) -> str:
+    source = str(submit_attempt_id or nonce or uuid.uuid4().hex).strip().lower()
+    hex_chars = "".join(ch for ch in source if ch in _CLIENT_ORDER_ID_HEX)
+    if not hex_chars:
+        hex_chars = uuid.uuid4().hex
+    if len(hex_chars) < _CLIENT_ORDER_ID_SUFFIX_LENGTH:
+        hex_chars = f"{hex_chars}{uuid.uuid4().hex}"
+    return hex_chars[:_CLIENT_ORDER_ID_SUFFIX_LENGTH]
+
+
+def build_client_order_id(
+    *,
+    mode: str,
+    side: str,
+    intent_ts: int,
+    submit_attempt_id: str | None = None,
+    nonce: str | None = None,
+) -> str:
+    mode_token = _client_order_token(mode, fallback=_CLIENT_ORDER_ID_TOKEN_FALLBACK, max_len=5)
+    side_token = _client_order_token(side, fallback="ord", max_len=4)
+    ts = int(intent_ts)
+    suffix = _client_order_suffix(submit_attempt_id=submit_attempt_id, nonce=nonce)
+    client_order_id = f"{mode_token}_{ts}_{side_token}_{suffix}"
+    if len(client_order_id) > MAX_CLIENT_ORDER_ID_LENGTH:
+        raise ValueError(
+            f"client_order_id length overflow: value={client_order_id} "
+            f"len={len(client_order_id)} limit={MAX_CLIENT_ORDER_ID_LENGTH}"
+        )
+    return client_order_id
+
+
 def create_order(
     *,
     client_order_id: str,

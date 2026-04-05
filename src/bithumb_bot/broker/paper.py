@@ -10,6 +10,7 @@ from ..marketdata import fetch_orderbook_top, validated_best_quote_prices
 from ..notifier import notify
 from ..observability import format_log_kv
 from ..oms import (
+    build_client_order_id,
     build_order_intent_key,
     claim_order_intent_dedup,
     new_client_order_id,
@@ -102,7 +103,12 @@ def paper_execute(
         else:
             return None
 
-        client_order_id = new_client_order_id("paper")
+        client_order_id = build_client_order_id(
+            mode=settings.MODE,
+            side=side,
+            intent_ts=int(ts),
+            nonce=new_client_order_id("paper"),
+        )
         intent_key = build_order_intent_key(
             symbol=settings.PAIR,
             side=side,
