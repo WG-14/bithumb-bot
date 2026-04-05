@@ -55,6 +55,19 @@ def parse_bool_env(key: str, default: str = "false") -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def parse_bool_env_strict(key: str, default: str) -> bool:
+    raw = os.getenv(key)
+    candidate = raw if raw is not None and raw.strip() != "" else default
+    normalized = str(candidate).strip().lower()
+    if normalized in ("1", "true", "yes", "y", "on"):
+        return True
+    if normalized in ("0", "false", "no", "n", "off"):
+        return False
+    raise ValueError(
+        f"{key} must be a boolean value (one of: true/false/1/0/yes/no/on/off), got {candidate!r}"
+    )
+
+
 def parse_float_env(key: str, default: str) -> float:
     raw = os.getenv(key)
     candidate = raw if raw is not None and raw.strip() != "" else default
@@ -62,6 +75,13 @@ def parse_float_env(key: str, default: str) -> float:
         return float(candidate)
     except ValueError as exc:
         raise ValueError(f"{key} must be a float-compatible value, got {candidate!r}") from exc
+
+
+def parse_non_negative_float_env(key: str, default: str) -> float:
+    value = parse_float_env(key, default)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{key} must be a finite value >= 0, got {value!r}")
+    return value
 
 
 def resolve_db_path(path: str) -> str:
@@ -408,6 +428,11 @@ class Settings:
     SMA_FILTER_OVEREXT_LOOKBACK: int = int(os.getenv("SMA_FILTER_OVEREXT_LOOKBACK", "3"))
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
         os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.02")
+    )
+    SMA_COST_EDGE_ENABLED: bool = parse_bool_env_strict("SMA_COST_EDGE_ENABLED", "true")
+    SMA_COST_EDGE_MIN_RATIO: float = parse_non_negative_float_env(
+        "SMA_COST_EDGE_MIN_RATIO",
+        os.getenv("STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0"),
     )
     ENTRY_EDGE_BUFFER_RATIO: float = parse_float_env("ENTRY_EDGE_BUFFER_RATIO", "0.0005")
     STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = parse_float_env(
@@ -830,6 +855,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append(
             "notifier must be enabled and configured with at least one delivery target "
             "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
+        )
+    if not cfg.SMA_COST_EDGE_ENABLED:
+        LOG.warning(
+            "live preflight warning: SMA_COST_EDGE_ENABLED=false (cost-edge entry block disabled for sma_with_filter)"
         )
 
     from .broker.order_rules import (

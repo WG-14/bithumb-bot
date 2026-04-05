@@ -155,3 +155,39 @@ def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monke
     assert "BLOCKED_ENTRY" in out
     assert "BUY,sma_with_filter" in out
     assert "HOLD,sma_with_filter" in out
+
+
+def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-cost-edge.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=10,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="filtered entry: cost_edge",
+            candle_ts=10,
+            market_price=1.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "filtered entry: cost_edge",
+                "blocked_filters": ["cost_edge"],
+                "filters": {"cost_edge": {"enabled": True, "passed": False, "threshold": 0.04, "value": 0.03}},
+                "filter_blocked": True,
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["decision_type"] == "BLOCKED_ENTRY"
+    assert ctx["blocked_filters"] == ["cost_edge"]
+    assert ctx["entry_reason"] == "filtered entry: cost_edge"

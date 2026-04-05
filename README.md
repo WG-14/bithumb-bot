@@ -123,6 +123,8 @@ MODE=paper DB_PATH="$tmp_dir/data/paper/trades/paper.sqlite" uv run python tools
 - `SMA_LONG` (기본: `30`)
 - `COOLDOWN_MIN` (기본: `1`)
 - `MIN_GAP` (기본: `0.0003`)
+- `SMA_COST_EDGE_ENABLED` (기본: `true`, `sma_with_filter`의 cost-edge 차단 on/off)
+- `SMA_COST_EDGE_MIN_RATIO` (기본: `STRATEGY_MIN_EXPECTED_EDGE_RATIO` fallback, 없으면 `0`)
 - `DB_PATH` (점진적 호환 override. 미설정 시 `DATA_ROOT/<mode>/trades/<mode>.sqlite`)
 - `LIVE_MIN_ORDER_QTY` (기본: `0`, 0이면 비활성)
 - `LIVE_ORDER_QTY_STEP` (기본: `0`, 0이면 비활성)
@@ -131,6 +133,11 @@ MODE=paper DB_PATH="$tmp_dir/data/paper/trades/paper.sqlite" uv run python tools
 > `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
 
 전략 선택은 전부 환경변수 주입(`STRATEGY_NAME`) 기반이며, 런타임/배포 환경(AWS EC2/ECS/Lambda 등)에서 파일 경로 하드코딩 없이 동일하게 동작합니다. 운영 기본값은 체결 비용/노이즈를 고려한 `sma_with_filter`이며, 백테스트/비교가 필요하면 `STRATEGY_NAME=sma_cross`로 즉시 override할 수 있습니다(대소문자/공백 입력도 정규화되어 동작).
+
+`sma_with_filter`의 `cost_edge` 필터는 운영 env로 조정 가능합니다.
+- `SMA_COST_EDGE_ENABLED=true`(기본): 기존처럼 cost_edge 기준 미달이면 `BLOCKED_ENTRY ... cost_edge`로 차단됩니다.
+- `SMA_COST_EDGE_ENABLED=false`: cost_edge 차단만 우회합니다(다른 gap/volatility/overextended 필터는 그대로 유지).
+- `SMA_COST_EDGE_MIN_RATIO`(0 이상): 비용 바닥(`LIVE_FEE_RATE_ESTIMATE`, `STRATEGY_ENTRY_SLIPPAGE_BPS`, `ENTRY_EDGE_BUFFER_RATIO`)과 함께 비교되는 최소 기대 엣지 하한값입니다.
 
 예시(AWS 배포 환경변수만으로 전략 전환):
 

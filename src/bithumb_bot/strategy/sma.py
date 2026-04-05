@@ -81,6 +81,7 @@ def _evaluate_entry_edge_filter(
     live_fee_rate_estimate: float,
     edge_buffer_ratio: float,
     strategy_min_expected_edge_ratio: float,
+    filter_enabled: bool = True,
 ) -> tuple[bool, dict[str, float | bool]]:
     cost_floor_ratio, required_edge_ratio = _compute_required_entry_edge_ratio(
         slippage_bps=slippage_bps,
@@ -89,10 +90,13 @@ def _evaluate_entry_edge_filter(
         strategy_min_expected_edge_ratio=strategy_min_expected_edge_ratio,
     )
     expected_edge_ratio = max(0.0, float(gap_ratio))
-    enabled = base_signal in ("BUY", "SELL")
+    signal_eligible = base_signal in ("BUY", "SELL")
+    enabled = bool(filter_enabled) and signal_eligible
     blocked = enabled and expected_edge_ratio < required_edge_ratio
     return blocked, {
         "enabled": enabled,
+        "configured_enabled": bool(filter_enabled),
+        "signal_eligible": signal_eligible,
         "blocked": blocked,
         "expected_edge_ratio": expected_edge_ratio,
         "required_edge_ratio": required_edge_ratio,
@@ -371,7 +375,8 @@ class SmaWithFilterStrategy:
     slippage_bps: float = settings.STRATEGY_ENTRY_SLIPPAGE_BPS
     live_fee_rate_estimate: float = settings.LIVE_FEE_RATE_ESTIMATE
     entry_edge_buffer_ratio: float = settings.ENTRY_EDGE_BUFFER_RATIO
-    strategy_min_expected_edge_ratio: float = settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
+    cost_edge_enabled: bool = settings.SMA_COST_EDGE_ENABLED
+    cost_edge_min_ratio: float = settings.SMA_COST_EDGE_MIN_RATIO
     exit_rule_names: list[str] = field(
         default_factory=lambda: _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)
     )
@@ -446,7 +451,8 @@ class SmaWithFilterStrategy:
             slippage_bps=float(self.slippage_bps),
             live_fee_rate_estimate=float(self.live_fee_rate_estimate),
             edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
-            strategy_min_expected_edge_ratio=float(self.strategy_min_expected_edge_ratio),
+            strategy_min_expected_edge_ratio=float(self.cost_edge_min_ratio),
+            filter_enabled=bool(self.cost_edge_enabled),
         )
 
         blocked_filters = []
@@ -534,6 +540,8 @@ class SmaWithFilterStrategy:
                 },
                 "cost_edge": {
                     "enabled": bool(edge_filter_details["enabled"]),
+                    "configured_enabled": bool(edge_filter_details["configured_enabled"]),
+                    "signal_eligible": bool(edge_filter_details["signal_eligible"]),
                     "passed": not bool(edge_filter_details["blocked"]),
                     "value": float(edge_filter_details["expected_edge_ratio"]),
                     "threshold": float(edge_filter_details["required_edge_ratio"]),
@@ -643,6 +651,8 @@ def create_sma_with_filter_strategy(
     live_fee_rate_estimate: float | None = None,
     entry_edge_buffer_ratio: float | None = None,
     strategy_min_expected_edge_ratio: float | None = None,
+    cost_edge_enabled: bool | None = None,
+    cost_edge_min_ratio: float | None = None,
     exit_rule_names: list[str] | None = None,
     exit_max_holding_min: int | None = None,
     exit_min_take_profit_ratio: float | None = None,
@@ -687,10 +697,17 @@ def create_sma_with_filter_strategy(
             if entry_edge_buffer_ratio is None
             else entry_edge_buffer_ratio
         ),
-        strategy_min_expected_edge_ratio=float(
-            settings.STRATEGY_MIN_EXPECTED_EDGE_RATIO
-            if strategy_min_expected_edge_ratio is None
-            else strategy_min_expected_edge_ratio
+        cost_edge_enabled=(
+            bool(settings.SMA_COST_EDGE_ENABLED) if cost_edge_enabled is None else bool(cost_edge_enabled)
+        ),
+        cost_edge_min_ratio=float(
+            (
+                settings.SMA_COST_EDGE_MIN_RATIO
+                if cost_edge_min_ratio is None and strategy_min_expected_edge_ratio is None
+                else strategy_min_expected_edge_ratio
+                if cost_edge_min_ratio is None
+                else cost_edge_min_ratio
+            )
         ),
         exit_rule_names=(
             _resolve_exit_rule_names(settings.STRATEGY_EXIT_RULES)

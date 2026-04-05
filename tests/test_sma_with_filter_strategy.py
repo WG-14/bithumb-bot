@@ -139,7 +139,7 @@ def test_cost_edge_filter_blocks_small_gap_entry_and_records_reason() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.02,
             entry_edge_buffer_ratio=0.005,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -172,7 +172,7 @@ def test_cost_edge_filter_allows_entry_when_signal_clears_cost_floor() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -199,7 +199,7 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -208,6 +208,82 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
     assert decision.signal == "SELL"
     assert decision.context["filters"]["cost_edge"]["passed"] is True
     assert decision.context["entry"]["cost_edge_blocked"] is False
+
+
+def test_cost_edge_filter_can_be_disabled_explicitly() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.02,
+            entry_edge_buffer_ratio=0.005,
+            cost_edge_enabled=False,
+            cost_edge_min_ratio=0.05,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert "cost_edge" not in decision.context["blocked_filters"]
+    assert decision.context["filters"]["cost_edge"]["enabled"] is False
+    assert decision.context["filters"]["cost_edge"]["configured_enabled"] is False
+    assert decision.context["entry"]["cost_edge_blocked"] is False
+
+
+def test_cost_edge_min_ratio_relaxation_unblocks_same_market_case() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        strict = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.06,
+        ).decide(conn)
+        relaxed = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert strict is not None
+    assert relaxed is not None
+    assert strict.signal == "HOLD"
+    assert "cost_edge" in strict.context["blocked_filters"]
+    assert relaxed.signal == "BUY"
+    assert "cost_edge" not in relaxed.context["blocked_filters"]
 
 
 def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase() -> None:
@@ -226,7 +302,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
         conservative = create_sma_with_filter_strategy(
             short_n=2,
@@ -241,7 +317,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             slippage_bps=0.0,
             live_fee_rate_estimate=0.01,
             entry_edge_buffer_ratio=0.01,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
