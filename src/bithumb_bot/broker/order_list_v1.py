@@ -139,6 +139,87 @@ def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
     return int(value * 1000)
 
 
+def _try_parse_ts(raw: object, *, field_name: str, context: str) -> int | None:
+    if raw in (None, ""):
+        return None
+    try:
+        return _strict_parse_ts(raw, field_name=field_name, context=context)
+    except BrokerRejectError:
+        return None
+
+
+def _trade_timestamp_fallback(row: dict[str, object], *, context: str) -> int | None:
+    trades = row.get("trades")
+    if not isinstance(trades, list):
+        return None
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        for key in ("updated_at", "created_at", "ordered_at", "trade_timestamp", "timestamp", "trade_at"):
+            parsed = _try_parse_ts(trade.get(key), field_name=f"trades.{key}", context=context)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _resolve_order_timestamps(row: dict[str, object], *, context: str) -> tuple[int, int, tuple[str, ...]]:
+    degraded: list[str] = []
+    ordered_aliases = ("ordered_at", "order_at", "order_time", "order_timestamp")
+
+    updated_ts = _try_parse_ts(row.get("updated_at"), field_name="updated_at", context=context)
+    if updated_ts is None:
+        created_as_updated = _try_parse_ts(row.get("created_at"), field_name="created_at", context=context)
+        if created_as_updated is not None:
+            updated_ts = created_as_updated
+            degraded.append("updated_at:derived_from_created_at")
+
+    if updated_ts is None:
+        for key in ordered_aliases:
+            alias_ts = _try_parse_ts(row.get(key), field_name=key, context=context)
+            if alias_ts is not None:
+                updated_ts = alias_ts
+                degraded.append(f"updated_at:derived_from_{key}")
+                break
+
+    if updated_ts is None:
+        trade_ts = _trade_timestamp_fallback(row, context=context)
+        if trade_ts is not None:
+            updated_ts = trade_ts
+            degraded.append("updated_at:derived_from_trade_timestamp")
+
+    created_ts = _try_parse_ts(row.get("created_at"), field_name="created_at", context=context)
+    if created_ts is None:
+        for key in ordered_aliases:
+            alias_ts = _try_parse_ts(row.get(key), field_name=key, context=context)
+            if alias_ts is not None:
+                created_ts = alias_ts
+                degraded.append(f"created_at:derived_from_{key}")
+                break
+
+    if created_ts is None and updated_ts is not None:
+        created_ts = updated_ts
+        degraded.append("created_at:derived_from_updated_at")
+
+    if created_ts is None:
+        trade_ts = _trade_timestamp_fallback(row, context=context)
+        if trade_ts is not None:
+            created_ts = trade_ts
+            degraded.append("created_at:derived_from_trade_timestamp")
+
+    if created_ts is None and updated_ts is None:
+        created_ts = 0
+        updated_ts = 0
+        degraded.append("timestamps:missing_defaulted_zero")
+    elif created_ts is None:
+        created_ts = updated_ts or 0
+        degraded.append("created_at:derived_from_updated_at")
+    elif updated_ts is None:
+        updated_ts = created_ts
+        degraded.append("updated_at:derived_from_created_ts")
+
+    return created_ts, updated_ts, tuple(degraded)
+
+
 def _normalize_side(side: object, *, context: str) -> str:
     normalized = clean_identifier(side).lower()
     if normalized in {"bid", "buy"}:
@@ -212,6 +293,9 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
             f"{context} schema mismatch: missing required numeric fields 'volume' and 'executed_volume'"
         )
 
+    created_ts, updated_ts, degraded_ts_fields = _resolve_order_timestamps(row, context=context)
+    degraded_fields.extend(degraded_ts_fields)
+
     return V1ListNormalizedOrder(
         uuid=uuid,
         client_order_id=client_order_id,
@@ -223,8 +307,8 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
         volume=volume,
         remaining_volume=remaining_volume,
         executed_volume=executed_volume,
-        created_ts=_strict_parse_ts(row.get("created_at"), field_name="created_at", context=context),
-        updated_ts=_strict_parse_ts(row.get("updated_at"), field_name="updated_at", context=context),
+        created_ts=created_ts,
+        updated_ts=updated_ts,
         executed_funds=executed_funds,
         paid_fee=paid_fee,
         degraded_fields=tuple(degraded_fields),

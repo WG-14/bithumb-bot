@@ -162,6 +162,41 @@ def test_parse_v1_order_list_row_tolerates_missing_volume_when_derivable() -> No
     assert parsed.executed_volume == pytest.approx(0.01)
 
 
+
+
+def _aws_observed_done_row_missing_updated_at(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "uuid": "aws-done-1",
+        "client_order_id": "live_1712230310689_buy_abcd1234",
+        "market": "KRW-BTC",
+        "side": "bid",
+        "ord_type": "price",
+        "state": "done",
+        "price": "149000000",
+        "volume": "",
+        "remaining_volume": "",
+        "executed_volume": "0.01",
+        "created_at": "2024-04-04T13:45:10+09:00",
+        "updated_at": "",
+        "executed_funds": "1490000",
+        "fee": "745",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_parse_v1_order_list_row_aws_done_shape_missing_updated_at_is_tolerated() -> None:
+    parsed = parse_v1_order_list_row(_aws_observed_done_row_missing_updated_at())
+
+    assert parsed.uuid == "aws-done-1"
+    assert parsed.client_order_id == "live_1712230310689_buy_abcd1234"
+    assert parsed.state == "done"
+    assert parsed.executed_volume == pytest.approx(0.01)
+    assert parsed.volume == pytest.approx(0.01)
+    assert parsed.paid_fee == pytest.approx(745.0)
+    assert parsed.updated_ts == parsed.created_ts
+    assert "updated_at:derived_from_created_at" in parsed.degraded_fields
+
 def test_parse_v1_order_list_row_done_tolerates_missing_volume_and_remaining() -> None:
     parsed = parse_v1_order_list_row(
         _v1_orders_row(
@@ -227,6 +262,42 @@ def test_parse_v1_order_list_row_executed_funds_forward_compatibility() -> None:
     assert parsed.volume == pytest.approx(0.01)
 
 
-def test_parse_v1_order_list_row_rejects_invalid_timestamp() -> None:
-    with pytest.raises(BrokerRejectError, match="invalid timestamp field 'updated_at'"):
-        parse_v1_order_list_row(_v1_orders_row(updated_at="not-a-timestamp"))
+def test_parse_v1_order_list_row_tolerates_missing_updated_at_with_created_at_fallback() -> None:
+    parsed = parse_v1_order_list_row(_v1_orders_row(state="done", updated_at=""))
+
+    assert parsed.created_ts == 1704067200000
+    assert parsed.updated_ts == 1704067200000
+    assert "updated_at:derived_from_created_at" in parsed.degraded_fields
+
+
+def test_parse_v1_order_list_row_tolerates_missing_created_and_updated_with_ordered_at() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            created_at="",
+            updated_at="",
+            ordered_at="2024-01-01T00:02:00+00:00",
+        )
+    )
+
+    assert parsed.created_ts == 1704067320000
+    assert parsed.updated_ts == 1704067320000
+    assert "created_at:derived_from_ordered_at" in parsed.degraded_fields
+    assert "updated_at:derived_from_ordered_at" in parsed.degraded_fields
+
+
+def test_parse_v1_order_list_row_tolerates_missing_order_timestamps_with_trade_timestamp_fallback() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            created_at="",
+            updated_at="",
+            ordered_at="",
+            trades=[{"created_at": "2024-01-01T00:03:00+00:00"}],
+        )
+    )
+
+    assert parsed.created_ts == 1704067380000
+    assert parsed.updated_ts == 1704067380000
+    assert "created_at:derived_from_updated_at" in parsed.degraded_fields
+    assert "updated_at:derived_from_trade_timestamp" in parsed.degraded_fields

@@ -3029,6 +3029,51 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
     }
 
 
+
+
+def test_get_recent_orders_tolerates_done_row_missing_updated_at_for_identifier_scoped_reconcile(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint: str, params: dict[str, object], retry_safe: bool = False):
+        assert endpoint == "/v1/orders"
+        state = params.get("state")
+        if state == "wait":
+            return []
+        if state == "done":
+            return [
+                {
+                    "uuid": "done-missing-updated-1",
+                    "client_order_id": "live_1712230310689_buy_abcd1234",
+                    "market": "KRW-BTC",
+                    "side": "bid",
+                    "ord_type": "price",
+                    "state": "done",
+                    "price": "149000000",
+                    "volume": "",
+                    "remaining_volume": "",
+                    "executed_volume": "0.01",
+                    "created_at": "2024-04-04T13:45:10+09:00",
+                    "updated_at": "",
+                    "executed_funds": "1490000",
+                    "fee": "745",
+                }
+            ]
+        if state == "cancel":
+            return []
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    orders = broker.get_recent_orders(limit=10, exchange_order_ids=["done-missing-updated-1"])
+
+    assert len(orders) == 1
+    order = orders[0]
+    assert order.exchange_order_id == "done-missing-updated-1"
+    assert order.client_order_id == "live_1712230310689_buy_abcd1234"
+    assert order.status == "FILLED"
+    assert order.updated_ts == order.created_ts
+
 def test_get_recent_orders_logs_parser_failure_context_for_v1_orders(monkeypatch, caplog):
     _configure_live()
     broker = BithumbBroker()
