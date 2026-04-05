@@ -162,6 +162,71 @@ def test_parse_v1_order_list_row_tolerates_missing_volume_when_derivable() -> No
     assert parsed.executed_volume == pytest.approx(0.01)
 
 
+def test_parse_v1_order_list_row_done_tolerates_missing_volume_and_remaining() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            volume="",
+            remaining_volume="",
+            executed_volume="0.02",
+        )
+    )
+    assert parsed.volume == pytest.approx(0.02)
+    assert parsed.remaining_volume == pytest.approx(0.0)
+    assert "volume:derived_from_executed_volume" in parsed.degraded_fields
+
+
+def test_parse_v1_order_list_row_done_tolerates_missing_volume_from_executed_funds() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            volume="",
+            remaining_volume="",
+            executed_volume="",
+            executed_funds="2980000",
+            price="149000000",
+        )
+    )
+    assert parsed.volume == pytest.approx(0.02)
+    assert parsed.executed_volume == pytest.approx(0.02)
+    assert parsed.remaining_volume == pytest.approx(0.0)
+    assert "volume:derived_from_executed_funds" in parsed.degraded_fields
+
+
+@pytest.mark.parametrize(
+    ("fee_payload", "expected"),
+    [
+        ({}, None),
+        ({"paid_fee": ""}, None),
+        ({"paid_fee": None}, None),
+        ({"paid_fee": "0"}, 0.0),
+        ({"reserved_fee": "12.5"}, 12.5),
+        ({"remaining_fee": "1.2"}, 1.2),
+    ],
+)
+def test_parse_v1_order_list_row_fee_variants_are_tolerated(fee_payload, expected) -> None:
+    parsed = parse_v1_order_list_row(_v1_orders_row(**fee_payload))
+    if expected is None:
+        assert parsed.paid_fee is None
+    else:
+        assert parsed.paid_fee == pytest.approx(expected)
+
+
+def test_parse_v1_order_list_row_executed_funds_forward_compatibility() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            volume="",
+            remaining_volume="",
+            executed_volume="",
+            executed_funds="1490000",
+            avg_price="149000000",
+        )
+    )
+    assert parsed.executed_funds == pytest.approx(1_490_000.0)
+    assert parsed.volume == pytest.approx(0.01)
+
+
 def test_parse_v1_order_list_row_rejects_invalid_timestamp() -> None:
     with pytest.raises(BrokerRejectError, match="invalid timestamp field 'updated_at'"):
         parse_v1_order_list_row(_v1_orders_row(updated_at="not-a-timestamp"))

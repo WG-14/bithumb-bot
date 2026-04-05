@@ -987,6 +987,7 @@ class BithumbBroker:
 
     def _normalize_v1_order_row_strict(self, row: dict[str, object]) -> V1NormalizedOrder:
         context = "/v1/order"
+        state = require_v1_known_state(row.get("state"), context=context)
         volume = self._strict_optional_number(row, "volume", context=context)
         if volume is None:
             volume = self._strict_optional_number(row, "units", context=context)
@@ -1006,15 +1007,24 @@ class BithumbBroker:
         if volume is None and remaining is not None and executed is not None:
             volume = max(0.0, remaining + executed)
 
+        executed_funds = self._strict_optional_number(row, "executed_funds", context=context)
+        price = self._strict_optional_number(row, "price", context=context)
+        avg_price = self._strict_optional_number(row, "avg_price", context=context)
+        reference_price = avg_price if avg_price is not None and avg_price > 0 else price
+        if volume is None and state == "done":
+            if executed is not None:
+                volume = max(0.0, executed)
+            elif executed_funds is not None and reference_price is not None and reference_price > 0:
+                volume = max(0.0, executed_funds / reference_price)
+                executed = volume
+        if remaining is None and state == "done":
+            remaining = 0.0
         if volume is None:
             raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'volume'")
         if remaining is None:
             raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
         if executed is None:
             executed = max(0.0, volume - remaining)
-
-        price = self._strict_optional_number(row, "price", context=context)
-        state = require_v1_known_state(row.get("state"), context=context)
 
         raw_trades = row.get("trades")
         if raw_trades is None:
@@ -1041,7 +1051,7 @@ class BithumbBroker:
             created_ts=created_ts,
             updated_ts=updated_ts,
             trades=trades,
-            executed_funds=self._strict_optional_number(row, "executed_funds", context=context),
+            executed_funds=executed_funds,
         )
 
     @staticmethod
@@ -1123,6 +1133,10 @@ class BithumbBroker:
             "executed_volume",
             "executed_funds",
             "paid_fee",
+            "reserved_fee",
+            "remaining_fee",
+            "fee",
+            "trade_fee",
             "locked",
             "created_at",
             "updated_at",
@@ -1133,6 +1147,21 @@ class BithumbBroker:
         if isinstance(row.get("trades"), list):
             raw["trades"] = row["trades"]
         return raw
+
+    @staticmethod
+    def _v1_list_quantities(normalized) -> tuple[float, float]:
+        qty_filled = float(normalized.executed_volume or 0.0)
+        if normalized.volume is not None:
+            qty_req = float(normalized.volume)
+        elif normalized.remaining_volume is not None:
+            qty_req = max(0.0, float(normalized.remaining_volume) + qty_filled)
+        elif normalized.state == "done":
+            qty_req = qty_filled
+        else:
+            raise BrokerRejectError(
+                "/v1/orders schema mismatch: missing required numeric fields for quantity reconciliation"
+            )
+        return qty_req, qty_filled
 
     def get_order_chance(self, *, market: str | None = None) -> dict[str, object]:
         try:
@@ -1494,8 +1523,7 @@ class BithumbBroker:
                     reason=str(exc),
                 )
                 raise
-            qty_req = float(normalized.volume)
-            qty_filled = float(normalized.executed_volume)
+            qty_req, qty_filled = self._v1_list_quantities(normalized)
             status = v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled)
             out.append(
                 BrokerOrder(
@@ -1716,8 +1744,7 @@ class BithumbBroker:
                         reason=str(exc),
                     )
                     raise
-                qty_req = float(normalized.volume)
-                qty_filled = float(normalized.executed_volume)
+                qty_req, qty_filled = self._v1_list_quantities(normalized)
                 order = BrokerOrder(
                     client_order_id=normalized.client_order_id,
                     exchange_order_id=normalized.uuid,

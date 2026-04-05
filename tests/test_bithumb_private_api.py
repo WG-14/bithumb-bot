@@ -1641,6 +1641,35 @@ def test_get_order_tolerates_missing_volume_when_derivable(monkeypatch):
     assert order.qty_filled == pytest.approx(0.01)
 
 
+def test_get_order_done_tolerates_missing_volume_with_executed_funds(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: {
+            "uuid": "done-derived-volume-1",
+            "client_order_id": "cid-done-derived-volume-1",
+            "market": "KRW-BTC",
+            "ord_type": "limit",
+            "side": "ask",
+            "price": "149000000",
+            "volume": "",
+            "remaining_volume": "",
+            "executed_volume": "",
+            "executed_funds": "1490000",
+            "state": "done",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:01:00+00:00",
+        },
+    )
+
+    order = broker.get_order(client_order_id="cid-done-derived-volume-1")
+    assert order.qty_req == pytest.approx(0.01)
+    assert order.qty_filled == pytest.approx(0.01)
+    assert order.status == "FILLED"
+
+
 def test_get_open_orders_tolerates_missing_volume_with_alias_fields(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1673,6 +1702,50 @@ def test_get_open_orders_tolerates_missing_volume_with_alias_fields(monkeypatch)
     assert len(orders) == 1
     assert orders[0].qty_req == pytest.approx(0.05)
     assert orders[0].qty_filled == pytest.approx(0.0)
+
+
+def test_get_recent_orders_tolerates_done_missing_volume_and_fee_variants(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        state = str(params.get("state"))
+        if state == "wait":
+            return []
+        if state == "done":
+            return [
+                {
+                    "uuid": "done-missing-volume-1",
+                    "client_order_id": "cid-done-missing-volume-1",
+                    "market": "KRW-BTC",
+                    "ord_type": "limit",
+                    "side": "bid",
+                    "price": "149000000",
+                    "volume": "",
+                    "remaining_volume": "",
+                    "executed_volume": "0.02",
+                    "paid_fee": "",
+                    "reserved_fee": None,
+                    "state": "done",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:01+00:00",
+                    "trades_count": 1,
+                    "executed_funds": "2980000",
+                }
+            ]
+        if state == "cancel":
+            return []
+        raise AssertionError(state)
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    orders = broker.get_recent_orders(limit=10, exchange_order_ids=["done-missing-volume-1"])
+    assert len(orders) == 1
+    order = orders[0]
+    assert order.exchange_order_id == "done-missing-volume-1"
+    assert order.qty_req == pytest.approx(0.02)
+    assert order.qty_filled == pytest.approx(0.02)
+    assert order.status == "FILLED"
 
 
 def test_get_order_rejects_invalid_executed_funds_numeric(monkeypatch):

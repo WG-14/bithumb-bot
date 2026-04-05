@@ -48,12 +48,14 @@ class V1ListNormalizedOrder:
     ord_type: str
     state: str
     price: float
-    volume: float
-    remaining_volume: float
-    executed_volume: float
+    volume: float | None
+    remaining_volume: float | None
+    executed_volume: float | None
     created_ts: int
     updated_ts: int
     executed_funds: float | None
+    paid_fee: float | None
+    degraded_fields: tuple[str, ...]
 
 
 def _validate_identifier_list(values: list[str], *, field_name: str) -> tuple[str, ...]:
@@ -101,6 +103,19 @@ def _optional_number(row: dict[str, object], key: str, *, context: str) -> float
     return parsed
 
 
+def _first_optional_number(
+    row: dict[str, object],
+    keys: tuple[str, ...],
+    *,
+    context: str,
+) -> float | None:
+    for key in keys:
+        value = _optional_number(row, key, context=context)
+        if value is not None:
+            return value
+    return None
+
+
 def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
     if raw in (None, ""):
         raise BrokerRejectError(f"{context} schema mismatch: missing required timestamp field '{field_name}'")
@@ -144,29 +159,58 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
     if state not in V1_ORDER_STATES:
         raise BrokerRejectError(f"{context} schema mismatch: unknown state '{row.get('state')}'")
 
-    volume = _optional_number(row, "volume", context=context)
-    if volume is None:
-        volume = _optional_number(row, "units", context=context)
-    remaining_volume = _optional_number(row, "remaining_volume", context=context)
-    if remaining_volume is None:
-        remaining_volume = _optional_number(row, "units_remaining", context=context)
-    executed_volume = _optional_number(row, "executed_volume", context=context)
-    if executed_volume is None:
-        executed_volume = _optional_number(row, "filled_volume", context=context)
+    degraded_fields: list[str] = []
+    volume = _first_optional_number(row, ("volume", "units"), context=context)
+    remaining_volume = _first_optional_number(row, ("remaining_volume", "units_remaining"), context=context)
+    executed_volume = _first_optional_number(row, ("executed_volume", "filled_volume"), context=context)
+    executed_funds = _optional_number(row, "executed_funds", context=context)
+    paid_fee = _first_optional_number(
+        row,
+        ("paid_fee", "trade_fee", "fee", "reserved_fee", "remaining_fee"),
+        context=context,
+    )
+    price = _required_number(row, "price", context=context)
+    avg_price = _first_optional_number(row, ("avg_price", "average_price"), context=context)
+    reference_price = avg_price if avg_price is not None and avg_price > 0 else price
 
     if remaining_volume is None and volume is not None and executed_volume is not None:
         remaining_volume = max(0.0, volume - executed_volume)
+    elif remaining_volume is None:
+        degraded_fields.append("remaining_volume")
     if executed_volume is None and volume is not None and remaining_volume is not None:
         executed_volume = max(0.0, volume - remaining_volume)
+    elif executed_volume is None:
+        degraded_fields.append("executed_volume")
     if volume is None and remaining_volume is not None and executed_volume is not None:
         volume = max(0.0, remaining_volume + executed_volume)
+    elif volume is None:
+        if state == "done" and executed_volume is not None:
+            volume = max(0.0, executed_volume)
+            degraded_fields.append("volume:derived_from_executed_volume")
+        elif state == "done" and executed_funds is not None and reference_price > 0:
+            volume = max(0.0, executed_funds / reference_price)
+            if executed_volume is None:
+                executed_volume = volume
+            if remaining_volume is None:
+                remaining_volume = 0.0
+            degraded_fields.append("volume:derived_from_executed_funds")
+        else:
+            degraded_fields.append("volume")
 
-    if volume is None:
-        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'volume'")
-    if remaining_volume is None:
-        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
     if executed_volume is None:
-        executed_volume = max(0.0, volume - remaining_volume)
+        if volume is not None and remaining_volume is not None:
+            executed_volume = max(0.0, volume - remaining_volume)
+        elif state == "done":
+            executed_volume = max(0.0, volume or 0.0)
+    if remaining_volume is None and state == "done":
+        remaining_volume = 0.0
+
+    if state in {"wait", "watch"} and remaining_volume is None:
+        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
+    if state in {"wait", "watch"} and volume is None and executed_volume is None:
+        raise BrokerRejectError(
+            f"{context} schema mismatch: missing required numeric fields 'volume' and 'executed_volume'"
+        )
 
     return V1ListNormalizedOrder(
         uuid=uuid,
@@ -175,13 +219,15 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
         side=_normalize_side(row.get("side"), context=context),
         ord_type=_required_text(row, "ord_type", context=context),
         state=state,
-        price=_required_number(row, "price", context=context),
+        price=price,
         volume=volume,
         remaining_volume=remaining_volume,
         executed_volume=executed_volume,
         created_ts=_strict_parse_ts(row.get("created_at"), field_name="created_at", context=context),
         updated_ts=_strict_parse_ts(row.get("updated_at"), field_name="updated_at", context=context),
-        executed_funds=_optional_number(row, "executed_funds", context=context),
+        executed_funds=executed_funds,
+        paid_fee=paid_fee,
+        degraded_fields=tuple(degraded_fields),
     )
 
 
