@@ -1167,7 +1167,6 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="price",
                     price=self._format_krw_amount(notional),
-                    client_order_id=validated_client_order_id,
                 )
             else:
                 payload = build_order_payload(
@@ -1175,7 +1174,6 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="market",
                     volume=volume_text,
-                    client_order_id=validated_client_order_id,
                 )
         else:
             requested_limit_price = self._decimal_from_value(price)
@@ -1206,7 +1204,6 @@ class BithumbBroker:
                 ord_type="limit",
                 volume=volume_text,
                 price=self._format_krw_amount(requested_limit_price),
-                client_order_id=validated_client_order_id,
             )
 
         RUN_LOG.info(

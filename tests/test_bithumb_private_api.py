@@ -768,7 +768,6 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "side": "bid",
         "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
         "ord_type": "price",
-        "client_order_id": "cid-1",
     }
 
 
@@ -786,14 +785,14 @@ def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
     def _fake_post_private(endpoint, payload, retry_safe=False):
         call["endpoint"] = endpoint
         call["payload"] = payload
-        return {"uuid": "mkt-valid-cid-1", "client_order_id": payload["client_order_id"]}
+        return {"uuid": "mkt-valid-cid-1"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     order = broker.place_order(client_order_id=valid_client_order_id, side="BUY", qty=0.1234, price=None)
 
     assert order.client_order_id == valid_client_order_id
-    assert call["payload"]["client_order_id"] == valid_client_order_id
+    assert "client_order_id" not in call["payload"]
 
 
 def test_place_order_rejects_empty_client_order_id():
@@ -867,7 +866,6 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         "side": "ask",
         "volume": "0.4321",
         "ord_type": "market",
-        "client_order_id": "cid-2",
     }
 
 
@@ -901,7 +899,6 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "volume": "0.4",
         "price": "149500000",
         "ord_type": "limit",
-        "client_order_id": "cid-3",
     }
     assert order.raw == {
         "market": "KRW-BTC",
@@ -931,7 +928,7 @@ def test_place_order_preserves_local_client_order_id_when_response_omits_it(monk
     order = broker.place_order(client_order_id="cid-omit", side="BUY", qty=0.4, price=149500000)
 
     assert order.exchange_order_id == "lmt-omit-client-id"
-    assert call["payload"]["client_order_id"] == "cid-omit"
+    assert "client_order_id" not in call["payload"]
     assert order.raw == {
         "market": "KRW-BTC",
         "ord_type": "limit",
