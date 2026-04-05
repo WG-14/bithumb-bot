@@ -1136,7 +1136,13 @@ def live_execute_signal(
         try:
             if pretrade_needs_live_reference:
                 reference_quote = _load_live_reference_quote(pair=settings.PAIR)
-            normalized_qty = normalize_order_qty(qty=order_qty, market_price=market_price)
+            # Bithumb v2 market BUY (`side=bid`, `ord_type=price`) uses `price` as
+            # total KRW spend and does not submit `volume`.
+            # Keep BUY quantity as spend-derived base estimate (without qty-step flooring),
+            # so broker payload construction can preserve intended KRW notional.
+            # SELL market (`side=ask`, `ord_type=market`) still requires `volume`,
+            # so qty normalization remains mandatory on SELL.
+            normalized_qty = float(order_qty) if side == "BUY" else normalize_order_qty(qty=order_qty, market_price=market_price)
             validate_order(signal=signal, side=side, qty=normalized_qty, market_price=market_price)
             validate_pretrade(
                 broker=broker,

@@ -159,6 +159,7 @@ STRATEGY_NAME=sma_cross
 - `LIVE_DRY_RUN=true`를 켜면 **private write 요청(주문/취소/상태변경)** 은 차단하고, **private read-only GET 진단 요청(`/v1/accounts`, `/v1/orders/chance` 등)** 은 실제 API 호출을 허용합니다.
 - 실주문(`LIVE_DRY_RUN=false`)은 `LIVE_REAL_ORDER_ARMED=true`를 명시적으로 설정한 경우에만 허용됩니다.
 - live/paper/dryrun 공통으로 `client_order_id`는 `{mode_token}_{intent_ts}_{side_token}_{suffix}` 규칙으로 생성하며, 거래소 제약에 맞게 항상 36자 이하를 보장합니다(예: `live_1775367720000_buy_f70fd9a0`).
+- Bithumb `/v2/orders` payload 규칙: 시장가 매수는 `side=bid`, `ord_type=price`, `price=<총 주문금액 KRW>`로 전송하고 `volume`은 보내지 않습니다. 시장가 매도는 `side=ask`, `ord_type=market`, `volume=<매도 수량>`을 사용합니다.
 
 ### 실주문 arming 방법
 

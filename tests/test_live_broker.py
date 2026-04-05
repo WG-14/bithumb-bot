@@ -1968,6 +1968,27 @@ def test_normalize_order_qty_does_not_apply_notional_guard():
     assert normalized == pytest.approx(1.0)
 
 
+def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    # 20,000 / 100,000,000 = 0.0002. If qty-step flooring leaked into market BUY,
+    # this would collapse to 0.0001 and halve the KRW notional (regression).
+    assert broker._last_qty == pytest.approx(0.0002)
+
+
 def test_validate_pretrade_applies_side_specific_min_total():
     from bithumb_bot.broker import live as live_module
     from bithumb_bot.broker import order_rules
