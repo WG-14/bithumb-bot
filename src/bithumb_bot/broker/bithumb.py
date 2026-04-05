@@ -883,8 +883,6 @@ class BithumbBroker:
             }
         )
         if not present_keys:
-            if strict:
-                raise BrokerRejectError(f"/v1/order.{context} schema mismatch: missing required fee field")
             RUN_LOG.warning(format_log_kv("[FILL_FEE] missing fee key", payload=log_payload))
             return 0.0
 
@@ -892,10 +890,11 @@ class BithumbBroker:
             raw = row.get(key)
             parsed = self._to_float(raw, default=None)
             if parsed is None:
-                if strict:
-                    raise BrokerRejectError(f"/v1/order.{context} schema mismatch: invalid fee field '{key}'={raw}")
                 if raw in (None, "") or (isinstance(raw, str) and raw.strip().lower() in {"null", "none"}):
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] empty fee value", payload=log_payload, fee_key=key))
+                    continue
+                if strict:
+                    raise BrokerRejectError(f"/v1/order.{context} schema mismatch: invalid fee field '{key}'={raw}")
                 else:
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] invalid fee value", payload=log_payload, fee_key=key))
                 continue
@@ -907,7 +906,12 @@ class BithumbBroker:
             return fee
 
         if strict:
-            raise BrokerRejectError(f"/v1/order.{context} schema mismatch: unable to parse fee field")
+            has_non_empty_fee = any(
+                row.get(key) not in (None, "") and not (isinstance(row.get(key), str) and str(row.get(key)).strip().lower() in {"null", "none"})
+                for key in present_keys
+            )
+            if has_non_empty_fee:
+                raise BrokerRejectError(f"/v1/order.{context} schema mismatch: unable to parse fee field")
         RUN_LOG.warning(format_log_kv("[FILL_FEE] unable to parse any fee value", payload=log_payload))
         return 0.0
 
@@ -983,9 +987,29 @@ class BithumbBroker:
 
     def _normalize_v1_order_row_strict(self, row: dict[str, object]) -> V1NormalizedOrder:
         context = "/v1/order"
-        volume = self._required_number(row, "volume", context=context)
-        remaining = self._required_number(row, "remaining_volume", context=context)
+        volume = self._strict_optional_number(row, "volume", context=context)
+        if volume is None:
+            volume = self._strict_optional_number(row, "units", context=context)
+
+        remaining = self._strict_optional_number(row, "remaining_volume", context=context)
+        if remaining is None:
+            remaining = self._strict_optional_number(row, "units_remaining", context=context)
+
         executed = self._strict_optional_number(row, "executed_volume", context=context)
+        if executed is None:
+            executed = self._strict_optional_number(row, "filled_volume", context=context)
+
+        if remaining is None and volume is not None and executed is not None:
+            remaining = max(0.0, volume - executed)
+        if executed is None and volume is not None and remaining is not None:
+            executed = max(0.0, volume - remaining)
+        if volume is None and remaining is not None and executed is not None:
+            volume = max(0.0, remaining + executed)
+
+        if volume is None:
+            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'volume'")
+        if remaining is None:
+            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
         if executed is None:
             executed = max(0.0, volume - remaining)
 

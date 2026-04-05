@@ -133,6 +133,35 @@ def test_parse_v1_order_list_row_rejects_invalid_numeric() -> None:
         parse_v1_order_list_row(_v1_orders_row(executed_volume="bad-number"))
 
 
+def test_parse_v1_order_list_row_tolerates_missing_volume_with_units_alias() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            volume="",
+            remaining_volume="",
+            executed_volume="",
+            units="0.02",
+            units_remaining="0.01",
+            filled_volume="0.01",
+        )
+    )
+    assert parsed.volume == pytest.approx(0.02)
+    assert parsed.remaining_volume == pytest.approx(0.01)
+    assert parsed.executed_volume == pytest.approx(0.01)
+
+
+def test_parse_v1_order_list_row_tolerates_missing_volume_when_derivable() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            volume="",
+            remaining_volume="0.01",
+            executed_volume="0.01",
+        )
+    )
+    assert parsed.volume == pytest.approx(0.02)
+    assert parsed.remaining_volume == pytest.approx(0.01)
+    assert parsed.executed_volume == pytest.approx(0.01)
+
+
 def test_parse_v1_order_list_row_rejects_invalid_timestamp() -> None:
     with pytest.raises(BrokerRejectError, match="invalid timestamp field 'updated_at'"):
         parse_v1_order_list_row(_v1_orders_row(updated_at="not-a-timestamp"))

@@ -144,6 +144,30 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
     if state not in V1_ORDER_STATES:
         raise BrokerRejectError(f"{context} schema mismatch: unknown state '{row.get('state')}'")
 
+    volume = _optional_number(row, "volume", context=context)
+    if volume is None:
+        volume = _optional_number(row, "units", context=context)
+    remaining_volume = _optional_number(row, "remaining_volume", context=context)
+    if remaining_volume is None:
+        remaining_volume = _optional_number(row, "units_remaining", context=context)
+    executed_volume = _optional_number(row, "executed_volume", context=context)
+    if executed_volume is None:
+        executed_volume = _optional_number(row, "filled_volume", context=context)
+
+    if remaining_volume is None and volume is not None and executed_volume is not None:
+        remaining_volume = max(0.0, volume - executed_volume)
+    if executed_volume is None and volume is not None and remaining_volume is not None:
+        executed_volume = max(0.0, volume - remaining_volume)
+    if volume is None and remaining_volume is not None and executed_volume is not None:
+        volume = max(0.0, remaining_volume + executed_volume)
+
+    if volume is None:
+        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'volume'")
+    if remaining_volume is None:
+        raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
+    if executed_volume is None:
+        executed_volume = max(0.0, volume - remaining_volume)
+
     return V1ListNormalizedOrder(
         uuid=uuid,
         client_order_id=client_order_id,
@@ -152,9 +176,9 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
         ord_type=_required_text(row, "ord_type", context=context),
         state=state,
         price=_required_number(row, "price", context=context),
-        volume=_required_number(row, "volume", context=context),
-        remaining_volume=_required_number(row, "remaining_volume", context=context),
-        executed_volume=_required_number(row, "executed_volume", context=context),
+        volume=volume,
+        remaining_volume=remaining_volume,
+        executed_volume=executed_volume,
         created_ts=_strict_parse_ts(row.get("created_at"), field_name="created_at", context=context),
         updated_ts=_strict_parse_ts(row.get("updated_at"), field_name="updated_at", context=context),
         executed_funds=_optional_number(row, "executed_funds", context=context),
