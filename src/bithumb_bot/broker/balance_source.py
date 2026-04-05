@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
-from ..config import settings
-from ..db_core import ensure_db
+from ..config import prepare_db_path_for_connection, settings
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -279,7 +279,9 @@ class AccountsV1BalanceSource:
 
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
-    conn = ensure_db()
+    db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
     try:
         unresolved_row = conn.execute(
             """

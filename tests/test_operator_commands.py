@@ -268,6 +268,35 @@ class _RecoverAmbiguousBroker(_RecoverSuccessBroker):
         )
 
 
+class _RecoverUnresolvedHighConfidenceTerminalBroker(_RecoverSuccessBroker):
+    def __init__(self, *, recent_orders: list[BrokerOrder] | None = None, remote_status: str = "FILLED") -> None:
+        self._recent_orders = list(recent_orders or [])
+        self._remote_status = remote_status
+
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return list(self._recent_orders)
+
+    def get_order(
+        self, *, client_order_id: str, exchange_order_id: str | None = None
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "ex-unresolved-1",
+            "BUY",
+            self._remote_status,
+            100.0,
+            0.01,
+            0.01 if self._remote_status == "FILLED" else 0.0,
+            1,
+            1,
+        )
+
 class _SubmitUnknownRecoveredByRecentFillBroker:
     def get_order(
         self, *, client_order_id: str, exchange_order_id: str | None = None
@@ -2843,6 +2872,151 @@ def test_recover_order_refuses_when_order_not_recovery_required(monkeypatch, tmp
 
     assert exc.value.code == 1
     assert broker_calls["n"] == 0
+
+
+def test_recover_order_allows_new_unresolved_when_single_high_confidence_terminal_match(
+    monkeypatch, tmp_path
+):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="NEW",
+        client_order_id="new_unresolved_recoverable",
+        created_ts=now_ms,
+        price=100.0,
+    )
+
+    conn = ensure_db()
+    try:
+        set_exchange_order_id("new_unresolved_recoverable", "ex-unresolved-1", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_mode = settings.MODE
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    broker = _RecoverUnresolvedHighConfidenceTerminalBroker(
+        recent_orders=[
+            BrokerOrder(
+                "new_unresolved_recoverable",
+                "ex-unresolved-1",
+                "BUY",
+                "FILLED",
+                100.0,
+                0.01,
+                0.01,
+                now_ms,
+                now_ms,
+            )
+        ],
+        remote_status="FILLED",
+    )
+
+    try:
+        cmd_recover_order(
+            client_order_id="new_unresolved_recoverable",
+            exchange_order_id="ex-unresolved-1",
+            confirm=True,
+            broker_factory=lambda: broker,
+        )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+    conn = ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id FROM orders WHERE client_order_id='new_unresolved_recoverable'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex-unresolved-1"
+
+
+def test_recover_order_refuses_when_unresolved_has_multiple_high_confidence_candidates(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="NEW",
+        client_order_id="new_unresolved_ambiguous",
+        created_ts=now_ms,
+        price=100.0,
+    )
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    broker = _RecoverUnresolvedHighConfidenceTerminalBroker(
+        recent_orders=[
+            BrokerOrder("new_unresolved_ambiguous", "ex-a", "BUY", "FILLED", 100.0, 0.01, 0.01, now_ms, now_ms),
+            BrokerOrder("new_unresolved_ambiguous", "ex-b", "BUY", "FILLED", 100.0, 0.01, 0.01, now_ms, now_ms),
+        ],
+        remote_status="FILLED",
+    )
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_recover_order(
+                client_order_id="new_unresolved_ambiguous",
+                exchange_order_id="ex-a",
+                confirm=True,
+                broker_factory=lambda: broker,
+            )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert exc.value.code == 1
+
+
+def test_recover_order_refuses_when_unresolved_candidate_is_not_terminal(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="NEW",
+        client_order_id="new_unresolved_non_terminal",
+        created_ts=now_ms,
+        price=100.0,
+    )
+    conn = ensure_db()
+    try:
+        set_exchange_order_id("new_unresolved_non_terminal", "ex-non-terminal", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    broker = _RecoverUnresolvedHighConfidenceTerminalBroker(
+        recent_orders=[
+            BrokerOrder(
+                "new_unresolved_non_terminal",
+                "ex-non-terminal",
+                "BUY",
+                "NEW",
+                100.0,
+                0.01,
+                0.0,
+                now_ms,
+                now_ms,
+            )
+        ],
+        remote_status="NEW",
+    )
+    try:
+        with pytest.raises(SystemExit) as exc:
+            cmd_recover_order(
+                client_order_id="new_unresolved_non_terminal",
+                exchange_order_id="ex-non-terminal",
+                confirm=True,
+                broker_factory=lambda: broker,
+            )
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert exc.value.code == 1
 
 
 def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):

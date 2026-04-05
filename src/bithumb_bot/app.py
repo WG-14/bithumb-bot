@@ -2234,12 +2234,22 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
     )
 
 
-def _build_recover_order_preview(*, client_order_id: str, exchange_order_id: str) -> dict[str, object]:
+_RECOVERABLE_UNRESOLVED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
+_TERMINAL_REMOTE_ORDER_STATUSES = {"FILLED", "CANCELED", "CANCELLED", "REJECTED", "FAILED"}
+
+
+def _build_recover_order_preview(
+    *,
+    client_order_id: str,
+    exchange_order_id: str,
+    broker=None,
+) -> dict[str, object]:
     conn = ensure_db()
     try:
         row = conn.execute(
             """
-            SELECT client_order_id, status, exchange_order_id, qty_filled, last_error
+            SELECT client_order_id, status, exchange_order_id, qty_filled, last_error,
+                   side, price, qty_req, created_ts, updated_ts
             FROM orders
             WHERE client_order_id=?
             """,
@@ -2256,18 +2266,99 @@ def _build_recover_order_preview(*, client_order_id: str, exchange_order_id: str
             "target_exchange_order_id": exchange_order_id,
             "current_status": "UNKNOWN",
             "current_exchange_order_id": "-",
+            "eligibility_reason": "client_order_id not found",
             "proposed_action": "manual_recover_with_exchange_id",
             "state_changes": ["none (client_order_id not found)"],
         }
 
     current_status = str(row["status"] or "UNKNOWN")
+    current_exchange_order_id = str(row["exchange_order_id"] or "").strip()
+    if current_status == "RECOVERY_REQUIRED":
+        return {
+            "exists": True,
+            "safe_to_apply": True,
+            "target_client_order_id": client_order_id,
+            "target_exchange_order_id": exchange_order_id,
+            "current_status": current_status,
+            "current_exchange_order_id": (current_exchange_order_id or "-"),
+            "eligibility_reason": "status is RECOVERY_REQUIRED",
+            "proposed_action": "manual_recover_with_exchange_id",
+            "state_changes": [
+                f"exchange_order_id -> {exchange_order_id}",
+                "fetch remote order + fills and apply missing fills",
+                "final order status updated from broker snapshot",
+                "trading remains disabled until explicit resume",
+            ],
+            "last_error": str(row["last_error"] or "-"),
+            "qty_filled": float(row["qty_filled"] or 0.0),
+        }
+
+    eligibility_reason = "client_order_id must exist and be safely attributable"
+    safe_to_apply = False
+    plausible_candidate_count = 0
+    likely_broker_exchange_order_id = None
+    remote_status = "-"
+    if current_status in _RECOVERABLE_UNRESOLVED_STATUSES:
+        if not exchange_order_id:
+            eligibility_reason = "exchange_order_id is required for unresolved local order recovery"
+        elif current_exchange_order_id and current_exchange_order_id != exchange_order_id:
+            eligibility_reason = "exchange_order_id mismatch with local order mapping"
+        elif broker is None:
+            eligibility_reason = "broker snapshot required to verify high-confidence unresolved recovery"
+        else:
+            local_order = {
+                "client_order_id": str(row["client_order_id"]),
+                "status": current_status,
+                "exchange_order_id": (current_exchange_order_id or "-"),
+                "side": str(row["side"] or "-"),
+                "price": (float(row["price"]) if row["price"] is not None else None),
+                "qty_req": float(row["qty_req"] or 0.0),
+                "qty_filled": float(row["qty_filled"] or 0.0),
+                "created_ts": int(row["created_ts"]),
+                "updated_ts": int(row["updated_ts"]),
+                "submit_evidence_attempted_ts": int(row["created_ts"]),
+            }
+            recent_orders = broker.get_recent_orders(
+                limit=100,
+                exchange_order_ids=[exchange_order_id],
+                client_order_ids=[client_order_id],
+            )
+            candidates = _build_recovery_candidates(local_order=local_order, recent_orders=recent_orders)
+            plausible_candidates = [c for c in candidates if int(c.get("high_confidence") or 0) == 1]
+            plausible_candidate_count = len(plausible_candidates)
+            likely_candidate = plausible_candidates[0] if plausible_candidate_count == 1 else None
+            likely_broker_exchange_order_id = (
+                str(likely_candidate["exchange_order_id"]) if likely_candidate is not None else None
+            )
+            if plausible_candidate_count != 1:
+                eligibility_reason = "requires exactly one high-confidence broker candidate"
+            elif likely_broker_exchange_order_id != exchange_order_id:
+                eligibility_reason = "suggested high-confidence candidate does not match requested exchange_order_id"
+            else:
+                remote = broker.get_order(
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id,
+                )
+                remote_status = str(remote.status or "").upper()
+                if remote_status not in _TERMINAL_REMOTE_ORDER_STATUSES:
+                    eligibility_reason = f"remote order is not terminal (status={remote.status})"
+                else:
+                    safe_to_apply = True
+                    eligibility_reason = (
+                        "unresolved local order with single high-confidence candidate and terminal remote snapshot"
+                    )
+
     return {
         "exists": True,
-        "safe_to_apply": current_status == "RECOVERY_REQUIRED",
+        "safe_to_apply": safe_to_apply,
         "target_client_order_id": client_order_id,
         "target_exchange_order_id": exchange_order_id,
         "current_status": current_status,
-        "current_exchange_order_id": str(row["exchange_order_id"] or "-"),
+        "current_exchange_order_id": (current_exchange_order_id or "-"),
+        "eligibility_reason": eligibility_reason,
+        "plausible_candidate_count": plausible_candidate_count,
+        "likely_broker_exchange_order_id": likely_broker_exchange_order_id,
+        "remote_terminal_status": remote_status,
         "proposed_action": "manual_recover_with_exchange_id",
         "state_changes": [
             f"exchange_order_id -> {exchange_order_id}",
@@ -2280,15 +2371,40 @@ def _build_recover_order_preview(*, client_order_id: str, exchange_order_id: str
     }
 
 
-def cmd_recover_order(*, client_order_id: str, exchange_order_id: str, dry_run: bool = False, confirm: bool = False) -> None:
+def cmd_recover_order(
+    *,
+    client_order_id: str,
+    exchange_order_id: str,
+    dry_run: bool = False,
+    confirm: bool = False,
+    broker_factory=None,
+) -> None:
     if settings.MODE != "live":
         print(f"[RECOVER-ORDER] skipped: MODE={settings.MODE} (live only)")
         raise SystemExit(1)
 
+    broker = None
     preview = _build_recover_order_preview(
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id,
+        broker=None,
     )
+    if (
+        not bool(preview.get("safe_to_apply"))
+        and preview.get("eligibility_reason")
+        == "broker snapshot required to verify high-confidence unresolved recovery"
+    ):
+        if broker_factory is not None:
+            broker = broker_factory()
+        else:
+            from .broker.bithumb import BithumbBroker
+
+            broker = BithumbBroker()
+        preview = _build_recover_order_preview(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            broker=broker,
+        )
     print("[RECOVER-ORDER] preview")
     print(
         "  target_order_id="
@@ -2299,6 +2415,7 @@ def cmd_recover_order(*, client_order_id: str, exchange_order_id: str, dry_run: 
         f"status={preview['current_status']} "
         f"exchange_order_id={preview['current_exchange_order_id']}"
     )
+    print(f"  eligibility_reason={preview.get('eligibility_reason')}")
     print(f"  proposed_recovery_action={preview['proposed_action']}")
     print("  important_state_changes:")
     for change in preview.get("state_changes", []):
@@ -2310,19 +2427,25 @@ def cmd_recover_order(*, client_order_id: str, exchange_order_id: str, dry_run: 
 
     if not bool(preview.get("safe_to_apply")):
         print("[RECOVER-ORDER] refused: unsafe recovery request")
-        print("  reason=client_order_id must exist and be RECOVERY_REQUIRED")
+        print(f"  reason={preview.get('eligibility_reason')}")
         raise SystemExit(1)
 
     if not confirm:
         print("[RECOVER-ORDER] confirmation required: re-run with --yes to apply")
         raise SystemExit(1)
 
-    from .broker.bithumb import BithumbBroker, classify_private_api_error
+    if broker is None:
+        if broker_factory is not None:
+            broker = broker_factory()
+        else:
+            from .broker.bithumb import BithumbBroker
+
+            broker = BithumbBroker()
 
     disable_trading_until(float("inf"), reason="manual recovery in progress")
     try:
         recover_order_with_exchange_id(
-            BithumbBroker(),
+            broker,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
         )

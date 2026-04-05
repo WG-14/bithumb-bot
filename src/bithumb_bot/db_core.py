@@ -9,7 +9,7 @@ from .sqlite_resilience import configure_connection
 from .decision_context import normalize_strategy_decision_context
 
 
-def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
+def ensure_db(db_path: str | None = None, *, ensure_schema_ready: bool = True) -> sqlite3.Connection:
     path = prepare_db_path_for_connection(db_path or settings.DB_PATH, mode=settings.MODE)
 
     conn = sqlite3.connect(path)
@@ -20,7 +20,8 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     except Exception:
         pass
 
-    ensure_schema(conn)
+    if ensure_schema_ready:
+        ensure_schema(conn)
     return conn
 
 

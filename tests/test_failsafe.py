@@ -8,6 +8,7 @@ import pytest
 
 from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance, BrokerRejectError
+from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
@@ -321,6 +322,19 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert "BrokerRejectError" in state.last_disable_reason
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
+
+
+def test_flat_start_safety_check_avoids_self_lock_when_writer_transaction_open():
+    writer_conn = ensure_db()
+    try:
+        writer_conn.execute("BEGIN IMMEDIATE")
+        allowed, reason = _default_flat_start_safety_check()
+    finally:
+        writer_conn.rollback()
+        writer_conn.close()
+
+    assert isinstance(allowed, bool)
+    assert isinstance(reason, str)
 
 
 def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatch):
