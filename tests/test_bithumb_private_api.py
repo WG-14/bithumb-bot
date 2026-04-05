@@ -102,6 +102,19 @@ def _stub_order_rules(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _restore_live_mode_related_settings():
+    snapshot = {
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
+        "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+    }
+    yield
+    for key, value in snapshot.items():
+        object.__setattr__(settings, key, value)
+
 
 def test_private_timeout_is_temporary_error(monkeypatch):
     _configure_live()
@@ -264,7 +277,38 @@ def test_private_jwt_headers_include_query_hash_for_get(monkeypatch):
     assert "nonce" in claims
     assert "timestamp" in claims
     assert "query_hash" in claims
-    assert call["params"] == {"market": "KRW-BTC", "state": "wait"}
+    assert "params" not in call
+    assert call["endpoint"] == "/v1/orders?market=KRW-BTC&state=wait"
+
+
+def test_private_get_orders_transmitted_query_matches_jwt_query_hash(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, [])]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    payload = {
+        "page": 1,
+        "order_by": "desc",
+        "uuids": ["open-1"],
+        "client_order_ids": ["live_123_buy_abc"],
+        "state": "wait",
+        "limit": 100,
+    }
+    broker._get_private("/v1/orders", payload, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+    transmitted_query = call["endpoint"].split("?", 1)[1]
+
+    assert transmitted_query == (
+        "page=1&order_by=desc&uuids[]=open-1&client_order_ids[]=live_123_buy_abc&state=wait&limit=100"
+    )
+    assert claims["query_hash"] == hashlib.sha512(transmitted_query.encode("utf-8")).hexdigest()
+    assert claims["query_hash_alg"] == "SHA512"
 
 
 
@@ -690,8 +734,7 @@ def test_order_chance_keeps_market_param_and_auth_query_hash(monkeypatch):
     auth = str(call["headers"]["Authorization"])
     claims = _decode_jwt(auth.removeprefix("Bearer "))
 
-    assert call["endpoint"] == "/v1/orders/chance"
-    assert call["params"] == {"market": "KRW-BTC"}
+    assert call["endpoint"] == "/v1/orders/chance?market=KRW-BTC"
     assert claims["query_hash"] == hashlib.sha512(b"market=KRW-BTC").hexdigest()
     assert claims["query_hash_alg"] == "SHA512"
 

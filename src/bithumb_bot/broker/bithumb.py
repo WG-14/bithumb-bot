@@ -236,6 +236,7 @@ class BithumbPrivateAPI:
         response_excerpt: callable | None = None,
     ) -> dict | list:
         method = method.upper()
+        request_endpoint = endpoint
         if self.dry_run and not self._is_read_only_private_request(method):
             # LIVE_DRY_RUN safety contract:
             # - allow read-only private diagnostics (GET) to reach exchange
@@ -255,8 +256,8 @@ class BithumbPrivateAPI:
         request_content_type: str | None = None
         fixed_nonce: str | None = None
         fixed_timestamp: int | None = None
-        if params:
-            request_kwargs["params"] = params
+        if method in {"GET", "DELETE"} and params:
+            request_endpoint = f"{endpoint}?{canonical_payload}"
         if json_body:
             if is_order_submit:
                 fixed_nonce = str(uuid.uuid4())
@@ -289,7 +290,7 @@ class BithumbPrivateAPI:
                 headers = self._headers(
                     auth_payload,
                     content_type=request_content_type,
-                    canonical_payload=None,
+                    canonical_payload=canonical_payload,
                     nonce=fixed_nonce,
                     timestamp=fixed_timestamp,
                 )
@@ -319,7 +320,7 @@ class BithumbPrivateAPI:
                 )
             try:
                 with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
-                    res = client.request(method, endpoint, headers=headers, **request_kwargs)
+                    res = client.request(method, request_endpoint, headers=headers, **request_kwargs)
 
                 if debug_order_submit:
                     RUN_LOG.info(
