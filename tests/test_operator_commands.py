@@ -746,6 +746,85 @@ def test_resume_refuses_when_kill_switch_halt_has_open_position(tmp_path, capsys
     assert "HALT_RISK_OPEN_POSITION" in state.resume_gate_reason
 
 
+def test_resume_allows_risk_halt_when_only_dust_residual_remains(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio(id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="KILL_SWITCH=ON; flatten submitted; dust residual only",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "dust_residual_allowed_for_resume",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", lambda _broker: None)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
+
+    cmd_resume(force=False)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.resume_gate_blocked is False
+    assert state.resume_gate_reason is None
+
+
+def test_resume_refuses_when_dust_residual_policy_requires_review(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO portfolio(id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="KILL_SWITCH=ON; flatten submitted but attribution inconsistent",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 0,
+            "dust_policy_reason": "dust_residual_requires_operator_review",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00020000 delta=-0.00010371",
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_resume(force=False)
+
+    out = capsys.readouterr().out
+    assert "code=HALT_RISK_OPEN_POSITION" in out
+    assert "dust_policy=dust_residual_requires_operator_review" in out
+    assert exc.value.code == 1
+
+
 
 
 def test_resume_allows_risk_halt_when_exposure_is_flat(tmp_path):
@@ -2307,8 +2386,12 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
 
     assert set(payload.keys()) == {
         "broker_recent_orders_snapshot_error",
-        "balance_split_mismatch_summary",
-        "active_blocker_summary",
+            "balance_split_mismatch_summary",
+            "dust_residual_present",
+            "dust_residual_allow_resume",
+            "dust_policy_reason",
+            "dust_residual_summary",
+            "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",
         "blockers",
@@ -3551,3 +3634,31 @@ def test_health_and_recovery_report_expose_emergency_flatten_blocker(tmp_path, c
     assert "emergency_flatten_blocked=1" in report_out
     assert "emergency_flatten_block_reason=emergency flatten unresolved" in report_out
     assert "EMERGENCY_FLATTEN_UNRESOLVED" in report_out
+
+
+def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "dust_residual_allowed_for_resume",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+        },
+    )
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "dust_residual_present=1" in health_out
+    assert "dust_residual_allow_resume=1" in health_out
+    assert "dust_policy_reason=dust_residual_allowed_for_resume" in health_out
+
+    cmd_recovery_report(as_json=False)
+    report_out = capsys.readouterr().out
+    assert "[P3.0] dust_residual" in report_out
+    assert "present=1" in report_out
+    assert "allow_resume=1" in report_out
+    assert "policy_reason=dust_residual_allowed_for_resume" in report_out

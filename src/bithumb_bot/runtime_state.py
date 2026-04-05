@@ -20,6 +20,39 @@ def _clip(v: str | None, max_len: int = 500) -> str | None:
     return str(v)[:max_len]
 
 
+def _json_with_size_limit(
+    payload: dict[str, object] | None,
+    *,
+    max_len: int = 1000,
+    preserve_keys: tuple[str, ...] = (),
+) -> str | None:
+    if payload is None:
+        return None
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if len(encoded) <= max_len:
+        return encoded
+
+    compact: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, str):
+            compact[key] = value[:160]
+        else:
+            compact[key] = value
+    encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+    if len(encoded) <= max_len:
+        return encoded
+
+    protected = {str(k) for k in preserve_keys}
+    removable_keys = [k for k in sorted(compact.keys()) if k not in protected]
+    for key in removable_keys:
+        compact.pop(key, None)
+        encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        if len(encoded) <= max_len:
+            return encoded
+
+    return "{}"
+
+
 @dataclass
 class RuntimeState:
     trading_enabled: bool = True
@@ -505,9 +538,24 @@ def record_reconcile_result(
 
         ts = time.time()
 
-    payload = None
-    if metadata is not None:
-        payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    payload = _json_with_size_limit(
+        metadata,
+        max_len=1000,
+        preserve_keys=(
+            "balance_source",
+            "balance_observed_ts_ms",
+            "broker_read_journal",
+            "balance_split_mismatch_count",
+            "balance_split_mismatch_summary",
+            "dust_residual_present",
+            "dust_residual_allow_resume",
+            "dust_policy_reason",
+            "dust_residual_summary",
+            "recovery_disposition",
+            "recovery_progress_state",
+            "recovery_classification_reason",
+        ),
+    )
 
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -515,7 +563,7 @@ def record_reconcile_result(
         _STATE.last_reconcile_status = "ok" if success else "error"
         _STATE.last_reconcile_error = None if success else (error[:500] if error else "unknown")
         _STATE.last_reconcile_reason_code = _clip(reason_code)
-        _STATE.last_reconcile_metadata = _clip(payload, max_len=1000)
+        _STATE.last_reconcile_metadata = payload
         _persist_state(_STATE)
 
 

@@ -337,6 +337,36 @@ def test_flat_start_safety_check_avoids_self_lock_when_writer_transaction_open()
     assert isinstance(reason, str)
 
 
+def test_flat_start_safety_check_allows_local_dust_position(monkeypatch):
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)
+            """
+        )
+        conn.execute(
+            "INSERT INTO candles(pair, interval, ts, open, high, low, close, volume) VALUES ('KRW-BTC', '1m', 1, 100000000, 100000000, 100000000, 100000000, 1.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Resolved:
+        class rules:
+            min_qty = 0.0001
+            min_notional_krw = 5000.0
+
+    monkeypatch.setattr("bithumb_bot.broker.order_rules.get_effective_order_rules", lambda _pair: _Resolved())
+
+    allowed, reason = _default_flat_start_safety_check()
+
+    assert allowed is True
+    assert "local_dust_position_allowed" in reason
+
+
 def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatch):
     _prepare_run_loop(monkeypatch)
     called = {"n": 0}

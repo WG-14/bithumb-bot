@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -16,6 +17,8 @@ from .broker.base import (
     BrokerTemporaryError,
 )
 from .broker.balance_source import fetch_balance_snapshot
+from .broker.order_rules import get_effective_order_rules
+from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
@@ -363,6 +366,8 @@ def _classify_lookup_error(exc: Exception) -> str:
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
 _LOG = logging.getLogger(__name__)
+DUST_POSITION_EPS = 1e-12
+RECENT_FLATTEN_WINDOW_SEC = 600.0
 
 
 def _balance_split_mismatch_summary(
@@ -410,6 +415,112 @@ def _balance_split_mismatch_summary(
     )
 
     return len(mismatches), "; ".join(mismatches)
+
+
+def _latest_price_for_notional_estimate(conn) -> float | None:
+    row = conn.execute(
+        """
+        SELECT close
+        FROM candles
+        WHERE close IS NOT NULL
+        ORDER BY ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        price = float(row["close"])
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    return price
+
+
+def _is_partial_flatten_recent(*, now_sec: float) -> tuple[bool, str]:
+    try:
+        state = runtime_state.snapshot()
+    except Exception as exc:
+        return False, f"flatten_state_unavailable({type(exc).__name__})"
+    status = str(state.last_flatten_position_status or "").strip()
+    flatten_ts = state.last_flatten_position_epoch_sec
+    if status != "submitted" or flatten_ts is None:
+        return False, "flatten_not_recent"
+    age_sec = max(0.0, now_sec - float(flatten_ts))
+    if age_sec > RECENT_FLATTEN_WINDOW_SEC:
+        return False, f"flatten_too_old(age_sec={age_sec:.1f})"
+    summary_raw = str(state.last_flatten_position_summary or "").strip()
+    trigger = "-"
+    if summary_raw:
+        try:
+            summary = json.loads(summary_raw)
+            trigger = str(summary.get("trigger") or "-")
+        except json.JSONDecodeError:
+            trigger = "-"
+    return True, f"flatten_recent(age_sec={age_sec:.1f},trigger={trigger})"
+
+
+def _evaluate_dust_residual_policy(
+    *,
+    conn,
+    broker_asset_available: float,
+    broker_asset_locked: float,
+    local_asset_available: float,
+    local_asset_locked: float,
+) -> dict[str, int | float | str]:
+    broker_qty = max(0.0, float(broker_asset_available) + float(broker_asset_locked))
+    local_qty = max(0.0, float(local_asset_available) + float(local_asset_locked))
+    delta_qty = broker_qty - local_qty
+    min_qty = 0.0
+    min_notional = 0.0
+    try:
+        rules = get_effective_order_rules(settings.PAIR).rules
+        min_qty = max(0.0, float(rules.min_qty))
+        min_notional = max(0.0, float(rules.min_notional_krw))
+    except Exception:
+        min_qty = 0.0
+        min_notional = 0.0
+
+    recent_flatten, recent_flatten_reason = _is_partial_flatten_recent(now_sec=time.time())
+    est_price = _latest_price_for_notional_estimate(conn)
+    broker_notional = broker_qty * est_price if est_price is not None else None
+    local_notional = local_qty * est_price if est_price is not None else None
+
+    broker_qty_is_dust = broker_qty > DUST_POSITION_EPS and (min_qty <= 0.0 or broker_qty < min_qty)
+    local_qty_is_dust = local_qty <= DUST_POSITION_EPS or (min_qty > 0.0 and local_qty < min_qty)
+    notional_is_dust = bool(
+        broker_notional is not None
+        and min_notional > 0.0
+        and broker_notional < min_notional
+    )
+    qty_gap_small = abs(delta_qty) <= max(ASSET_SPLIT_ABS_TOL * 10.0, min_qty * 0.5 if min_qty > 0 else ASSET_SPLIT_ABS_TOL * 10.0)
+
+    allow_dust_for_resume = bool(
+        broker_qty_is_dust
+        and local_qty_is_dust
+        and (notional_is_dust or recent_flatten or min_notional <= 0.0)
+        and qty_gap_small
+    )
+    if allow_dust_for_resume:
+        reason = "dust_residual_allowed_for_resume"
+    else:
+        reason = "dust_residual_requires_operator_review" if broker_qty_is_dust else "no_dust_residual"
+
+    summary = (
+        f"broker_qty={broker_qty:.8f} local_qty={local_qty:.8f} "
+        f"delta={delta_qty:.8f} min_qty={min_qty:.8f} min_notional_krw={min_notional:.1f} "
+        f"partial_flatten_recent={1 if recent_flatten else 0} "
+        f"allow_resume={1 if allow_dust_for_resume else 0} policy_reason={reason}"
+    )
+    return {
+        "dust_residual_present": 1 if broker_qty_is_dust else 0,
+        "dust_residual_allow_resume": 1 if allow_dust_for_resume else 0,
+        "dust_policy_reason": reason,
+        "dust_partial_flatten_recent": 1 if recent_flatten else 0,
+        "dust_partial_flatten_reason": recent_flatten_reason,
+        "dust_residual_summary": summary[:280],
+    }
 
 
 def assert_no_open_orders() -> None:
@@ -1047,27 +1158,32 @@ def _clear_reconcile_halt_if_safe(
     portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
     unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
     recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
-    position_flat = abs(float(portfolio_row["asset_qty"] or 0.0)) <= 1e-12 if portfolio_row else True
+    position_qty = float(portfolio_row["asset_qty"] or 0.0) if portfolio_row else 0.0
+    position_flat = abs(position_qty) <= 1e-12
+    dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
     _LOG.info(
-        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s halt_reason_code=%s",
+        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s dust_resume_allowed=%s halt_reason_code=%s",
         unresolved_count,
         recovery_required_count,
         broker_open_order_count,
         int(position_flat),
+        int(dust_resume_allowed),
         state.halt_reason_code or "-",
     )
     if not (
         unresolved_count == 0
         and recovery_required_count == 0
         and broker_open_order_count == 0
-        and position_flat
+        and (position_flat or dust_resume_allowed)
     ):
         _LOG.info(
-            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s",
+            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_qty=%s position_flat=%s dust_resume_allowed=%s",
             unresolved_count,
             recovery_required_count,
             broker_open_order_count,
+            position_qty,
             int(position_flat),
+            int(dust_resume_allowed),
         )
         return
     _LOG.info(
@@ -1106,6 +1222,9 @@ def reconcile_with_broker(broker: Broker) -> None:
         "lookup_schema_mismatch": 0,
         "balance_source": "-",
         "balance_observed_ts_ms": 0,
+        "dust_residual_present": 0,
+        "dust_residual_allow_resume": 0,
+        "dust_policy_reason": "no_dust_residual",
     }
     try:
         init_portfolio(conn)
@@ -1387,6 +1506,15 @@ def reconcile_with_broker(broker: Broker) -> None:
         metadata["balance_split_mismatch_count"] = mismatch_count
         if mismatch_summary:
             metadata["balance_split_mismatch_summary"] = mismatch_summary[:500]
+        dust_eval = _evaluate_dust_residual_policy(
+            conn=conn,
+            broker_asset_available=float(bal.asset_available),
+            broker_asset_locked=asset_locked,
+            local_asset_available=local_asset_available,
+            local_asset_locked=local_asset_locked,
+        )
+        for key, value in dust_eval.items():
+            metadata[key] = value
 
         set_portfolio_breakdown(
             conn,

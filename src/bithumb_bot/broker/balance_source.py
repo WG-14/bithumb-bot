@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
-
 from ..config import prepare_db_path_for_connection, settings
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
@@ -279,6 +278,8 @@ class AccountsV1BalanceSource:
 
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
+    from .order_rules import get_effective_order_rules
+
     db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -297,6 +298,45 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
+            min_qty = 0.0
+            min_notional = 0.0
+            try:
+                rules = get_effective_order_rules(settings.PAIR).rules
+                min_qty = max(0.0, float(rules.min_qty))
+                min_notional = max(0.0, float(rules.min_notional_krw))
+            except Exception:
+                min_qty = 0.0
+                min_notional = 0.0
+
+            latest_price = None
+            row = conn.execute(
+                """
+                SELECT close
+                FROM candles
+                WHERE close IS NOT NULL
+                ORDER BY ts DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is not None:
+                try:
+                    parsed = float(row["close"])
+                    if parsed > 0:
+                        latest_price = parsed
+                except (TypeError, ValueError):
+                    latest_price = None
+
+            is_qty_dust = bool(min_qty > 0.0 and abs(asset_qty) < min_qty)
+            is_notional_dust = bool(
+                latest_price is not None
+                and min_notional > 0.0
+                and abs(asset_qty) * latest_price < min_notional
+            )
+            if is_qty_dust:
+                return True, (
+                    "local_dust_position_allowed"
+                    f"(asset_qty={asset_qty:.8f},min_qty={min_qty:.8f},min_notional_krw={min_notional:.1f})"
+                )
             return False, f"local_position_present={asset_qty:.12f}"
     finally:
         conn.close()

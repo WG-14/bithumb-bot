@@ -669,6 +669,24 @@ def cmd_health() -> None:
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
     print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
+    dust_present = 0
+    dust_allow_resume = 0
+    dust_policy_reason = "none"
+    dust_summary = "none"
+    if health.get("last_reconcile_metadata"):
+        try:
+            reconcile_meta = json.loads(str(health["last_reconcile_metadata"]))
+            dust_present = 1 if int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1 else 0
+            dust_allow_resume = 1 if int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1 else 0
+            dust_policy_reason = str(reconcile_meta.get("dust_policy_reason") or "none")
+            dust_summary = str(reconcile_meta.get("dust_residual_summary") or "none")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            dust_policy_reason = "metadata_parse_error"
+            dust_summary = "unavailable"
+    print(f"  dust_residual_present={dust_present}")
+    print(f"  dust_residual_allow_resume={dust_allow_resume}")
+    print(f"  dust_policy_reason={dust_policy_reason}")
+    print(f"  dust_residual_summary={dust_summary}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
     print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
     print(f"  halt_reason_code={health['halt_reason_code']}")
@@ -1588,6 +1606,10 @@ def _load_recovery_report(
     unprocessed_remote_open_orders = 0
     remote_known_unresolved_verification_summary = "none"
     balance_split_mismatch_summary = "none"
+    dust_residual_summary = "none"
+    dust_residual_present = False
+    dust_residual_allow_resume = False
+    dust_policy_reason = "none"
     if health_row and health_row["last_reconcile_metadata"]:
         try:
             reconcile_meta = json.loads(str(health_row["last_reconcile_metadata"]))
@@ -1601,6 +1623,12 @@ def _load_recovery_report(
         raw_mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "").strip()
         if raw_mismatch_summary:
             balance_split_mismatch_summary = raw_mismatch_summary
+        dust_residual_present = bool(int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1)
+        dust_residual_allow_resume = bool(int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1)
+        dust_policy_reason = str(reconcile_meta.get("dust_policy_reason") or "none")
+        raw_dust_summary = str(reconcile_meta.get("dust_residual_summary") or "").strip()
+        if raw_dust_summary:
+            dust_residual_summary = raw_dust_summary
         remote_known_unresolved_verification_summary = (
             "lookup_known_exchange_id={lookup_known_exchange_id} "
             "lookup_known_client_order_id={lookup_known_client_order_id} "
@@ -1769,6 +1797,10 @@ def _load_recovery_report(
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
         "remote_known_unresolved_verification_summary": remote_known_unresolved_verification_summary,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
+        "dust_residual_present": dust_residual_present,
+        "dust_residual_allow_resume": dust_residual_allow_resume,
+        "dust_policy_reason": dust_policy_reason,
+        "dust_residual_summary": dust_residual_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
@@ -1837,6 +1869,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         )
     print("  [P3] balance_mismatch")
     print(f"    summary={report['balance_split_mismatch_summary']}")
+    print("  [P3.0] dust_residual")
+    print(f"    present={1 if bool(report.get('dust_residual_present')) else 0}")
+    print(f"    allow_resume={1 if bool(report.get('dust_residual_allow_resume')) else 0}")
+    print(f"    policy_reason={report.get('dust_policy_reason') or 'none'}")
+    print(f"    summary={report.get('dust_residual_summary') or 'none'}")
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")

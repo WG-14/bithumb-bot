@@ -99,6 +99,33 @@ def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
         return 0
 
 
+def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
+    if not metadata_raw:
+        return {
+            "present": False,
+            "allow_resume": False,
+            "policy_reason": "none",
+            "summary": "none",
+        }
+    try:
+        reconcile_meta = json.loads(str(metadata_raw))
+    except json.JSONDecodeError:
+        return {
+            "present": False,
+            "allow_resume": False,
+            "policy_reason": "metadata_parse_error",
+            "summary": "none",
+        }
+    present = bool(int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1)
+    allow_resume = bool(int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1)
+    return {
+        "present": present,
+        "allow_resume": allow_resume,
+        "policy_reason": str(reconcile_meta.get("dust_policy_reason") or "-"),
+        "summary": str(reconcile_meta.get("dust_residual_summary") or "none"),
+    }
+
+
 LIVE_UNRESOLVED_ORDER_STATUSES = (
     "PENDING_SUBMIT",
     "NEW",
@@ -254,6 +281,7 @@ def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
 def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None) -> bool:
     open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
     mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
+    dust_context = _reconcile_dust_context(state.last_reconcile_metadata)
     reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
     return bool(
         state.last_reconcile_status == "ok"
@@ -264,7 +292,7 @@ def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None)
         and state.unresolved_open_order_count == 0
         and state.recovery_required_count == 0
         and not open_orders_present
-        and not position_present
+        and (not position_present or bool(dust_context["allow_resume"]))
     )
 
 
@@ -506,7 +534,15 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             )
         )
 
-    if state.halt_state_unresolved:
+    dust_context_for_halt = _reconcile_dust_context(state.last_reconcile_metadata)
+    unresolved_dust_safe = bool(
+        state.halt_state_unresolved
+        and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
+        and int(state.unresolved_open_order_count) == 0
+        and int(state.recovery_required_count) == 0
+        and bool(dust_context_for_halt["allow_resume"])
+    )
+    if state.halt_state_unresolved and not unresolved_dust_safe:
         reasons.append(
             _resume_blocker(
                 code="HALT_STATE_UNRESOLVED",
@@ -517,8 +553,14 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
 
     if state.halt_new_orders_blocked:
         open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+        dust_context = _reconcile_dust_context(state.last_reconcile_metadata)
         is_risk_exposure_halt = (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
-        if open_orders_present or position_present:
+        dust_exposure_only = bool(
+            not open_orders_present
+            and position_present
+            and bool(dust_context["allow_resume"])
+        )
+        if open_orders_present or (position_present and not dust_exposure_only):
             detail = (
                 "halt blocked with open exposure: "
                 f"position_present={1 if position_present else 0} "
@@ -526,6 +568,11 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 f"reason_code={state.halt_reason_code or '-'} "
                 f"reason={state.last_disable_reason or '-'}"
             )
+            if position_present and not open_orders_present and bool(dust_context["present"]):
+                detail += (
+                    f" dust_policy={str(dust_context['policy_reason'])} "
+                    f"dust_summary={str(dust_context['summary'])}"
+                )
             if is_risk_exposure_halt:
                 detail = (
                     "risk halt resume rejected until exposure is flattened/resolved first; "
