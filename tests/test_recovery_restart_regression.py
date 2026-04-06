@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,19 @@ class _FilledFlatReplayBroker(_NoopBroker):
                 exchange_order_id="ex-flat-sell",
             ),
         ]
+
+    def get_balance(self) -> BrokerBalance:
+        return self._balance
+
+
+class _DustBalanceBroker(_NoopBroker):
+    def __init__(self, *, asset_available: float, asset_locked: float = 0.0) -> None:
+        self._balance = BrokerBalance(
+            cash_available=1000.0,
+            cash_locked=0.0,
+            asset_available=asset_available,
+            asset_locked=asset_locked,
+        )
 
     def get_balance(self) -> BrokerBalance:
         return self._balance
@@ -486,6 +500,182 @@ class _ApiErrorBroker(_NoopBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         raise RuntimeError("broker api unavailable")
 
+
+
+def _resolved_order_rules(*, min_qty: float, min_notional_krw: float):
+    rules = type(
+        "_Rules",
+        (),
+        {
+            "min_qty": float(min_qty),
+            "min_notional_krw": float(min_notional_krw),
+        },
+    )
+    return type("_Resolved", (), {"rules": rules})()
+
+
+def _latest_reconcile_metadata() -> dict[str, object]:
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_metadata is not None
+    return json.loads(str(state.last_reconcile_metadata))
+
+
+def _seed_dust_state(*, db_path: Path, asset_qty: float, close_price: float) -> None:
+    conn = ensure_db(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (asset_qty, asset_qty),
+        )
+        conn.execute(
+            """
+            INSERT INTO candles(pair, interval, ts, open, high, low, close, volume)
+            VALUES ('KRW-BTC', '1m', 1, ?, ?, ?, ?, 1.0)
+            """,
+            (close_price, close_price, close_price, close_price),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(isolated_db, monkeypatch):
+    _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=40_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (True, "flatten_recent(age_sec=10.0,trigger=kill-switch)"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.00009629))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 1
+    assert metadata["dust_policy_reason"] == "dust_residual_allowed_for_resume"
+    assert "partial_flatten_recent=1" in str(metadata["dust_residual_summary"])
+
+
+def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_notional_is_also_dust(
+    isolated_db,
+    monkeypatch,
+):
+    _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=40_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (False, "flatten_not_recent"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.00009629))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 1
+    assert metadata["dust_policy_reason"] == "dust_residual_allowed_for_resume"
+    assert "partial_flatten_recent=0" in str(metadata["dust_residual_summary"])
+
+
+def test_reconcile_blocks_local_only_dust_gap_without_broker_match(isolated_db, monkeypatch):
+    _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=40_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (False, "flatten_not_recent"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.0))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
+    assert "allow_resume=0" in str(metadata["dust_residual_summary"])
+
+
+@pytest.mark.parametrize(
+    ("local_qty", "broker_qty"),
+    [
+        (0.00009629, 0.0),
+        (0.0, 0.00009629),
+    ],
+    ids=["local_only_dust", "broker_only_dust"],
+)
+def test_reconcile_blocks_one_sided_dust_gap_without_broker_local_match(
+    isolated_db,
+    monkeypatch,
+    local_qty,
+    broker_qty,
+):
+    _seed_dust_state(db_path=isolated_db, asset_qty=local_qty, close_price=40_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (False, "flatten_not_recent"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=broker_qty))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
+    summary = str(metadata["dust_residual_summary"])
+    assert "allow_resume=0" in summary
+    assert f"broker_qty={broker_qty:.8f}" in summary
+    assert f"local_qty={local_qty:.8f}" in summary
+    assert f"delta={(broker_qty - local_qty):.8f}" in summary
+
+
+def test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable(isolated_db, monkeypatch):
+    _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=100_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (False, "flatten_not_recent"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.00009629))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
+    assert "allow_resume=0" in str(metadata["dust_residual_summary"])
 
 
 def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):

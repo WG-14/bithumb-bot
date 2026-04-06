@@ -15,6 +15,7 @@ from .analytics_context import (
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
+from .dust import build_dust_operator_view
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
@@ -2202,6 +2203,16 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             estimated_fee_rate=float(settings.FEE_RATE),
         )
         recovery_attribution_signals = fetch_recovery_attribution_signal_summary(conn)
+        health_row = conn.execute(
+            """
+            SELECT
+                unresolved_open_order_count,
+                recovery_required_count,
+                last_reconcile_metadata
+            FROM bot_health
+            WHERE id=1
+            """
+        ).fetchone()
     finally:
         conn.close()
 
@@ -2291,6 +2302,28 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
         },
     }
+    dust_view = build_dust_operator_view(health_row["last_reconcile_metadata"] if health_row else None)
+    payload["operator_recovery_summary"] = {
+        "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
+        "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
+        "dust_state": dust_view.state,
+        "dust_state_label": dust_view.state_label,
+        "dust_operator_action": dust_view.operator_action,
+        "dust_operator_message": dust_view.operator_message,
+        "dust_broker_local_match": dust_view.broker_local_match,
+        "dust_new_orders_allowed": dust_view.new_orders_allowed,
+        "dust_resume_allowed_by_policy": dust_view.resume_allowed,
+        "dust_treat_as_flat": dust_view.treat_as_flat,
+        "dust_broker_qty": dust_view.broker_qty,
+        "dust_local_qty": dust_view.local_qty,
+        "dust_delta_qty": dust_view.delta_qty,
+        "dust_broker_qty_below_min": dust_view.broker_qty_below_min,
+        "dust_local_qty_below_min": dust_view.local_qty_below_min,
+        "dust_broker_notional_below_min": dust_view.broker_notional_below_min,
+        "dust_local_notional_below_min": dust_view.local_notional_below_min,
+        "dust_min_qty": dust_view.min_qty,
+        "dust_min_notional_krw": dust_view.min_notional_krw,
+    }
     balance_source_diag: dict[str, object] = {
         "source": "unavailable",
         "reason": "not_checked",
@@ -2319,6 +2352,28 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print(
         f"  mode={settings.MODE} market={market}{raw_symbol_info} interval={settings.INTERVAL} db_path={settings.DB_PATH}"
     )
+    operator_recovery = payload["operator_recovery_summary"]
+    print(
+        "  "
+        f"unresolved_open_order_count={operator_recovery['unresolved_open_order_count']} "
+        f"recovery_required_count={operator_recovery['recovery_required_count']} "
+        f"dust_state={operator_recovery['dust_state']} "
+        f"dust_action={operator_recovery['dust_operator_action']} "
+        f"dust_new_orders_allowed={1 if operator_recovery['dust_new_orders_allowed'] else 0} "
+        f"dust_resume_allowed={1 if operator_recovery['dust_resume_allowed_by_policy'] else 0} "
+        f"dust_treat_as_flat={1 if operator_recovery['dust_treat_as_flat'] else 0}"
+    )
+    print(
+        "  "
+        f"dust_broker_qty={float(operator_recovery['dust_broker_qty']):.8f} "
+        f"dust_local_qty={float(operator_recovery['dust_local_qty']):.8f} "
+        f"dust_delta_qty={float(operator_recovery['dust_delta_qty']):.8f} "
+        f"dust_broker_local_match={1 if operator_recovery['dust_broker_local_match'] else 0} "
+        f"dust_qty_below_min=broker:{1 if operator_recovery['dust_broker_qty_below_min'] else 0} "
+        f"local:{1 if operator_recovery['dust_local_qty_below_min'] else 0} "
+        f"dust_notional_below_min=broker:{1 if operator_recovery['dust_broker_notional_below_min'] else 0} "
+        f"local:{1 if operator_recovery['dust_local_notional_below_min'] else 0}"
+    )
     print(
         "  "
         f"balance_source={balance_source_diag.get('source') or '-'} "
@@ -2330,8 +2385,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"base_currency={balance_source_diag.get('base_currency') or '-'} "
         f"base_missing_policy={balance_source_diag.get('base_currency_missing_policy') or '-'} "
         f"preflight_outcome={balance_source_diag.get('preflight_outcome') or '-'} "
-        f"flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
-        f"flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
+        f"accounts_flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
+        f"accounts_flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
     )
     print(
         "  "

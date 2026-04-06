@@ -345,6 +345,7 @@ def record_submit_attempt(
     order_status: str,
     submit_attempt_id: str,
     event_type: str = "submit_attempt_recorded",
+    message: str | None = None,
     conn: sqlite3.Connection,
 ) -> None:
     _record_order_event(
@@ -366,6 +367,7 @@ def record_submit_attempt(
         timeout_flag=timeout_flag,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
+        message=message,
     )
 
 

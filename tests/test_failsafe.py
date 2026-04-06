@@ -337,7 +337,7 @@ def test_flat_start_safety_check_avoids_self_lock_when_writer_transaction_open()
     assert isinstance(reason, str)
 
 
-def test_flat_start_safety_check_allows_local_dust_position(monkeypatch):
+def test_flat_start_safety_check_blocks_local_dust_position_without_broker_confirmation(monkeypatch):
     conn = ensure_db()
     try:
         conn.execute(
@@ -363,8 +363,9 @@ def test_flat_start_safety_check_allows_local_dust_position(monkeypatch):
 
     allowed, reason = _default_flat_start_safety_check()
 
-    assert allowed is True
-    assert "local_dust_position_allowed" in reason
+    assert allowed is False
+    assert "flat_start_requires_operator_review" in reason
+    assert "policy_reason=dust_residual_requires_operator_review" in reason
 
 
 def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatch):

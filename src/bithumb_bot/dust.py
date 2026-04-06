@@ -1,0 +1,399 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+
+
+DUST_POSITION_EPS = 1e-12
+
+
+@dataclass(frozen=True)
+class DustClassification:
+    present: bool
+    allow_resume: bool
+    effective_flat: bool
+    policy_reason: str
+    summary: str
+    broker_qty: float
+    local_qty: float
+    delta_qty: float
+    min_qty: float
+    min_notional_krw: float
+    latest_price: float | None
+    broker_notional_krw: float | None
+    local_notional_krw: float | None
+    partial_flatten_recent: bool
+    partial_flatten_reason: str
+    qty_gap_tolerance: float
+    qty_gap_small: bool
+    broker_qty_is_dust: bool
+    local_qty_is_dust: bool
+    broker_notional_is_dust: bool
+    local_notional_is_dust: bool
+
+    def to_metadata(self) -> dict[str, int | float | str]:
+        return {
+            "dust_residual_present": 1 if self.present else 0,
+            "dust_residual_allow_resume": 1 if self.allow_resume else 0,
+            "dust_effective_flat": 1 if self.effective_flat else 0,
+            "dust_policy_reason": self.policy_reason,
+            "dust_partial_flatten_recent": 1 if self.partial_flatten_recent else 0,
+            "dust_partial_flatten_reason": self.partial_flatten_reason,
+            "dust_qty_gap_tolerance": self.qty_gap_tolerance,
+            "dust_qty_gap_small": 1 if self.qty_gap_small else 0,
+            "dust_broker_qty": self.broker_qty,
+            "dust_local_qty": self.local_qty,
+            "dust_delta_qty": self.delta_qty,
+            "dust_min_qty": self.min_qty,
+            "dust_min_notional_krw": self.min_notional_krw,
+            "dust_latest_price": self.latest_price if self.latest_price is not None else "",
+            "dust_broker_notional_krw": (
+                self.broker_notional_krw if self.broker_notional_krw is not None else ""
+            ),
+            "dust_local_notional_krw": (
+                self.local_notional_krw if self.local_notional_krw is not None else ""
+            ),
+            "dust_broker_qty_is_dust": 1 if self.broker_qty_is_dust else 0,
+            "dust_local_qty_is_dust": 1 if self.local_qty_is_dust else 0,
+            "dust_broker_notional_is_dust": 1 if self.broker_notional_is_dust else 0,
+            "dust_local_notional_is_dust": 1 if self.local_notional_is_dust else 0,
+            "dust_residual_summary": self.summary[:280],
+        }
+
+    @classmethod
+    def from_metadata(cls, metadata_raw: str | dict[str, object] | None) -> DustClassification:
+        if metadata_raw is None:
+            return _metadata_fallback(policy_reason="none")
+        if isinstance(metadata_raw, dict):
+            metadata = metadata_raw
+        else:
+            try:
+                metadata = json.loads(str(metadata_raw))
+            except json.JSONDecodeError:
+                return _metadata_fallback(policy_reason="metadata_parse_error")
+
+        present = bool(int(metadata.get("dust_residual_present", 0) or 0) == 1)
+        allow_resume = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
+        effective_flat_raw = metadata.get("dust_effective_flat")
+        if effective_flat_raw is None:
+            effective_flat = bool(allow_resume)
+        else:
+            effective_flat = bool(int(effective_flat_raw or 0) == 1)
+        summary = str(metadata.get("dust_residual_summary") or "none")
+        return cls(
+            present=present,
+            allow_resume=allow_resume,
+            effective_flat=effective_flat,
+            policy_reason=str(metadata.get("dust_policy_reason") or "none"),
+            summary=summary,
+            broker_qty=_float_or_default(metadata.get("dust_broker_qty"), 0.0),
+            local_qty=_float_or_default(metadata.get("dust_local_qty"), 0.0),
+            delta_qty=_float_or_default(metadata.get("dust_delta_qty"), 0.0),
+            min_qty=_float_or_default(metadata.get("dust_min_qty"), 0.0),
+            min_notional_krw=_float_or_default(metadata.get("dust_min_notional_krw"), 0.0),
+            latest_price=_float_or_none(metadata.get("dust_latest_price")),
+            broker_notional_krw=_float_or_none(metadata.get("dust_broker_notional_krw")),
+            local_notional_krw=_float_or_none(metadata.get("dust_local_notional_krw")),
+            partial_flatten_recent=bool(int(metadata.get("dust_partial_flatten_recent", 0) or 0) == 1),
+            partial_flatten_reason=str(metadata.get("dust_partial_flatten_reason") or "none"),
+            qty_gap_tolerance=_float_or_default(metadata.get("dust_qty_gap_tolerance"), 0.0),
+            qty_gap_small=bool(int(metadata.get("dust_qty_gap_small", 0) or 0) == 1),
+            broker_qty_is_dust=bool(int(metadata.get("dust_broker_qty_is_dust", 0) or 0) == 1),
+            local_qty_is_dust=bool(int(metadata.get("dust_local_qty_is_dust", 0) or 0) == 1),
+            broker_notional_is_dust=bool(int(metadata.get("dust_broker_notional_is_dust", 0) or 0) == 1),
+            local_notional_is_dust=bool(int(metadata.get("dust_local_notional_is_dust", 0) or 0) == 1),
+        )
+
+
+@dataclass(frozen=True)
+class DustOperatorView:
+    state: str
+    state_label: str
+    operator_action: str
+    operator_message: str
+    broker_local_match: bool
+    new_orders_allowed: bool
+    resume_allowed: bool
+    treat_as_flat: bool
+    broker_qty: float
+    local_qty: float
+    delta_qty: float
+    min_qty: float
+    min_notional_krw: float
+    broker_qty_below_min: bool
+    local_qty_below_min: bool
+    broker_notional_below_min: bool
+    local_notional_below_min: bool
+
+    @property
+    def qty_below_min_summary(self) -> str:
+        return (
+            f"broker={1 if self.broker_qty_below_min else 0} "
+            f"local={1 if self.local_qty_below_min else 0}"
+        )
+
+    @property
+    def notional_below_min_summary(self) -> str:
+        return (
+            f"broker={1 if self.broker_notional_below_min else 0} "
+            f"local={1 if self.local_notional_below_min else 0}"
+        )
+
+    @property
+    def compact_summary(self) -> str:
+        return (
+            f"state={self.state} "
+            f"broker_qty={self.broker_qty:.8f} "
+            f"local_qty={self.local_qty:.8f} "
+            f"delta_qty={self.delta_qty:.8f} "
+            f"qty_below_min({self.qty_below_min_summary}) "
+            f"notional_below_min({self.notional_below_min_summary}) "
+            f"broker_local_match={1 if self.broker_local_match else 0} "
+            f"operator_action={self.operator_action} "
+            f"new_orders_allowed={1 if self.new_orders_allowed else 0} "
+            f"resume_allowed={1 if self.resume_allowed else 0} "
+            f"treat_as_flat={1 if self.treat_as_flat else 0}"
+        )
+
+
+def dust_qty_gap_tolerance(*, min_qty: float, default_abs_tolerance: float) -> float:
+    normalized_min_qty = max(0.0, float(min_qty))
+    normalized_default = max(0.0, float(default_abs_tolerance))
+    if normalized_min_qty <= 0.0:
+        return normalized_default
+    return max(normalized_default, normalized_min_qty * 0.5)
+
+
+def classify_dust_residual(
+    *,
+    broker_qty: float,
+    local_qty: float,
+    min_qty: float,
+    min_notional_krw: float,
+    latest_price: float | None,
+    partial_flatten_recent: bool,
+    partial_flatten_reason: str,
+    qty_gap_tolerance: float,
+) -> DustClassification:
+    normalized_broker_qty = max(0.0, float(broker_qty))
+    normalized_local_qty = max(0.0, float(local_qty))
+    normalized_min_qty = max(0.0, float(min_qty))
+    normalized_min_notional = max(0.0, float(min_notional_krw))
+    normalized_qty_gap_tolerance = max(0.0, float(qty_gap_tolerance))
+    delta_qty = normalized_broker_qty - normalized_local_qty
+
+    broker_present = normalized_broker_qty > DUST_POSITION_EPS
+    local_present = normalized_local_qty > DUST_POSITION_EPS
+    broker_qty_is_dust = broker_present and (
+        normalized_min_qty <= 0.0 or normalized_broker_qty < normalized_min_qty
+    )
+    local_qty_is_dust = local_present and (
+        normalized_min_qty <= 0.0 or normalized_local_qty < normalized_min_qty
+    )
+
+    broker_notional = _estimate_notional(normalized_broker_qty, latest_price)
+    local_notional = _estimate_notional(normalized_local_qty, latest_price)
+    broker_notional_is_dust = bool(
+        broker_notional is not None
+        and normalized_min_notional > 0.0
+        and broker_notional < normalized_min_notional
+    )
+    local_notional_is_dust = bool(
+        local_notional is not None
+        and normalized_min_notional > 0.0
+        and local_notional < normalized_min_notional
+    )
+    qty_gap_small = abs(delta_qty) <= normalized_qty_gap_tolerance
+
+    present = bool(broker_qty_is_dust or local_qty_is_dust)
+    allow_resume = bool(
+        present
+        and broker_qty_is_dust
+        and local_qty_is_dust
+        and qty_gap_small
+        and (
+            (broker_notional_is_dust and local_notional_is_dust)
+            or partial_flatten_recent
+            or normalized_min_notional <= 0.0
+        )
+    )
+    effective_flat = bool((not broker_present and not local_present) or allow_resume)
+
+    if not present:
+        policy_reason = "no_dust_residual"
+    elif allow_resume:
+        policy_reason = "dust_residual_allowed_for_resume"
+    else:
+        policy_reason = "dust_residual_requires_operator_review"
+
+    summary = (
+        f"broker_qty={normalized_broker_qty:.8f} local_qty={normalized_local_qty:.8f} "
+        f"delta={delta_qty:.8f} min_qty={normalized_min_qty:.8f} "
+        f"min_notional_krw={normalized_min_notional:.1f} "
+        f"partial_flatten_recent={1 if partial_flatten_recent else 0} "
+        f"allow_resume={1 if allow_resume else 0} "
+        f"effective_flat={1 if effective_flat else 0} "
+        f"qty_gap_small={1 if qty_gap_small else 0} policy_reason={policy_reason}"
+    )
+    return DustClassification(
+        present=present,
+        allow_resume=allow_resume,
+        effective_flat=effective_flat,
+        policy_reason=policy_reason,
+        summary=summary,
+        broker_qty=normalized_broker_qty,
+        local_qty=normalized_local_qty,
+        delta_qty=delta_qty,
+        min_qty=normalized_min_qty,
+        min_notional_krw=normalized_min_notional,
+        latest_price=_float_or_none(latest_price),
+        broker_notional_krw=broker_notional,
+        local_notional_krw=local_notional,
+        partial_flatten_recent=bool(partial_flatten_recent),
+        partial_flatten_reason=str(partial_flatten_reason or "none"),
+        qty_gap_tolerance=normalized_qty_gap_tolerance,
+        qty_gap_small=qty_gap_small,
+        broker_qty_is_dust=broker_qty_is_dust,
+        local_qty_is_dust=local_qty_is_dust,
+        broker_notional_is_dust=broker_notional_is_dust,
+        local_notional_is_dust=local_notional_is_dust,
+    )
+
+
+def no_dust_classification(*, policy_reason: str) -> DustClassification:
+    return DustClassification(
+        present=False,
+        allow_resume=False,
+        effective_flat=True,
+        policy_reason=policy_reason,
+        summary="none",
+        broker_qty=0.0,
+        local_qty=0.0,
+        delta_qty=0.0,
+        min_qty=0.0,
+        min_notional_krw=0.0,
+        latest_price=None,
+        broker_notional_krw=None,
+        local_notional_krw=None,
+        partial_flatten_recent=False,
+        partial_flatten_reason="none",
+        qty_gap_tolerance=0.0,
+        qty_gap_small=True,
+        broker_qty_is_dust=False,
+        local_qty_is_dust=False,
+        broker_notional_is_dust=False,
+        local_notional_is_dust=False,
+    )
+
+
+def build_dust_operator_view(
+    metadata_raw: str | dict[str, object] | DustClassification | None,
+) -> DustOperatorView:
+    dust = (
+        metadata_raw
+        if isinstance(metadata_raw, DustClassification)
+        else DustClassification.from_metadata(metadata_raw)
+    )
+
+    if dust.policy_reason == "metadata_parse_error":
+        state = "unknown"
+        state_label = "dust metadata unavailable"
+        operator_action = "rerun_reconcile_and_review"
+        operator_message = "Dust metadata could not be parsed. Re-run reconcile and review before resuming."
+        new_orders_allowed = False
+        resume_allowed = False
+        treat_as_flat = False
+    elif dust.present and dust.allow_resume:
+        state = "effective_flat_dust"
+        state_label = "dust only, treat as effective flat"
+        operator_action = "monitor_only"
+        operator_message = "Dust residual only. Treat as effective flat and do not force extra liquidation."
+        new_orders_allowed = True
+        resume_allowed = True
+        treat_as_flat = True
+    elif dust.present:
+        state = "manual_review_required"
+        state_label = "dust residual requires manual review"
+        operator_action = "manual_review_before_resume"
+        operator_message = (
+            "Dust residual is not resume-safe. Review broker/local state manually before resuming or placing new orders."
+        )
+        new_orders_allowed = False
+        resume_allowed = False
+        treat_as_flat = False
+    else:
+        state = "none"
+        state_label = "no dust residual"
+        operator_action = "none"
+        operator_message = "No dust residual signal is blocking operations."
+        new_orders_allowed = True
+        resume_allowed = True
+        treat_as_flat = bool(dust.effective_flat)
+
+    return DustOperatorView(
+        state=state,
+        state_label=state_label,
+        operator_action=operator_action,
+        operator_message=operator_message,
+        broker_local_match=bool(dust.qty_gap_small),
+        new_orders_allowed=new_orders_allowed,
+        resume_allowed=resume_allowed,
+        treat_as_flat=treat_as_flat,
+        broker_qty=dust.broker_qty,
+        local_qty=dust.local_qty,
+        delta_qty=dust.delta_qty,
+        min_qty=dust.min_qty,
+        min_notional_krw=dust.min_notional_krw,
+        broker_qty_below_min=bool(dust.broker_qty_is_dust),
+        local_qty_below_min=bool(dust.local_qty_is_dust),
+        broker_notional_below_min=bool(dust.broker_notional_is_dust),
+        local_notional_below_min=bool(dust.local_notional_is_dust),
+    )
+
+
+def _metadata_fallback(*, policy_reason: str) -> DustClassification:
+    return DustClassification(
+        present=False,
+        allow_resume=False,
+        effective_flat=False,
+        policy_reason=policy_reason,
+        summary="none",
+        broker_qty=0.0,
+        local_qty=0.0,
+        delta_qty=0.0,
+        min_qty=0.0,
+        min_notional_krw=0.0,
+        latest_price=None,
+        broker_notional_krw=None,
+        local_notional_krw=None,
+        partial_flatten_recent=False,
+        partial_flatten_reason="none",
+        qty_gap_tolerance=0.0,
+        qty_gap_small=False,
+        broker_qty_is_dust=False,
+        local_qty_is_dust=False,
+        broker_notional_is_dust=False,
+        local_notional_is_dust=False,
+    )
+
+
+def _estimate_notional(qty: float, latest_price: float | None) -> float | None:
+    normalized_price = _float_or_none(latest_price)
+    if normalized_price is None:
+        return None
+    return qty * normalized_price
+
+
+def _float_or_default(raw: object, default: float) -> float:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _float_or_none(raw: object) -> float | None:
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0.0 else None

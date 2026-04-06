@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
+from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_attempt, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
+from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.observability import safety_event
 
 
@@ -291,3 +292,59 @@ def test_critical_safety_event_payloads_include_common_fields():
     assert "state_from=SUBMIT_UNKNOWN" in recovery_msg
     assert "state_to=RECOVERY_REQUIRED" in recovery_msg
     assert "severity=CRITICAL" in recovery_msg
+
+
+def test_submit_attempt_event_persists_custom_dust_unsellable_reason_code(tmp_path):
+    db_path = tmp_path / "order_events_dust_reason.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_dust_reason",
+            submit_attempt_id="attempt_dust",
+            side="SELL",
+            qty_req=0.00009,
+            price=100000000.0,
+            status="FAILED",
+            ts_ms=1000,
+            conn=conn,
+        )
+        record_submit_attempt(
+            conn=conn,
+            client_order_id="o_dust_reason",
+            submit_attempt_id="attempt_dust",
+            symbol="KRW-BTC",
+            side="SELL",
+            qty=0.00009,
+            price=100000000.0,
+            submit_ts=1001,
+            payload_fingerprint="dust-fingerprint",
+            broker_response_summary="blocked_before_submit:dust_residual_unsellable",
+            submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+            exception_class=None,
+            timeout_flag=False,
+            submit_evidence='{"state":"EXIT_PARTIAL_LEFT_DUST"}',
+            exchange_order_id_obtained=False,
+            order_status="FAILED",
+        )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT event_type, order_status, side, qty, price, submission_reason_code, broker_response_summary
+            FROM order_events
+            WHERE client_order_id='o_dust_reason' AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["event_type"] == "submit_attempt_recorded"
+    assert row["order_status"] == "FAILED"
+    assert row["side"] == "SELL"
+    assert float(row["qty"]) == 0.00009
+    assert float(row["price"]) == 100000000.0
+    assert row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    assert row["broker_response_summary"] == "blocked_before_submit:dust_residual_unsellable"

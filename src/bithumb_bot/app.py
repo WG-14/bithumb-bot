@@ -36,6 +36,8 @@ from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
+from .reason_codes import DUST_RESIDUAL_UNSELLABLE
+from .dust import DustClassification, build_dust_operator_view
 from .reporting import (
     cmd_experiment_report,
     cmd_decision_telemetry,
@@ -476,6 +478,8 @@ def cmd_health() -> None:
     elif not bool(health["trading_enabled"]):
         state_label = "paused"
 
+    dust = DustClassification.from_metadata(health.get("last_reconcile_metadata"))
+    dust_view = build_dust_operator_view(dust)
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
     can_resume_label = "true" if bool(resume_allowed) else "false"
@@ -503,6 +507,9 @@ def cmd_health() -> None:
             "uv run python bot.py recover-order --client-order-id <id>"
             " | uv run python bot.py recovery-report"
         )
+    elif dust.present and not dust_view.resume_allowed:
+        halt_reason_for_summary = "DUST_RESIDUAL_REVIEW_REQUIRED"
+        recommended_commands = "uv run python bot.py recovery-report"
     elif halt_reason_for_summary == "KILL_SWITCH":
         recommended_commands = "uv run python bot.py recovery-report | uv run python bot.py resume"
 
@@ -511,6 +518,7 @@ def cmd_health() -> None:
         or health["halt_new_orders_blocked"]
         or bool(health.get("emergency_flatten_blocked"))
         or health["recovery_required_count"] > 0
+        or (dust.present and not dust_view.resume_allowed)
     )
 
     reconcile_latest = "none"
@@ -568,6 +576,22 @@ def cmd_health() -> None:
     print(f"    resume_safety={resume_safety}")
     print(
         "    "
+        f"dust_state={dust_view.state} "
+        f"dust_action={dust_view.operator_action} "
+        f"dust_new_orders_allowed={1 if dust_view.new_orders_allowed else 0} "
+        f"dust_resume_allowed={1 if dust_view.resume_allowed else 0} "
+        f"dust_treat_as_flat={1 if dust_view.treat_as_flat else 0}"
+    )
+    print(
+        "    "
+        f"dust_broker_qty={dust_view.broker_qty:.8f} "
+        f"dust_local_qty={dust_view.local_qty:.8f} "
+        f"dust_broker_local_match={1 if dust_view.broker_local_match else 0} "
+        f"dust_qty_below_min({dust_view.qty_below_min_summary}) "
+        f"dust_notional_below_min({dust_view.notional_below_min_summary})"
+    )
+    print(
+        "    "
         f"balance_source={balance_diag.get('source') or '-'} "
         f"diag_reason={balance_diag.get('reason') or '-'} "
         f"diag_category={balance_diag.get('failure_category') or '-'} "
@@ -623,7 +647,8 @@ def cmd_health() -> None:
             f"halt_reason={halt_reason_for_summary} "
             f"unresolved_order_count={health['unresolved_open_order_count']} "
             f"open_order_count={open_order_count} "
-            f"position={position_summary}"
+            f"position={position_summary} "
+            f"dust_state={dust_view.state}"
         )
         print(f"    next_commands={recommended_commands}")
     print("  [ORDER-RULE-SNAPSHOT]")
@@ -669,24 +694,31 @@ def cmd_health() -> None:
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
     print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
-    dust_present = 0
-    dust_allow_resume = 0
-    dust_policy_reason = "none"
-    dust_summary = "none"
-    if health.get("last_reconcile_metadata"):
-        try:
-            reconcile_meta = json.loads(str(health["last_reconcile_metadata"]))
-            dust_present = 1 if int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1 else 0
-            dust_allow_resume = 1 if int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1 else 0
-            dust_policy_reason = str(reconcile_meta.get("dust_policy_reason") or "none")
-            dust_summary = str(reconcile_meta.get("dust_residual_summary") or "none")
-        except (json.JSONDecodeError, ValueError, TypeError):
-            dust_policy_reason = "metadata_parse_error"
-            dust_summary = "unavailable"
+    dust = DustClassification.from_metadata(health.get("last_reconcile_metadata"))
+    dust_view = build_dust_operator_view(dust)
+    dust_present = 1 if dust.present else 0
+    dust_allow_resume = 1 if dust.allow_resume else 0
+    dust_policy_reason = dust.policy_reason
+    dust_summary = dust.summary
     print(f"  dust_residual_present={dust_present}")
     print(f"  dust_residual_allow_resume={dust_allow_resume}")
     print(f"  dust_policy_reason={dust_policy_reason}")
     print(f"  dust_residual_summary={dust_summary}")
+    print(f"  dust_state={dust_view.state}")
+    print(f"  dust_state_label={dust_view.state_label}")
+    print(f"  dust_operator_action={dust_view.operator_action}")
+    print(f"  dust_operator_message={dust_view.operator_message}")
+    print(f"  dust_broker_qty={dust_view.broker_qty:.8f}")
+    print(f"  dust_local_qty={dust_view.local_qty:.8f}")
+    print(f"  dust_delta_qty={dust_view.delta_qty:.8f}")
+    print(f"  dust_min_qty={dust_view.min_qty:.8f}")
+    print(f"  dust_min_notional_krw={dust_view.min_notional_krw:.1f}")
+    print(f"  dust_qty_below_min={dust_view.qty_below_min_summary}")
+    print(f"  dust_notional_below_min={dust_view.notional_below_min_summary}")
+    print(f"  dust_broker_local_match={1 if dust_view.broker_local_match else 0}")
+    print(f"  dust_new_orders_allowed={1 if dust_view.new_orders_allowed else 0}")
+    print(f"  dust_resume_allowed_by_policy={1 if dust_view.resume_allowed else 0}")
+    print(f"  dust_treat_as_flat={1 if dust_view.treat_as_flat else 0}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
     print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
     print(f"  halt_reason_code={health['halt_reason_code']}")
@@ -1606,10 +1638,12 @@ def _load_recovery_report(
     unprocessed_remote_open_orders = 0
     remote_known_unresolved_verification_summary = "none"
     balance_split_mismatch_summary = "none"
-    dust_residual_summary = "none"
-    dust_residual_present = False
-    dust_residual_allow_resume = False
-    dust_policy_reason = "none"
+    dust = DustClassification.from_metadata(health_row["last_reconcile_metadata"] if health_row else None)
+    dust_view = build_dust_operator_view(dust)
+    dust_residual_summary = dust.summary
+    dust_residual_present = bool(dust.present)
+    dust_residual_allow_resume = bool(dust.allow_resume)
+    dust_policy_reason = dust.policy_reason
     if health_row and health_row["last_reconcile_metadata"]:
         try:
             reconcile_meta = json.loads(str(health_row["last_reconcile_metadata"]))
@@ -1623,12 +1657,6 @@ def _load_recovery_report(
         raw_mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "").strip()
         if raw_mismatch_summary:
             balance_split_mismatch_summary = raw_mismatch_summary
-        dust_residual_present = bool(int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1)
-        dust_residual_allow_resume = bool(int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1)
-        dust_policy_reason = str(reconcile_meta.get("dust_policy_reason") or "none")
-        raw_dust_summary = str(reconcile_meta.get("dust_residual_summary") or "").strip()
-        if raw_dust_summary:
-            dust_residual_summary = raw_dust_summary
         remote_known_unresolved_verification_summary = (
             "lookup_known_exchange_id={lookup_known_exchange_id} "
             "lookup_known_client_order_id={lookup_known_client_order_id} "
@@ -1677,6 +1705,13 @@ def _load_recovery_report(
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
         recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
         resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
+    elif "DUST_RESIDUAL_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_dust_review_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm this is dust only, not an unresolved order. Do not force extra liquidation while still below exchange minimums."
+        )
+        resume_blocked_reason = "resume blocked by dust residual manual review"
     else:
         operator_next_action = "investigate_blockers"
         recommended_command = "uv run python bot.py recovery-report --json"
@@ -1744,6 +1779,30 @@ def _load_recovery_report(
         )
 
     recent_orders_snapshot, broker_snapshot_error = _safe_recent_broker_orders_snapshot(limit=100)
+    recent_dust_unsellable_event = None
+    conn = ensure_db()
+    try:
+        recent_dust_unsellable_event = conn.execute(
+            """
+            SELECT
+                oe.event_ts,
+                oe.client_order_id,
+                oe.qty,
+                oe.price,
+                oe.submission_reason_code,
+                oe.message
+            FROM order_events oe
+            JOIN orders o ON o.client_order_id = oe.client_order_id
+            WHERE oe.event_type='submit_attempt_recorded'
+              AND oe.submission_reason_code=?
+              AND o.side='SELL'
+            ORDER BY oe.event_ts DESC, oe.id DESC
+            LIMIT 1
+            """,
+            (DUST_RESIDUAL_UNSELLABLE,),
+        ).fetchone()
+    finally:
+        conn.close()
     candidate_report: list[dict[str, object]] = []
     for local_order in candidate_local_orders:
         candidates = _build_recovery_candidates(local_order=local_order, recent_orders=recent_orders_snapshot)
@@ -1803,6 +1862,39 @@ def _load_recovery_report(
         "dust_residual_allow_resume": dust_residual_allow_resume,
         "dust_policy_reason": dust_policy_reason,
         "dust_residual_summary": dust_residual_summary,
+        "dust_state": dust_view.state,
+        "dust_state_label": dust_view.state_label,
+        "dust_operator_action": dust_view.operator_action,
+        "dust_operator_message": dust_view.operator_message,
+        "dust_broker_local_match": bool(dust_view.broker_local_match),
+        "dust_new_orders_allowed": bool(dust_view.new_orders_allowed),
+        "dust_resume_allowed_by_policy": bool(dust_view.resume_allowed),
+        "dust_treat_as_flat": bool(dust_view.treat_as_flat),
+        "dust_broker_qty": dust_view.broker_qty,
+        "dust_local_qty": dust_view.local_qty,
+        "dust_delta_qty": dust_view.delta_qty,
+        "dust_min_qty": dust_view.min_qty,
+        "dust_min_notional_krw": dust_view.min_notional_krw,
+        "dust_broker_qty_below_min": bool(dust_view.broker_qty_below_min),
+        "dust_local_qty_below_min": bool(dust_view.local_qty_below_min),
+        "dust_broker_notional_below_min": bool(dust_view.broker_notional_below_min),
+        "dust_local_notional_below_min": bool(dust_view.local_notional_below_min),
+        "recent_dust_unsellable_event": (
+            {
+                "event_ts": int(recent_dust_unsellable_event["event_ts"]),
+                "client_order_id": str(recent_dust_unsellable_event["client_order_id"]),
+                "qty": float(recent_dust_unsellable_event["qty"] or 0.0),
+                "price": (
+                    float(recent_dust_unsellable_event["price"])
+                    if recent_dust_unsellable_event["price"] is not None
+                    else None
+                ),
+                "reason_code": str(recent_dust_unsellable_event["submission_reason_code"] or "-"),
+                "summary": str(recent_dust_unsellable_event["message"] or "-"),
+            }
+            if recent_dust_unsellable_event is not None
+            else None
+        ),
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
@@ -1875,7 +1967,41 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    present={1 if bool(report.get('dust_residual_present')) else 0}")
     print(f"    allow_resume={1 if bool(report.get('dust_residual_allow_resume')) else 0}")
     print(f"    policy_reason={report.get('dust_policy_reason') or 'none'}")
+    print(f"    state={report.get('dust_state') or 'none'}")
+    print(f"    state_label={report.get('dust_state_label') or 'none'}")
+    print(f"    operator_action={report.get('dust_operator_action') or 'none'}")
+    print(f"    operator_message={report.get('dust_operator_message') or 'none'}")
+    print(
+        "    "
+        f"broker_qty={float(report.get('dust_broker_qty') or 0.0):.8f} "
+        f"local_qty={float(report.get('dust_local_qty') or 0.0):.8f} "
+        f"delta_qty={float(report.get('dust_delta_qty') or 0.0):.8f}"
+    )
+    print(
+        "    "
+        f"qty_below_min=broker:{1 if bool(report.get('dust_broker_qty_below_min')) else 0} "
+        f"local:{1 if bool(report.get('dust_local_qty_below_min')) else 0} "
+        f"notional_below_min=broker:{1 if bool(report.get('dust_broker_notional_below_min')) else 0} "
+        f"local:{1 if bool(report.get('dust_local_notional_below_min')) else 0}"
+    )
+    print(f"    broker_local_match={1 if bool(report.get('dust_broker_local_match')) else 0}")
+    print(f"    new_orders_allowed={1 if bool(report.get('dust_new_orders_allowed')) else 0}")
+    print(f"    resume_allowed_by_policy={1 if bool(report.get('dust_resume_allowed_by_policy')) else 0}")
+    print(f"    treat_as_flat={1 if bool(report.get('dust_treat_as_flat')) else 0}")
     print(f"    summary={report.get('dust_residual_summary') or 'none'}")
+    recent_dust_unsellable_event = report.get("recent_dust_unsellable_event")
+    print("  [P3.0a] recent_dust_unsellable_event")
+    if recent_dust_unsellable_event:
+        print(
+            "    "
+            f"reason_code={recent_dust_unsellable_event.get('reason_code') or '-'} "
+            f"client_order_id={recent_dust_unsellable_event.get('client_order_id') or '-'} "
+            f"qty={float(recent_dust_unsellable_event.get('qty') or 0.0):.8f} "
+            f"price={recent_dust_unsellable_event.get('price') if recent_dust_unsellable_event.get('price') is not None else '-'}"
+        )
+        print(f"    summary={recent_dust_unsellable_event.get('summary') or 'none'}")
+    else:
+        print("    none")
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")

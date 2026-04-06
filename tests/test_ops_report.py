@@ -8,6 +8,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
 from bithumb_bot.db_core import ensure_db, init_portfolio
 from bithumb_bot.config import PATH_MANAGER
+from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.reporting import cmd_ops_report
 
 
@@ -65,7 +66,23 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
         runtime_state.record_reconcile_result(
             success=True,
             reason_code="RECONCILE_OK",
-            metadata={"remote_open_order_found": 0},
+            metadata={
+                "remote_open_order_found": 0,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 0,
+                "dust_policy_reason": "dust_residual_requires_operator_review",
+                "dust_residual_summary": "broker_qty=0.00009000 local_qty=0.00009000 min_qty=0.00010000",
+                "dust_broker_qty": 0.00009,
+                "dust_local_qty": 0.00009,
+                "dust_delta_qty": 0.0,
+                "dust_min_qty": 0.0001,
+                "dust_min_notional_krw": 5000.0,
+                "dust_broker_qty_is_dust": 1,
+                "dust_local_qty_is_dust": 1,
+                "dust_broker_notional_is_dust": 0,
+                "dust_local_notional_is_dust": 0,
+                "dust_qty_gap_small": 1,
+            },
             now_epoch_sec=1000.0,
         )
         conn.execute(
@@ -114,6 +131,32 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
         )
         conn.execute(
             """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            ("dust-sell-1", None, "FAILED", "SELL", 100000000.0, 0.00009, 0.0, 6, 6),
+        )
+        conn.execute(
+            """
+            INSERT INTO order_events(
+                client_order_id, event_type, event_ts, order_status, side, qty, price, submission_reason_code, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "dust-sell-1",
+                "submit_attempt_recorded",
+                6,
+                "FAILED",
+                "SELL",
+                0.00009,
+                100000000.0,
+                "DUST_RESIDUAL_UNSELLABLE",
+                "state=EXIT_PARTIAL_LEFT_DUST;operator_action=MANUAL_DUST_REVIEW_REQUIRED;position_qty=0.000090000000",
+            ),
+        )
+        conn.execute(
+            """
             INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, note)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
@@ -159,17 +202,26 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert f"db_path={db_path}" in out
     assert "paper:sma_cross:1m,1,1,100000.00,0.00,50.00,-100050.00" in out
     assert "event=submit_attempt_recorded" in out
+    assert "reason=DUST_RESIDUAL_UNSELLABLE" in out
+    assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "note=paper fill" in out
     assert "[ORDER-RULE-SNAPSHOT]" in out
     assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
     assert "balance_source=accounts_v1_rest_snapshot" in out
     assert "category=none stale=False execution_mode=- quote_currency=- base_currency=-" in out
+    assert "unresolved_open_order_count=0 recovery_required_count=0 dust_state=manual_review_required" in out
+    assert "dust_action=manual_review_before_resume" in out
+    assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=0" in out
+    assert "dust_broker_qty=0.00009000 dust_local_qty=0.00009000" in out
+    assert "accounts_flat_start_allowed=None" in out
     assert "unresolved_attribution_count=1 recent_recovery_derived_trade_count=1" in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     assert payload["recovery_attribution_quality_signals"]["unresolved_attribution_count"] == 1
     assert payload["recovery_attribution_quality_signals"]["recent_recovery_derived_trade_count"] == 1
     assert payload["recovery_attribution_quality_signals"]["ambiguous_linkage_after_recent_reconcile"] is False
+    assert payload["operator_recovery_summary"]["dust_state"] == "manual_review_required"
+    assert payload["operator_recovery_summary"]["dust_new_orders_allowed"] is False
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):
@@ -209,3 +261,90 @@ def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatc
     assert "failed_to_load=RuntimeError: rules unavailable" in out
     assert "balance_source=myasset_ws_private_stream" in out
     assert "category=stale_source stale=True execution_mode=- quote_currency=- base_currency=-" in out
+    assert "accounts_flat_start_allowed=None" in out
+
+
+def test_ops_report_surfaces_resume_safe_dust_without_hiding_unresolved_open_orders(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-dust-unresolved.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "ok",
+                    "failure_category": "none",
+                    "stale": False,
+                },
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECENT_FILL_APPLIED",
+            metadata={
+                "remote_open_order_found": 1,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 1,
+                "dust_policy_reason": "dust_residual_allowed_for_resume",
+                "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+                "dust_broker_qty": 0.00009629,
+                "dust_local_qty": 0.00009629,
+                "dust_delta_qty": 0.0,
+                "dust_min_qty": 0.0001,
+                "dust_min_notional_krw": 5000.0,
+                "dust_broker_qty_is_dust": 1,
+                "dust_local_qty_is_dust": 1,
+                "dust_broker_notional_is_dust": 1,
+                "dust_local_notional_is_dust": 1,
+                "dust_qty_gap_small": 1,
+            },
+            now_epoch_sec=1000.0,
+        )
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            ("open-dust-1", "ex-open-1", "NEW", "SELL", 100000000.0, 0.00009, 0.0, 10, 10),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    evaluate_startup_safety_gate()
+    cmd_ops_report(limit=3)
+    out = capsys.readouterr().out
+
+    assert "unresolved_open_order_count=1 recovery_required_count=0" in out
+    assert "dust_new_orders_allowed=1 dust_resume_allowed=1" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    assert payload["operator_recovery_summary"]["unresolved_open_order_count"] == 1
+    assert payload["operator_recovery_summary"]["dust_resume_allowed_by_policy"] is True

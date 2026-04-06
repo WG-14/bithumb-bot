@@ -27,6 +27,7 @@ from bithumb_bot.engine import evaluate_resume_eligibility
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.public_api_orderbook import BestQuote
+from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.recovery import reconcile_with_broker
 
 
@@ -2386,12 +2387,30 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
 
     assert set(payload.keys()) == {
         "broker_recent_orders_snapshot_error",
-            "balance_split_mismatch_summary",
-            "dust_residual_present",
-            "dust_residual_allow_resume",
-            "dust_policy_reason",
-            "dust_residual_summary",
-            "active_blocker_summary",
+        "balance_split_mismatch_summary",
+        "dust_residual_present",
+        "dust_residual_allow_resume",
+        "dust_policy_reason",
+        "dust_residual_summary",
+        "dust_state",
+        "dust_state_label",
+        "dust_operator_action",
+        "dust_operator_message",
+        "dust_broker_local_match",
+        "dust_new_orders_allowed",
+        "dust_resume_allowed_by_policy",
+        "dust_treat_as_flat",
+        "dust_broker_qty",
+        "dust_local_qty",
+        "dust_delta_qty",
+        "dust_min_qty",
+        "dust_min_notional_krw",
+        "dust_broker_qty_below_min",
+        "dust_local_qty_below_min",
+        "dust_broker_notional_below_min",
+        "dust_local_notional_below_min",
+        "recent_dust_unsellable_event",
+        "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",
         "blockers",
@@ -2417,12 +2436,12 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "trading_enabled",
         "emergency_flatten_blocked",
         "emergency_flatten_block_reason",
-            "recovery_candidates",
-            "remote_known_unresolved_verification_summary",
-            "unprocessed_remote_open_orders",
-            "unresolved_count",
-            "unresolved_summary",
-        }
+        "recovery_candidates",
+        "remote_known_unresolved_verification_summary",
+        "unprocessed_remote_open_orders",
+        "unresolved_count",
+        "unresolved_summary",
+    }
 
 
 def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
@@ -2704,6 +2723,39 @@ def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_witho
     assert all(b.overridable is False for b in blockers)
 
 
+def test_resume_eligibility_keeps_unresolved_open_order_block_even_when_dust_is_resume_safe(tmp_path):
+    _set_tmp_db(tmp_path)
+    _insert_order(
+        status="NEW",
+        client_order_id="open_dust_guard",
+        created_ts=int(time.time() * 1000),
+        side="SELL",
+        qty_req=0.00009,
+        price=100000000.0,
+    )
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "dust_residual_allowed_for_resume",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+            "remote_open_order_found": 1,
+            "submit_unknown_unresolved": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    eligible, blockers = evaluate_resume_eligibility()
+
+    assert eligible is False
+    blocker_codes = [b.code for b in blockers]
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in blocker_codes
+    assert "DUST_RESIDUAL_REVIEW_REQUIRED" not in blocker_codes
+
+
 def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.enable_trading()
@@ -2727,6 +2779,44 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
     assert report["can_resume"] is False
     assert "DUST_RESIDUAL_REVIEW_REQUIRED" in report["resume_blockers"]
     assert report["operator_next_action"] != "resume_now"
+    assert report["operator_next_action"] == "manual_dust_review_required"
+    assert report["dust_state"] == "manual_review_required"
+    assert report["dust_new_orders_allowed"] is False
+    assert report["dust_resume_allowed_by_policy"] is False
+
+
+def test_recovery_report_keeps_effective_flat_dust_visible_when_unresolved_order_also_blocks_resume(tmp_path):
+    _set_tmp_db(tmp_path)
+    _insert_order(
+        status="NEW",
+        client_order_id="open_dust_report_guard",
+        created_ts=int(time.time() * 1000),
+        side="SELL",
+        qty_req=0.00009,
+        price=100000000.0,
+    )
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "dust_residual_allowed_for_resume",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+            "remote_open_order_found": 1,
+            "submit_unknown_unresolved": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    report = _load_recovery_report()
+
+    assert report["dust_state"] == "effective_flat_dust"
+    assert report["dust_resume_allowed_by_policy"] is True
+    assert report["can_resume"] is False
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
+    assert "DUST_RESIDUAL_REVIEW_REQUIRED" not in report["resume_blockers"]
     assert report["operator_next_action"] == "investigate_blockers"
 
 
@@ -3705,6 +3795,10 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_residual_present=1" in health_out
     assert "dust_residual_allow_resume=1" in health_out
     assert "dust_policy_reason=dust_residual_allowed_for_resume" in health_out
+    assert "dust_state=effective_flat_dust" in health_out
+    assert "dust_operator_action=monitor_only" in health_out
+    assert "dust_resume_allowed_by_policy=1" in health_out
+    assert "dust_treat_as_flat=1" in health_out
 
     cmd_recovery_report(as_json=False)
     report_out = capsys.readouterr().out
@@ -3712,3 +3806,52 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "present=1" in report_out
     assert "allow_resume=1" in report_out
     assert "policy_reason=dust_residual_allowed_for_resume" in report_out
+    assert "state=effective_flat_dust" in report_out
+    assert "operator_action=monitor_only" in report_out
+    assert "resume_allowed_by_policy=1" in report_out
+    assert "treat_as_flat=1" in report_out
+
+
+def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="FAILED",
+        client_order_id="dust_exit_1",
+        created_ts=now_ms,
+        side="SELL",
+        qty_req=0.00009,
+        price=100000000.0,
+    )
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO order_events(
+                client_order_id, event_type, event_ts, order_status, side, qty, price, submission_reason_code, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "dust_exit_1",
+                "submit_attempt_recorded",
+                now_ms,
+                "FAILED",
+                "SELL",
+                0.00009,
+                100000000.0,
+                DUST_RESIDUAL_UNSELLABLE,
+                "state=EXIT_PARTIAL_LEFT_DUST;operator_action=MANUAL_DUST_REVIEW_REQUIRED;position_qty=0.000090000000",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_recovery_report(as_json=False)
+    out = capsys.readouterr().out
+
+    assert "[P3.0a] recent_dust_unsellable_event" in out
+    assert f"reason_code={DUST_RESIDUAL_UNSELLABLE}" in out
+    assert "EXIT_PARTIAL_LEFT_DUST" in out
+    assert "MANUAL_DUST_REVIEW_REQUIRED" in out

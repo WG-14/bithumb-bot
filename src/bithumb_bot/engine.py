@@ -5,7 +5,6 @@ import math
 import time
 import json
 import os
-import re
 from dataclasses import dataclass
 
 from .config import (
@@ -24,6 +23,7 @@ from .broker.bithumb import BithumbBroker
 from .broker.base import BrokerError
 from .db_core import ensure_db
 from .db_core import record_strategy_decision
+from .dust import DustClassification
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
@@ -101,54 +101,18 @@ def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
 
 
 def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
-    if not metadata_raw:
-        return {
-            "present": False,
-            "allow_resume": False,
-            "policy_reason": "none",
-            "summary": "none",
-        }
-    try:
-        reconcile_meta = json.loads(str(metadata_raw))
-    except json.JSONDecodeError:
-        return {
-            "present": False,
-            "allow_resume": False,
-            "policy_reason": "metadata_parse_error",
-            "summary": "none",
-        }
-    present = bool(int(reconcile_meta.get("dust_residual_present", 0) or 0) == 1)
-    allow_resume = bool(int(reconcile_meta.get("dust_residual_allow_resume", 0) or 0) == 1)
+    dust = DustClassification.from_metadata(metadata_raw)
     return {
-        "present": present,
-        "allow_resume": allow_resume,
-        "policy_reason": str(reconcile_meta.get("dust_policy_reason") or "-"),
-        "summary": str(reconcile_meta.get("dust_residual_summary") or "none"),
+        "present": dust.present,
+        "allow_resume": dust.allow_resume,
+        "effective_flat": dust.effective_flat,
+        "policy_reason": dust.policy_reason,
+        "summary": dust.summary,
     }
 
 
-_DUST_SUMMARY_NUMERIC_RE = re.compile(
-    r"\b(?P<key>delta|min_qty|min_notional_krw)=(-?\d+(?:\.\d+)?)"
-)
-
-
 def _dust_residual_requires_operator_review(dust_context: dict[str, object]) -> bool:
-    if not bool(dust_context["present"]) or bool(dust_context["allow_resume"]):
-        return False
-
-    summary = str(dust_context.get("summary") or "")
-    metrics: dict[str, float] = {}
-    for match in _DUST_SUMMARY_NUMERIC_RE.finditer(summary):
-        key = str(match.group("key"))
-        try:
-            metrics[key] = float(match.group(2))
-        except (TypeError, ValueError):
-            continue
-
-    delta_qty = abs(metrics.get("delta", 0.0))
-    min_qty = max(0.0, metrics.get("min_qty", 0.0))
-    min_notional = max(0.0, metrics.get("min_notional_krw", 0.0))
-    return bool(delta_qty > CLEANUP_REVALIDATION_POSITION_EPS or min_qty > 0.0 or min_notional > 0.0)
+    return bool(dust_context["present"]) and not bool(dust_context["allow_resume"])
 
 
 LIVE_UNRESOLVED_ORDER_STATUSES = (
@@ -317,7 +281,7 @@ def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None)
         and state.unresolved_open_order_count == 0
         and state.recovery_required_count == 0
         and not open_orders_present
-        and (not position_present or bool(dust_context["allow_resume"]))
+        and (not position_present or bool(dust_context["effective_flat"]))
     )
 
 
@@ -578,7 +542,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
         and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
         and int(state.unresolved_open_order_count) == 0
         and int(state.recovery_required_count) == 0
-        and bool(dust_context_for_halt["allow_resume"])
+        and bool(dust_context_for_halt["effective_flat"])
     )
     if state.halt_state_unresolved and not unresolved_dust_safe:
         reasons.append(
@@ -596,7 +560,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
         dust_exposure_only = bool(
             not open_orders_present
             and position_present
-            and bool(dust_context["allow_resume"])
+            and bool(dust_context["effective_flat"])
         )
         if open_orders_present or (position_present and not dust_exposure_only):
             detail = (

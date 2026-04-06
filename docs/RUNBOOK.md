@@ -465,3 +465,22 @@ MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
 BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
 uv run bithumb-bot run
 ```
+
+## Dust Residual Operational Reading
+
+- `dust residual` means the remaining BTC is below exchange minimum quantity and/or minimum notional, so additional closing sells may be impossible or unsafe.
+- `unresolved order` means order lifecycle consistency is still unclear. This is not the same as dust and must be treated as a higher-risk condition.
+- Before restart, check in this order:
+  1. `uv run bithumb-bot health`
+  2. `uv run bithumb-bot recovery-report`
+  3. `uv run bithumb-bot ops-report --limit 20`
+- If `dust_state=manual_review_required`, treat the bot as restart-blocked for new orders even when `/v1/accounts` diagnostics say `accounts_flat_start_allowed=True`.
+- If `dust_state=effective_flat_dust`, the remainder is dust-only and can be treated as effective flat only when `recovery-report` also shows dust resume allowed and unresolved order counts are zero.
+- If `unresolved_count > 0` or `recovery_required_count > 0`, do not downgrade the situation to dust-only until recovery evidence is clear.
+
+## Manual App Sell Caution
+
+- If the bot is stopped and you manually sell in the exchange app, run `health` and `recovery-report` again before restarting.
+- Manual app sells can leave dust smaller than exchange minimums. In that case, another sell attempt may fail or create misleading operator signals.
+- Do not assume "almost zero balance" means restart is safe. Confirm `dust_state`, `dust_action`, `dust_resume_allowed_by_policy`, and unresolved order counts first.
+- Prefer `reconcile` plus report review over `resume --force` whenever broker balance changed outside the bot.

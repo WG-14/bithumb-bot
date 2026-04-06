@@ -20,6 +20,7 @@ from .broker.balance_source import fetch_balance_snapshot
 from .broker.order_rules import get_effective_order_rules
 from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
+from .dust import classify_dust_residual, dust_qty_gap_tolerance
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
@@ -366,7 +367,6 @@ def _classify_lookup_error(exc: Exception) -> str:
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
 _LOG = logging.getLogger(__name__)
-DUST_POSITION_EPS = 1e-12
 RECENT_FLATTEN_WINDOW_SEC = 600.0
 
 
@@ -471,7 +471,6 @@ def _evaluate_dust_residual_policy(
 ) -> dict[str, int | float | str]:
     broker_qty = max(0.0, float(broker_asset_available) + float(broker_asset_locked))
     local_qty = max(0.0, float(local_asset_available) + float(local_asset_locked))
-    delta_qty = broker_qty - local_qty
     min_qty = 0.0
     min_notional = 0.0
     try:
@@ -484,43 +483,20 @@ def _evaluate_dust_residual_policy(
 
     recent_flatten, recent_flatten_reason = _is_partial_flatten_recent(now_sec=time.time())
     est_price = _latest_price_for_notional_estimate(conn)
-    broker_notional = broker_qty * est_price if est_price is not None else None
-    local_notional = local_qty * est_price if est_price is not None else None
-
-    broker_qty_is_dust = broker_qty > DUST_POSITION_EPS and (min_qty <= 0.0 or broker_qty < min_qty)
-    local_qty_is_dust = local_qty <= DUST_POSITION_EPS or (min_qty > 0.0 and local_qty < min_qty)
-    notional_is_dust = bool(
-        broker_notional is not None
-        and min_notional > 0.0
-        and broker_notional < min_notional
+    dust_eval = classify_dust_residual(
+        broker_qty=broker_qty,
+        local_qty=local_qty,
+        min_qty=min_qty,
+        min_notional_krw=min_notional,
+        latest_price=est_price,
+        partial_flatten_recent=recent_flatten,
+        partial_flatten_reason=recent_flatten_reason,
+        qty_gap_tolerance=dust_qty_gap_tolerance(
+            min_qty=min_qty,
+            default_abs_tolerance=ASSET_SPLIT_ABS_TOL * 10.0,
+        ),
     )
-    qty_gap_small = abs(delta_qty) <= max(ASSET_SPLIT_ABS_TOL * 10.0, min_qty * 0.5 if min_qty > 0 else ASSET_SPLIT_ABS_TOL * 10.0)
-
-    allow_dust_for_resume = bool(
-        broker_qty_is_dust
-        and local_qty_is_dust
-        and (notional_is_dust or recent_flatten or min_notional <= 0.0)
-        and qty_gap_small
-    )
-    if allow_dust_for_resume:
-        reason = "dust_residual_allowed_for_resume"
-    else:
-        reason = "dust_residual_requires_operator_review" if broker_qty_is_dust else "no_dust_residual"
-
-    summary = (
-        f"broker_qty={broker_qty:.8f} local_qty={local_qty:.8f} "
-        f"delta={delta_qty:.8f} min_qty={min_qty:.8f} min_notional_krw={min_notional:.1f} "
-        f"partial_flatten_recent={1 if recent_flatten else 0} "
-        f"allow_resume={1 if allow_dust_for_resume else 0} policy_reason={reason}"
-    )
-    return {
-        "dust_residual_present": 1 if broker_qty_is_dust else 0,
-        "dust_residual_allow_resume": 1 if allow_dust_for_resume else 0,
-        "dust_policy_reason": reason,
-        "dust_partial_flatten_recent": 1 if recent_flatten else 0,
-        "dust_partial_flatten_reason": recent_flatten_reason,
-        "dust_residual_summary": summary[:280],
-    }
+    return dust_eval.to_metadata()
 
 
 def assert_no_open_orders() -> None:

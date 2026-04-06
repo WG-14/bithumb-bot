@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
+from ..dust import classify_dust_residual, dust_qty_gap_tolerance
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -326,17 +327,23 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
                 except (TypeError, ValueError):
                     latest_price = None
 
-            is_qty_dust = bool(min_qty > 0.0 and abs(asset_qty) < min_qty)
-            is_notional_dust = bool(
-                latest_price is not None
-                and min_notional > 0.0
-                and abs(asset_qty) * latest_price < min_notional
+            dust = classify_dust_residual(
+                broker_qty=0.0,
+                local_qty=abs(asset_qty),
+                min_qty=min_qty,
+                min_notional_krw=min_notional,
+                latest_price=latest_price,
+                partial_flatten_recent=False,
+                partial_flatten_reason="flat_start_base_row_missing",
+                qty_gap_tolerance=dust_qty_gap_tolerance(
+                    min_qty=min_qty,
+                    default_abs_tolerance=1e-12,
+                ),
             )
-            if is_qty_dust:
-                return True, (
-                    "local_dust_position_allowed"
-                    f"(asset_qty={asset_qty:.8f},min_qty={min_qty:.8f},min_notional_krw={min_notional:.1f})"
-                )
+            if dust.effective_flat:
+                return True, f"flat_start_effective_flat({dust.summary})"
+            if dust.present:
+                return False, f"flat_start_requires_operator_review({dust.summary})"
             return False, f"local_position_present={asset_qty:.12f}"
     finally:
         conn.close()

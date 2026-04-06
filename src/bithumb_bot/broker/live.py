@@ -12,7 +12,15 @@ from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
 from ..public_api_orderbook import BestQuote
-from ..reason_codes import AMBIGUOUS_SUBMIT, RISKY_ORDER_BLOCK, SUBMIT_FAILED, SUBMIT_TIMEOUT
+from ..reason_codes import (
+    AMBIGUOUS_SUBMIT,
+    DUST_RESIDUAL_UNSELLABLE,
+    EXIT_PARTIAL_LEFT_DUST,
+    MANUAL_DUST_REVIEW_REQUIRED,
+    RISKY_ORDER_BLOCK,
+    SUBMIT_FAILED,
+    SUBMIT_TIMEOUT,
+)
 from .order_rules import get_effective_order_rules, side_min_total_krw
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
@@ -322,7 +330,7 @@ def validate_order(*, signal: str, side: str, qty: float, market_price: float) -
         raise ValueError(f"invalid order qty: {qty}")
 
 
-def normalize_order_qty(*, qty: float, market_price: float) -> float:
+def _normalize_order_qty_snapshot(*, qty: float) -> dict[str, float | int]:
     normalized = float(qty)
     if not math.isfinite(normalized) or normalized <= 0:
         raise ValueError(f"invalid order qty: {qty}")
@@ -338,14 +346,247 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
         scale = 10 ** max_decimals
         normalized = math.floor((normalized * scale) + POSITION_EPSILON) / scale
 
+    return {
+        "input_qty": float(qty),
+        "normalized_qty": float(normalized),
+        "min_qty": float(rules.min_qty),
+        "qty_step": float(rules.qty_step),
+        "max_qty_decimals": int(rules.max_qty_decimals),
+    }
+
+
+def normalize_order_qty(*, qty: float, market_price: float) -> float:
+    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    normalized = float(snapshot["normalized_qty"])
+
     if normalized <= 0:
         raise ValueError(f"normalized order qty is non-positive: {normalized}")
 
-    min_qty = float(rules.min_qty)
+    min_qty = float(snapshot["min_qty"])
     if min_qty > 0 and normalized < min_qty:
         raise ValueError(f"order qty below minimum: {normalized:.12f} < {min_qty:.12f}")
 
     return normalized
+
+
+def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> dict[str, float | int | str] | None:
+    if not math.isfinite(float(qty)) or float(qty) <= 0:
+        return None
+    if not math.isfinite(float(market_price)) or float(market_price) <= 0:
+        return None
+
+    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    normalized_qty = float(snapshot["normalized_qty"])
+    min_qty = float(snapshot["min_qty"])
+    input_qty = float(snapshot["input_qty"])
+    rules = get_effective_order_rules(settings.PAIR).rules
+    min_notional = float(side_min_total_krw(rules=rules, side="SELL"))
+    notional = input_qty * float(market_price)
+
+    normalized_non_positive = normalized_qty <= 0
+    qty_below_min = bool(min_qty > 0 and input_qty < min_qty)
+    normalized_below_min = bool(min_qty > 0 and normalized_qty > 0 and normalized_qty < min_qty)
+    notional_below_min = bool(min_notional > 0 and notional < min_notional)
+    if not any((normalized_non_positive, qty_below_min, normalized_below_min, notional_below_min)):
+        return None
+
+    dust_signature = (
+        f"qty={input_qty:.12g}|normalized={normalized_qty:.12g}|min_qty={min_qty:.12g}|"
+        f"notional={notional:.12g}|min_notional={min_notional:.12g}|"
+        f"qty_below_min={1 if qty_below_min else 0}|"
+        f"normalized_non_positive={1 if normalized_non_positive else 0}|"
+        f"normalized_below_min={1 if normalized_below_min else 0}|"
+        f"notional_below_min={1 if notional_below_min else 0}"
+    )
+    summary = (
+        f"state={EXIT_PARTIAL_LEFT_DUST};"
+        f"operator_action={MANUAL_DUST_REVIEW_REQUIRED};"
+        f"position_qty={input_qty:.12f};"
+        f"normalized_qty={normalized_qty:.12f};"
+        f"min_qty={min_qty:.12f};"
+        f"sell_notional_krw={notional:.2f};"
+        f"min_notional_krw={min_notional:.2f};"
+        f"qty_below_min={1 if qty_below_min else 0};"
+        f"normalized_non_positive={1 if normalized_non_positive else 0};"
+        f"normalized_below_min={1 if normalized_below_min else 0};"
+        f"notional_below_min={1 if notional_below_min else 0};"
+        f"dust_signature={dust_signature}"
+    )
+    return {
+        "state": EXIT_PARTIAL_LEFT_DUST,
+        "operator_action": MANUAL_DUST_REVIEW_REQUIRED,
+        "position_qty": input_qty,
+        "normalized_qty": normalized_qty,
+        "min_qty": min_qty,
+        "sell_notional_krw": notional,
+        "min_notional_krw": min_notional,
+        "qty_below_min": 1 if qty_below_min else 0,
+        "normalized_non_positive": 1 if normalized_non_positive else 0,
+        "normalized_below_min": 1 if normalized_below_min else 0,
+        "notional_below_min": 1 if notional_below_min else 0,
+        "qty_step": float(snapshot["qty_step"]),
+        "max_qty_decimals": int(snapshot["max_qty_decimals"]),
+        "dust_signature": dust_signature,
+        "summary": summary,
+    }
+
+
+def _record_sell_dust_unsellable(
+    *,
+    conn,
+    ts: int,
+    market_price: float,
+    position_qty: float,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+) -> bool:
+    dust_details = _build_sell_dust_unsellable_details(qty=position_qty, market_price=market_price)
+    if dust_details is None:
+        return False
+
+    dust_message = str(dust_details["summary"])
+    existing = conn.execute(
+        """
+        SELECT oe.client_order_id
+        FROM order_events oe
+        JOIN orders o ON o.client_order_id = oe.client_order_id
+        WHERE oe.event_type='submit_blocked'
+          AND o.side='SELL'
+          AND oe.message=?
+        ORDER BY oe.event_ts DESC, oe.id DESC
+        LIMIT 1
+        """,
+        (dust_message,),
+    ).fetchone()
+    if existing is not None:
+        RUN_LOG.info(
+            format_log_kv(
+                "[ORDER_SKIP] dust residual already recorded",
+                side="SELL",
+                reason_code=DUST_RESIDUAL_UNSELLABLE,
+                state=dust_details["state"],
+                operator_action=dust_details["operator_action"],
+                client_order_id=str(existing["client_order_id"]),
+                position_qty=dust_details["position_qty"],
+                normalized_qty=dust_details["normalized_qty"],
+                min_qty=dust_details["min_qty"],
+                sell_notional_krw=dust_details["sell_notional_krw"],
+                min_notional_krw=dust_details["min_notional_krw"],
+            )
+        )
+        return True
+
+    submit_attempt_id = _submit_attempt_id()
+    client_order_id = _client_order_id(ts=ts, side="SELL", submit_attempt_id=submit_attempt_id)
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        side="SELL",
+        qty_req=float(position_qty),
+        price=float(market_price),
+        strategy_name=(strategy_name or settings.STRATEGY_NAME),
+        exit_decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        ts_ms=ts,
+        status="FAILED",
+    )
+
+    payload = {
+        "client_order_id": client_order_id,
+        "submit_attempt_id": submit_attempt_id,
+        "symbol": settings.PAIR,
+        "side": "SELL",
+        "qty": float(position_qty),
+        "price": float(market_price),
+        "submit_ts": int(ts),
+        "dust_signature": str(dust_details["dust_signature"]),
+    }
+    submit_evidence = _encode_submit_evidence(
+        payload={
+            "submit_mode": settings.MODE,
+            "submit_path": "blocked_before_submit",
+            "symbol": settings.PAIR,
+            "side": "SELL",
+            "market_price": float(market_price),
+            "intended_qty": float(position_qty),
+            "reason_code": DUST_RESIDUAL_UNSELLABLE,
+            "dust_state": dust_details["state"],
+            "operator_action": dust_details["operator_action"],
+            "position_qty": float(dust_details["position_qty"]),
+            "normalized_qty": float(dust_details["normalized_qty"]),
+            "min_qty": float(dust_details["min_qty"]),
+            "sell_notional_krw": float(dust_details["sell_notional_krw"]),
+            "min_notional_krw": float(dust_details["min_notional_krw"]),
+            "qty_below_min": int(dust_details["qty_below_min"]),
+            "normalized_non_positive": int(dust_details["normalized_non_positive"]),
+            "normalized_below_min": int(dust_details["normalized_below_min"]),
+            "notional_below_min": int(dust_details["notional_below_min"]),
+            "qty_step": float(dust_details["qty_step"]),
+            "max_qty_decimals": int(dust_details["max_qty_decimals"]),
+        }
+    )
+    record_submit_attempt(
+        conn=conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        symbol=settings.PAIR,
+        side="SELL",
+        qty=float(position_qty),
+        price=float(market_price),
+        submit_ts=int(ts),
+        payload_fingerprint=payload_fingerprint(payload),
+        broker_response_summary="blocked_before_submit:dust_residual_unsellable",
+        submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+        exception_class=None,
+        timeout_flag=False,
+        submit_evidence=submit_evidence,
+        exchange_order_id_obtained=False,
+        order_status="FAILED",
+        message=dust_message,
+    )
+    record_submit_blocked(client_order_id, status="FAILED", reason=dust_message, conn=conn)
+    RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_SKIP] dust residual unsellable",
+            side="SELL",
+            signal="SELL",
+            reason_code=DUST_RESIDUAL_UNSELLABLE,
+            state=dust_details["state"],
+            operator_action=dust_details["operator_action"],
+            client_order_id=client_order_id,
+            position_qty=dust_details["position_qty"],
+            normalized_qty=dust_details["normalized_qty"],
+            min_qty=dust_details["min_qty"],
+            sell_notional_krw=dust_details["sell_notional_krw"],
+            min_notional_krw=dust_details["min_notional_krw"],
+        )
+    )
+    notify(
+        safety_event(
+            "order_submit_blocked",
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            reason_code=DUST_RESIDUAL_UNSELLABLE,
+            side="SELL",
+            status="FAILED",
+            dust_state="manual_review_required",
+            dust_action="manual_review_before_resume",
+            dust_new_orders_allowed="0",
+            dust_resume_allowed="0",
+            dust_treat_as_flat="0",
+            dust_event_state=str(dust_details["state"]),
+            operator_action=str(dust_details["operator_action"]),
+            dust_qty_below_min=str(dust_details["qty_below_min"]),
+            dust_notional_below_min=str(dust_details["notional_below_min"]),
+            reason=dust_message,
+        )
+    )
+    return True
 
 
 def _validate_live_price_protection(
@@ -1157,6 +1398,18 @@ def live_execute_signal(
                 reference_source=(str(reference_quote["reference_source"]) if reference_quote is not None else None),
             )
         except ValueError as e:
+            if side == "SELL" and _record_sell_dust_unsellable(
+                conn=conn,
+                ts=int(ts),
+                market_price=float(market_price),
+                position_qty=float(order_qty),
+                strategy_name=(strategy_name or settings.STRATEGY_NAME),
+                decision_id=decision_id,
+                decision_reason=decision_reason,
+                exit_rule_name=exit_rule_name,
+            ):
+                conn.commit()
+                return None
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SKIP] pretrade blocked",

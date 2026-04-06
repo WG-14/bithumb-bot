@@ -222,3 +222,14 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
 ```
 
 JSON 출력이 필요하면 `--json`을 사용합니다.
+## 9) Dust Residual Reading Guide
+
+- `ops-report` now separates dust interpretation from `/v1/accounts` preflight. `accounts_flat_start_allowed` is only an accounts-row diagnostic and must not be read as automatic resume permission.
+- Check `dust_state`, `dust_action`, `dust_new_orders_allowed`, `dust_resume_allowed`, and `dust_treat_as_flat` together.
+- `dust_state=manual_review_required` means "not an unresolved order yet still not safely resumable". New orders stay blocked until operator review.
+- `dust_state=effective_flat_dust` means the remainder is dust-only and can be treated as operationally flat when `recovery-report` also shows no unresolved or recovery-required orders.
+- To avoid confusion, classify states in this order:
+  1. unresolved/recovery-required order problem
+  2. dust residual requiring manual review
+  3. dust-only effective flat
+  4. normal flat or normal open position

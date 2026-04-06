@@ -11,6 +11,7 @@ from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order, validate_pretrade
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
+from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE, EXIT_PARTIAL_LEFT_DUST, MANUAL_DUST_REVIEW_REQUIRED
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
@@ -1987,6 +1988,167 @@ def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tm
     # 20,000 / 100,000,000 = 0.0002. If qty-step flooring leaked into market BUY,
     # this would collapse to 0.0001 and halve the KRW notional (regression).
     assert broker._last_qty == pytest.approx(0.0002)
+
+
+def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_dedups(tmp_path):
+    notifications: list[str] = []
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_dust_unsellable.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(tmp_path / "sell_dust_unsellable.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00009,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+
+    trade_first = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    trade_second = live_execute_signal(
+        broker,
+        "SELL",
+        1001,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade_first is None
+    assert trade_second is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "sell_dust_unsellable.sqlite"))
+    order_row = conn.execute(
+        """
+        SELECT client_order_id, status, side, qty_req, decision_reason, exit_rule_name
+        FROM orders
+        WHERE side='SELL'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    event_rows = conn.execute(
+        """
+        SELECT event_type, order_status, qty, price, submission_reason_code, message
+        FROM order_events
+        WHERE submission_reason_code=?
+        ORDER BY id
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchall()
+    conn.close()
+
+    assert order_row is not None
+    assert order_row["status"] == "FAILED"
+    assert order_row["side"] == "SELL"
+    assert float(order_row["qty_req"]) == pytest.approx(0.00009)
+    assert order_row["decision_reason"] == "partial_take_profit"
+    assert order_row["exit_rule_name"] == "exit_signal"
+    assert len(event_rows) == 1
+    assert event_rows[0]["event_type"] == "submit_attempt_recorded"
+    assert event_rows[0]["order_status"] == "FAILED"
+    assert float(event_rows[0]["qty"]) == pytest.approx(0.00009)
+    assert float(event_rows[0]["price"]) == pytest.approx(100_000_000.0)
+    assert event_rows[0]["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    assert EXIT_PARTIAL_LEFT_DUST in str(event_rows[0]["message"])
+    assert MANUAL_DUST_REVIEW_REQUIRED in str(event_rows[0]["message"])
+    assert len(notifications) == 1
+    assert "event=order_submit_blocked" in notifications[0]
+    assert "dust_state=manual_review_required" in notifications[0]
+    assert "dust_action=manual_review_before_resume" in notifications[0]
+    assert "dust_new_orders_allowed=0" in notifications[0]
+    assert "dust_resume_allowed=0" in notifications[0]
+    monkeypatch.undo()
+
+
+def test_live_execute_signal_sell_with_dust_and_unresolved_open_order_still_records_dust_evidence(monkeypatch, tmp_path):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_dust_with_open.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    now_ms = int(time.time() * 1000)
+    conn = ensure_db(str(tmp_path / "sell_dust_with_open.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00009,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('existing_open_sell','ex_open_sell','NEW','SELL',100000000.0,0.00009,0,?,?,NULL)
+        """,
+        (now_ms, now_ms),
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        3000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "sell_dust_with_open.sqlite"))
+    dust_blocked = conn.execute(
+        """
+        SELECT event_type, message
+        FROM order_events
+        WHERE client_order_id LIKE 'live_3000_sell_%' AND event_type='submit_blocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    dust_rows = conn.execute(
+        """
+        SELECT id
+        FROM order_events
+        WHERE submission_reason_code=?
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchall()
+    conn.close()
+
+    assert dust_blocked is not None
+    assert EXIT_PARTIAL_LEFT_DUST in str(dust_blocked["message"])
+    assert MANUAL_DUST_REVIEW_REQUIRED in str(dust_blocked["message"])
+    assert len(dust_rows) == 1
+    assert any("event=order_submit_blocked" in msg for msg in notifications)
 
 
 def test_validate_pretrade_applies_side_specific_min_total():
