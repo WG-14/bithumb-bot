@@ -427,6 +427,133 @@ def _sell_qty_is_unsellable(
     return qty_below_min, notional_below_min, notional
 
 
+def _normalize_sell_dust_details(
+    *,
+    details: dict[str, float | int | str],
+    market_price: float,
+) -> dict[str, float | int | str]:
+    normalized = dict(details)
+    position_qty = float(normalized["position_qty"])
+    normalized_qty = float(normalized["normalized_qty"])
+    min_qty = float(normalized["min_qty"])
+    min_notional = float(normalized["min_notional_krw"])
+    qty_step = float(normalized["qty_step"])
+    max_qty_decimals = int(normalized["max_qty_decimals"])
+    sell_notional = float(normalized.get("sell_notional_krw", position_qty * float(market_price)))
+    requested_qty = float(normalized.get("requested_qty", position_qty))
+    remainder_qty = float(normalized.get("remainder_qty", max(0.0, requested_qty - normalized_qty)))
+    remainder_notional = float(
+        normalized.get("remainder_notional_krw", max(0.0, remainder_qty * float(market_price)))
+    )
+    broker_full_qty = float(
+        normalized.get(
+            "broker_full_qty",
+            _floor_qty_to_places(qty=requested_qty, places=BROKER_MARKET_SELL_QTY_DECIMALS),
+        )
+    )
+    broker_full_remainder_qty = float(
+        normalized.get("broker_full_remainder_qty", max(0.0, requested_qty - broker_full_qty))
+    )
+    broker_full_remainder_notional = float(
+        normalized.get(
+            "broker_full_remainder_notional_krw",
+            max(0.0, broker_full_remainder_qty * float(market_price)),
+        )
+    )
+    dust_scope = str(normalized.get("dust_scope") or "position_qty")
+    qty_below_min = int(normalized.get("qty_below_min", 0))
+    normalized_non_positive = int(normalized.get("normalized_non_positive", 0))
+    normalized_below_min = int(normalized.get("normalized_below_min", 0))
+    notional_below_min = int(normalized.get("notional_below_min", 0))
+    new_orders_allowed = int(normalized.get("new_orders_allowed", 0))
+    resume_allowed = int(normalized.get("resume_allowed", 0))
+    treat_as_flat = int(normalized.get("treat_as_flat", 0))
+    broker_volume_decimals = int(
+        normalized.get("broker_volume_decimals", BROKER_MARKET_SELL_QTY_DECIMALS)
+    )
+    dust_signature = str(
+        normalized.get(
+            "dust_signature",
+            (
+                f"dust_scope={dust_scope}|position_qty={position_qty:.12g}|"
+                f"requested_qty={requested_qty:.12g}|normalized={normalized_qty:.12g}|"
+                f"remainder_qty={remainder_qty:.12g}|remainder_notional={remainder_notional:.12g}|"
+                f"broker_full_qty={broker_full_qty:.12g}|broker_full_remainder={broker_full_remainder_qty:.12g}|"
+                f"min_qty={min_qty:.12g}|min_notional={min_notional:.12g}|"
+                f"qty_below_min={qty_below_min}|normalized_non_positive={normalized_non_positive}|"
+                f"normalized_below_min={normalized_below_min}|notional_below_min={notional_below_min}"
+            ),
+        )
+    )
+    summary = str(
+        normalized.get(
+            "summary",
+            (
+                f"state={normalized['state']};"
+                f"operator_action={normalized['operator_action']};"
+                f"dust_scope={dust_scope};"
+                f"position_qty={position_qty:.12f};"
+                f"requested_qty={requested_qty:.12f};"
+                f"normalized_qty={normalized_qty:.12f};"
+                f"min_qty={min_qty:.12f};"
+                f"sell_notional_krw={sell_notional:.2f};"
+                f"min_notional_krw={min_notional:.2f};"
+                f"qty_below_min={qty_below_min};"
+                f"normalized_non_positive={normalized_non_positive};"
+                f"normalized_below_min={normalized_below_min};"
+                f"notional_below_min={notional_below_min};"
+                f"new_orders_allowed={new_orders_allowed};"
+                f"resume_allowed={resume_allowed};"
+                f"treat_as_flat={treat_as_flat};"
+                f"remainder_qty={remainder_qty:.12f};"
+                f"remainder_notional_krw={remainder_notional:.2f};"
+                f"broker_full_qty={broker_full_qty:.12f};"
+                f"broker_full_remainder_qty={broker_full_remainder_qty:.12f};"
+                f"broker_full_remainder_notional_krw={broker_full_remainder_notional:.2f};"
+                f"qty_step={qty_step:.12f};"
+                f"max_qty_decimals={max_qty_decimals};"
+                f"broker_volume_decimals={broker_volume_decimals};"
+                f"dust_signature={dust_signature}"
+            ),
+        )
+    )
+    normalized.update(
+        {
+            "state": str(normalized["state"]),
+            "operator_action": str(normalized["operator_action"]),
+            "position_qty": position_qty,
+            "normalized_qty": normalized_qty,
+            "min_qty": min_qty,
+            "sell_notional_krw": sell_notional,
+            "min_notional_krw": min_notional,
+            "qty_below_min": qty_below_min,
+            "normalized_non_positive": normalized_non_positive,
+            "normalized_below_min": normalized_below_min,
+            "notional_below_min": notional_below_min,
+            "new_orders_allowed": new_orders_allowed,
+            "resume_allowed": resume_allowed,
+            "treat_as_flat": treat_as_flat,
+            "dust_scope": dust_scope,
+            "requested_qty": requested_qty,
+            "remainder_qty": remainder_qty,
+            "remainder_notional_krw": remainder_notional,
+            "broker_full_qty": broker_full_qty,
+            "broker_full_remainder_qty": broker_full_remainder_qty,
+            "broker_full_remainder_notional_krw": broker_full_remainder_notional,
+            "qty_step": qty_step,
+            "max_qty_decimals": max_qty_decimals,
+            "broker_volume_decimals": broker_volume_decimals,
+            "dust_signature": dust_signature,
+            "summary": summary,
+            "notify_dust_state": str(normalized.get("notify_dust_state") or "dangerous_dust"),
+            "notify_dust_action": str(
+                normalized.get("notify_dust_action") or "manual_review_before_resume"
+            ),
+        }
+    )
+    return normalized
+
+
 def adjust_sell_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
     snapshot = _normalize_order_qty_snapshot(qty=qty)
     input_qty = float(snapshot["input_qty"])
@@ -506,7 +633,8 @@ def adjust_sell_order_qty_for_dust_safety(*, qty: float, market_price: float) ->
         f"broker_remainder_qty_below_min={1 if broker_remainder_qty_below_min else 0}|"
         f"broker_remainder_notional_below_min={1 if broker_remainder_notional_below_min else 0}"
     )
-    dust_details: dict[str, float | int | str] = {
+    dust_details = _normalize_sell_dust_details(
+        details={
         "state": EXIT_PARTIAL_LEFT_DUST,
         "operator_action": MANUAL_DUST_REVIEW_REQUIRED,
         "dust_scope": "remainder_after_sell",
@@ -551,7 +679,9 @@ def adjust_sell_order_qty_for_dust_safety(*, qty: float, market_price: float) ->
             f"broker_volume_decimals={BROKER_MARKET_SELL_QTY_DECIMALS};"
             f"dust_signature={dust_signature}"
         ),
-    }
+        },
+        market_price=market_price,
+    )
     raise SellDustGuardError(
         "sell dust guard blocked remainder that would become unsellable: "
         f"position_qty={input_qty:.12f} normalized_qty={normalized_qty:.12f} "
@@ -604,23 +734,26 @@ def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> d
         f"notional_below_min={1 if notional_below_min else 0};"
         f"dust_signature={dust_signature}"
     )
-    return {
-        "state": EXIT_PARTIAL_LEFT_DUST,
-        "operator_action": MANUAL_DUST_REVIEW_REQUIRED,
-        "position_qty": input_qty,
-        "normalized_qty": normalized_qty,
-        "min_qty": min_qty,
-        "sell_notional_krw": notional,
-        "min_notional_krw": min_notional,
-        "qty_below_min": 1 if qty_below_min else 0,
-        "normalized_non_positive": 1 if normalized_non_positive else 0,
-        "normalized_below_min": 1 if normalized_below_min else 0,
-        "notional_below_min": 1 if notional_below_min else 0,
-        "qty_step": float(snapshot["qty_step"]),
-        "max_qty_decimals": int(snapshot["max_qty_decimals"]),
-        "dust_signature": dust_signature,
-        "summary": summary,
-    }
+    return _normalize_sell_dust_details(
+        details={
+            "state": EXIT_PARTIAL_LEFT_DUST,
+            "operator_action": MANUAL_DUST_REVIEW_REQUIRED,
+            "position_qty": input_qty,
+            "normalized_qty": normalized_qty,
+            "min_qty": min_qty,
+            "sell_notional_krw": notional,
+            "min_notional_krw": min_notional,
+            "qty_below_min": 1 if qty_below_min else 0,
+            "normalized_non_positive": 1 if normalized_non_positive else 0,
+            "normalized_below_min": 1 if normalized_below_min else 0,
+            "notional_below_min": 1 if notional_below_min else 0,
+            "qty_step": float(snapshot["qty_step"]),
+            "max_qty_decimals": int(snapshot["max_qty_decimals"]),
+            "dust_signature": dust_signature,
+            "summary": summary,
+        },
+        market_price=market_price,
+    )
 
 
 def _record_sell_dust_unsellable(
@@ -638,6 +771,7 @@ def _record_sell_dust_unsellable(
     dust_details = dust_details or _build_sell_dust_unsellable_details(qty=position_qty, market_price=market_price)
     if dust_details is None:
         return False
+    dust_details = _normalize_sell_dust_details(details=dust_details, market_price=market_price)
 
     dust_message = str(dust_details["summary"])
     existing = conn.execute(
@@ -779,8 +913,8 @@ def _record_sell_dust_unsellable(
             reason_code=DUST_RESIDUAL_UNSELLABLE,
             side="SELL",
             status="FAILED",
-            dust_state=str(dust_details["state"]),
-            dust_action=str(dust_details["operator_action"]),
+            dust_state=str(dust_details["notify_dust_state"]),
+            dust_action=str(dust_details["notify_dust_action"]),
             dust_new_orders_allowed="1" if bool(dust_details["new_orders_allowed"]) else "0",
             dust_resume_allowed="1" if bool(dust_details["resume_allowed"]) else "0",
             dust_treat_as_flat="1" if bool(dust_details["treat_as_flat"]) else "0",

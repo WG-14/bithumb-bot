@@ -667,6 +667,17 @@ def set_startup_gate_reason(reason: str | None) -> None:
         _STATE.startup_gate_reason = _clip(reason)
         if reason:
             _STATE.last_reconcile_reason_code = "STARTUP_GATE_BLOCKED"
+            _STATE.last_reconcile_metadata = _json_with_size_limit(
+                {
+                    "startup_gate_reason": _STATE.startup_gate_reason,
+                    "startup_gate_blocked": True,
+                },
+                max_len=1000,
+                preserve_keys=("startup_gate_reason", "startup_gate_blocked"),
+            )
+        elif _STATE.last_reconcile_reason_code == "STARTUP_GATE_BLOCKED":
+            _STATE.last_reconcile_reason_code = None
+            _STATE.last_reconcile_metadata = None
         _persist_state(_STATE)
 
 
