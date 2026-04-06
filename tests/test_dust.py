@@ -93,10 +93,10 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             False,
             True,
             False,
-            "dangerous_dust_operator_review_required",
-            "dangerous_dust",
+            "matched_harmless_dust_operator_review_required",
+            "matched_harmless_dust",
             True,
-            False,
+            True,
         ),
         (
             0.0,
@@ -170,11 +170,12 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
         {
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
-            "dust_policy_reason": "dangerous_dust_operator_review_required",
+            "dust_policy_reason": "matched_harmless_dust_operator_review_required",
             "dust_residual_summary": (
                 "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required"
+                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+                "allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required"
             ),
             "dust_latest_price": 100000000.0,
         }
@@ -192,6 +193,28 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
     assert view.local_notional_below_min is False
 
 
+def test_matched_dust_operator_message_does_not_imply_mismatch_or_recovery_concern() -> None:
+    view = build_dust_operator_view(
+        classify_dust_residual(
+            broker_qty=0.00009193,
+            local_qty=0.00009193,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=100_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=False,
+        )
+    )
+
+    assert view.state == "matched_harmless_dust"
+    assert "matches across broker/local state" in view.operator_message
+    assert "below minimum tradable quantity" in view.operator_message
+    assert "mismatch" not in view.operator_message.lower()
+    assert "recovery concern" not in view.operator_message.lower()
+
+
 @pytest.mark.parametrize(
     (
         "summary",
@@ -206,12 +229,13 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
         (
             "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-            "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required",
+            "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+            "allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
             100000000.0,
             0.00009193,
             False,
-            "dangerous_dust",
-            False,
+            "matched_harmless_dust",
+            True,
             False,
         ),
         (
@@ -244,7 +268,7 @@ def test_dust_operator_view_keeps_summary_and_detail_consistent(
             "dust_policy_reason": (
                 "matched_harmless_dust_resume_allowed"
                 if expected_resume_allowed
-                else "dangerous_dust_operator_review_required"
+                else "matched_harmless_dust_operator_review_required"
             ),
             "dust_residual_summary": summary,
             "dust_latest_price": latest_price,

@@ -383,11 +383,6 @@ def classify_dust_residual(
         and broker_qty_is_dust
         and local_qty_is_dust
         and qty_gap_small
-        and (
-            (broker_notional_is_dust and local_notional_is_dust)
-            or partial_flatten_recent
-            or normalized_min_notional <= 0.0
-        )
     )
     classification = "none"
     if present:
@@ -409,13 +404,14 @@ def classify_dust_residual(
         f"broker_qty={normalized_broker_qty:.8f} local_qty={normalized_local_qty:.8f} "
         f"delta={delta_qty:.8f} min_qty={normalized_min_qty:.8f} "
         f"min_notional_krw={normalized_min_notional:.1f} "
-        f"partial_flatten_recent={1 if partial_flatten_recent else 0} "
         f"classification={classification} "
         f"matched_harmless={1 if matched_harmless else 0} "
         f"broker_local_match={1 if qty_gap_small else 0} "
         f"allow_resume={1 if allow_resume else 0} "
         f"effective_flat={1 if effective_flat else 0} "
-        f"qty_gap_small={1 if qty_gap_small else 0} policy_reason={policy_reason}"
+        f"qty_gap_small={1 if qty_gap_small else 0} "
+        f"policy_reason={policy_reason} "
+        f"partial_flatten_recent={1 if partial_flatten_recent else 0}"
     )
     return DustClassification(
         classification=classification,
@@ -500,7 +496,7 @@ def build_dust_operator_view(
         else:
             operator_action = "review_matched_dust_policy"
             operator_message = (
-                "Matched harmless dust only. Treat exposure as flat, but keep resume and new orders blocked until operator review."
+                "Residual dust matches across broker/local state, but remains below minimum tradable quantity, so automatic resume and new orders stay blocked pending operator review."
             )
             new_orders_allowed = False
             resume_allowed = False
@@ -715,10 +711,5 @@ def _infer_dust_classification(
         broker_qty_is_dust
         and local_qty_is_dust
         and qty_gap_small
-        and (
-            (broker_notional_is_dust and local_notional_is_dust)
-            or partial_flatten_recent
-            or min_notional_krw <= 0.0
-        )
     )
     return "matched_harmless_dust" if matched_harmless else "dangerous_dust"

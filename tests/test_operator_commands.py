@@ -2716,7 +2716,7 @@ def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_witho
         metadata={
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
-            "dust_policy_reason": "dangerous_dust_operator_review_required",
+            "dust_policy_reason": "matched_harmless_dust_operator_review_required",
             "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000 min_notional_krw=5000.0",
             "remote_open_order_found": 0,
             "submit_unknown_unresolved": 0,
@@ -2727,7 +2727,7 @@ def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_witho
     eligible, blockers = evaluate_resume_eligibility()
 
     assert eligible is False
-    assert [b.code for b in blockers] == ["DANGEROUS_DUST_REVIEW_REQUIRED"]
+    assert [b.code for b in blockers] == ["MATCHED_DUST_POLICY_REVIEW_REQUIRED"]
     assert all(b.overridable is False for b in blockers)
 
 
@@ -2773,7 +2773,7 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
         metadata={
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
-            "dust_policy_reason": "dangerous_dust_operator_review_required",
+            "dust_policy_reason": "matched_harmless_dust_operator_review_required",
             "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
             "remote_open_order_found": 0,
             "submit_unknown_unresolved": 0,
@@ -2785,10 +2785,10 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
 
     assert report["resume_allowed"] is False
     assert report["can_resume"] is False
-    assert "DANGEROUS_DUST_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert "MATCHED_DUST_POLICY_REVIEW_REQUIRED" in report["resume_blockers"]
     assert report["operator_next_action"] != "resume_now"
-    assert report["operator_next_action"] == "manual_dust_review_required"
-    assert report["dust_state"] == "dangerous_dust"
+    assert report["operator_next_action"] == "review_matched_dust_policy"
+    assert report["dust_state"] == "matched_harmless_dust"
     assert report["dust_new_orders_allowed"] is False
     assert report["dust_resume_allowed_by_policy"] is False
 
@@ -3920,4 +3920,3 @@ def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, ca
     assert f"reason_code={DUST_RESIDUAL_UNSELLABLE}" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "MANUAL_DUST_REVIEW_REQUIRED" in out
-

@@ -564,7 +564,7 @@ def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(i
     assert int(metadata["dust_residual_allow_resume"]) == 0
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_operator_review_required"
     assert metadata["dust_classification"] == "matched_harmless_dust"
-    assert "partial_flatten_recent=1" in str(metadata["dust_residual_summary"])
+    assert int(metadata["dust_partial_flatten_recent"]) == 1
 
 
 def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_notional_is_also_dust(
@@ -591,7 +591,7 @@ def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_n
     assert int(metadata["dust_residual_allow_resume"]) == 0
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_operator_review_required"
     assert metadata["dust_classification"] == "matched_harmless_dust"
-    assert "partial_flatten_recent=0" in str(metadata["dust_residual_summary"])
+    assert int(metadata["dust_partial_flatten_recent"]) == 0
 
 
 def test_reconcile_blocks_local_only_dust_gap_without_broker_match(isolated_db, monkeypatch):
@@ -707,9 +707,9 @@ def test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable(isolated_db,
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
-    assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
-    assert metadata["dust_classification"] == "dangerous_dust"
-    assert "classification=dangerous_dust" in str(metadata["dust_residual_summary"])
+    assert metadata["dust_policy_reason"] == "matched_harmless_dust_operator_review_required"
+    assert metadata["dust_classification"] == "matched_harmless_dust"
+    assert "classification=matched_harmless_dust" in str(metadata["dust_residual_summary"])
 
 
 def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):
@@ -2201,6 +2201,4 @@ def test_restart_startup_proceeds_when_reconcile_clears_risky_state(isolated_db,
     state = runtime_state.snapshot()
     assert state.startup_gate_reason is None
     assert state.trading_enabled is True
-
-
 
