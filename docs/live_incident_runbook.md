@@ -62,18 +62,19 @@ live 운영 중 장애 발생 시, 감정적으로 대응하지 않고 같은 �
 - 재발 방지책
 ## 9. Dust Residual vs Unresolved Order
 
-- `dust_state=manual_review_required` means the residual position is not safely sellable by the bot and needs operator review before resume or new orders.
-- `dust_state=effective_flat_dust` means the remainder is dust-only and can be treated as effective flat when unresolved order counts are also zero.
+- `dust_state=matched_harmless_dust` means broker/local dust matches closely enough to be interpreted as harmless dust. Resume is allowed only if `resume_allowed_by_policy=1`.
+- `dust_state=dangerous_dust` means the remainder is not safely resumable. Treat it as an operator-review condition before any resume or new orders.
 - `unresolved_count > 0` or `recovery_required_count > 0` means order consistency is still unresolved. Treat that as a recovery problem first, not a dust problem.
 - If a manual app sell happened while the bot was stopped, do not restart immediately. Re-run `health`, `recovery-report`, and `ops-report` first.
-- If reports show below-minimum dust only, avoid forcing another liquidation attempt unless exchange minimum quantity and minimum notional are both clearly satisfied.
+- If reports show below-minimum dust only, avoid forcing another liquidation attempt unless exchange minimum quantity and minimum notional are both clearly satisfied after qty-step/decimal normalization.
 - Incident triage order:
   1. Check `recovery-report [P2]`. If `resume_allowed=0` and `can_resume=false`, restart stays blocked.
-  2. If the blocker includes `DUST_RESIDUAL_REVIEW_REQUIRED`, decide whether this is dust-only manual review or a broader recovery issue.
-  3. Only treat the position as dust-only when `unresolved_count=0`, `recovery_required_count=0`, and `dust_state=effective_flat_dust`.
+  2. If the blocker includes `MATCHED_DUST_POLICY_REVIEW_REQUIRED` or `DANGEROUS_DUST_REVIEW_REQUIRED`, decide whether this is matched dust under policy review or dangerous dust requiring manual intervention.
+  3. Only treat the position as dust-only when `unresolved_count=0`, `recovery_required_count=0`, `dust_state=matched_harmless_dust`, and `resume_allowed_by_policy=1`.
 - Manual dust review checklist:
   1. app side: read `dust_state`, `dust_action`, `dust_resume_allowed_by_policy`, and `recent_dust_unsellable_event`
   2. DB side: confirm there is no unresolved or recovery-required order left
   3. broker side: confirm the remaining balance reflected by `dust_broker_qty`
   4. exchange minimums: check both `dust_min_qty` and `dust_min_notional_krw`
+- Do not make manual app liquidation the default dust workflow. Use it only as an exception after reports, broker balance, and DB state have been compared.
 - `accounts_flat_start_allowed` is not resume permission. It is only an `/v1/accounts` diagnostic and must not override `recovery-report` restart blockers.

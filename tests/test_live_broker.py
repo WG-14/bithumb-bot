@@ -8,7 +8,15 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.balance_source import BalanceSnapshot
-from bithumb_bot.broker.live import live_execute_signal, normalize_order_qty, validate_order, validate_pretrade
+from bithumb_bot.broker.live import (
+    adjust_buy_order_qty_for_dust_safety,
+    adjust_sell_order_qty_for_dust_safety,
+    live_execute_signal,
+    SellDustGuardError,
+    normalize_order_qty,
+    validate_order,
+    validate_pretrade,
+)
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
 from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE, EXIT_PARTIAL_LEFT_DUST, MANUAL_DUST_REVIEW_REQUIRED
@@ -1969,6 +1977,85 @@ def test_normalize_order_qty_does_not_apply_notional_guard():
     assert normalized == pytest.approx(1.0)
 
 
+def test_adjust_buy_order_qty_for_dust_safety_floors_to_sellable_qty():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
+    adjusted = adjust_buy_order_qty_for_dust_safety(qty=0.00019193, market_price=100_000_000.0)
+
+    assert adjusted == pytest.approx(0.0001)
+
+
+def test_adjust_buy_order_qty_for_dust_safety_rejects_when_no_sellable_qty_remains():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
+    with pytest.raises(ValueError, match="dust-safe entry qty unavailable"):
+        adjust_buy_order_qty_for_dust_safety(qty=0.00009193, market_price=100_000_000.0)
+
+
+@pytest.mark.parametrize(
+    ("qty", "expected_qty"),
+    [
+        (0.0001, 0.0001),
+        (0.00019999, 0.0001),
+    ],
+    ids=["already_sellable_qty", "floors_to_sellable_qty_without_leaving_entry_dust"],
+)
+def test_adjust_buy_order_qty_for_dust_safety_preserves_only_sellable_entry_qty(qty, expected_qty):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+
+    adjusted = adjust_buy_order_qty_for_dust_safety(qty=qty, market_price=100_000_000.0)
+
+    assert adjusted == pytest.approx(expected_qty)
+
+
+def test_adjust_sell_order_qty_for_dust_safety_uses_full_position_qty_when_step_floor_would_leave_dust():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    adjusted = adjust_sell_order_qty_for_dust_safety(qty=0.00019193, market_price=100_000_000.0)
+
+    assert adjusted == pytest.approx(0.00019193)
+
+
+def test_adjust_sell_order_qty_for_dust_safety_blocks_when_broker_precision_still_leaves_dust():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    with pytest.raises(ValueError, match="sell dust guard blocked remainder that would become unsellable"):
+        adjust_sell_order_qty_for_dust_safety(qty=0.000191939, market_price=100_000_000.0)
+
+
+def test_adjust_sell_order_qty_for_dust_safety_exposes_remainder_dust_guard_details():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    with pytest.raises(SellDustGuardError) as exc:
+        adjust_sell_order_qty_for_dust_safety(qty=0.000191939, market_price=100_000_000.0)
+
+    details = exc.value.details
+    assert details["state"] == EXIT_PARTIAL_LEFT_DUST
+    assert details["operator_action"] == MANUAL_DUST_REVIEW_REQUIRED
+    assert details["dust_scope"] == "remainder_after_sell"
+    assert details["qty_below_min"] == 1
+    assert details["notional_below_min"] == 0
+    assert details["remainder_qty"] == pytest.approx(0.000091939)
+    assert details["broker_full_qty"] == pytest.approx(0.00019193)
+    assert details["broker_full_remainder_qty"] == pytest.approx(0.000000009)
+    assert "guard_action=block_sell_remainder_dust" in str(details["summary"])
+
+
 def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -1988,6 +2075,177 @@ def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tm
     # 20,000 / 100,000,000 = 0.0002. If qty-step flooring leaked into market BUY,
     # this would collapse to 0.0001 and halve the KRW notional (regression).
     assert broker._last_qty == pytest.approx(0.0002)
+
+
+def test_live_execute_signal_buy_adjusts_dust_creating_entry_qty(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_safe.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 19_193.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0001)
+
+
+def test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_zero(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_blocked.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 9_193.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+
+    conn = ensure_db(str(tmp_path / "market_buy_dust_blocked.sqlite"))
+    order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    conn.close()
+
+    assert order_count == 0
+    assert event_count == 0
+
+
+def test_live_execute_signal_sell_uses_full_position_qty_to_avoid_unsellable_remainder(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_dust_safe_full_qty.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(tmp_path / "sell_dust_safe_full_qty.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00019193,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.00019193)
+
+    conn = ensure_db(str(tmp_path / "sell_dust_safe_full_qty.sqlite"))
+    dust_rows = conn.execute(
+        """
+        SELECT id
+        FROM order_events
+        WHERE submission_reason_code=?
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchall()
+    latest_order = conn.execute(
+        """
+        SELECT qty_req, qty_filled, status
+        FROM orders
+        WHERE side='SELL'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert len(dust_rows) == 0
+    assert latest_order is not None
+    assert float(latest_order["qty_req"]) == pytest.approx(0.00019193)
+    assert float(latest_order["qty_filled"]) == pytest.approx(0.00019193)
+    assert latest_order["status"] == "FILLED"
+
+
+def test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unsellable_dust(tmp_path):
+    notifications: list[str] = []
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_dust_precision_block.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(tmp_path / "sell_dust_precision_block.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.000191939,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "sell_dust_precision_block.sqlite"))
+    row = conn.execute(
+        """
+        SELECT event_type, order_status, submission_reason_code, message, submit_evidence
+        FROM order_events
+        WHERE submission_reason_code=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["event_type"] == "submit_attempt_recorded"
+    assert row["order_status"] == "FAILED"
+    assert row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    assert "dust_scope=remainder_after_sell" in str(row["message"])
+    assert "guard_action=block_sell_remainder_dust" in str(row["message"])
+    assert '"dust_scope":"remainder_after_sell"' in str(row["submit_evidence"])
+    assert len(notifications) == 1
+    monkeypatch.undo()
 
 
 def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_dedups(tmp_path):
@@ -2074,7 +2332,7 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert MANUAL_DUST_REVIEW_REQUIRED in str(event_rows[0]["message"])
     assert len(notifications) == 1
     assert "event=order_submit_blocked" in notifications[0]
-    assert "dust_state=manual_review_required" in notifications[0]
+    assert "dust_state=dangerous_dust" in notifications[0]
     assert "dust_action=manual_review_before_resume" in notifications[0]
     assert "dust_new_orders_allowed=0" in notifications[0]
     assert "dust_resume_allowed=0" in notifications[0]
@@ -2294,3 +2552,7 @@ def test_reconcile_persists_broker_read_journal_metadata(tmp_path):
     payload = json.loads(state.last_reconcile_metadata)
     assert "broker_read_journal" in payload
     assert "/v1/accounts" in str(payload["broker_read_journal"])
+
+
+
+

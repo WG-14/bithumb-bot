@@ -556,6 +556,7 @@ def record_reconcile_result(
             "broker_read_journal",
             "balance_split_mismatch_count",
             "balance_split_mismatch_summary",
+            "dust_classification",
             "dust_residual_present",
             "dust_residual_allow_resume",
             "dust_policy_reason",
@@ -666,10 +667,6 @@ def set_startup_gate_reason(reason: str | None) -> None:
         _STATE.startup_gate_reason = _clip(reason)
         if reason:
             _STATE.last_reconcile_reason_code = "STARTUP_GATE_BLOCKED"
-            _STATE.last_reconcile_metadata = _clip(
-                json.dumps({"startup_gate_reason": reason}, ensure_ascii=False, sort_keys=True),
-                max_len=1000,
-            )
         _persist_state(_STATE)
 
 

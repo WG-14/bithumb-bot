@@ -11,6 +11,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
         "local_qty",
         "latest_price",
         "partial_flatten_recent",
+        "matched_harmless_resume_allowed",
         "expected_present",
         "expected_allow_resume",
         "expected_policy_reason",
@@ -24,10 +25,11 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             0.00009629,
             40_000_000.0,
             True,
+            False,
             True,
-            True,
-            "dust_residual_allowed_for_resume",
-            "effective_flat_dust",
+            False,
+            "matched_harmless_dust_operator_review_required",
+            "matched_harmless_dust",
             True,
             True,
         ),
@@ -38,32 +40,48 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             False,
             True,
             True,
-            "dust_residual_allowed_for_resume",
-            "effective_flat_dust",
+            True,
+            "matched_harmless_dust_resume_allowed",
+            "matched_harmless_dust",
             True,
             True,
         ),
         (
+            0.00009629,
+            0.00009629,
+            40_000_000.0,
+            False,
+            False,
+            True,
+            False,
+            "matched_harmless_dust_operator_review_required",
+            "matched_harmless_dust",
+            True,
+            True,
+        ),
+        (
+            0.00009900,
+            0.00001000,
+            40_000_000.0,
+            False,
+            False,
+            True,
+            False,
+            "dangerous_dust_operator_review_required",
+            "dangerous_dust",
+            False,
+            False,
+        ),
+        (
+            0.00009629,
             0.0,
-            0.00009629,
             40_000_000.0,
+            False,
             False,
             True,
             False,
-            "dust_residual_requires_operator_review",
-            "manual_review_required",
-            False,
-            False,
-        ),
-        (
-            0.00009629,
-            0.0,
-            40_000_000.0,
-            False,
-            True,
-            False,
-            "dust_residual_requires_operator_review",
-            "manual_review_required",
+            "dangerous_dust_operator_review_required",
+            "dangerous_dust",
             False,
             False,
         ),
@@ -72,10 +90,11 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             0.00009629,
             100_000_000.0,
             False,
+            False,
             True,
             False,
-            "dust_residual_requires_operator_review",
-            "manual_review_required",
+            "dangerous_dust_operator_review_required",
+            "dangerous_dust",
             True,
             False,
         ),
@@ -83,6 +102,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             0.0,
             0.0,
             40_000_000.0,
+            False,
             False,
             False,
             False,
@@ -94,8 +114,9 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
     ],
     ids=[
         "matched_dust_recent_partial_flatten",
+        "matched_dust_resume_allowed",
         "matched_dust_notional_also_dust",
-        "local_only_dust_mismatch",
+        "dust_on_both_sides_but_gap_too_large",
         "broker_only_dust_mismatch",
         "qty_dust_but_notional_tradeable",
         "fully_flat_no_dust",
@@ -106,6 +127,7 @@ def test_dust_classification_and_operator_view_matrix(
     local_qty: float,
     latest_price: float,
     partial_flatten_recent: bool,
+    matched_harmless_resume_allowed: bool,
     expected_present: bool,
     expected_allow_resume: bool,
     expected_policy_reason: str,
@@ -122,6 +144,7 @@ def test_dust_classification_and_operator_view_matrix(
         partial_flatten_recent=partial_flatten_recent,
         partial_flatten_reason="test_case",
         qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=matched_harmless_resume_allowed,
     )
     view = build_dust_operator_view(dust)
 
@@ -147,11 +170,11 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
         {
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
-            "dust_policy_reason": "dust_residual_requires_operator_review",
+            "dust_policy_reason": "dangerous_dust_operator_review_required",
             "dust_residual_summary": (
                 "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "allow_resume=0 effective_flat=0 policy_reason=dust_residual_requires_operator_review"
+                "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required"
             ),
             "dust_latest_price": 100000000.0,
         }
@@ -183,22 +206,22 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
         (
             "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-            "allow_resume=0 effective_flat=0 policy_reason=dust_residual_requires_operator_review",
+            "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required",
             100000000.0,
             0.00009193,
             False,
-            "manual_review_required",
+            "dangerous_dust",
             False,
             False,
         ),
         (
             "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-            "allow_resume=1 effective_flat=1 policy_reason=dust_residual_allowed_for_resume",
+            "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed",
             40000000.0,
             0.00009629,
             True,
-            "effective_flat_dust",
+            "matched_harmless_dust",
             True,
             True,
         ),
@@ -219,9 +242,9 @@ def test_dust_operator_view_keeps_summary_and_detail_consistent(
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 1 if expected_resume_allowed else 0,
             "dust_policy_reason": (
-                "dust_residual_allowed_for_resume"
+                "matched_harmless_dust_resume_allowed"
                 if expected_resume_allowed
-                else "dust_residual_requires_operator_review"
+                else "dangerous_dust_operator_review_required"
             ),
             "dust_residual_summary": summary,
             "dust_latest_price": latest_price,

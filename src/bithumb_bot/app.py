@@ -509,7 +509,11 @@ def cmd_health() -> None:
             " | uv run python bot.py recovery-report"
         )
     elif dust.present and not dust_view.resume_allowed:
-        halt_reason_for_summary = "DUST_RESIDUAL_REVIEW_REQUIRED"
+        halt_reason_for_summary = (
+            "MATCHED_DUST_POLICY_REVIEW_REQUIRED"
+            if dust_view.state == "matched_harmless_dust"
+            else "DANGEROUS_DUST_REVIEW_REQUIRED"
+        )
         recommended_commands = "uv run python bot.py recovery-report"
     elif halt_reason_for_summary == "KILL_SWITCH":
         recommended_commands = "uv run python bot.py recovery-report | uv run python bot.py resume"
@@ -1697,13 +1701,20 @@ def _load_recovery_report(
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
         recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
         resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
-    elif "DUST_RESIDUAL_REVIEW_REQUIRED" in blocker_codes:
+    elif "MATCHED_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "review_matched_dust_policy"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm matched broker/local dust is harmless, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
+        )
+        resume_blocked_reason = "resume blocked by matched dust policy review"
+    elif "DANGEROUS_DUST_REVIEW_REQUIRED" in blocker_codes:
         operator_next_action = "manual_dust_review_required"
         recommended_command = "uv run python bot.py recovery-report --json"
         recommended_next_action = (
-            "Confirm this is dust only, not an unresolved order. Do not force extra liquidation while still below exchange minimums."
+            "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
         )
-        resume_blocked_reason = "resume blocked by dust residual manual review"
+        resume_blocked_reason = "resume blocked by dangerous dust manual review"
     else:
         operator_next_action = "investigate_blockers"
         recommended_command = "uv run python bot.py recovery-report --json"
@@ -1736,7 +1747,7 @@ def _load_recovery_report(
             return "uv run python bot.py reconcile"
         if code == "HALT_RISK_OPEN_POSITION":
             return "uv run python bot.py flatten-position"
-        if code == "DUST_RESIDUAL_REVIEW_REQUIRED":
+        if code in {"MATCHED_DUST_POLICY_REVIEW_REQUIRED", "DANGEROUS_DUST_REVIEW_REQUIRED"}:
             return "uv run python bot.py recovery-report --json"
         if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
             return "uv run python bot.py restart-checklist"

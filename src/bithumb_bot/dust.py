@@ -11,6 +11,7 @@ _SUMMARY_TOKEN_RE = re.compile(r"([a-z_]+)=([^\s]+)")
 
 @dataclass(frozen=True)
 class DustClassification:
+    classification: str
     present: bool
     allow_resume: bool
     effective_flat: bool
@@ -35,6 +36,7 @@ class DustClassification:
 
     def to_metadata(self) -> dict[str, int | float | str]:
         return {
+            "dust_classification": self.classification,
             "dust_residual_present": 1 if self.present else 0,
             "dust_residual_allow_resume": 1 if self.allow_resume else 0,
             "dust_effective_flat": 1 if self.effective_flat else 0,
@@ -82,7 +84,7 @@ class DustClassification:
         if effective_flat_raw is None:
             effective_flat = summary_values.get("effective_flat")
             if effective_flat is None:
-                effective_flat = bool(allow_resume)
+                effective_flat = False
             else:
                 effective_flat = bool(effective_flat)
         else:
@@ -155,14 +157,14 @@ class DustClassification:
             summary_values,
             metadata_key="dust_broker_qty_is_dust",
             summary_key="broker_qty_is_dust",
-            default=bool(broker_qty > DUST_POSITION_EPS and (min_qty <= 0.0 or broker_qty < min_qty)),
+            default=bool(broker_qty > DUST_POSITION_EPS and min_qty > 0.0 and broker_qty < min_qty),
         )
         local_qty_is_dust = _bool_from_metadata_or_summary(
             metadata,
             summary_values,
             metadata_key="dust_local_qty_is_dust",
             summary_key="local_qty_is_dust",
-            default=bool(local_qty > DUST_POSITION_EPS and (min_qty <= 0.0 or local_qty < min_qty)),
+            default=bool(local_qty > DUST_POSITION_EPS and min_qty > 0.0 and local_qty < min_qty),
         )
         broker_notional_is_dust = _bool_from_metadata_or_summary(
             metadata,
@@ -186,7 +188,27 @@ class DustClassification:
                 and local_notional_krw < min_notional_krw
             ),
         )
+        inferred_classification = _infer_dust_classification(
+            present=present,
+            broker_qty_is_dust=broker_qty_is_dust,
+            local_qty_is_dust=local_qty_is_dust,
+            broker_notional_is_dust=broker_notional_is_dust,
+            local_notional_is_dust=local_notional_is_dust,
+            partial_flatten_recent=partial_flatten_recent,
+            qty_gap_small=qty_gap_small,
+            min_notional_krw=min_notional_krw,
+        )
+        classification = str(
+            metadata.get("dust_classification")
+            or summary_values.get("classification")
+            or _classification_from_policy_reason(str(metadata.get("dust_policy_reason") or ""))
+            or inferred_classification
+            or "none"
+        )
+        if effective_flat_raw is None and not bool(summary_values.get("effective_flat")):
+            effective_flat = bool(classification == "matched_harmless_dust" or allow_resume)
         return cls(
+            classification=classification,
             present=present,
             allow_resume=allow_resume,
             effective_flat=effective_flat,
@@ -323,6 +345,7 @@ def classify_dust_residual(
     partial_flatten_recent: bool,
     partial_flatten_reason: str,
     qty_gap_tolerance: float,
+    matched_harmless_resume_allowed: bool = False,
 ) -> DustClassification:
     normalized_broker_qty = max(0.0, float(broker_qty))
     normalized_local_qty = max(0.0, float(local_qty))
@@ -333,11 +356,11 @@ def classify_dust_residual(
 
     broker_present = normalized_broker_qty > DUST_POSITION_EPS
     local_present = normalized_local_qty > DUST_POSITION_EPS
-    broker_qty_is_dust = broker_present and (
-        normalized_min_qty <= 0.0 or normalized_broker_qty < normalized_min_qty
+    broker_qty_is_dust = bool(
+        broker_present and normalized_min_qty > 0.0 and normalized_broker_qty < normalized_min_qty
     )
-    local_qty_is_dust = local_present and (
-        normalized_min_qty <= 0.0 or normalized_local_qty < normalized_min_qty
+    local_qty_is_dust = bool(
+        local_present and normalized_min_qty > 0.0 and normalized_local_qty < normalized_min_qty
     )
 
     broker_notional = _estimate_notional(normalized_broker_qty, latest_price)
@@ -355,7 +378,7 @@ def classify_dust_residual(
     qty_gap_small = abs(delta_qty) <= normalized_qty_gap_tolerance
 
     present = bool(broker_qty_is_dust or local_qty_is_dust)
-    allow_resume = bool(
+    matched_harmless = bool(
         present
         and broker_qty_is_dust
         and local_qty_is_dust
@@ -366,25 +389,36 @@ def classify_dust_residual(
             or normalized_min_notional <= 0.0
         )
     )
-    effective_flat = bool((not broker_present and not local_present) or allow_resume)
+    classification = "none"
+    if present:
+        classification = "matched_harmless_dust" if matched_harmless else "dangerous_dust"
+
+    allow_resume = bool(matched_harmless and matched_harmless_resume_allowed)
+    effective_flat = bool((not broker_present and not local_present) or matched_harmless)
 
     if not present:
         policy_reason = "no_dust_residual"
-    elif allow_resume:
-        policy_reason = "dust_residual_allowed_for_resume"
+    elif matched_harmless and allow_resume:
+        policy_reason = "matched_harmless_dust_resume_allowed"
+    elif matched_harmless:
+        policy_reason = "matched_harmless_dust_operator_review_required"
     else:
-        policy_reason = "dust_residual_requires_operator_review"
+        policy_reason = "dangerous_dust_operator_review_required"
 
     summary = (
         f"broker_qty={normalized_broker_qty:.8f} local_qty={normalized_local_qty:.8f} "
         f"delta={delta_qty:.8f} min_qty={normalized_min_qty:.8f} "
         f"min_notional_krw={normalized_min_notional:.1f} "
         f"partial_flatten_recent={1 if partial_flatten_recent else 0} "
+        f"classification={classification} "
+        f"matched_harmless={1 if matched_harmless else 0} "
+        f"broker_local_match={1 if qty_gap_small else 0} "
         f"allow_resume={1 if allow_resume else 0} "
         f"effective_flat={1 if effective_flat else 0} "
         f"qty_gap_small={1 if qty_gap_small else 0} policy_reason={policy_reason}"
     )
     return DustClassification(
+        classification=classification,
         present=present,
         allow_resume=allow_resume,
         effective_flat=effective_flat,
@@ -411,6 +445,7 @@ def classify_dust_residual(
 
 def no_dust_classification(*, policy_reason: str) -> DustClassification:
     return DustClassification(
+        classification="none",
         present=False,
         allow_resume=False,
         effective_flat=True,
@@ -452,20 +487,30 @@ def build_dust_operator_view(
         new_orders_allowed = False
         resume_allowed = False
         treat_as_flat = False
-    elif dust.present and dust.allow_resume:
-        state = "effective_flat_dust"
-        state_label = "dust only, treat as effective flat"
-        operator_action = "monitor_only"
-        operator_message = "Dust residual only. Treat as effective flat and do not force extra liquidation."
-        new_orders_allowed = True
-        resume_allowed = True
+    elif dust.classification == "matched_harmless_dust":
+        state = "matched_harmless_dust"
+        state_label = "matched harmless dust residual"
+        if dust.allow_resume:
+            operator_action = "monitor_only"
+            operator_message = (
+                "Matched harmless dust only. Exposure is effectively flat and current policy permits resume."
+            )
+            new_orders_allowed = True
+            resume_allowed = True
+        else:
+            operator_action = "review_matched_dust_policy"
+            operator_message = (
+                "Matched harmless dust only. Treat exposure as flat, but keep resume and new orders blocked until operator review."
+            )
+            new_orders_allowed = False
+            resume_allowed = False
         treat_as_flat = True
     elif dust.present:
-        state = "manual_review_required"
-        state_label = "dust residual requires manual review"
+        state = "dangerous_dust"
+        state_label = "dangerous dust residual requires manual review"
         operator_action = "manual_review_before_resume"
         operator_message = (
-            "Dust residual is not resume-safe. Review broker/local state manually before resuming or placing new orders."
+            "Dust residual is not harmless. Review broker/local mismatch or recovery concerns before resuming or placing new orders."
         )
         new_orders_allowed = False
         resume_allowed = False
@@ -517,6 +562,7 @@ def build_dust_display_context(
         classification=dust,
         operator_view=view,
         fields={
+            "dust_classification": dust.classification,
             "dust_residual_present": bool(dust.present),
             "dust_residual_allow_resume": bool(dust.allow_resume),
             "dust_policy_reason": dust.policy_reason,
@@ -544,6 +590,7 @@ def build_dust_display_context(
 
 def _metadata_fallback(*, policy_reason: str) -> DustClassification:
     return DustClassification(
+        classification="none",
         present=False,
         allow_resume=False,
         effective_flat=False,
@@ -638,3 +685,40 @@ def _bool_from_metadata_or_summary(
         return bool(int(summary_value))
     except (TypeError, ValueError):
         return bool(default)
+
+
+def _classification_from_policy_reason(policy_reason: str) -> str | None:
+    normalized = str(policy_reason or "").strip()
+    if normalized.startswith("matched_harmless_dust_"):
+        return "matched_harmless_dust"
+    if normalized.startswith("dangerous_dust_"):
+        return "dangerous_dust"
+    if normalized == "no_dust_residual":
+        return "none"
+    return None
+
+
+def _infer_dust_classification(
+    *,
+    present: bool,
+    broker_qty_is_dust: bool,
+    local_qty_is_dust: bool,
+    broker_notional_is_dust: bool,
+    local_notional_is_dust: bool,
+    partial_flatten_recent: bool,
+    qty_gap_small: bool,
+    min_notional_krw: float,
+) -> str:
+    if not present:
+        return "none"
+    matched_harmless = bool(
+        broker_qty_is_dust
+        and local_qty_is_dust
+        and qty_gap_small
+        and (
+            (broker_notional_is_dust and local_notional_is_dust)
+            or partial_flatten_recent
+            or min_notional_krw <= 0.0
+        )
+    )
+    return "matched_harmless_dust" if matched_harmless else "dangerous_dust"

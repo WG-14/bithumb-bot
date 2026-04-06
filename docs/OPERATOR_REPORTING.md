@@ -226,17 +226,22 @@ JSON 출력이 필요하면 `--json`을 사용합니다.
 
 - `ops-report` now separates dust interpretation from `/v1/accounts` preflight. `accounts_flat_start_allowed` is only an accounts-row diagnostic and must not be read as automatic resume permission.
 - Check `dust_state`, `dust_action`, `dust_new_orders_allowed`, `dust_resume_allowed`, and `dust_treat_as_flat` together.
-- `dust_state=manual_review_required` means "not an unresolved order yet still not safely resumable". New orders stay blocked until operator review.
-- `dust_state=effective_flat_dust` means the remainder is dust-only and can be treated as operationally flat when `recovery-report` also shows no unresolved or recovery-required orders.
+- `dust_state=matched_harmless_dust` means broker/local dust matches closely enough to be treated as harmless dust. New orders and resume are allowed only when `dust_resume_allowed=1`.
+- `dust_state=dangerous_dust` means "not an unresolved order yet still not safely resumable". New orders stay blocked until operator review.
 - Use the field groups this way:
   1. restart gate: `resume_allowed`, `can_resume`, `blockers`
   2. dust policy: `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_treat_as_flat`
   3. quantity cross-check: `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, `dust_broker_local_match`
   4. exchange minimum cross-check: `dust_min_qty`, `dust_min_notional_krw`, `dust_qty_below_min`, `dust_notional_below_min`
 - `dust_min_qty` and `dust_min_notional_krw` answer different questions. Operators should not conclude "sellable" until both minimums are satisfied after rounding and quantity-step normalization.
-- If `dust_state=manual_review_required`, the safe reading is: "not an unresolved order yet, but still not restart-safe". Resume remains blocked until the operator verifies broker/app/DB state and confirms the remainder is not a recoverable open-order problem.
+- The comparison order is app -> DB -> broker:
+  1. app/report view: `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_treat_as_flat`
+  2. DB view: `dust_local_qty`, unresolved counts, recovery-required counts, `recent_dust_unsellable_event`
+  3. broker/app balance view: `dust_broker_qty`, `/v1/accounts` diagnostics, and `dust_broker_local_match`
+- If `dust_state=dangerous_dust`, the safe reading is: "not an unresolved order yet, but still not restart-safe". Resume remains blocked until the operator verifies broker/app/DB state and confirms the remainder is not a recoverable open-order problem.
+- Manual app sells are exception handling, not the primary dust policy. Prefer `reconcile` plus report comparison over manual liquidation retries.
 - To avoid confusion, classify states in this order:
   1. unresolved/recovery-required order problem
-  2. dust residual requiring manual review
-  3. dust-only effective flat
+  2. dangerous dust requiring manual review
+  3. matched harmless dust
   4. normal flat or normal open position

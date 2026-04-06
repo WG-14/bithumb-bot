@@ -103,6 +103,7 @@ def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
 def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
     dust = DustClassification.from_metadata(metadata_raw)
     return {
+        "classification": dust.classification,
         "present": dust.present,
         "allow_resume": dust.allow_resume,
         "effective_flat": dust.effective_flat,
@@ -111,8 +112,26 @@ def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
     }
 
 
-def _dust_residual_requires_operator_review(dust_context: dict[str, object]) -> bool:
-    return bool(dust_context["present"]) and not bool(dust_context["allow_resume"])
+def _dust_residual_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str] | None:
+    if not bool(dust_context["present"]) or bool(dust_context["allow_resume"]):
+        return None
+    if str(dust_context.get("classification") or "") == "matched_harmless_dust":
+        return (
+            "MATCHED_DUST_POLICY_REVIEW_REQUIRED",
+            (
+                "matched harmless dust is visible and treated as flat, but current policy still blocks resume/new orders: "
+                f"policy={str(dust_context['policy_reason'])} "
+                f"summary={str(dust_context['summary'])}"
+            ),
+        )
+    return (
+        "DANGEROUS_DUST_REVIEW_REQUIRED",
+        (
+            "dangerous dust residual requires operator review before resume: "
+            f"policy={str(dust_context['policy_reason'])} "
+            f"summary={str(dust_context['summary'])}"
+        ),
+    )
 
 
 LIVE_UNRESOLVED_ORDER_STATUSES = (
@@ -524,15 +543,13 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
         )
 
     dust_context_for_halt = _reconcile_dust_context(state.last_reconcile_metadata)
-    if _dust_residual_requires_operator_review(dust_context_for_halt):
+    dust_resume_blocker = _dust_residual_resume_blocker(dust_context_for_halt)
+    if dust_resume_blocker is not None:
+        blocker_code, blocker_detail = dust_resume_blocker
         reasons.append(
             _resume_blocker(
-                code="DUST_RESIDUAL_REVIEW_REQUIRED",
-                detail=(
-                    "dust residual requires operator review before resume: "
-                    f"policy={str(dust_context_for_halt['policy_reason'])} "
-                    f"summary={str(dust_context_for_halt['summary'])}"
-                ),
+                code=blocker_code,
+                detail=blocker_detail,
                 overridable=False,
             )
         )

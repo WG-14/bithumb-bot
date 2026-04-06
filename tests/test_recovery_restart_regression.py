@@ -561,8 +561,9 @@ def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(i
 
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
-    assert int(metadata["dust_residual_allow_resume"]) == 1
-    assert metadata["dust_policy_reason"] == "dust_residual_allowed_for_resume"
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "matched_harmless_dust_operator_review_required"
+    assert metadata["dust_classification"] == "matched_harmless_dust"
     assert "partial_flatten_recent=1" in str(metadata["dust_residual_summary"])
 
 
@@ -587,8 +588,9 @@ def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_n
 
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
-    assert int(metadata["dust_residual_allow_resume"]) == 1
-    assert metadata["dust_policy_reason"] == "dust_residual_allowed_for_resume"
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "matched_harmless_dust_operator_review_required"
+    assert metadata["dust_classification"] == "matched_harmless_dust"
     assert "partial_flatten_recent=0" in str(metadata["dust_residual_summary"])
 
 
@@ -611,8 +613,9 @@ def test_reconcile_blocks_local_only_dust_gap_without_broker_match(isolated_db, 
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
-    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
-    assert "allow_resume=0" in str(metadata["dust_residual_summary"])
+    assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
+    assert metadata["dust_classification"] == "dangerous_dust"
+    assert "classification=dangerous_dust" in str(metadata["dust_residual_summary"])
 
 
 @pytest.mark.parametrize(
@@ -647,12 +650,42 @@ def test_reconcile_blocks_one_sided_dust_gap_without_broker_local_match(
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
-    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
+    assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
+    assert metadata["dust_classification"] == "dangerous_dust"
     summary = str(metadata["dust_residual_summary"])
-    assert "allow_resume=0" in summary
+    assert "classification=dangerous_dust" in summary
     assert f"broker_qty={broker_qty:.8f}" in summary
     assert f"local_qty={local_qty:.8f}" in summary
     assert f"delta={(broker_qty - local_qty):.8f}" in summary
+
+
+def test_reconcile_blocks_matched_dust_when_broker_local_gap_exceeds_tolerance(isolated_db, monkeypatch):
+    _seed_dust_state(db_path=isolated_db, asset_qty=0.00001, close_price=40_000_000.0)
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=5000.0),
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "_is_partial_flatten_recent",
+        lambda *, now_sec: (False, "flatten_not_recent"),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.000099))
+
+    metadata = _latest_reconcile_metadata()
+    assert int(metadata["dust_residual_present"]) == 1
+    assert int(metadata["dust_residual_allow_resume"]) == 0
+    assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
+    assert metadata["dust_classification"] == "dangerous_dust"
+
+    assert int(metadata["dust_qty_gap_small"]) == 0
+    summary = str(metadata["dust_residual_summary"])
+    assert "classification=dangerous_dust" in summary
+    assert "broker_qty=0.00009900" in summary
+    assert "local_qty=0.00001000" in summary
 
 
 def test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable(isolated_db, monkeypatch):
@@ -674,8 +707,9 @@ def test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable(isolated_db,
     metadata = _latest_reconcile_metadata()
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
-    assert metadata["dust_policy_reason"] == "dust_residual_requires_operator_review"
-    assert "allow_resume=0" in str(metadata["dust_residual_summary"])
+    assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
+    assert metadata["dust_classification"] == "dangerous_dust"
+    assert "classification=dangerous_dust" in str(metadata["dust_residual_summary"])
 
 
 def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):
@@ -2167,3 +2201,6 @@ def test_restart_startup_proceeds_when_reconcile_clears_risky_state(isolated_db,
     state = runtime_state.snapshot()
     assert state.startup_gate_reason is None
     assert state.trading_enabled is True
+
+
+

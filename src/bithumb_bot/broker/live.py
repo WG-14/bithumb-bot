@@ -45,6 +45,7 @@ from ..oms import (
 from .base import Broker, BrokerFill, BrokerSubmissionUnknownError, BrokerTemporaryError
 
 POSITION_EPSILON = 1e-12
+BROKER_MARKET_SELL_QTY_DECIMALS = 8
 VALID_ORDER_SIDES = {"BUY", "SELL"}
 UNSET_EVENT_FIELD = "-"
 
@@ -58,6 +59,14 @@ RUN_LOG = logging.getLogger("bithumb_bot.run")
 
 class FillFeeStrictModeError(RuntimeError):
     """Raised when strict fee validation blocks fill aggregation."""
+
+
+class SellDustGuardError(ValueError):
+    """Raised when a SELL would create an unsellable dust remainder."""
+
+    def __init__(self, message: str, *, details: dict[str, float | int | str]) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 def _parse_fill_fee(*, fill_fee_raw: object) -> tuple[bool, float]:
@@ -369,6 +378,189 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
     return normalized
 
 
+def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
+    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    input_qty = float(snapshot["input_qty"])
+    normalized_qty = float(snapshot["normalized_qty"])
+    min_qty = float(snapshot["min_qty"])
+    qty_step = float(snapshot["qty_step"])
+    max_qty_decimals = int(snapshot["max_qty_decimals"])
+
+    if normalized_qty <= 0:
+        raise ValueError(
+            "dust-safe entry qty unavailable: "
+            f"input_qty={input_qty:.12f} normalized_qty={normalized_qty:.12f} "
+            f"min_qty={min_qty:.12f} qty_step={qty_step:.12f} max_qty_decimals={max_qty_decimals}"
+        )
+    if min_qty > 0 and normalized_qty < min_qty:
+        raise ValueError(
+            "dust-safe entry qty below minimum: "
+            f"normalized_qty={normalized_qty:.12f} < min_qty={min_qty:.12f}"
+        )
+
+    remainder = max(0.0, input_qty - normalized_qty)
+    if remainder <= POSITION_EPSILON:
+        return input_qty
+
+    return normalized_qty
+
+
+def _floor_qty_to_places(*, qty: float, places: int) -> float:
+    if not math.isfinite(float(qty)) or float(qty) <= 0:
+        return 0.0
+    scale = 10 ** max(0, int(places))
+    return math.floor((float(qty) * scale) + POSITION_EPSILON) / scale
+
+
+def _sell_qty_is_unsellable(
+    *,
+    qty: float,
+    market_price: float,
+    min_qty: float,
+    min_notional: float,
+) -> tuple[bool, bool, float]:
+    if qty <= POSITION_EPSILON:
+        return False, False, 0.0
+    notional = float(qty) * float(market_price)
+    qty_below_min = bool(min_qty > 0 and float(qty) < min_qty)
+    notional_below_min = bool(min_notional > 0 and notional < min_notional)
+    return qty_below_min, notional_below_min, notional
+
+
+def adjust_sell_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
+    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    input_qty = float(snapshot["input_qty"])
+    normalized_qty = float(snapshot["normalized_qty"])
+    min_qty = float(snapshot["min_qty"])
+    qty_step = float(snapshot["qty_step"])
+    max_qty_decimals = int(snapshot["max_qty_decimals"])
+    rules = get_effective_order_rules(settings.PAIR).rules
+    min_notional = float(side_min_total_krw(rules=rules, side="SELL"))
+
+    input_qty_below_min, input_notional_below_min, input_notional = _sell_qty_is_unsellable(
+        qty=input_qty,
+        market_price=market_price,
+        min_qty=min_qty,
+        min_notional=min_notional,
+    )
+    if normalized_qty <= 0 or input_qty_below_min or input_notional_below_min:
+        dust_details = _build_sell_dust_unsellable_details(qty=input_qty, market_price=market_price)
+        if dust_details is None:
+            raise ValueError(
+                "sell dust guard failed to classify unsellable position: "
+                f"qty={input_qty:.12f} normalized_qty={normalized_qty:.12f}"
+            )
+        raise SellDustGuardError(
+            "sell dust guard blocked unsellable position: "
+            f"qty={input_qty:.12f} min_qty={min_qty:.12f} "
+            f"sell_notional_krw={input_notional:.2f} min_notional_krw={min_notional:.2f}",
+            details=dust_details,
+        )
+
+    remainder_qty = max(0.0, input_qty - normalized_qty)
+    remainder_qty_below_min, remainder_notional_below_min, remainder_notional = _sell_qty_is_unsellable(
+        qty=remainder_qty,
+        market_price=market_price,
+        min_qty=min_qty,
+        min_notional=min_notional,
+    )
+    if remainder_qty <= POSITION_EPSILON or not (remainder_qty_below_min or remainder_notional_below_min):
+        return normalized_qty
+
+    broker_full_qty = _floor_qty_to_places(qty=input_qty, places=BROKER_MARKET_SELL_QTY_DECIMALS)
+    broker_full_remainder = max(0.0, input_qty - broker_full_qty)
+    broker_remainder_qty_below_min, broker_remainder_notional_below_min, broker_remainder_notional = _sell_qty_is_unsellable(
+        qty=broker_full_remainder,
+        market_price=market_price,
+        min_qty=min_qty,
+        min_notional=min_notional,
+    )
+    if broker_full_qty > POSITION_EPSILON and not (
+        broker_remainder_qty_below_min or broker_remainder_notional_below_min
+    ):
+        RUN_LOG.info(
+            format_log_kv(
+                "[ORDER_GUARD] adjusted sell qty to avoid dust remainder",
+                side="SELL",
+                requested_qty=input_qty,
+                normalized_qty=normalized_qty,
+                adjusted_qty=broker_full_qty,
+                remainder_qty=remainder_qty,
+                remainder_notional_krw=remainder_notional,
+                min_qty=min_qty,
+                min_notional_krw=min_notional,
+                qty_step=qty_step,
+                max_qty_decimals=max_qty_decimals,
+                broker_volume_decimals=BROKER_MARKET_SELL_QTY_DECIMALS,
+            )
+        )
+        return broker_full_qty
+
+    dust_signature = (
+        f"position_qty={input_qty:.12g}|normalized={normalized_qty:.12g}|"
+        f"remainder_qty={remainder_qty:.12g}|remainder_notional={remainder_notional:.12g}|"
+        f"broker_full_qty={broker_full_qty:.12g}|broker_full_remainder={broker_full_remainder:.12g}|"
+        f"min_qty={min_qty:.12g}|min_notional={min_notional:.12g}|"
+        f"remainder_qty_below_min={1 if remainder_qty_below_min else 0}|"
+        f"remainder_notional_below_min={1 if remainder_notional_below_min else 0}|"
+        f"broker_remainder_qty_below_min={1 if broker_remainder_qty_below_min else 0}|"
+        f"broker_remainder_notional_below_min={1 if broker_remainder_notional_below_min else 0}"
+    )
+    dust_details: dict[str, float | int | str] = {
+        "state": EXIT_PARTIAL_LEFT_DUST,
+        "operator_action": MANUAL_DUST_REVIEW_REQUIRED,
+        "dust_scope": "remainder_after_sell",
+        "position_qty": input_qty,
+        "sell_notional_krw": input_notional,
+        "requested_qty": input_qty,
+        "normalized_qty": normalized_qty,
+        "remainder_qty": remainder_qty,
+        "remainder_notional_krw": remainder_notional,
+        "broker_full_qty": broker_full_qty,
+        "broker_full_remainder_qty": broker_full_remainder,
+        "broker_full_remainder_notional_krw": broker_remainder_notional,
+        "min_qty": min_qty,
+        "min_notional_krw": min_notional,
+        "qty_step": qty_step,
+        "max_qty_decimals": max_qty_decimals,
+        "broker_volume_decimals": BROKER_MARKET_SELL_QTY_DECIMALS,
+        "qty_below_min": 1 if remainder_qty_below_min else 0,
+        "notional_below_min": 1 if remainder_notional_below_min else 0,
+        "normalized_non_positive": 0,
+        "normalized_below_min": 0,
+        "dust_signature": dust_signature,
+        "summary": (
+            f"state={EXIT_PARTIAL_LEFT_DUST};"
+            f"operator_action={MANUAL_DUST_REVIEW_REQUIRED};"
+            f"dust_scope=remainder_after_sell;"
+            f"guard_action=block_sell_remainder_dust;"
+            f"position_qty={input_qty:.12f};"
+            f"requested_qty={input_qty:.12f};"
+            f"normalized_qty={normalized_qty:.12f};"
+            f"remainder_qty={remainder_qty:.12f};"
+            f"remainder_notional_krw={remainder_notional:.2f};"
+            f"broker_full_qty={broker_full_qty:.12f};"
+            f"broker_full_remainder_qty={broker_full_remainder:.12f};"
+            f"broker_full_remainder_notional_krw={broker_remainder_notional:.2f};"
+            f"min_qty={min_qty:.12f};"
+            f"min_notional_krw={min_notional:.2f};"
+            f"remainder_qty_below_min={1 if remainder_qty_below_min else 0};"
+            f"remainder_notional_below_min={1 if remainder_notional_below_min else 0};"
+            f"qty_step={qty_step:.12f};"
+            f"max_qty_decimals={max_qty_decimals};"
+            f"broker_volume_decimals={BROKER_MARKET_SELL_QTY_DECIMALS};"
+            f"dust_signature={dust_signature}"
+        ),
+    }
+    raise SellDustGuardError(
+        "sell dust guard blocked remainder that would become unsellable: "
+        f"position_qty={input_qty:.12f} normalized_qty={normalized_qty:.12f} "
+        f"remainder_qty={remainder_qty:.12f} min_qty={min_qty:.12f} "
+        f"remainder_notional_krw={remainder_notional:.2f} min_notional_krw={min_notional:.2f}",
+        details=dust_details,
+    )
+
+
 def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> dict[str, float | int | str] | None:
     if not math.isfinite(float(qty)) or float(qty) <= 0:
         return None
@@ -441,8 +633,9 @@ def _record_sell_dust_unsellable(
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
+    dust_details: dict[str, float | int | str] | None = None,
 ) -> bool:
-    dust_details = _build_sell_dust_unsellable_details(qty=position_qty, market_price=market_price)
+    dust_details = dust_details or _build_sell_dust_unsellable_details(qty=position_qty, market_price=market_price)
     if dust_details is None:
         return False
 
@@ -527,6 +720,18 @@ def _record_sell_dust_unsellable(
             "notional_below_min": int(dust_details["notional_below_min"]),
             "qty_step": float(dust_details["qty_step"]),
             "max_qty_decimals": int(dust_details["max_qty_decimals"]),
+            "dust_scope": str(dust_details.get("dust_scope") or "position_qty"),
+            "requested_qty": float(dust_details.get("requested_qty", dust_details["position_qty"])),
+            "remainder_qty": float(dust_details.get("remainder_qty", 0.0)),
+            "remainder_notional_krw": float(dust_details.get("remainder_notional_krw", 0.0)),
+            "broker_full_qty": float(dust_details.get("broker_full_qty", dust_details["position_qty"])),
+            "broker_full_remainder_qty": float(dust_details.get("broker_full_remainder_qty", 0.0)),
+            "broker_full_remainder_notional_krw": float(
+                dust_details.get("broker_full_remainder_notional_krw", 0.0)
+            ),
+            "broker_volume_decimals": int(
+                dust_details.get("broker_volume_decimals", BROKER_MARKET_SELL_QTY_DECIMALS)
+            ),
         }
     )
     record_submit_attempt(
@@ -574,11 +779,11 @@ def _record_sell_dust_unsellable(
             reason_code=DUST_RESIDUAL_UNSELLABLE,
             side="SELL",
             status="FAILED",
-            dust_state="manual_review_required",
-            dust_action="manual_review_before_resume",
-            dust_new_orders_allowed="0",
-            dust_resume_allowed="0",
-            dust_treat_as_flat="0",
+            dust_state=str(dust_details["state"]),
+            dust_action=str(dust_details["operator_action"]),
+            dust_new_orders_allowed="1" if bool(dust_details["new_orders_allowed"]) else "0",
+            dust_resume_allowed="1" if bool(dust_details["resume_allowed"]) else "0",
+            dust_treat_as_flat="1" if bool(dust_details["treat_as_flat"]) else "0",
             dust_event_state=str(dust_details["state"]),
             operator_action=str(dust_details["operator_action"]),
             dust_qty_below_min=str(dust_details["qty_below_min"]),
@@ -1377,13 +1582,12 @@ def live_execute_signal(
         try:
             if pretrade_needs_live_reference:
                 reference_quote = _load_live_reference_quote(pair=settings.PAIR)
-            # Bithumb v2 market BUY (`side=bid`, `ord_type=price`) uses `price` as
-            # total KRW spend and does not submit `volume`.
-            # Keep BUY quantity as spend-derived base estimate (without qty-step flooring),
-            # so broker payload construction can preserve intended KRW notional.
-            # SELL market (`side=ask`, `ord_type=market`) still requires `volume`,
-            # so qty normalization remains mandatory on SELL.
-            normalized_qty = float(order_qty) if side == "BUY" else normalize_order_qty(qty=order_qty, market_price=market_price)
+            # BUY entry qty is adjusted against SELL quantity rules so we do not
+            # open a position that can only be partially liquidated later.
+            if side == "BUY":
+                normalized_qty = adjust_buy_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)
+            else:
+                normalized_qty = adjust_sell_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)
             validate_order(signal=signal, side=side, qty=normalized_qty, market_price=market_price)
             validate_pretrade(
                 broker=broker,
@@ -1397,6 +1601,32 @@ def live_execute_signal(
                 ),
                 reference_source=(str(reference_quote["reference_source"]) if reference_quote is not None else None),
             )
+        except SellDustGuardError as e:
+            if side == "SELL" and _record_sell_dust_unsellable(
+                conn=conn,
+                ts=int(ts),
+                market_price=float(market_price),
+                position_qty=float(order_qty),
+                strategy_name=(strategy_name or settings.STRATEGY_NAME),
+                decision_id=decision_id,
+                decision_reason=decision_reason,
+                exit_rule_name=exit_rule_name,
+                dust_details=e.details,
+            ):
+                conn.commit()
+                return None
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SKIP] sell dust guard blocked",
+                    signal=signal,
+                    side=side,
+                    reason=str(e),
+                    market_price=market_price,
+                    order_qty=order_qty,
+                )
+            )
+            notify(f"live pretrade validation blocked ({side}): {e}")
+            return None
         except ValueError as e:
             if side == "SELL" and _record_sell_dust_unsellable(
                 conn=conn,
