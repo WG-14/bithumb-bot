@@ -175,7 +175,8 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
                 "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
                 "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
-                "allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required"
+                "allow_resume=0 effective_flat=1 "
+                "policy_reason=matched_harmless_dust_operator_review_required"
             ),
             "dust_latest_price": 100000000.0,
         }
@@ -191,6 +192,11 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
     assert view.local_qty_below_min is True
     assert view.broker_notional_below_min is False
     assert view.local_notional_below_min is False
+    assert view.resume_allowed is True
+    assert view.new_orders_allowed is True
+    assert view.operator_action == "matched_dust_tracked_resume_allowed"
+    assert "tracked only" in view.operator_message
+    assert "resume/new orders are allowed" in view.operator_message
 
 
 def test_matched_dust_operator_message_does_not_imply_mismatch_or_recovery_concern() -> None:
@@ -253,7 +259,8 @@ def test_matched_dust_resume_safe_operator_view_marks_residual_as_tracked_only()
             "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
             "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
-            "allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
+            "allow_resume=0 effective_flat=1 submit_unknown_count=1 "
+            "policy_reason=matched_harmless_dust_operator_review_required",
             100000000.0,
             0.00009193,
             False,

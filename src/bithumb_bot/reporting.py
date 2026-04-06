@@ -2329,6 +2329,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             balance_source_diag.update(raw_diag)
     except Exception as exc:
         balance_source_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    if dust_view.resume_allowed and dust_view.treat_as_flat:
+        balance_source_diag["flat_start_allowed"] = True
     balance_source_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
         balance_source_diag.get("flat_start_reason"),
         dust_context,

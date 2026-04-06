@@ -77,7 +77,6 @@ class DustClassification:
                 return _metadata_fallback(policy_reason="metadata_parse_error")
 
         present = bool(int(metadata.get("dust_residual_present", 0) or 0) == 1)
-        allow_resume = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
         summary = str(metadata.get("dust_residual_summary") or "none")
         summary_values = _parse_dust_summary(summary)
         effective_flat_raw = metadata.get("dust_effective_flat")
@@ -131,6 +130,49 @@ class DustClassification:
             broker_notional_krw = _estimate_notional(broker_qty, latest_price)
         if local_notional_krw is None:
             local_notional_krw = _estimate_notional(local_qty, latest_price)
+        unresolved_open_order_count = _int_from_metadata_or_summary(
+            metadata,
+            summary_values,
+            metadata_key="unresolved_open_order_count",
+            summary_key="unresolved_open_order_count",
+            default=0,
+        )
+        submit_unknown_count = _int_from_metadata_or_summary(
+            metadata,
+            summary_values,
+            metadata_key="submit_unknown_count",
+            summary_key="submit_unknown_count",
+            default=0,
+        )
+        recovery_required_count = _int_from_metadata_or_summary(
+            metadata,
+            summary_values,
+            metadata_key="recovery_required_count",
+            summary_key="recovery_required_count",
+            default=0,
+        )
+        if (
+            unresolved_open_order_count == 0
+            and "unresolved_open_order_count" not in metadata
+            and "unresolved_open_order_count" not in summary_values
+        ):
+            try:
+                from . import runtime_state
+
+                unresolved_open_order_count = max(0, int(runtime_state.snapshot().unresolved_open_order_count))
+            except Exception:
+                pass
+        if (
+            recovery_required_count == 0
+            and "recovery_required_count" not in metadata
+            and "recovery_required_count" not in summary_values
+        ):
+            try:
+                from . import runtime_state
+
+                recovery_required_count = max(0, int(runtime_state.snapshot().recovery_required_count))
+            except Exception:
+                pass
         qty_gap_tolerance = _float_from_metadata_or_summary(
             metadata,
             summary_values,
@@ -206,13 +248,28 @@ class DustClassification:
             or "none"
         )
         if effective_flat_raw is None and not bool(summary_values.get("effective_flat")):
-            effective_flat = bool(classification == "matched_harmless_dust" or allow_resume)
+            effective_flat = bool(classification == "matched_harmless_dust")
+        allow_resume = bool(
+            classification == "matched_harmless_dust"
+            and effective_flat
+            and unresolved_open_order_count == 0
+            and submit_unknown_count == 0
+            and recovery_required_count == 0
+        )
+        if not present:
+            policy_reason = str(metadata.get("dust_policy_reason") or "none")
+        elif classification == "matched_harmless_dust" and allow_resume:
+            policy_reason = "matched_harmless_dust_resume_allowed"
+        elif classification == "matched_harmless_dust":
+            policy_reason = "matched_harmless_dust_operator_review_required"
+        else:
+            policy_reason = "dangerous_dust_operator_review_required"
         return cls(
             classification=classification,
             present=present,
             allow_resume=allow_resume,
             effective_flat=effective_flat,
-            policy_reason=str(metadata.get("dust_policy_reason") or "none"),
+            policy_reason=policy_reason,
             summary=summary,
             broker_qty=broker_qty,
             local_qty=local_qty,
@@ -312,11 +369,15 @@ def format_flat_start_reason_with_dust(
     raw_reason = str(flat_start_reason or "").strip()
     if not raw_reason:
         return "not_checked"
-    if not raw_reason.startswith("flat_start_"):
-        return raw_reason
 
     dust = dust_context.classification
     if not dust.present:
+        return raw_reason
+
+    if dust_context.operator_view.treat_as_flat and dust_context.operator_view.resume_allowed:
+        return f"flat_start_effective_flat({dust_context.compact_summary})"
+
+    if not raw_reason.startswith("flat_start_"):
         return raw_reason
 
     prefix = (
@@ -682,6 +743,28 @@ def _bool_from_metadata_or_summary(
         return bool(int(summary_value))
     except (TypeError, ValueError):
         return bool(default)
+
+
+def _int_from_metadata_or_summary(
+    metadata: dict[str, object],
+    summary_values: dict[str, object],
+    *,
+    metadata_key: str,
+    summary_key: str,
+    default: int,
+) -> int:
+    if metadata_key in metadata:
+        try:
+            return max(0, int(metadata.get(metadata_key, default) or 0))
+        except (TypeError, ValueError):
+            return max(0, int(default))
+    summary_value = summary_values.get(summary_key)
+    if summary_value is None:
+        return max(0, int(default))
+    try:
+        return max(0, int(summary_value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
 
 
 def _classification_from_policy_reason(policy_reason: str) -> str | None:

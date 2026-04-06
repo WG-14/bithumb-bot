@@ -514,7 +514,15 @@ def _evaluate_dust_residual_policy(
             and recovery_required_count == 0
         ),
     )
-    return dust_eval.to_metadata()
+    metadata = dust_eval.to_metadata()
+    metadata.update(
+        {
+            "unresolved_open_order_count": unresolved_open_order_count,
+            "submit_unknown_count": submit_unknown_count,
+            "recovery_required_count": recovery_required_count,
+        }
+    )
+    return metadata
 
 
 def assert_no_open_orders() -> None:

@@ -259,6 +259,8 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
         return False, "non_live_mode"
     if bool(settings.LIVE_DRY_RUN) or not bool(settings.LIVE_REAL_ORDER_ARMED):
         return False, "not_real_order_path"
+    from . import runtime_state
+    from .dust import DustClassification
     from .db_core import ensure_db
 
     conn = ensure_db()
@@ -276,6 +278,9 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
+            dust = DustClassification.from_metadata(runtime_state.snapshot().last_reconcile_metadata)
+            if dust.classification == "matched_harmless_dust" and dust.allow_resume and dust.effective_flat:
+                return True, f"flat_start_effective_flat({dust.summary})"
             return False, f"local_position_present={asset_qty:.12f}"
     finally:
         conn.close()

@@ -37,7 +37,7 @@ from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
-from .dust import build_dust_display_context
+from .dust import build_dust_display_context, format_flat_start_reason_with_dust
 from .reporting import (
     cmd_experiment_report,
     cmd_decision_telemetry,
@@ -187,6 +187,14 @@ def cmd_status():
             balance_diag.update(raw_diag)
     except Exception as exc:
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+    dust_view = dust_context.operator_view
+    if dust_view.resume_allowed and dust_view.treat_as_flat:
+        balance_diag["flat_start_allowed"] = True
+        balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
+            balance_diag.get("flat_start_reason"),
+            dust_context,
+        )
     raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
     print(f"[STATUS {MARKET} {INTERVAL}{raw_suffix}] at {kst_str(ts)}")
     print(f"  cash_krw={cash:,.0f} (available={cash_available:,.0f}, locked={cash_locked:,.0f})")
@@ -555,6 +563,12 @@ def cmd_health() -> None:
             balance_diag.update(raw_diag)
     except Exception as exc:
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    if dust_view.resume_allowed and dust_view.treat_as_flat:
+        balance_diag["flat_start_allowed"] = True
+        balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
+            balance_diag.get("flat_start_reason"),
+            dust_context,
+        )
 
     print("[HEALTH]")
     print("  [HALT-RECOVERY-STATUS]")

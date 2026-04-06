@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
-from ..dust import build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
+from ..dust import build_dust_display_context
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -279,7 +279,8 @@ class AccountsV1BalanceSource:
 
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
-    from .order_rules import get_effective_order_rules
+    from .. import runtime_state
+    from ..dust import DustClassification
 
     db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -299,49 +300,9 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
-            min_qty = 0.0
-            min_notional = 0.0
-            try:
-                rules = get_effective_order_rules(settings.PAIR).rules
-                min_qty = max(0.0, float(rules.min_qty))
-                min_notional = max(0.0, float(rules.min_notional_krw))
-            except Exception:
-                min_qty = 0.0
-                min_notional = 0.0
-
-            latest_price = None
-            row = conn.execute(
-                """
-                SELECT close
-                FROM candles
-                WHERE close IS NOT NULL
-                ORDER BY ts DESC
-                LIMIT 1
-                """
-            ).fetchone()
-            if row is not None:
-                try:
-                    parsed = float(row["close"])
-                    if parsed > 0:
-                        latest_price = parsed
-                except (TypeError, ValueError):
-                    latest_price = None
-
-            dust = classify_dust_residual(
-                broker_qty=0.0,
-                local_qty=abs(asset_qty),
-                min_qty=min_qty,
-                min_notional_krw=min_notional,
-                latest_price=latest_price,
-                partial_flatten_recent=False,
-                partial_flatten_reason="flat_start_base_row_missing",
-                qty_gap_tolerance=dust_qty_gap_tolerance(
-                    min_qty=min_qty,
-                    default_abs_tolerance=1e-12,
-                ),
-            )
+            dust = DustClassification.from_metadata(runtime_state.snapshot().last_reconcile_metadata)
             dust_context = build_dust_display_context(dust)
-            if dust.effective_flat:
+            if dust.classification == "matched_harmless_dust" and dust.allow_resume and dust.effective_flat:
                 return True, f"flat_start_effective_flat({dust_context.compact_summary})"
             if dust.present:
                 return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"

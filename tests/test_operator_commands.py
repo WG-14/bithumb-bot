@@ -774,8 +774,9 @@ def test_resume_blocks_risk_halt_when_only_matched_dust_policy_review_remains(tm
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
             "dust_effective_flat": 1,
+            "submit_unknown_count": 1,
             "dust_policy_reason": "matched_harmless_dust_operator_review_required",
-            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 min_qty=0.00010000 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 min_qty=0.00010000 submit_unknown_count=1 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
         },
     )
     monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", lambda _broker: None)
@@ -2781,6 +2782,7 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
             "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
             "remote_open_order_found": 0,
             "submit_unknown_unresolved": 0,
+            "submit_unknown_count": 1,
             "balance_split_mismatch_count": 0,
         },
     )
@@ -3895,6 +3897,8 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_broker_local_match=1" in health_out
     assert "dust_qty_below_min=broker=1 local=1" in health_out
     assert "dust_notional_below_min=broker=0 local=0" in health_out
+    assert "balance_source_flat_start_allowed=True" in health_out
+    assert "balance_source_flat_start_reason=flat_start_effective_flat(" in health_out
 
     cmd_recovery_report(as_json=False)
     report_out = capsys.readouterr().out
