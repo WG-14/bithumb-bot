@@ -42,9 +42,18 @@ def _json_with_size_limit(
     if len(encoded) <= max_len:
         return encoded
 
-    protected = {str(k) for k in preserve_keys}
+    protected_keys = [str(k) for k in preserve_keys]
+    protected = set(protected_keys)
     removable_keys = [k for k in sorted(compact.keys()) if k not in protected]
     for key in removable_keys:
+        compact.pop(key, None)
+        encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        if len(encoded) <= max_len:
+            return encoded
+
+    for key in reversed(protected_keys):
+        if key not in compact:
+            continue
         compact.pop(key, None)
         encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
         if len(encoded) <= max_len:
@@ -551,6 +560,23 @@ def record_reconcile_result(
             "dust_residual_allow_resume",
             "dust_policy_reason",
             "dust_residual_summary",
+            "dust_effective_flat",
+            "dust_partial_flatten_recent",
+            "dust_partial_flatten_reason",
+            "dust_qty_gap_tolerance",
+            "dust_qty_gap_small",
+            "dust_broker_qty",
+            "dust_local_qty",
+            "dust_delta_qty",
+            "dust_min_qty",
+            "dust_min_notional_krw",
+            "dust_latest_price",
+            "dust_broker_notional_krw",
+            "dust_local_notional_krw",
+            "dust_broker_qty_is_dust",
+            "dust_local_qty_is_dust",
+            "dust_broker_notional_is_dust",
+            "dust_local_notional_is_dust",
             "recovery_disposition",
             "recovery_progress_state",
             "recovery_classification_reason",

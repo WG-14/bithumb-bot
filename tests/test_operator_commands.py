@@ -3786,7 +3786,12 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 1,
             "dust_policy_reason": "dust_residual_allowed_for_resume",
-            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=dust_residual_allowed_for_resume"
+            ),
+            "oversized_debug_blob": "x" * 5000,
         },
     )
 
@@ -3799,6 +3804,11 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_operator_action=monitor_only" in health_out
     assert "dust_resume_allowed_by_policy=1" in health_out
     assert "dust_treat_as_flat=1" in health_out
+    assert "dust_broker_qty=0.00009629" in health_out
+    assert "dust_local_qty=0.00009629" in health_out
+    assert "dust_broker_local_match=1" in health_out
+    assert "dust_qty_below_min=broker=1 local=1" in health_out
+    assert "dust_notional_below_min=broker=0 local=0" in health_out
 
     cmd_recovery_report(as_json=False)
     report_out = capsys.readouterr().out
@@ -3810,6 +3820,12 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "operator_action=monitor_only" in report_out
     assert "resume_allowed_by_policy=1" in report_out
     assert "treat_as_flat=1" in report_out
+    assert (
+        "broker_qty=0.00009629 local_qty=0.00009629 delta_qty=0.00000000 "
+        "min_qty=0.00010000 min_notional_krw=5000.0"
+    ) in report_out
+    assert "qty_below_min=broker=1 local=1 notional_below_min=broker=0 local=0" in report_out
+    assert "broker_local_match=1" in report_out
 
 
 def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, capsys):

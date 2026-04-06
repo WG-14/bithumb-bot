@@ -140,3 +140,111 @@ def test_dust_classification_and_operator_view_matrix(
     else:
         assert dust.effective_flat is True
         assert view.operator_action == "none"
+
+
+def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None:
+    view = build_dust_operator_view(
+        {
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 0,
+            "dust_policy_reason": "dust_residual_requires_operator_review",
+            "dust_residual_summary": (
+                "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "allow_resume=0 effective_flat=0 policy_reason=dust_residual_requires_operator_review"
+            ),
+            "dust_latest_price": 100000000.0,
+        }
+    )
+
+    assert view.broker_qty == pytest.approx(0.00009193)
+    assert view.local_qty == pytest.approx(0.00009193)
+    assert view.delta_qty == pytest.approx(0.0)
+    assert view.min_qty == pytest.approx(0.0001)
+    assert view.min_notional_krw == pytest.approx(5000.0)
+    assert view.broker_local_match is True
+    assert view.broker_qty_below_min is True
+    assert view.local_qty_below_min is True
+    assert view.broker_notional_below_min is False
+    assert view.local_notional_below_min is False
+
+
+@pytest.mark.parametrize(
+    (
+        "summary",
+        "latest_price",
+        "expected_qty",
+        "expected_resume_allowed",
+        "expected_state",
+        "expected_treat_as_flat",
+        "expected_notional_below_min",
+    ),
+    [
+        (
+            "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
+            "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+            "allow_resume=0 effective_flat=0 policy_reason=dust_residual_requires_operator_review",
+            100000000.0,
+            0.00009193,
+            False,
+            "manual_review_required",
+            False,
+            False,
+        ),
+        (
+            "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+            "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+            "allow_resume=1 effective_flat=1 policy_reason=dust_residual_allowed_for_resume",
+            40000000.0,
+            0.00009629,
+            True,
+            "effective_flat_dust",
+            True,
+            True,
+        ),
+    ],
+    ids=["blocked_matched_dust", "resume_safe_matched_dust"],
+)
+def test_dust_operator_view_keeps_summary_and_detail_consistent(
+    summary: str,
+    latest_price: float,
+    expected_qty: float,
+    expected_resume_allowed: bool,
+    expected_state: str,
+    expected_treat_as_flat: bool,
+    expected_notional_below_min: bool,
+) -> None:
+    view = build_dust_operator_view(
+        {
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1 if expected_resume_allowed else 0,
+            "dust_policy_reason": (
+                "dust_residual_allowed_for_resume"
+                if expected_resume_allowed
+                else "dust_residual_requires_operator_review"
+            ),
+            "dust_residual_summary": summary,
+            "dust_latest_price": latest_price,
+        }
+    )
+
+    assert f"broker_qty={expected_qty:.8f}" in summary
+    assert f"local_qty={expected_qty:.8f}" in summary
+    assert view.broker_qty == pytest.approx(expected_qty)
+    assert view.local_qty == pytest.approx(expected_qty)
+    assert view.delta_qty == pytest.approx(0.0)
+    assert view.broker_local_match is True
+    assert view.resume_allowed is expected_resume_allowed
+    assert view.new_orders_allowed is expected_resume_allowed
+    assert view.state == expected_state
+    assert view.treat_as_flat is expected_treat_as_flat
+    assert view.broker_qty_below_min is True
+    assert view.local_qty_below_min is True
+    assert view.broker_notional_below_min is expected_notional_below_min
+    assert view.local_notional_below_min is expected_notional_below_min
+    assert f"broker_qty={expected_qty:.8f}" in view.compact_summary
+    assert f"local_qty={expected_qty:.8f}" in view.compact_summary
+    assert (
+        f"resume_allowed={1 if expected_resume_allowed else 0}" in view.compact_summary
+    )
+    assert "broker_local_match=1" in view.compact_summary

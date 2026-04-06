@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 
+import pytest
+
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
@@ -212,7 +214,8 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "unresolved_open_order_count=0 recovery_required_count=0 dust_state=manual_review_required" in out
     assert "dust_action=manual_review_before_resume" in out
     assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=0" in out
-    assert "dust_broker_qty=0.00009000 dust_local_qty=0.00009000" in out
+    assert "dust_broker_qty=0.00009000 dust_local_qty=0.00009000 dust_delta_qty=0.00000000" in out
+    assert "dust_min_qty=0.00010000 dust_min_notional_krw=5000.0" in out
     assert "accounts_flat_start_allowed=None" in out
     assert "unresolved_attribution_count=1 recent_recovery_derived_trade_count=1" in out
 
@@ -348,3 +351,111 @@ def test_ops_report_surfaces_resume_safe_dust_without_hiding_unresolved_open_ord
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     assert payload["operator_recovery_summary"]["unresolved_open_order_count"] == 1
     assert payload["operator_recovery_summary"]["dust_resume_allowed_by_policy"] is True
+
+
+def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_path, monkeypatch, capsys):
+    expected_qty = 0.00009193
+    expected_summary = (
+        "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
+        "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+        "allow_resume=0 effective_flat=0 policy_reason=dust_residual_requires_operator_review"
+    )
+    db_path = str(tmp_path / "ops-report-dust-trimmed.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "ok",
+                    "failure_category": "none",
+                    "stale": False,
+                },
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "remote_open_order_found": 0,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 0,
+                "dust_policy_reason": "dust_residual_requires_operator_review",
+                "dust_residual_summary": expected_summary,
+                "dust_broker_qty": expected_qty,
+                "dust_local_qty": expected_qty,
+                "dust_delta_qty": 0.0,
+                "dust_min_qty": 0.0001,
+                "dust_min_notional_krw": 5000.0,
+                "dust_latest_price": 100000000.0,
+                "dust_broker_qty_is_dust": 1,
+                "dust_local_qty_is_dust": 1,
+                "dust_broker_notional_is_dust": 0,
+                "dust_local_notional_is_dust": 0,
+                "dust_qty_gap_small": 1,
+                "oversized_debug_blob": "x" * 5000,
+            },
+            now_epoch_sec=1000.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=1)
+    out = capsys.readouterr().out
+
+    assert f"broker_qty={expected_qty:.8f}" in expected_summary
+    assert f"local_qty={expected_qty:.8f}" in expected_summary
+    assert "allow_resume=0" in expected_summary
+    assert "policy_reason=dust_residual_requires_operator_review" in expected_summary
+    assert "dust_state=manual_review_required" in out
+    assert "dust_action=manual_review_before_resume" in out
+    assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=0" in out
+    assert (
+        f"dust_broker_qty={expected_qty:.8f} dust_local_qty={expected_qty:.8f} "
+        "dust_delta_qty=0.00000000 dust_min_qty=0.00010000 dust_min_notional_krw=5000.0"
+    ) in out
+    assert "dust_broker_local_match=1" in out
+    assert "dust_qty_below_min=broker=1 local=1" in out
+    assert "dust_notional_below_min=broker=0 local=0" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    summary = payload["operator_recovery_summary"]
+    assert summary["dust_state"] == "manual_review_required"
+    assert summary["dust_operator_action"] == "manual_review_before_resume"
+    assert summary["dust_new_orders_allowed"] is False
+    assert summary["dust_resume_allowed_by_policy"] is False
+    assert summary["dust_treat_as_flat"] is False
+    assert summary["dust_broker_qty"] == pytest.approx(expected_qty)
+    assert summary["dust_local_qty"] == pytest.approx(expected_qty)
+    assert summary["dust_broker_local_match"] is True
+    assert summary["dust_broker_qty_below_min"] is True
+    assert summary["dust_local_qty_below_min"] is True
+    assert summary["dust_broker_notional_below_min"] is False
+    assert summary["dust_local_notional_below_min"] is False

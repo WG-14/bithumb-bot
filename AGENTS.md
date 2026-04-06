@@ -355,6 +355,13 @@ Minimum expectations:
 uv run pytest -q
 ```
 
+### Test execution discipline
+- Run focused tests for the changed area before broader tests.
+- Use `pytest --collect-only -q` first when collection/import stability is uncertain.
+- Do not repeat the same full test command only by extending timeout.
+- If the same verification runs longer than 90 seconds, stop repeating it and report the likely bottleneck, alternative validation commands, and residual risk.
+- Run the full suite only once at the end when it is actually needed.
+
 ### If environment/import issues appear
 Use the repository-supported execution style rather than inventing ad hoc commands.
 Prefer `uv run ...` entrypoints and the current package layout under `src/`.
@@ -441,6 +448,13 @@ For each non-trivial patch, provide a concise summary that includes:
 4. whether any new artifact/output was introduced and how it was classified
 5. what tests were run
 6. any remaining risks or follow-up items
+
+Also include:
+- changed files
+- commands executed
+- concise test result summary
+- any blocked or deferred items
+- AWS deployment checks that still require human confirmation
 
 If a patch adds a new runtime artifact, explicitly state:
 - classification

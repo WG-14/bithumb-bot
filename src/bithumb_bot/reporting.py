@@ -15,7 +15,7 @@ from .analytics_context import (
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
-from .dust import build_dust_operator_view
+from .dust import build_dust_display_context
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
@@ -2302,27 +2302,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
         },
     }
-    dust_view = build_dust_operator_view(health_row["last_reconcile_metadata"] if health_row else None)
+    dust_context = build_dust_display_context(health_row["last_reconcile_metadata"] if health_row else None)
+    dust_view = dust_context.operator_view
     payload["operator_recovery_summary"] = {
         "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
         "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
-        "dust_state": dust_view.state,
-        "dust_state_label": dust_view.state_label,
-        "dust_operator_action": dust_view.operator_action,
-        "dust_operator_message": dust_view.operator_message,
-        "dust_broker_local_match": dust_view.broker_local_match,
-        "dust_new_orders_allowed": dust_view.new_orders_allowed,
-        "dust_resume_allowed_by_policy": dust_view.resume_allowed,
-        "dust_treat_as_flat": dust_view.treat_as_flat,
-        "dust_broker_qty": dust_view.broker_qty,
-        "dust_local_qty": dust_view.local_qty,
-        "dust_delta_qty": dust_view.delta_qty,
-        "dust_broker_qty_below_min": dust_view.broker_qty_below_min,
-        "dust_local_qty_below_min": dust_view.local_qty_below_min,
-        "dust_broker_notional_below_min": dust_view.broker_notional_below_min,
-        "dust_local_notional_below_min": dust_view.local_notional_below_min,
-        "dust_min_qty": dust_view.min_qty,
-        "dust_min_notional_krw": dust_view.min_notional_krw,
+        **dust_context.fields,
     }
     balance_source_diag: dict[str, object] = {
         "source": "unavailable",
@@ -2368,11 +2353,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"dust_broker_qty={float(operator_recovery['dust_broker_qty']):.8f} "
         f"dust_local_qty={float(operator_recovery['dust_local_qty']):.8f} "
         f"dust_delta_qty={float(operator_recovery['dust_delta_qty']):.8f} "
+        f"dust_min_qty={float(operator_recovery['dust_min_qty']):.8f} "
+        f"dust_min_notional_krw={float(operator_recovery['dust_min_notional_krw']):.1f} "
         f"dust_broker_local_match={1 if operator_recovery['dust_broker_local_match'] else 0} "
-        f"dust_qty_below_min=broker:{1 if operator_recovery['dust_broker_qty_below_min'] else 0} "
-        f"local:{1 if operator_recovery['dust_local_qty_below_min'] else 0} "
-        f"dust_notional_below_min=broker:{1 if operator_recovery['dust_broker_notional_below_min'] else 0} "
-        f"local:{1 if operator_recovery['dust_local_notional_below_min'] else 0}"
+        f"dust_qty_below_min={dust_context.qty_below_min_summary} "
+        f"dust_notional_below_min={dust_context.notional_below_min_summary}"
     )
     print(
         "  "

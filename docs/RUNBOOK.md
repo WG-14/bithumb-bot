@@ -474,13 +474,33 @@ uv run bithumb-bot run
   1. `uv run bithumb-bot health`
   2. `uv run bithumb-bot recovery-report`
   3. `uv run bithumb-bot ops-report --limit 20`
+- Read the outputs in this order:
+  1. `recovery-report [P1]` and `[P2]` decide whether restart is allowed.
+  2. `recovery-report [P3.0]` explains whether any remaining position is dust-only or restart-blocking dust.
+  3. `ops-report` is the operator cross-check for dust numbers and `/v1/accounts` diagnostics.
+- `resume_allowed=0` and `can_resume=false` always mean do not restart yet. If the blocker list includes `DUST_RESIDUAL_REVIEW_REQUIRED`, treat that as a manual review gate, not as an unresolved-order recovery flow.
 - If `dust_state=manual_review_required`, treat the bot as restart-blocked for new orders even when `/v1/accounts` diagnostics say `accounts_flat_start_allowed=True`.
-- If `dust_state=effective_flat_dust`, the remainder is dust-only and can be treated as effective flat only when `recovery-report` also shows dust resume allowed and unresolved order counts are zero.
+- If `dust_state=effective_flat_dust`, the remainder is dust-only and can be treated as effective flat only when all of these are true:
+  1. `recovery-report` shows `unresolved_count=0`
+  2. `recovery-report` shows `recovery_required_count=0`
+  3. `recovery-report [P3.0]` shows `allow_resume=1` and `resume_allowed_by_policy=1`
 - If `unresolved_count > 0` or `recovery_required_count > 0`, do not downgrade the situation to dust-only until recovery evidence is clear.
+- For manual review, compare three views before any resume decision:
+  1. app view: `health` / `recovery-report` / `ops-report` dust fields
+  2. DB view: local position and recent sell evidence represented by `dust_local_qty`, `recent_dust_unsellable_event`, unresolved counts, and recovery-required counts
+  3. broker view: `/v1/accounts` diagnostics and broker quantity represented by `dust_broker_qty`
+- `dust_broker_qty` and `dust_local_qty` should be read together with `dust_broker_local_match`. A small remainder is only resume-safe when the broker/local remainder matches closely enough and the policy marks it resume-safe.
+- `dust_min_qty` and `dust_min_notional_krw` are different gates. A sell can be blocked because quantity is below minimum, because notional is below minimum, or because both are below minimum. Do not assume one implies the other.
 
 ## Manual App Sell Caution
 
 - If the bot is stopped and you manually sell in the exchange app, run `health` and `recovery-report` again before restarting.
 - Manual app sells can leave dust smaller than exchange minimums. In that case, another sell attempt may fail or create misleading operator signals.
+- Before any manual sell retry, confirm all of the following:
+  1. `unresolved_count=0` and `recovery_required_count=0`
+  2. broker/local dust numbers are understood from `dust_broker_qty`, `dust_local_qty`, and `dust_broker_local_match`
+  3. both exchange limits are checked: `dust_min_qty` and `dust_min_notional_krw`
+  4. the intended sell size is actually above both minimums after quantity-step and decimal normalization
 - Do not assume "almost zero balance" means restart is safe. Confirm `dust_state`, `dust_action`, `dust_resume_allowed_by_policy`, and unresolved order counts first.
+- If `dust_state=manual_review_required`, do not use `resume --force` as a shortcut around dust review. First confirm this is dust only and not an unresolved order or mismatched broker/local state.
 - Prefer `reconcile` plus report review over `resume --force` whenever broker balance changed outside the bot.

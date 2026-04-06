@@ -37,7 +37,7 @@ from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
-from .dust import DustClassification, build_dust_operator_view
+from .dust import build_dust_display_context
 from .reporting import (
     cmd_experiment_report,
     cmd_decision_telemetry,
@@ -478,8 +478,9 @@ def cmd_health() -> None:
     elif not bool(health["trading_enabled"]):
         state_label = "paused"
 
-    dust = DustClassification.from_metadata(health.get("last_reconcile_metadata"))
-    dust_view = build_dust_operator_view(dust)
+    dust_context = build_dust_display_context(health.get("last_reconcile_metadata"))
+    dust = dust_context.classification
+    dust_view = dust_context.operator_view
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
     can_resume_label = "true" if bool(resume_allowed) else "false"
@@ -586,9 +587,12 @@ def cmd_health() -> None:
         "    "
         f"dust_broker_qty={dust_view.broker_qty:.8f} "
         f"dust_local_qty={dust_view.local_qty:.8f} "
+        f"dust_delta_qty={dust_view.delta_qty:.8f} "
+        f"dust_min_qty={dust_view.min_qty:.8f} "
+        f"dust_min_notional_krw={dust_view.min_notional_krw:.1f} "
         f"dust_broker_local_match={1 if dust_view.broker_local_match else 0} "
-        f"dust_qty_below_min({dust_view.qty_below_min_summary}) "
-        f"dust_notional_below_min({dust_view.notional_below_min_summary})"
+        f"dust_qty_below_min={dust_context.qty_below_min_summary} "
+        f"dust_notional_below_min={dust_context.notional_below_min_summary}"
     )
     print(
         "    "
@@ -694,31 +698,21 @@ def cmd_health() -> None:
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
     print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
-    dust = DustClassification.from_metadata(health.get("last_reconcile_metadata"))
-    dust_view = build_dust_operator_view(dust)
-    dust_present = 1 if dust.present else 0
-    dust_allow_resume = 1 if dust.allow_resume else 0
-    dust_policy_reason = dust.policy_reason
-    dust_summary = dust.summary
-    print(f"  dust_residual_present={dust_present}")
-    print(f"  dust_residual_allow_resume={dust_allow_resume}")
-    print(f"  dust_policy_reason={dust_policy_reason}")
-    print(f"  dust_residual_summary={dust_summary}")
-    print(f"  dust_state={dust_view.state}")
-    print(f"  dust_state_label={dust_view.state_label}")
-    print(f"  dust_operator_action={dust_view.operator_action}")
-    print(f"  dust_operator_message={dust_view.operator_message}")
-    print(f"  dust_broker_qty={dust_view.broker_qty:.8f}")
-    print(f"  dust_local_qty={dust_view.local_qty:.8f}")
-    print(f"  dust_delta_qty={dust_view.delta_qty:.8f}")
-    print(f"  dust_min_qty={dust_view.min_qty:.8f}")
-    print(f"  dust_min_notional_krw={dust_view.min_notional_krw:.1f}")
-    print(f"  dust_qty_below_min={dust_view.qty_below_min_summary}")
-    print(f"  dust_notional_below_min={dust_view.notional_below_min_summary}")
-    print(f"  dust_broker_local_match={1 if dust_view.broker_local_match else 0}")
-    print(f"  dust_new_orders_allowed={1 if dust_view.new_orders_allowed else 0}")
-    print(f"  dust_resume_allowed_by_policy={1 if dust_view.resume_allowed else 0}")
-    print(f"  dust_treat_as_flat={1 if dust_view.treat_as_flat else 0}")
+    for key, value in dust_context.fields.items():
+        if isinstance(value, bool):
+            rendered = 1 if value else 0
+        elif isinstance(value, float):
+            if key in {"dust_broker_qty", "dust_local_qty", "dust_delta_qty", "dust_min_qty"}:
+                rendered = f"{value:.8f}"
+            elif key == "dust_min_notional_krw":
+                rendered = f"{value:.1f}"
+            else:
+                rendered = value
+        else:
+            rendered = value
+        print(f"  {key}={rendered}")
+    print(f"  dust_qty_below_min={dust_context.qty_below_min_summary}")
+    print(f"  dust_notional_below_min={dust_context.notional_below_min_summary}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
     print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
     print(f"  halt_reason_code={health['halt_reason_code']}")
@@ -1638,12 +1632,10 @@ def _load_recovery_report(
     unprocessed_remote_open_orders = 0
     remote_known_unresolved_verification_summary = "none"
     balance_split_mismatch_summary = "none"
-    dust = DustClassification.from_metadata(health_row["last_reconcile_metadata"] if health_row else None)
-    dust_view = build_dust_operator_view(dust)
-    dust_residual_summary = dust.summary
-    dust_residual_present = bool(dust.present)
-    dust_residual_allow_resume = bool(dust.allow_resume)
-    dust_policy_reason = dust.policy_reason
+    dust_context = build_dust_display_context(health_row["last_reconcile_metadata"] if health_row else None)
+    dust = dust_context.classification
+    dust_view = dust_context.operator_view
+    dust_fields = dust_context.fields
     if health_row and health_row["last_reconcile_metadata"]:
         try:
             reconcile_meta = json.loads(str(health_row["last_reconcile_metadata"]))
@@ -1858,27 +1850,7 @@ def _load_recovery_report(
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
         "remote_known_unresolved_verification_summary": remote_known_unresolved_verification_summary,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
-        "dust_residual_present": dust_residual_present,
-        "dust_residual_allow_resume": dust_residual_allow_resume,
-        "dust_policy_reason": dust_policy_reason,
-        "dust_residual_summary": dust_residual_summary,
-        "dust_state": dust_view.state,
-        "dust_state_label": dust_view.state_label,
-        "dust_operator_action": dust_view.operator_action,
-        "dust_operator_message": dust_view.operator_message,
-        "dust_broker_local_match": bool(dust_view.broker_local_match),
-        "dust_new_orders_allowed": bool(dust_view.new_orders_allowed),
-        "dust_resume_allowed_by_policy": bool(dust_view.resume_allowed),
-        "dust_treat_as_flat": bool(dust_view.treat_as_flat),
-        "dust_broker_qty": dust_view.broker_qty,
-        "dust_local_qty": dust_view.local_qty,
-        "dust_delta_qty": dust_view.delta_qty,
-        "dust_min_qty": dust_view.min_qty,
-        "dust_min_notional_krw": dust_view.min_notional_krw,
-        "dust_broker_qty_below_min": bool(dust_view.broker_qty_below_min),
-        "dust_local_qty_below_min": bool(dust_view.local_qty_below_min),
-        "dust_broker_notional_below_min": bool(dust_view.broker_notional_below_min),
-        "dust_local_notional_below_min": bool(dust_view.local_notional_below_min),
+        **dust_fields,
         "recent_dust_unsellable_event": (
             {
                 "event_ts": int(recent_dust_unsellable_event["event_ts"]),
@@ -1927,6 +1899,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     if as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return
+    dust_context = build_dust_display_context(report)
 
     print("[RECOVERY-REPORT]")
     print("  [P0] blocker_summary_view")
@@ -1975,14 +1948,16 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         "    "
         f"broker_qty={float(report.get('dust_broker_qty') or 0.0):.8f} "
         f"local_qty={float(report.get('dust_local_qty') or 0.0):.8f} "
-        f"delta_qty={float(report.get('dust_delta_qty') or 0.0):.8f}"
+        f"delta_qty={float(report.get('dust_delta_qty') or 0.0):.8f} "
+        f"min_qty={float(report.get('dust_min_qty') or 0.0):.8f} "
+        f"min_notional_krw={float(report.get('dust_min_notional_krw') or 0.0):.1f}"
     )
     print(
         "    "
-        f"qty_below_min=broker:{1 if bool(report.get('dust_broker_qty_below_min')) else 0} "
-        f"local:{1 if bool(report.get('dust_local_qty_below_min')) else 0} "
-        f"notional_below_min=broker:{1 if bool(report.get('dust_broker_notional_below_min')) else 0} "
-        f"local:{1 if bool(report.get('dust_local_notional_below_min')) else 0}"
+        "qty_below_min="
+        f"{dust_context.qty_below_min_summary} "
+        "notional_below_min="
+        f"{dust_context.notional_below_min_summary}"
     )
     print(f"    broker_local_match={1 if bool(report.get('dust_broker_local_match')) else 0}")
     print(f"    new_orders_allowed={1 if bool(report.get('dust_new_orders_allowed')) else 0}")

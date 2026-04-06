@@ -228,6 +228,13 @@ JSON 출력이 필요하면 `--json`을 사용합니다.
 - Check `dust_state`, `dust_action`, `dust_new_orders_allowed`, `dust_resume_allowed`, and `dust_treat_as_flat` together.
 - `dust_state=manual_review_required` means "not an unresolved order yet still not safely resumable". New orders stay blocked until operator review.
 - `dust_state=effective_flat_dust` means the remainder is dust-only and can be treated as operationally flat when `recovery-report` also shows no unresolved or recovery-required orders.
+- Use the field groups this way:
+  1. restart gate: `resume_allowed`, `can_resume`, `blockers`
+  2. dust policy: `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_treat_as_flat`
+  3. quantity cross-check: `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, `dust_broker_local_match`
+  4. exchange minimum cross-check: `dust_min_qty`, `dust_min_notional_krw`, `dust_qty_below_min`, `dust_notional_below_min`
+- `dust_min_qty` and `dust_min_notional_krw` answer different questions. Operators should not conclude "sellable" until both minimums are satisfied after rounding and quantity-step normalization.
+- If `dust_state=manual_review_required`, the safe reading is: "not an unresolved order yet, but still not restart-safe". Resume remains blocked until the operator verifies broker/app/DB state and confirms the remainder is not a recoverable open-order problem.
 - To avoid confusion, classify states in this order:
   1. unresolved/recovery-required order problem
   2. dust residual requiring manual review

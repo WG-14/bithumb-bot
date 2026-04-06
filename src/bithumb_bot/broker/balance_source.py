@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
-from ..dust import classify_dust_residual, dust_qty_gap_tolerance
+from ..dust import build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -340,10 +340,11 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
                     default_abs_tolerance=1e-12,
                 ),
             )
+            dust_context = build_dust_display_context(dust)
             if dust.effective_flat:
-                return True, f"flat_start_effective_flat({dust.summary})"
+                return True, f"flat_start_effective_flat({dust_context.compact_summary})"
             if dust.present:
-                return False, f"flat_start_requires_operator_review({dust.summary})"
+                return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"
             return False, f"local_position_present={asset_qty:.12f}"
     finally:
         conn.close()
