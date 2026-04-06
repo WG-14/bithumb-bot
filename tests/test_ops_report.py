@@ -391,6 +391,15 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
                     "reason": "ok",
                     "failure_category": "none",
                     "stale": False,
+                    "flat_start_reason": (
+                        "flat_start_requires_operator_review("
+                        "state=manual_review_required broker_qty=0.00000000 "
+                        "local_qty=0.00009193 delta_qty=-0.00009193 min_qty=0.00010000 "
+                        "min_notional_krw=5000.0 qty_below_min(broker=0 local=1) "
+                        "notional_below_min(broker=0 local=0) broker_local_match=0 "
+                        "operator_action=manual_review_before_resume new_orders_allowed=0 "
+                        "resume_allowed=0 treat_as_flat=0)"
+                    ),
                 },
             },
         )(),
@@ -444,6 +453,14 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert "dust_broker_local_match=1" in out
     assert "dust_qty_below_min=broker=1 local=1" in out
     assert "dust_notional_below_min=broker=0 local=0" in out
+    assert (
+        "accounts_flat_start_reason=flat_start_requires_operator_review("
+        "state=manual_review_required broker_qty=0.00009193 local_qty=0.00009193 "
+        "delta_qty=0.00000000 min_qty=0.00010000 min_notional_krw=5000.0 "
+        "qty_below_min(broker=1 local=1) notional_below_min(broker=0 local=0) "
+        "broker_local_match=1 operator_action=manual_review_before_resume "
+        "new_orders_allowed=0 resume_allowed=0 treat_as_flat=0)"
+    ) in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     summary = payload["operator_recovery_summary"]
@@ -459,3 +476,11 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert summary["dust_local_qty_below_min"] is True
     assert summary["dust_broker_notional_below_min"] is False
     assert summary["dust_local_notional_below_min"] is False
+    assert payload["balance_source_diagnostics"]["flat_start_reason"] == (
+        "flat_start_requires_operator_review("
+        "state=manual_review_required broker_qty=0.00009193 local_qty=0.00009193 "
+        "delta_qty=0.00000000 min_qty=0.00010000 min_notional_krw=5000.0 "
+        "qty_below_min(broker=1 local=1) notional_below_min(broker=0 local=0) "
+        "broker_local_match=1 operator_action=manual_review_before_resume "
+        "new_orders_allowed=0 resume_allowed=0 treat_as_flat=0)"
+    )

@@ -283,6 +283,28 @@ class DustDisplayContext:
         return self.operator_view.compact_summary
 
 
+def format_flat_start_reason_with_dust(
+    flat_start_reason: object,
+    dust_context: DustDisplayContext,
+) -> str:
+    raw_reason = str(flat_start_reason or "").strip()
+    if not raw_reason:
+        return "not_checked"
+    if not raw_reason.startswith("flat_start_"):
+        return raw_reason
+
+    dust = dust_context.classification
+    if not dust.present:
+        return raw_reason
+
+    prefix = (
+        "flat_start_effective_flat"
+        if dust_context.operator_view.treat_as_flat
+        else "flat_start_requires_operator_review"
+    )
+    return f"{prefix}({dust_context.compact_summary})"
+
+
 def dust_qty_gap_tolerance(*, min_qty: float, default_abs_tolerance: float) -> float:
     normalized_min_qty = max(0.0, float(min_qty))
     normalized_default = max(0.0, float(default_abs_tolerance))

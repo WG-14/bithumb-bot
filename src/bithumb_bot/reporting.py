@@ -15,7 +15,7 @@ from .analytics_context import (
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .db_core import ensure_db
-from .dust import build_dust_display_context
+from .dust import build_dust_display_context, format_flat_start_reason_with_dust
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
@@ -2329,6 +2329,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             balance_source_diag.update(raw_diag)
     except Exception as exc:
         balance_source_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    balance_source_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
+        balance_source_diag.get("flat_start_reason"),
+        dust_context,
+    )
     payload["balance_source_diagnostics"] = balance_source_diag
     write_json_atomic(PATH_MANAGER.ops_report_path(), payload)
 
