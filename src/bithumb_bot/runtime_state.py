@@ -665,19 +665,65 @@ def set_startup_gate_reason(reason: str | None) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
         _STATE.startup_gate_reason = _clip(reason)
+        existing_metadata: dict[str, object] = {}
+        if _STATE.last_reconcile_metadata:
+            try:
+                decoded = json.loads(_STATE.last_reconcile_metadata)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, dict):
+                existing_metadata = dict(decoded)
         if reason:
             _STATE.last_reconcile_reason_code = "STARTUP_GATE_BLOCKED"
+            existing_metadata["startup_gate_reason"] = _STATE.startup_gate_reason
+            existing_metadata["startup_gate_blocked"] = True
             _STATE.last_reconcile_metadata = _json_with_size_limit(
-                {
-                    "startup_gate_reason": _STATE.startup_gate_reason,
-                    "startup_gate_blocked": True,
-                },
+                existing_metadata,
                 max_len=1000,
-                preserve_keys=("startup_gate_reason", "startup_gate_blocked"),
+                preserve_keys=(
+                    "startup_gate_reason",
+                    "startup_gate_blocked",
+                    "balance_source",
+                    "balance_observed_ts_ms",
+                    "broker_read_journal",
+                    "balance_split_mismatch_count",
+                    "balance_split_mismatch_summary",
+                    "dust_classification",
+                    "dust_residual_present",
+                    "dust_residual_allow_resume",
+                    "dust_policy_reason",
+                    "dust_residual_summary",
+                    "dust_effective_flat",
+                    "dust_partial_flatten_recent",
+                    "dust_partial_flatten_reason",
+                    "dust_qty_gap_tolerance",
+                    "dust_qty_gap_small",
+                    "dust_broker_qty",
+                    "dust_local_qty",
+                    "dust_delta_qty",
+                    "dust_min_qty",
+                    "dust_min_notional_krw",
+                    "dust_latest_price",
+                    "dust_broker_notional_krw",
+                    "dust_local_notional_krw",
+                    "dust_broker_qty_is_dust",
+                    "dust_local_qty_is_dust",
+                    "dust_broker_notional_is_dust",
+                    "dust_local_notional_is_dust",
+                    "recovery_disposition",
+                    "recovery_progress_state",
+                    "recovery_classification_reason",
+                ),
             )
         elif _STATE.last_reconcile_reason_code == "STARTUP_GATE_BLOCKED":
             _STATE.last_reconcile_reason_code = None
-            _STATE.last_reconcile_metadata = None
+            existing_metadata.pop("startup_gate_reason", None)
+            existing_metadata.pop("startup_gate_blocked", None)
+            _STATE.last_reconcile_metadata = (
+                _json_with_size_limit(existing_metadata, max_len=1000)
+                if existing_metadata
+                else None
+            )
         _persist_state(_STATE)
 
 
