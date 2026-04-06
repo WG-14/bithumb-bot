@@ -1709,6 +1709,8 @@ def _load_recovery_report(
             return "uv run python bot.py reconcile"
         if code == "HALT_RISK_OPEN_POSITION":
             return "uv run python bot.py flatten-position"
+        if code == "DUST_RESIDUAL_REVIEW_REQUIRED":
+            return "uv run python bot.py recovery-report --json"
         if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
             return "uv run python bot.py restart-checklist"
         return recommended_command

@@ -2680,6 +2680,56 @@ def test_recovery_report_can_resume_true_again_after_risk_halt_is_flat(tmp_path)
     assert report["resume_blockers"] == []
 
 
+def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_without_halt(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 0,
+            "dust_policy_reason": "dust_residual_requires_operator_review",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    eligible, blockers = evaluate_resume_eligibility()
+
+    assert eligible is False
+    assert [b.code for b in blockers] == ["DUST_RESIDUAL_REVIEW_REQUIRED"]
+    assert all(b.overridable is False for b in blockers)
+
+
+def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 0,
+            "dust_policy_reason": "dust_residual_requires_operator_review",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000",
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    report = _load_recovery_report()
+
+    assert report["resume_allowed"] is False
+    assert report["can_resume"] is False
+    assert "DUST_RESIDUAL_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert report["operator_next_action"] != "resume_now"
+    assert report["operator_next_action"] == "investigate_blockers"
+
+
 def test_resume_eligibility_clears_stale_lock_halt_after_successful_reconcile_evidence(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.disable_trading_until(
