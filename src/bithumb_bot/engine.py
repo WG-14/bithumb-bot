@@ -5,6 +5,7 @@ import math
 import time
 import json
 import os
+import re
 from dataclasses import dataclass
 
 from .config import (
@@ -124,6 +125,30 @@ def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
         "policy_reason": str(reconcile_meta.get("dust_policy_reason") or "-"),
         "summary": str(reconcile_meta.get("dust_residual_summary") or "none"),
     }
+
+
+_DUST_SUMMARY_NUMERIC_RE = re.compile(
+    r"\b(?P<key>delta|min_qty|min_notional_krw)=(-?\d+(?:\.\d+)?)"
+)
+
+
+def _dust_residual_requires_operator_review(dust_context: dict[str, object]) -> bool:
+    if not bool(dust_context["present"]) or bool(dust_context["allow_resume"]):
+        return False
+
+    summary = str(dust_context.get("summary") or "")
+    metrics: dict[str, float] = {}
+    for match in _DUST_SUMMARY_NUMERIC_RE.finditer(summary):
+        key = str(match.group("key"))
+        try:
+            metrics[key] = float(match.group(2))
+        except (TypeError, ValueError):
+            continue
+
+    delta_qty = abs(metrics.get("delta", 0.0))
+    min_qty = max(0.0, metrics.get("min_qty", 0.0))
+    min_notional = max(0.0, metrics.get("min_notional_krw", 0.0))
+    return bool(delta_qty > CLEANUP_REVALIDATION_POSITION_EPS or min_qty > 0.0 or min_notional > 0.0)
 
 
 LIVE_UNRESOLVED_ORDER_STATUSES = (
@@ -535,6 +560,19 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
         )
 
     dust_context_for_halt = _reconcile_dust_context(state.last_reconcile_metadata)
+    if _dust_residual_requires_operator_review(dust_context_for_halt):
+        reasons.append(
+            _resume_blocker(
+                code="DUST_RESIDUAL_REVIEW_REQUIRED",
+                detail=(
+                    "dust residual requires operator review before resume: "
+                    f"policy={str(dust_context_for_halt['policy_reason'])} "
+                    f"summary={str(dust_context_for_halt['summary'])}"
+                ),
+                overridable=False,
+            )
+        )
+
     unresolved_dust_safe = bool(
         state.halt_state_unresolved
         and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
