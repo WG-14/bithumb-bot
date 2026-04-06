@@ -2707,7 +2707,7 @@ def test_recovery_report_can_resume_true_again_after_risk_halt_is_flat(tmp_path)
     assert report["resume_blockers"] == []
 
 
-def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_without_halt(tmp_path):
+def test_resume_eligibility_allows_matched_harmless_dust_when_policy_marks_it_tracked_only(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.enable_trading()
     runtime_state.record_reconcile_result(
@@ -2715,9 +2715,14 @@ def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_witho
         reason_code="RECONCILE_OK",
         metadata={
             "dust_residual_present": 1,
-            "dust_residual_allow_resume": 0,
-            "dust_policy_reason": "matched_harmless_dust_operator_review_required",
-            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 min_qty=0.00010000 min_notional_krw=5000.0",
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
             "remote_open_order_found": 0,
             "submit_unknown_unresolved": 0,
             "balance_split_mismatch_count": 0,
@@ -2726,9 +2731,8 @@ def test_resume_eligibility_blocks_when_dust_requires_operator_review_even_witho
 
     eligible, blockers = evaluate_resume_eligibility()
 
-    assert eligible is False
-    assert [b.code for b in blockers] == ["MATCHED_DUST_POLICY_REVIEW_REQUIRED"]
-    assert all(b.overridable is False for b in blockers)
+    assert eligible is True
+    assert blockers == []
 
 
 def test_resume_eligibility_keeps_unresolved_open_order_block_even_when_dust_is_resume_safe(tmp_path):
@@ -2791,6 +2795,39 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
     assert report["dust_state"] == "matched_harmless_dust"
     assert report["dust_new_orders_allowed"] is False
     assert report["dust_resume_allowed_by_policy"] is False
+
+
+def test_recovery_report_allows_resume_now_for_matched_harmless_dust_when_tracked_only(tmp_path):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    report = _load_recovery_report()
+
+    assert report["resume_allowed"] is True
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
+    assert report["operator_next_action"] == "resume_now"
+    assert report["dust_state"] == "matched_harmless_dust"
+    assert report["dust_new_orders_allowed"] is True
+    assert report["dust_resume_allowed_by_policy"] is True
 
 
 def test_recovery_report_prioritizes_dangerous_dust_when_unresolved_order_also_blocks_resume(tmp_path):
@@ -3850,7 +3887,7 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_residual_allow_resume=1" in health_out
     assert "dust_policy_reason=matched_harmless_dust_resume_allowed" in health_out
     assert "dust_state=matched_harmless_dust" in health_out
-    assert "dust_operator_action=monitor_only" in health_out
+    assert "dust_operator_action=matched_dust_tracked_resume_allowed" in health_out
     assert "dust_resume_allowed_by_policy=1" in health_out
     assert "dust_treat_as_flat=1" in health_out
     assert "dust_broker_qty=0.00009629" in health_out
@@ -3866,7 +3903,7 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "allow_resume=1" in report_out
     assert "policy_reason=matched_harmless_dust_resume_allowed" in report_out
     assert "state=matched_harmless_dust" in report_out
-    assert "operator_action=monitor_only" in report_out
+    assert "operator_action=matched_dust_tracked_resume_allowed" in report_out
     assert "resume_allowed_by_policy=1" in report_out
     assert "treat_as_flat=1" in report_out
     assert (

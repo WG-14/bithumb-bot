@@ -487,9 +487,10 @@ def build_dust_operator_view(
         state = "matched_harmless_dust"
         state_label = "matched harmless dust residual"
         if dust.allow_resume:
-            operator_action = "monitor_only"
+            operator_action = "matched_dust_tracked_resume_allowed"
             operator_message = (
-                "Matched harmless dust only. Exposure is effectively flat and current policy permits resume."
+                "Broker/local matched dust remains tracked below minimum trade size, so it is not auto-liquidated. "
+                "This residual is tracked only, effective-flat gating applies, and resume/new orders are allowed."
             )
             new_orders_allowed = True
             resume_allowed = True

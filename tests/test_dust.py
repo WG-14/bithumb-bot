@@ -215,6 +215,29 @@ def test_matched_dust_operator_message_does_not_imply_mismatch_or_recovery_conce
     assert "recovery concern" not in view.operator_message.lower()
 
 
+def test_matched_dust_resume_safe_operator_view_marks_residual_as_tracked_only() -> None:
+    view = build_dust_operator_view(
+        classify_dust_residual(
+            broker_qty=0.00009629,
+            local_qty=0.00009629,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=40_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=True,
+        )
+    )
+
+    assert view.resume_allowed is True
+    assert view.new_orders_allowed is True
+    assert view.treat_as_flat is True
+    assert view.operator_action == "matched_dust_tracked_resume_allowed"
+    assert "tracked only" in view.operator_message
+    assert "resume/new orders are allowed" in view.operator_message
+
+
 @pytest.mark.parametrize(
     (
         "summary",

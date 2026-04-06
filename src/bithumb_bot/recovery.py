@@ -481,6 +481,19 @@ def _evaluate_dust_residual_policy(
         min_qty = 0.0
         min_notional = 0.0
 
+    status_counts = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
+            SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
+            SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
+        FROM orders
+        """
+    ).fetchone()
+    unresolved_open_order_count = int(status_counts["unresolved_open_order_count"] or 0) if status_counts else 0
+    submit_unknown_count = int(status_counts["submit_unknown_count"] or 0) if status_counts else 0
+    recovery_required_count = int(status_counts["recovery_required_count"] or 0) if status_counts else 0
+
     recent_flatten, recent_flatten_reason = _is_partial_flatten_recent(now_sec=time.time())
     est_price = _latest_price_for_notional_estimate(conn)
     dust_eval = classify_dust_residual(
@@ -494,6 +507,11 @@ def _evaluate_dust_residual_policy(
         qty_gap_tolerance=dust_qty_gap_tolerance(
             min_qty=min_qty,
             default_abs_tolerance=ASSET_SPLIT_ABS_TOL * 10.0,
+        ),
+        matched_harmless_resume_allowed=(
+            unresolved_open_order_count == 0
+            and submit_unknown_count == 0
+            and recovery_required_count == 0
         ),
     )
     return dust_eval.to_metadata()

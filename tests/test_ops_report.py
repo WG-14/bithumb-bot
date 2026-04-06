@@ -459,7 +459,7 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     expected_summary = (
         "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
         "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-        "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required"
+        "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
     )
     db_path = str(tmp_path / "ops-report-dust-trimmed.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
@@ -515,8 +515,8 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
             metadata={
                 "remote_open_order_found": 0,
                 "dust_residual_present": 1,
-                "dust_residual_allow_resume": 0,
-                "dust_policy_reason": "matched_harmless_dust_operator_review_required",
+                "dust_residual_allow_resume": 1,
+                "dust_policy_reason": "matched_harmless_dust_resume_allowed",
                 "dust_residual_summary": expected_summary,
                 "dust_broker_qty": expected_qty,
                 "dust_local_qty": expected_qty,
@@ -542,11 +542,11 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
 
     assert f"broker_qty={expected_qty:.8f}" in expected_summary
     assert f"local_qty={expected_qty:.8f}" in expected_summary
-    assert "allow_resume=0" in expected_summary
-    assert "policy_reason=matched_harmless_dust_operator_review_required" in expected_summary
+    assert "allow_resume=1" in expected_summary
+    assert "policy_reason=matched_harmless_dust_resume_allowed" in expected_summary
     assert "dust_state=matched_harmless_dust" in out
-    assert "dust_action=review_matched_dust_policy" in out
-    assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=1" in out
+    assert "dust_action=matched_dust_tracked_resume_allowed" in out
+    assert "dust_new_orders_allowed=1 dust_resume_allowed=1 dust_treat_as_flat=1" in out
     assert (
         f"dust_broker_qty={expected_qty:.8f} dust_local_qty={expected_qty:.8f} "
         "dust_delta_qty=0.00000000 dust_min_qty=0.00010000 dust_min_notional_krw=5000.0"
@@ -557,9 +557,9 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     summary = payload["operator_recovery_summary"]
     assert summary["dust_state"] == "matched_harmless_dust"
-    assert summary["dust_operator_action"] == "review_matched_dust_policy"
-    assert summary["dust_new_orders_allowed"] is False
-    assert summary["dust_resume_allowed_by_policy"] is False
+    assert summary["dust_operator_action"] == "matched_dust_tracked_resume_allowed"
+    assert summary["dust_new_orders_allowed"] is True
+    assert summary["dust_resume_allowed_by_policy"] is True
     assert summary["dust_treat_as_flat"] is True
     assert summary["dust_broker_qty"] == pytest.approx(expected_qty)
     assert summary["dust_local_qty"] == pytest.approx(expected_qty)
@@ -573,6 +573,6 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
         "state=matched_harmless_dust broker_qty=0.00009193 local_qty=0.00009193 "
         "delta_qty=0.00000000 min_qty=0.00010000 min_notional_krw=5000.0 "
         "qty_below_min(broker=1 local=1) notional_below_min(broker=0 local=0) "
-        "broker_local_match=1 operator_action=review_matched_dust_policy "
-        "new_orders_allowed=0 resume_allowed=0 treat_as_flat=1)"
+        "broker_local_match=1 operator_action=matched_dust_tracked_resume_allowed "
+        "new_orders_allowed=1 resume_allowed=1 treat_as_flat=1)"
     )
