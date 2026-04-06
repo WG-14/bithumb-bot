@@ -347,11 +347,11 @@ def test_ops_report_surfaces_resume_safe_dust_without_hiding_unresolved_open_ord
 
     assert "unresolved_open_order_count=1 recovery_required_count=0" in out
     assert "dust_state=matched_harmless_dust" in out
-    assert "dust_new_orders_allowed=0 dust_resume_allowed=0" in out
+    assert "dust_new_orders_allowed=1 dust_resume_allowed=1" in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     assert payload["operator_recovery_summary"]["unresolved_open_order_count"] == 1
-    assert payload["operator_recovery_summary"]["dust_resume_allowed_by_policy"] is False
+    assert payload["operator_recovery_summary"]["dust_resume_allowed_by_policy"] is True
 
 
 def test_ops_report_surfaces_dangerous_dust_alongside_unresolved_open_orders(tmp_path, monkeypatch, capsys):

@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
-from ..dust import build_dust_display_context
+from ..dust import build_dust_display_context, dust_qty_gap_tolerance
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -306,7 +306,36 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
                 return True, f"flat_start_effective_flat({dust_context.compact_summary})"
             if dust.present:
                 return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"
-            return False, f"local_position_present={asset_qty:.12f}"
+            try:
+                from . import order_rules
+
+                rules = order_rules.get_effective_order_rules(settings.PAIR).rules
+                min_qty = float(rules.min_qty)
+                min_notional_krw = float(rules.min_notional_krw)
+                qty_gap_tolerance = dust_qty_gap_tolerance(
+                    min_qty=min_qty,
+                    default_abs_tolerance=1e-12,
+                )
+                local_only_summary = (
+                    "state=dangerous_dust "
+                    f"broker_qty={0.0:.8f} "
+                    f"local_qty={asset_qty:.8f} "
+                    f"delta_qty={-asset_qty:.8f} "
+                    f"min_qty={min_qty:.8f} "
+                    f"min_notional_krw={min_notional_krw:.1f} "
+                    f"qty_gap_tolerance={qty_gap_tolerance:.8f} "
+                    "qty_gap_small=1 "
+                    "qty_below_min(broker=0 local=1) "
+                    "notional_below_min(broker=0 local=0) "
+                    "broker_local_match=0 "
+                    "operator_action=manual_review_before_resume "
+                    "new_orders_allowed=0 "
+                    "resume_allowed=0 "
+                    "treat_as_flat=0"
+                )
+                return False, f"flat_start_requires_operator_review({local_only_summary})"
+            except Exception:
+                return False, f"flat_start_requires_operator_review(local_position_present={asset_qty:.12f})"
     finally:
         conn.close()
     return True, "flat_start_safe"

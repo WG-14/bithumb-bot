@@ -151,28 +151,6 @@ class DustClassification:
             summary_key="recovery_required_count",
             default=0,
         )
-        if (
-            unresolved_open_order_count == 0
-            and "unresolved_open_order_count" not in metadata
-            and "unresolved_open_order_count" not in summary_values
-        ):
-            try:
-                from . import runtime_state
-
-                unresolved_open_order_count = max(0, int(runtime_state.snapshot().unresolved_open_order_count))
-            except Exception:
-                pass
-        if (
-            recovery_required_count == 0
-            and "recovery_required_count" not in metadata
-            and "recovery_required_count" not in summary_values
-        ):
-            try:
-                from . import runtime_state
-
-                recovery_required_count = max(0, int(runtime_state.snapshot().recovery_required_count))
-            except Exception:
-                pass
         qty_gap_tolerance = _float_from_metadata_or_summary(
             metadata,
             summary_values,
