@@ -952,12 +952,13 @@ def _record_harmless_dust_exit_suppression(
     dust_context = build_dust_display_context(state.last_reconcile_metadata)
     dust = dust_context.classification
     dust_view = dust_context.operator_view
-    if not (
+    harmless_dust_effective_flat = bool(
         dust.present
         and dust.classification == DustState.HARMLESS_DUST.value
         and dust_view.resume_allowed
         and dust_view.treat_as_flat
-    ):
+    )
+    if not harmless_dust_effective_flat:
         return False
 
     requested_qty = float(requested_qty)
@@ -969,14 +970,19 @@ def _record_harmless_dust_exit_suppression(
     notional_below_min = bool(
         dust.min_notional_krw > 0 and normalized_qty > 0 and (normalized_qty * market_price) < dust.min_notional_krw
     )
-    if not any((qty_below_min, normalized_non_positive, normalized_below_min, notional_below_min)):
-        return False
+    suppression_scope = (
+        "harmless_dust_below_min"
+        if any((qty_below_min, normalized_non_positive, normalized_below_min, notional_below_min))
+        else "harmless_dust_effective_flat"
+    )
 
     strategy_name_value = strategy_name or settings.STRATEGY_NAME
     strategy_context = f"{settings.MODE}:{strategy_name_value}:{settings.INTERVAL}"
     suppression_reason = "decision_suppressed:harmless_dust_exit"
     suppression_summary = (
         f"{suppression_reason};{dust_context.compact_summary};"
+        f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0};"
+        f"suppression_scope={suppression_scope};"
         f"requested_qty={requested_qty:.12f};normalized_qty={normalized_qty:.12f};"
         f"market_price={market_price:.8f};qty_below_min={1 if qty_below_min else 0};"
         f"normalized_non_positive={1 if normalized_non_positive else 0};"
@@ -1011,6 +1017,8 @@ def _record_harmless_dust_exit_suppression(
         "suppression_reason": suppression_reason,
         "suppression_summary": suppression_summary,
         "suppression_key": suppression_key,
+        "effective_flat_due_to_harmless_dust": bool(dust_context.effective_flat_due_to_harmless_dust),
+        "suppression_scope": suppression_scope,
     }
     record_order_suppression(
         conn=conn,
@@ -1050,6 +1058,7 @@ def _record_harmless_dust_exit_suppression(
             reason_code=DUST_RESIDUAL_SUPPRESSED,
             state=dust_view.state,
             operator_action=dust_view.operator_action,
+            suppression_scope=suppression_scope,
             requested_qty=requested_qty,
             normalized_qty=normalized_qty,
             market_price=market_price,
@@ -1071,10 +1080,12 @@ def _record_harmless_dust_exit_suppression(
             dust_residual_present=1 if dust.present else 0,
             dust_residual_allow_resume=1 if dust.allow_resume else 0,
             dust_effective_flat=1 if dust.effective_flat else 0,
+            effective_flat_due_to_harmless_dust=1 if dust_context.effective_flat_due_to_harmless_dust else 0,
             qty_below_min=1 if qty_below_min else 0,
             normalized_non_positive=1 if normalized_non_positive else 0,
             normalized_below_min=1 if normalized_below_min else 0,
             notional_below_min=1 if notional_below_min else 0,
+            suppression_scope=suppression_scope,
             dust_signature=suppression_key,
         )
     )

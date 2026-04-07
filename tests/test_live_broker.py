@@ -7,6 +7,7 @@ import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
+from bithumb_bot.broker import live as live_module
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
     adjust_buy_order_qty_for_dust_safety,
@@ -2518,6 +2519,89 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
+def test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qty_preview(monkeypatch, tmp_path):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_harmless_dust_state_only.sqlite"))
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    metadata = {
+        "dust_classification": "harmless_dust",
+        "dust_residual_present": 1,
+        "dust_residual_allow_resume": 1,
+        "dust_effective_flat": 1,
+        "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+        "dust_partial_flatten_recent": 0,
+        "dust_partial_flatten_reason": "flatten_not_recent",
+        "dust_qty_gap_tolerance": 0.00005,
+        "dust_qty_gap_small": 1,
+        "dust_broker_qty": 0.00009193,
+        "dust_local_qty": 0.00009193,
+        "dust_delta_qty": 0.0,
+        "dust_min_qty": 0.0001,
+        "dust_min_notional_krw": 5_000.0,
+        "dust_latest_price": 100_000_000.0,
+        "dust_broker_notional_krw": 9_193.0,
+        "dust_local_notional_krw": 9_193.0,
+        "dust_broker_qty_is_dust": 1,
+        "dust_local_qty_is_dust": 1,
+        "dust_broker_notional_is_dust": 0,
+        "dust_local_notional_is_dust": 0,
+        "dust_residual_summary": (
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+            "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+        ),
+    }
+    runtime_state.record_reconcile_result(success=True, metadata=metadata)
+
+    conn = ensure_db(str(tmp_path / "sell_harmless_dust_state_only.sqlite"))
+    try:
+        state = type("_State", (), {"last_reconcile_metadata": json.dumps(metadata)})()
+        suppressed = live_module._record_harmless_dust_exit_suppression(
+            conn=conn,
+            state=state,
+            signal="SELL",
+            side="SELL",
+            requested_qty=0.0002,
+            market_price=100_000_000.0,
+            normalized_qty=0.0002,
+            strategy_name="dust_exit_test",
+            decision_id=77,
+            decision_reason="partial_take_profit",
+            exit_rule_name="exit_signal",
+        )
+        conn.commit()
+
+        order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+        suppression_row = conn.execute(
+            """
+            SELECT reason_code, dust_state, dust_action, summary
+            FROM order_suppressions
+            WHERE strategy_name='dust_exit_test' AND signal='SELL'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert suppressed is True
+    assert order_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    assert suppression_row["dust_state"] == "harmless_dust"
+    assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
+    assert "suppression_scope=harmless_dust_effective_flat" in suppression_row["summary"]
+    assert "effective_flat_due_to_harmless_dust=1" in suppression_row["summary"]
+    assert len(notifications) == 1
+    assert "reason_code=DUST_RESIDUAL_SUPPRESSED" in notifications[0]
 
 
 @pytest.mark.fast_regression
