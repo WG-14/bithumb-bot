@@ -204,3 +204,7 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["effective_flat"] is True
     assert ctx["normalized_exposure_active"] is False
     assert ctx["normalized_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["open_exposure_qty"] == pytest.approx(0.00009629)
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)

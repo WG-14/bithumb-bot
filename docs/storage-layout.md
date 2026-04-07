@@ -411,16 +411,21 @@ runtime_snapshot_YYYYMMDD_HHMMSS.tar.gz
 `open_position_lots.position_state` is part of the storage contract and must keep the
 following meaning stable:
 
-- `open_exposure`: the real strategy-visible position. SELL submission logic should
-  read this quantity as the sellable lot base.
-- `dust_tracking`: operator tracking only. It records harmless dust evidence and is
-  excluded from SELL submission by default.
+- `open_exposure`: the real strategy-visible position and the default SELL submission base.
+  SELL submission logic should read `open_exposure_qty` and exclude `dust_tracking_qty`.
+- `dust_tracking`: operator-only residual tracking. It records harmless dust evidence and is
+  excluded from normal SELL submission by default.
 
 Practical routing rules:
 
-- BUY fills create `open_exposure` lots.
-- SELL matching consumes `open_exposure` lots first.
+- BUY fills create or refresh `open_exposure` lots.
+- SELL matching consumes `open_exposure` lots only.
 - `dust_tracking` lots are not sellable inventory and must not be counted as the
   basis for a normal SELL order.
 - harmless dust suppression is defined around the `dust_tracking` path, not the
   `open_exposure` path.
+- boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty`
+  stays `open_exposure`.
+- if a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as
+  operator evidence and remains excluded from normal SELL submission until an operator
+  clears the inconsistency.

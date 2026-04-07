@@ -2140,6 +2140,18 @@ def test_adjust_sell_order_qty_for_dust_safety_exposes_remainder_dust_guard_deta
     assert "guard_action=block_sell_remainder_dust" in str(details["summary"])
 
 
+@pytest.mark.fast_regression
+def test_adjust_sell_order_qty_for_dust_safety_snaps_tiny_min_qty_boundary_upward():
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    adjusted = adjust_sell_order_qty_for_dust_safety(qty=0.00009999, market_price=100_000_000.0)
+
+    assert adjusted == pytest.approx(0.0001)
+
+
 def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -2568,17 +2580,6 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
         },
     )
 
-    normalized_sell_qty: list[float] = []
-
-    def _capture_sell_qty(*, qty: float, market_price: float) -> float:
-        normalized_sell_qty.append(qty)
-        return qty
-
-    monkeypatch.setattr(
-        "bithumb_bot.broker.live.adjust_sell_order_qty_for_dust_safety",
-        _capture_sell_qty,
-    )
-
     broker = _FakeBroker()
     trade = live_execute_signal(
         broker,
@@ -2593,8 +2594,7 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
 
     assert trade is not None
     assert broker.place_order_calls == 1
-    assert normalized_sell_qty == [pytest.approx(0.00009999)]
-    assert broker._last_qty == pytest.approx(0.00009999)
+    assert broker._last_qty == pytest.approx(0.0001)
 
     conn = ensure_db(str(tmp_path / "sell_normalized_exposure_only.sqlite"))
     order_row = conn.execute(
@@ -2618,20 +2618,156 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
     conn.close()
 
     assert order_row is not None
-    assert float(order_row["qty_req"]) == pytest.approx(0.00009999)
-    assert float(order_row["qty_filled"]) == pytest.approx(0.00009999)
+    assert float(order_row["qty_req"]) == pytest.approx(0.0001)
+    assert float(order_row["qty_filled"]) == pytest.approx(0.0001)
     assert order_row["status"] == "FILLED"
     assert submit_attempt is not None
-    assert float(submit_attempt["qty"]) == pytest.approx(0.00009999)
+    assert float(submit_attempt["qty"]) == pytest.approx(0.0001)
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
-    assert submit_evidence["order_qty"] == pytest.approx(0.00009999)
-    assert submit_evidence["normalized_qty"] == pytest.approx(0.00009999)
+    assert submit_evidence["order_qty"] == pytest.approx(0.0001)
+    assert submit_evidence["normalized_qty"] == pytest.approx(0.0001)
     assert submit_evidence["submit_qty_source"] == "open_position_lots.open_exposure_qty"
     assert submit_evidence["position_state_source"] == "position_state.normalized_exposure.raw_qty_open"
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00019192)
     assert submit_evidence["open_exposure_qty"] == pytest.approx(0.00009999)
     assert submit_evidence["dust_tracking_qty"] == pytest.approx(0.00009193)
 
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_for_submission(
+    monkeypatch,
+    tmp_path,
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_sum_regression.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    conn = ensure_db(str(tmp_path / "sell_sum_regression.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00019192,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.00009999, "open_exposure"),
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 2, "entry_dust", 1_700_000_000_100, 100_000_000.0, 0.00009193, "dust_tracking"),
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_000_000_200,
+        strategy_name="dust_exit_test",
+        signal="SELL",
+        reason="partial_take_profit",
+        candle_ts=1_700_000_000_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "entry_allowed": False,
+            "effective_flat": False,
+            "raw_qty_open": 0.00009999,
+            "raw_total_asset_qty": 0.00019192,
+            "open_exposure_qty": 0.00009999,
+            "dust_tracking_qty": 0.00009193,
+            "normalized_exposure_active": True,
+            "normalized_exposure_qty": 0.00009999,
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.00009999,
+                    "raw_total_asset_qty": 0.00019192,
+                    "open_exposure_qty": 0.00009999,
+                    "dust_tracking_qty": 0.00009193,
+                    "effective_flat": False,
+                    "entry_allowed": False,
+                    "normalized_exposure_active": True,
+                    "normalized_exposure_qty": 0.00009999,
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_residual_present": 0,
+            "dust_effective_flat": 0,
+            "dust_policy_reason": "none",
+        },
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0001)
+
+    conn = ensure_db(str(tmp_path / "sell_sum_regression.sqlite"))
+    submit_attempt = conn.execute(
+        """
+        SELECT qty, submit_evidence
+        FROM order_events
+        WHERE client_order_id LIKE 'live_1000_sell_%' AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert submit_attempt is not None
+    assert float(submit_attempt["qty"]) == pytest.approx(0.0001)
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["order_qty"] == pytest.approx(0.0001)
+    assert submit_evidence["position_qty"] == pytest.approx(0.00009999)
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0001)
+    assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.00009999)
+    assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
+    assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00019192)
+    assert submit_evidence["sell_submit_qty_source"] == "open_position_lots.open_exposure_qty"
+    assert submit_evidence["order_qty"] != pytest.approx(0.00019192)
 
 @pytest.mark.fast_regression
 def test_live_execute_signal_sell_uses_open_exposure_only_when_dust_tracking_coexists(
@@ -2780,6 +2916,8 @@ def test_live_execute_signal_sell_uses_open_exposure_only_when_dust_tracking_coe
     assert float(submit_attempt["qty"]) == pytest.approx(0.00011)
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["order_qty"] == pytest.approx(0.00011)
+    assert submit_evidence["position_qty"] == pytest.approx(0.00011)
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.00011)
     assert submit_evidence["normalized_qty"] == pytest.approx(0.00011)
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00020999)
     assert submit_evidence["open_exposure_qty"] == pytest.approx(0.00011)
@@ -2896,6 +3034,9 @@ def test_live_execute_signal_sell_classifies_qty_step_mismatch_broker_reject(mon
     assert submit_row["submission_reason_code"] == "SUBMIT_FAILED"
     submit_evidence = json.loads(str(submit_row["submit_evidence"]))
     assert submit_evidence["sell_failure_category"] == "qty_step_mismatch"
+    assert submit_evidence["sell_failure_detail"] == "qty_step_mismatch"
+    assert submit_evidence["position_qty"] == pytest.approx(0.0002)
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0002)
     assert submit_evidence["sell_submit_qty_source"] == "open_position_lots.open_exposure_qty"
     assert submit_evidence["sell_normalized_exposure_qty"] == pytest.approx(0.0002)
 
@@ -3059,6 +3200,9 @@ def test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unse
     assert row["event_type"] == "submit_attempt_recorded"
     assert row["order_status"] == "FAILED"
     assert row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    submit_evidence = json.loads(str(row["submit_evidence"]))
+    assert submit_evidence["sell_failure_category"] == "remainder_dust_guard"
+    assert submit_evidence["dust_scope"] == "remainder_after_sell"
     assert "dust_scope=remainder_after_sell" in str(row["message"])
     assert "guard_action=block_sell_remainder_dust" in str(row["message"])
     assert '"dust_scope":"remainder_after_sell"' in str(row["submit_evidence"])
@@ -3138,15 +3282,18 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert order_row is not None
     assert order_row["status"] == "FAILED"
     assert order_row["side"] == "SELL"
-    assert float(order_row["qty_req"]) == pytest.approx(0.0)
+    assert float(order_row["qty_req"]) == pytest.approx(0.00009)
     assert order_row["decision_reason"] == "partial_take_profit"
     assert order_row["exit_rule_name"] == "exit_signal"
     assert len(event_rows) == 1
     assert event_rows[0]["event_type"] == "submit_attempt_recorded"
     assert event_rows[0]["order_status"] == "FAILED"
-    assert float(event_rows[0]["qty"]) == pytest.approx(0.0)
+    assert float(event_rows[0]["qty"]) == pytest.approx(0.00009)
     assert "position_qty=0.000090000000" in str(event_rows[0]["message"])
     assert "normalized_qty=0.000000000000" in str(event_rows[0]["message"])
+    assert "detail=boundary_below_min" in str(event_rows[0]["message"])
+    assert '"position_qty":0.00009' in str(event_rows[0]["submit_evidence"]) or '"position_qty":9e-05' in str(event_rows[0]["submit_evidence"])
+    assert '"submit_payload_qty":0' in str(event_rows[0]["submit_evidence"]) or '"submit_payload_qty":0.0' in str(event_rows[0]["submit_evidence"])
     assert '"normalized_qty":0' in str(event_rows[0]["submit_evidence"]) or '"normalized_qty":0.0' in str(event_rows[0]["submit_evidence"])
     assert float(event_rows[0]["price"]) == pytest.approx(100_000_000.0)
     assert event_rows[0]["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE

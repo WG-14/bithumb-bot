@@ -318,7 +318,7 @@ def _apply_entry_exit_policy(
                 "normalized_exposure_active",
                 position_gate.get(
                     "normalized_exposure_active",
-                    open_exposure_qty > 1e-12 and not entry_allowed,
+                    open_exposure_qty > 1e-12,
                 ),
             )
         )

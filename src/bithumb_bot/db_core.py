@@ -5,9 +5,12 @@ import sqlite3
 from typing import Any
 
 from .config import prepare_db_path_for_connection, settings
-from .dust import OPEN_EXPOSURE_LOT_STATE
+from .dust import OPEN_EXPOSURE_LOT_STATE, lot_state_quantity_contract
 from .sqlite_resilience import configure_connection
 from .decision_context import normalize_strategy_decision_context
+
+
+_OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
 
 
 def ensure_db(db_path: str | None = None, *, ensure_schema_ready: bool = True) -> sqlite3.Connection:
@@ -635,14 +638,17 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
-            position_state TEXT NOT NULL DEFAULT '{open_state}',
+            position_state TEXT NOT NULL DEFAULT '{open_state}' CHECK (position_state IN ({allowed_states})),
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
             entry_decision_id INTEGER,
             entry_decision_linkage TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
-        """.format(open_state=OPEN_EXPOSURE_LOT_STATE)
+        """.format(
+            open_state=OPEN_EXPOSURE_LOT_STATE,
+            allowed_states=', '.join(repr(state) for state in _OPEN_POSITION_LOT_STATES),
+        )
     )
 
     _ensure_column(

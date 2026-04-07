@@ -129,7 +129,7 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
                 "raw_total_asset_qty": 0.00019192,
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
-                "submit_qty_source": "position_state.normalized_exposure.normalized_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
                 "normalized_exposure_qty": 0.00009629,
@@ -153,6 +153,8 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert "[DECISION-TELEMETRY]" in out
     assert "base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,entry_allowed" in out
     assert "raw_total_asset_qty" in out
+    assert "position_qty" in out
+    assert "submit_payload_qty" in out
     assert "open_exposure_qty" in out
     assert "dust_tracking_qty" in out
     assert "submit_qty_source" in out
@@ -187,7 +189,7 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
                 "raw_total_asset_qty": 0.00019192,
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
-                "submit_qty_source": "position_state.normalized_exposure.normalized_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
                 "position_state_source": "context.raw_qty_open",
                 "position_gate": {
                     "entry_allowed": True,
@@ -205,19 +207,21 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     ctx = json.loads(str(row["context_json"]))
     assert ctx["entry_allowed"] is True
     assert ctx["effective_flat"] is True
-    assert ctx["normalized_exposure_active"] is False
+    assert ctx["normalized_exposure_active"] is True
     assert ctx["raw_total_asset_qty"] == 0.00019192
+    assert ctx["position_qty"] == 0.00009629
+    assert ctx["submit_payload_qty"] == pytest.approx(0.00009629)
     assert ctx["open_exposure_qty"] == 0.00009629
     assert ctx["dust_tracking_qty"] == 0.00009563
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.normalized_exposure_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.normalized_exposure_qty"
-    assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["position_state_source"] == "context.raw_qty_open"
     assert ctx["entry_allowed_truth_source"] == "position_gate.entry_allowed"
     assert ctx["effective_flat_truth_source"] == "position_gate.effective_flat_due_to_harmless_dust"
-    assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:raw_qty_open_and_entry_allowed"
+    assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:open_exposure_qty"
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
-    assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is True
 
 
 def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monkeypatch, capsys):

@@ -14,7 +14,20 @@ from .analytics_context import (
 )
 from .config import PATH_MANAGER, settings
 from .broker.order_rules import get_effective_order_rules, rule_source_for
-from .reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE, RISKY_ORDER_BLOCK
+from .reason_codes import (
+    DUST_RESIDUAL_SUPPRESSED,
+    DUST_RESIDUAL_UNSELLABLE,
+    RISKY_ORDER_BLOCK,
+    SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+    SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE,
+    SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
+    SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+    SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD,
+    SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
+    SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+    SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE,
+    SELL_FAILURE_CATEGORY_UNKNOWN,
+)
 from .db_core import ensure_db
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .markets import canonical_market_with_raw
@@ -105,6 +118,8 @@ class DecisionTelemetrySummary:
     effective_flat: bool
     raw_qty_open: float
     raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
     normalized_exposure_active: bool
     normalized_exposure_qty: float
     open_exposure_qty: float
@@ -136,6 +151,8 @@ class RecentDecisionFlowSummary:
     effective_flat: bool
     raw_qty_open: float
     raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
     normalized_exposure_active: bool
     normalized_exposure_qty: float
     open_exposure_qty: float
@@ -554,6 +571,16 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS raw_total_asset_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.position_qty'),
+                oe.qty,
+                0.0
+            ) AS position_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.submit_payload_qty'),
+                oe.qty,
+                0.0
+            ) AS submit_payload_qty,
+            COALESCE(
                 json_extract(oe.submit_evidence, '$.open_exposure_qty'),
                 0.0
             ) AS open_exposure_qty,
@@ -561,6 +588,10 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 json_extract(oe.submit_evidence, '$.dust_tracking_qty'),
                 0.0
             ) AS dust_tracking_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_failure_detail'),
+                '-'
+            ) AS sell_failure_detail,
             oe.submission_reason_code,
             oe.message,
             oe.submit_evidence,
@@ -685,34 +716,59 @@ def _sell_failure_category_from_observability(
         return str(evidence.get("sell_failure_category"))
 
     if submission_reason_code == DUST_RESIDUAL_SUPPRESSED:
-        return "dust_suppression"
+        return SELL_FAILURE_CATEGORY_DUST_SUPPRESSION
     if submission_reason_code == DUST_RESIDUAL_UNSELLABLE:
         dust_scope = str(evidence.get("dust_scope") or "")
         if dust_scope == "remainder_after_sell" or "guard_action=block_sell_remainder_dust" in detail_text:
-            return "remainder_dust_guard"
+            return SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD
         if any(
             bool(evidence.get(key))
-            for key in ("qty_below_min", "normalized_non_positive", "normalized_below_min", "notional_below_min")
+            for key in (
+                "qty_below_min",
+                "normalized_non_positive",
+                "normalized_below_min",
+                "notional_below_min",
+            )
+        ) or any(
+            token in detail_text
+            for token in (
+                "qty_below_min",
+                "normalized_non_positive",
+                "normalized_below_min",
+                "notional_below_min",
+                "min_qty_or_notional_boundary",
+                "boundary_below_min",
+            )
         ):
-            return "unsafe_dust_mismatch_dust"
-        return "unsafe_dust_mismatch_dust"
+            return SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
+        if any(
+            bool(evidence.get(key))
+            for key in (
+                "dust_broker_qty_is_dust",
+                "dust_local_qty_is_dust",
+                "dust_broker_notional_is_dust",
+                "dust_local_notional_is_dust",
+                "dust_qty_gap_small",
+            )
+        ) or any(token in detail_text for token in ("mismatch", "qty_gap_small", "dust_gap")):
+            return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
+        return SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE
     if submission_reason_code == RISKY_ORDER_BLOCK:
         if "runtime halted" in detail_text or "halt" in detail_text:
-            return "submission_halt"
-        return "unresolved_risk_gate"
+            return SELL_FAILURE_CATEGORY_SUBMISSION_HALT
+        return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
     if (
         "qty_step" in detail_text
         or "requires explicit normalization" in detail_text
         or "qty does not match qty_step" in detail_text
         or "max decimals" in detail_text
     ):
-        return "qty_step_mismatch"
+        return SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH
     if "runtime halted" in detail_text:
-        return "submission_halt"
+        return SELL_FAILURE_CATEGORY_SUBMISSION_HALT
     if "unresolved order gate" in detail_text or "reason_detail_code" in detail_text:
-        return "unresolved_risk_gate"
-    return "unknown"
-
+        return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
+    return SELL_FAILURE_CATEGORY_UNKNOWN
 
 def fetch_recent_decision_flow(
     conn: sqlite3.Connection,
@@ -777,14 +833,32 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS raw_total_asset_qty,
             COALESCE(
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                json_extract(context_json, '$.position_qty'),
+                0.0
+            ) AS position_qty,
+            COALESCE(
+                json_extract(context_json, '$.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                0.0
+            ) AS submit_payload_qty,
+            COALESCE(
                 CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
                 CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
                 CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                 CASE
                     WHEN COALESCE(
-                        json_extract(context_json, '$.raw_qty_open'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        json_extract(context_json, '$.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
                     ) > 0
                     AND COALESCE(
@@ -808,9 +882,10 @@ def fetch_recent_decision_flow(
                         CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                         CASE
                             WHEN COALESCE(
-                                json_extract(context_json, '$.raw_qty_open'),
-                                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                                json_extract(context_json, '$.position_gate.raw_qty_open'),
+                                json_extract(context_json, '$.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                                json_extract(context_json, '$.position_gate.open_exposure_qty'),
                                 0.0
                             ) > 0
                             AND COALESCE(
@@ -823,10 +898,10 @@ def fetch_recent_decision_flow(
                         END
                     ) = 1
                     THEN COALESCE(
-                        json_extract(context_json, '$.raw_qty_open'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
                     )
                     ELSE 0.0
@@ -860,11 +935,11 @@ def fetch_recent_decision_flow(
             ) AS sell_submit_qty_source,
             COALESCE(
                 json_extract(context_json, '$.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
                 0.0
             ) AS sell_normalized_exposure_qty,
             COALESCE(
@@ -912,6 +987,8 @@ def fetch_recent_decision_flow(
             effective_flat=bool(row["effective_flat"]),
             raw_qty_open=float(row["raw_qty_open"] or 0.0),
             raw_total_asset_qty=float(row["raw_total_asset_qty"] or 0.0),
+            position_qty=float(row["position_qty"] or 0.0),
+            submit_payload_qty=float(row["submit_payload_qty"] or 0.0),
             normalized_exposure_active=bool(row["normalized_exposure_active"]),
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
             open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
@@ -1023,14 +1100,32 @@ def fetch_decision_telemetry_summary(
                 0.0
             ) AS raw_total_asset_qty,
             COALESCE(
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                json_extract(context_json, '$.position_qty'),
+                0.0
+            ) AS position_qty,
+            COALESCE(
+                json_extract(context_json, '$.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                0.0
+            ) AS submit_payload_qty,
+            COALESCE(
                 CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
                 CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
                 CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                 CASE
                     WHEN COALESCE(
-                        json_extract(context_json, '$.raw_qty_open'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        json_extract(context_json, '$.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
                     ) > 0
                     AND COALESCE(
@@ -1054,9 +1149,10 @@ def fetch_decision_telemetry_summary(
                         CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                         CASE
                             WHEN COALESCE(
-                                json_extract(context_json, '$.raw_qty_open'),
-                                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                                json_extract(context_json, '$.position_gate.raw_qty_open'),
+                                json_extract(context_json, '$.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                                json_extract(context_json, '$.position_gate.open_exposure_qty'),
                                 0.0
                             ) > 0
                             AND COALESCE(
@@ -1069,10 +1165,10 @@ def fetch_decision_telemetry_summary(
                         END
                     ) = 1
                     THEN COALESCE(
-                        json_extract(context_json, '$.raw_qty_open'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
                     )
                     ELSE 0.0
@@ -1106,11 +1202,11 @@ def fetch_decision_telemetry_summary(
             ) AS sell_submit_qty_source,
             COALESCE(
                 json_extract(context_json, '$.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
                 0.0
             ) AS sell_normalized_exposure_qty,
             COALESCE(
@@ -1151,6 +1247,8 @@ def fetch_decision_telemetry_summary(
             effective_flat,
             raw_qty_open,
             raw_total_asset_qty,
+            position_qty,
+            submit_payload_qty,
             normalized_exposure_active,
             normalized_exposure_qty,
             open_exposure_qty,
@@ -1183,6 +1281,8 @@ def fetch_decision_telemetry_summary(
             effective_flat=bool(row["effective_flat"]),
             raw_qty_open=float(row["raw_qty_open"] or 0.0),
             raw_total_asset_qty=float(row["raw_total_asset_qty"] or 0.0),
+            position_qty=float(row["position_qty"] or 0.0),
+            submit_payload_qty=float(row["submit_payload_qty"] or 0.0),
             normalized_exposure_active=bool(row["normalized_exposure_active"]),
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
             open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
@@ -2117,7 +2217,7 @@ def cmd_strategy_report(
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
             print(f"  schema_error={exc}")
-            print("  tip: 최신 스키마로 마이그레이션하거나 최신 DB를 사용하세요.")
+            print("  tip: 筌ㅼ뮇????쎄텕筌띾뜄以?筌띾뜆?졿뉩紐껋쟿??곷??띻탢??筌ㅼ뮇??DB???????뤾쉭??")
             return
     finally:
         conn.close()
@@ -2252,7 +2352,7 @@ def cmd_strategy_report(
 
     if not stats:
         print("  no matched trade_lifecycles rows")
-        print("  tip: 실행 구간/전략명/청산 규칙 필터를 완화하거나 lifecycle 데이터 생성 여부를 확인하세요.")
+        print("  tip: ??쎈뻬 ?닌덉퍢/?袁⑥셽筌?筌?沅?域뱀뮇???袁り숲???袁れ넅??띻탢??lifecycle ?怨쀬뵠????밴쉐 ??????類ㅼ뵥??뤾쉭??")
     else:
         print(
             "  "
@@ -2684,7 +2784,7 @@ def cmd_experiment_report(
             "top_n": summary.top_n,
         },
         "operational_stability_boundary": {
-            "note": "ops-report/health/recovery 지표와 분리된 실험용 expectancy 검증 리포트입니다."
+            "note": "ops-report/health/recovery 筌왖??? ?브쑬?????쎈퓮??expectancy 野꺜筌??귐뗫７?紐꾩뿯??덈뼄."
         },
         "experiment_expectancy_metrics": {
             "realized_net_pnl": summary.realized_net_pnl,
@@ -2954,6 +3054,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "effective_flat": row.effective_flat,
                 "raw_qty_open": row.raw_qty_open,
                 "raw_total_asset_qty": row.raw_total_asset_qty,
+                "position_qty": row.position_qty,
+                "submit_payload_qty": row.submit_payload_qty,
                 "normalized_exposure_active": row.normalized_exposure_active,
                 "normalized_exposure_qty": row.normalized_exposure_qty,
                 "open_exposure_qty": row.open_exposure_qty,
@@ -3127,7 +3229,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print("\n[STRATEGY-SUMMARY]")
     if not strategy_stats:
         print("  no strategy_context rows in order_intent_dedup")
-        print("  tip: strategy_context 기반 집계는 주문 intent dedup 데이터가 있어야 계산됩니다.")
+        print("  tip: strategy_context 疫꿸퀡而?筌욌쵌???雅뚯눖揆 intent dedup ?怨쀬뵠?怨? ??됰선???④쑴沅??몃빍??")
     else:
         print("  strategy_context,order_count,fill_count,buy_notional,sell_notional,fee_total,pnl_proxy_deprecated")
         for stat in strategy_stats:
@@ -3170,13 +3272,15 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "  "
                 f"{ts} strategy={strategy_context} cid={row['client_order_id']} "
                 f"event={row['event_type']} status={row['order_status'] or '-'} side={row['side'] or '-'} "
-                f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
+                f"position_qty={_fmt_float(float(row['position_qty'] or 0.0), 8)} "
                 f"submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
+                f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
                 f"submit_qty_source={row['submit_qty_source'] or '-'} "
                 f"sell_submit_qty_source={sell_submit_qty_source} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(sell_normalized_exposure_qty), 8)} "
                 f"sell_failure_category={sell_failure_category} "
+                f"sell_failure_detail={row['sell_failure_detail'] or '-'} "
                 f"position_state_source={row['position_state_source'] or '-'} "
                 f"raw_total_asset_qty={_fmt_float(float(row['raw_total_asset_qty'] or 0.0), 8)} "
                 f"open_exposure_qty={_fmt_float(float(row['open_exposure_qty'] or 0.0), 8)} "
@@ -3213,6 +3317,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
+                f"position_qty={_fmt_float(float(row.position_qty), 8)} "
+                f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"submit_qty_source={row.submit_qty_source} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(row.sell_normalized_exposure_qty), 8)} "
@@ -3245,8 +3351,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         print(f"  fee_total(last {len(recent_trades)} trades)={_fmt_float(fee_total, 2)}")
 
     print("\n[KNOWN-LIMITATIONS/TODO]")
-    print("  - strategy-report는 trade_lifecycles 기반 realized gross/fee/net pnl 집계를 우선 사용하세요.")
-    print("  - ops-report의 strategy_summary는 intent/fill 기반 참고용이며 pnl_proxy_deprecated를 포함합니다.")
+    print("  - strategy-report??trade_lifecycles 疫꿸퀡而?realized gross/fee/net pnl 筌욌쵌?롧몴??怨쀪퐨 ?????뤾쉭??")
+    print("  - ops-report??strategy_summary??intent/fill 疫꿸퀡而?筌〓㈇???뱀뵠筌?pnl_proxy_deprecated????釉??몃빍??")
     print("\n[FEE-DIAGNOSTICS-SNAPSHOT]")
     print(
         "  "
@@ -3282,7 +3388,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
     print(
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
-        "raw_total_asset_qty,normalized_exposure_active,normalized_exposure_qty,"
+        "raw_total_asset_qty,position_qty,submit_payload_qty,normalized_exposure_active,normalized_exposure_qty,"
         "open_exposure_qty,dust_tracking_qty,submit_qty_source,sell_submit_qty_source,"
         "sell_normalized_exposure_qty,position_state_source,entry_allowed_truth_source,"
         "effective_flat_truth_source,strategy_name,pair,interval,count"
@@ -3293,7 +3399,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
             f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
             f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
-            f"{row.raw_total_asset_qty:.8f},{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_qty:.8f},"
+            f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_qty:.8f},"
             f"{row.open_exposure_qty:.8f},{row.dust_tracking_qty:.8f},{row.submit_qty_source},{row.sell_submit_qty_source},"
             f"{row.sell_normalized_exposure_qty:.8f},{row.position_state_source},"
             f"{row.entry_allowed_truth_source},{row.effective_flat_truth_source},"

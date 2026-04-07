@@ -358,16 +358,24 @@ P2:
 이 문서는 그 운영 구조를 정의하는 기준 문서다.
 ## 16. Lot state routing rule
 
-When runtime code classifies lot state, the quantity contract is:
+`open_position_lots.position_state` is part of the storage contract and must keep the
+following meaning stable:
 
-- `open_exposure`: the strategy-visible position and the default SELL submission base.
-- `dust_tracking`: operator-only residual tracking, used for harmless dust evidence
-  and excluded from normal SELL submission.
+- `open_exposure`: the real strategy-visible position and the default SELL submission base.
+  SELL submission logic should read `open_exposure_qty` and exclude `dust_tracking_qty`.
+- `dust_tracking`: operator-only residual tracking. It records harmless dust evidence and is
+  excluded from normal SELL submission by default.
 
-This means:
+Practical routing rules:
 
-- BUY flows should create or update `open_exposure` lots.
-- SELL flows should read `open_exposure` first and must not count `dust_tracking`
-  as sellable exposure.
-- harmless dust suppression is keyed off the `dust_tracking` branch, not the
-  `open_exposure` branch.
+- BUY fills create or refresh `open_exposure` lots.
+- SELL matching consumes `open_exposure` lots only.
+- `dust_tracking` lots are not sellable inventory and must not be counted as the
+  basis for a normal SELL order.
+- harmless dust suppression is defined around the `dust_tracking` path, not the
+  `open_exposure` path.
+- boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty`
+  stays `open_exposure`.
+- if a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as
+  operator evidence and remains excluded from normal SELL submission until an operator
+  clears the inconsistency.

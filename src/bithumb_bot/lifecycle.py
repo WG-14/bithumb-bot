@@ -9,6 +9,7 @@ from .dust import (
     DustDisplayContext,
     DustState,
     build_dust_display_context,
+    is_strictly_below_min_qty,
 )
 
 OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
@@ -322,23 +323,38 @@ def mark_harmless_dust_positions(
     if min_qty <= 0.0:
         return 0
 
-    res = conn.execute(
+    candidate_rows = conn.execute(
         """
-        UPDATE open_position_lots
-        SET position_state=?
+        SELECT id, qty_open
+        FROM open_position_lots
         WHERE pair=?
           AND position_state=?
           AND qty_open > 1e-12
-          AND qty_open < ?
+        ORDER BY entry_ts ASC, id ASC
         """,
         (
-            DUST_TRACKING_LOT_STATE,
             str(pair),
             OPEN_EXPOSURE_LOT_STATE,
-            float(min_qty),
         ),
-    )
-    return int(res.rowcount or 0)
+    ).fetchall()
+
+    updated_count = 0
+    for row in candidate_rows:
+        if not is_strictly_below_min_qty(qty_open=float(row["qty_open"]), min_qty=min_qty):
+            continue
+        conn.execute(
+            """
+            UPDATE open_position_lots
+            SET position_state=?
+            WHERE id=?
+            """,
+            (
+                DUST_TRACKING_LOT_STATE,
+                int(row["id"]),
+            ),
+        )
+        updated_count += 1
+    return updated_count
 
 
 def _fetch_sellable_open_exposure_lots(

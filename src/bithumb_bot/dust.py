@@ -16,15 +16,19 @@ LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
     OPEN_EXPOSURE_LOT_STATE: {
         "meaning": "real strategy-visible position",
         "strategy_qty_source": "open_exposure_qty",
-        "sell_submit_qty_source": "open_exposure_qty",
+        "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+        "sell_submission_allowed": True,
         "sell_submit_includes_dust_tracking": False,
+        "qty_boundary_rule": "qty_open >= min_qty remains open_exposure; SELL uses open_exposure_qty only",
         "operator_tracking_only": False,
     },
     DUST_TRACKING_LOT_STATE: {
         "meaning": "operator tracking residual",
         "strategy_qty_source": "dust_tracking_qty",
         "sell_submit_qty_source": "excluded_from_sell_qty",
+        "sell_submission_allowed": False,
         "sell_submit_includes_dust_tracking": False,
+        "qty_boundary_rule": "qty_open < min_qty is tracked here; SELL submission excludes dust_tracking by default",
         "operator_tracking_only": True,
     },
 }
@@ -582,7 +586,7 @@ class NormalizedExposure:
 
     @property
     def sell_submit_qty_source(self) -> str:
-        return "open_exposure_qty"
+        return str(lot_state_quantity_rule(OPEN_EXPOSURE_LOT_STATE)["sell_submit_qty_source"])
 
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
@@ -659,6 +663,39 @@ def lot_state_quantity_contract() -> dict[str, dict[str, object]]:
     return {state: dict(contract) for state, contract in LOT_STATE_QUANTITY_CONTRACT.items()}
 
 
+def lot_state_quantity_rule(position_state: str) -> dict[str, object]:
+    normalized_state = str(position_state or "").strip()
+    contract = LOT_STATE_QUANTITY_CONTRACT.get(normalized_state)
+    if contract is None:
+        return {
+            "meaning": "unknown lot state",
+            "strategy_qty_source": "unknown",
+            "sell_submit_qty_source": "excluded_from_sell_qty",
+            "sell_submission_allowed": False,
+            "sell_submit_includes_dust_tracking": False,
+            "qty_boundary_rule": "unknown lot state is not sellable",
+            "operator_tracking_only": False,
+        }
+    return dict(contract)
+
+
+def is_strictly_below_min_qty(*, qty_open: float, min_qty: float) -> bool:
+    """Return True when a positive residual is strictly below the tradable minimum.
+
+    The boundary is intentionally strict: `qty_open == min_qty` stays in
+    `open_exposure`, while `qty_open < min_qty` may be reclassified as
+    `dust_tracking`.
+    """
+
+    normalized_qty = max(0.0, float(qty_open))
+    normalized_min_qty = max(0.0, float(min_qty))
+    return bool(
+        normalized_qty > DUST_POSITION_EPS
+        and normalized_min_qty > 0.0
+        and normalized_qty < normalized_min_qty
+    )
+
+
 def should_treat_as_flat_for_entry_gate(
     dust_context: DustDisplayContext | None,
 ) -> bool:
@@ -721,11 +758,13 @@ def classify_dust_residual(
 
     broker_present = normalized_broker_qty > DUST_POSITION_EPS
     local_present = normalized_local_qty > DUST_POSITION_EPS
-    broker_qty_is_dust = bool(
-        broker_present and normalized_min_qty > 0.0 and normalized_broker_qty < normalized_min_qty
+    broker_qty_is_dust = is_strictly_below_min_qty(
+        qty_open=normalized_broker_qty,
+        min_qty=normalized_min_qty,
     )
-    local_qty_is_dust = bool(
-        local_present and normalized_min_qty > 0.0 and normalized_local_qty < normalized_min_qty
+    local_qty_is_dust = is_strictly_below_min_qty(
+        qty_open=normalized_local_qty,
+        min_qty=normalized_min_qty,
     )
 
     broker_notional = _estimate_notional(normalized_broker_qty, latest_price)
@@ -1039,7 +1078,9 @@ def build_normalized_exposure(
     )
     entry_allowed = should_treat_as_flat_for_entry_gate(display_context)
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
-    normalized_active = bool(normalized_open_exposure_qty > DUST_POSITION_EPS and not entry_allowed)
+    # `normalized_exposure_active` tracks whether strategy-visible open exposure exists.
+    # The entry gate is separate from the sellable exposure state.
+    normalized_active = bool(normalized_open_exposure_qty > DUST_POSITION_EPS)
     normalized_qty = float(normalized_open_exposure_qty if normalized_active else 0.0)
     return NormalizedExposure(
         raw_qty_open=normalized_raw_qty,

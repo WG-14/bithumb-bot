@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-_CANONICAL_CONTEXT_VERSION = 3
+_CANONICAL_CONTEXT_VERSION = 4
 
 
 def _as_text(value: Any, *, default: str = "") -> str:
@@ -251,8 +251,8 @@ def normalize_strategy_decision_context(
             position_normalized.get("normalized_exposure_active"),
         ),
         ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
-        default_value=open_exposure_qty > 1e-12 and not entry_allowed,
-        default_source="fallback:raw_qty_open_and_entry_allowed",
+        default_value=open_exposure_qty > 1e-12,
+        default_source="fallback:open_exposure_qty",
         value_kind="bool",
     )
     normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
@@ -268,6 +268,10 @@ def normalize_strategy_decision_context(
     )
     if normalized_exposure_qty is None:
         normalized_exposure_qty = open_exposure_qty if normalized_exposure_active else 0.0
+    position_qty = float(open_exposure_qty)
+    position_qty_truth_source = open_exposure_qty_truth_source
+    submit_payload_qty = float(normalized_exposure_qty)
+    submit_payload_qty_truth_source = normalized_exposure_qty_truth_source
     submit_qty_source = _as_text(
         payload.get(
             "submit_qty_source",
@@ -277,11 +281,7 @@ def normalize_strategy_decision_context(
     )
     submit_qty_source_truth_source = "context.submit_qty_source"
     if not submit_qty_source:
-        submit_qty_source = (
-            "position_state.normalized_exposure.open_exposure_qty"
-            if open_exposure_qty > 1e-12
-            else "position_state.normalized_exposure.normalized_exposure_qty"
-        )
+        submit_qty_source = "position_state.normalized_exposure.open_exposure_qty"
         submit_qty_source_truth_source = "derived:open_exposure_qty"
     sell_submit_qty_source = submit_qty_source
     sell_normalized_exposure_qty = float(normalized_exposure_qty)
@@ -304,11 +304,17 @@ def normalize_strategy_decision_context(
         "effective_flat": effective_flat_truth_source,
         "raw_qty_open": raw_qty_open_truth_source,
         "raw_total_asset_qty": raw_total_asset_qty_truth_source,
+        "position_qty": position_qty_truth_source,
+        "submit_payload_qty": submit_payload_qty_truth_source,
         "normalized_exposure_active": normalized_exposure_active_truth_source,
         "normalized_exposure_qty": normalized_exposure_qty_truth_source,
         "open_exposure_qty": open_exposure_qty_truth_source,
         "dust_tracking_qty": dust_tracking_qty_truth_source,
         "submit_qty_source": submit_qty_source_truth_source,
+        "sell_submit_qty_source": submit_qty_source_truth_source,
+        "sell_normalized_exposure_qty": normalized_exposure_qty_truth_source,
+        "sell_open_exposure_qty": open_exposure_qty_truth_source,
+        "sell_dust_tracking_qty": dust_tracking_qty_truth_source,
         "position_state_source": position_state_source_truth_source,
     }
 
@@ -322,6 +328,8 @@ def normalize_strategy_decision_context(
         "effective_flat": bool(effective_flat),
         "raw_qty_open": float(raw_qty_open),
         "raw_total_asset_qty": float(raw_total_asset_qty),
+        "position_qty": float(position_qty),
+        "submit_payload_qty": float(submit_payload_qty),
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
         "open_exposure_qty": float(open_exposure_qty),
@@ -352,6 +360,8 @@ def normalize_strategy_decision_context(
     payload["effective_flat"] = bool(effective_flat)
     payload["raw_qty_open"] = float(raw_qty_open)
     payload["raw_total_asset_qty"] = float(raw_total_asset_qty)
+    payload["position_qty"] = float(position_qty)
+    payload["submit_payload_qty"] = float(submit_payload_qty)
     payload["normalized_exposure_active"] = bool(normalized_exposure_active)
     payload["normalized_exposure_qty"] = float(normalized_exposure_qty)
     payload["open_exposure_qty"] = float(open_exposure_qty)
@@ -367,6 +377,8 @@ def normalize_strategy_decision_context(
     payload["effective_flat_truth_source"] = effective_flat_truth_source
     payload["raw_qty_open_truth_source"] = raw_qty_open_truth_source
     payload["raw_total_asset_qty_truth_source"] = raw_total_asset_qty_truth_source
+    payload["position_qty_truth_source"] = position_qty_truth_source
+    payload["submit_payload_qty_truth_source"] = submit_payload_qty_truth_source
     payload["normalized_exposure_active_truth_source"] = normalized_exposure_active_truth_source
     payload["normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
     payload["open_exposure_qty_truth_source"] = open_exposure_qty_truth_source
@@ -427,7 +439,13 @@ def normalize_strategy_decision_context(
                 "normalized_exposure_qty": float(normalized_exposure_qty),
                 "open_exposure_qty": float(open_exposure_qty),
                 "dust_tracking_qty": float(dust_tracking_qty),
+                "position_qty": float(position_qty),
+                "submit_payload_qty": float(submit_payload_qty),
                 "submit_qty_source": submit_qty_source,
+                "sell_submit_qty_source": sell_submit_qty_source,
+                "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
+                "sell_open_exposure_qty": float(sell_open_exposure_qty),
+                "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
                 "position_state_source": position_state_source,
                 "decision_truth_sources": decision_truth_sources,
             },

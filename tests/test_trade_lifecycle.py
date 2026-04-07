@@ -5,8 +5,9 @@ import sqlite3
 import pytest
 
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE
+from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.lifecycle import mark_harmless_dust_positions
 
 
 def _record_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_ms: int) -> None:
@@ -147,6 +148,9 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     trade_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
     lot_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(open_position_lots)").fetchall()}
     lifecycle_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(trade_lifecycles)").fetchall()}
+    lot_schema_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='open_position_lots'"
+    ).fetchone()[0]
     conn.close()
 
     assert "entry_client_order_id" in lot_cols
@@ -169,6 +173,89 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "exit_reason" in lifecycle_cols
     assert "exit_rule_name" in lifecycle_cols
     assert "position_state" in lot_cols
+    assert "CHECK (position_state IN ('open_exposure', 'dust_tracking'))" in lot_schema_sql
+
+
+def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_exposure_rows(tmp_path):
+    conn = ensure_db(str(tmp_path / "harmless_dust_boundary.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            position_state
+        ) VALUES
+            (?, ?, ?, ?, ?, ?, ?),
+            (?, ?, ?, ?, ?, ?, ?),
+            (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "BTC_KRW",
+            1,
+            "below_min",
+            1_700_000_000_000,
+            40_000_000.0,
+            0.00009999,
+            OPEN_EXPOSURE_LOT_STATE,
+            "BTC_KRW",
+            2,
+            "exact_min",
+            1_700_000_000_500,
+            40_000_000.0,
+            0.0001,
+            OPEN_EXPOSURE_LOT_STATE,
+            "BTC_KRW",
+            3,
+            "above_min",
+            1_700_000_001_000,
+            40_000_000.0,
+            0.00010001,
+            OPEN_EXPOSURE_LOT_STATE,
+        ),
+    )
+    conn.commit()
+
+    dust = classify_dust_residual(
+        broker_qty=0.00009999,
+        local_qty=0.00009999,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+    updated = mark_harmless_dust_positions(
+        conn,
+        pair="BTC_KRW",
+        dust_metadata=build_dust_display_context(dust),
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        """
+        SELECT entry_client_order_id, position_state, qty_open
+        FROM open_position_lots
+        ORDER BY entry_client_order_id ASC
+        """
+    ).fetchall()
+    conn.close()
+
+    assert updated == 1
+    assert rows[0]["entry_client_order_id"] == "above_min"
+    assert rows[0]["position_state"] == OPEN_EXPOSURE_LOT_STATE
+    assert float(rows[0]["qty_open"]) == pytest.approx(0.00010001)
+    assert rows[1]["entry_client_order_id"] == "below_min"
+    assert rows[1]["position_state"] == DUST_TRACKING_LOT_STATE
+    assert float(rows[1]["qty_open"]) == pytest.approx(0.00009999)
+    assert rows[2]["entry_client_order_id"] == "exact_min"
+    assert rows[2]["position_state"] == OPEN_EXPOSURE_LOT_STATE
+    assert float(rows[2]["qty_open"]) == pytest.approx(0.0001)
 
 
 def test_schema_bootstrap_backfills_open_position_lot_state_for_legacy_rows(tmp_path):

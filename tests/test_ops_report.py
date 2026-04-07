@@ -11,9 +11,9 @@ from bithumb_bot.broker import order_rules
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision
 from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
-from bithumb_bot.reporting import cmd_ops_report
+from bithumb_bot.reporting import _sell_failure_category_from_observability, cmd_ops_report
 from bithumb_bot.oms import record_order_suppression
-from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED
+from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE, SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN, SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE, SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
 
 
 def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
@@ -209,7 +209,7 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "submit_payload_qty=" in out
     assert "event=submit_attempt_recorded" in out
     assert "reason=DUST_RESIDUAL_UNSELLABLE" in out
-    assert "sell_failure_category=unsafe_dust_mismatch_dust" in out
+    assert "sell_failure_category=dust_residual_unsellable" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "note=paper fill" in out
     assert "[ORDER-RULE-SNAPSHOT]" in out
@@ -674,12 +674,43 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "sell_normalized_exposure_qty=0.00009629" in out
+    assert "position_qty=0.00009629" in out
+    assert "submit_payload_qty=0.00000000" in out or "submit_payload_qty=0" in out
     assert "position_state_source=context.raw_qty_open" in out
     assert "raw_total_asset_qty=0.00019192" in out
     assert "open_exposure_qty=0.00009629" in out
     assert "dust_tracking_qty=0.00009563" in out
     assert "entry_allowed_truth_source=context.entry_allowed" in out
     assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
+
+
+
+
+def test_sell_failure_category_from_observability_flags_boundary_below_min_from_message():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+        message="state=EXIT_PARTIAL_LEFT_DUST;qty_below_min=1;normalized_below_min=0;notional_below_min=0",
+        submit_evidence=None,
+    )
+
+    assert category == SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
+
+
+def test_sell_failure_category_from_observability_flags_unsafe_mismatch_from_evidence():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+        message="state=EXIT_PARTIAL_LEFT_DUST;operator_action=MANUAL_DUST_REVIEW_REQUIRED",
+        submit_evidence=json.dumps(
+            {
+                "dust_qty_gap_small": 1,
+                "dust_broker_qty_is_dust": 1,
+                "dust_local_qty_is_dust": 1,
+                "summary": "dust_qty_gap_small=1 dust_broker_qty_is_dust=1 dust_local_qty_is_dust=1",
+            }
+        ),
+    )
+
+    assert category == SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
 
 
 def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, capsys):
