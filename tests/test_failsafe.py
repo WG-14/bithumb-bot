@@ -571,6 +571,73 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
     assert called["n"] == 1
 
 
+def test_run_loop_live_harmless_dust_sell_suppresses_before_live_execution(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00009193)
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100_000_000.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "SELL",
+        },
+    )
+
+    suppression_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "bithumb_bot.engine.record_harmless_dust_exit_suppression",
+        lambda **kwargs: suppression_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reach live execution")),
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 1,
+            "dust_broker_qty": 0.00009193,
+            "dust_local_qty": 0.00009193,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_latest_price": 100_000_000.0,
+            "dust_broker_notional_krw": 9193.0,
+            "dust_local_notional_krw": 9193.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 0,
+            "dust_local_notional_is_dust": 0,
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+        },
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert suppression_calls
+    assert suppression_calls[0]["signal"] == "SELL"
+    assert suppression_calls[0]["side"] == "SELL"
+    assert suppression_calls[0]["requested_qty"] == pytest.approx(0.00009193)
+    assert suppression_calls[0]["market_price"] == pytest.approx(100_000_000.0)
+
+
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):
     _prepare_run_loop(monkeypatch)
     object.__setattr__(settings, "KILL_SWITCH", True)

@@ -18,7 +18,7 @@ from .config import (
 from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.paper import paper_execute
-from .broker.live import live_execute_signal
+from .broker.live import live_execute_signal, record_harmless_dust_exit_suppression
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import ensure_db
@@ -1339,17 +1339,21 @@ def run_loop(short_n: int, long_n: int) -> None:
                     continue
 
                 conn = ensure_db()
+                portfolio_cash = 0.0
+                portfolio_qty = 0.0
                 try:
                     portfolio = conn.execute(
                         "SELECT cash_krw, asset_qty FROM portfolio WHERE id=1"
                     ).fetchone()
                     if portfolio is not None:
+                        portfolio_cash = float(portfolio["cash_krw"])
+                        portfolio_qty = float(portfolio["asset_qty"])
                         # Use latest candle close as the mark price for daily-loss evaluation.
                         blocked, reason = evaluate_daily_loss_breach(
                             conn,
                             ts_ms=int(now * 1000),
-                            cash=float(portfolio["cash_krw"]),
-                            qty=float(portfolio["asset_qty"]),
+                            cash=portfolio_cash,
+                            qty=portfolio_qty,
                             price=float(last_close),
                         )
                         if blocked:
@@ -1368,7 +1372,7 @@ def run_loop(short_n: int, long_n: int) -> None:
 
                         blocked, reason = evaluate_position_loss_breach(
                             conn,
-                            qty=float(portfolio["asset_qty"]),
+                            qty=portfolio_qty,
                             price=float(last_close),
                         )
                         if blocked:
@@ -1658,6 +1662,29 @@ def run_loop(short_n: int, long_n: int) -> None:
                         raise
                     trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
+                if r["signal"] == "SELL" and portfolio_qty > 0:
+                    suppression_conn = ensure_db()
+                    try:
+                        suppression_preview = {
+                            "normalized_qty": portfolio_qty,
+                        }
+                        if record_harmless_dust_exit_suppression(
+                            conn=suppression_conn,
+                            state=runtime_state.snapshot(),
+                            signal=r["signal"],
+                            side="SELL",
+                            requested_qty=portfolio_qty,
+                            market_price=float(r["last_close"]),
+                            normalized_qty=float(suppression_preview["normalized_qty"]),
+                            strategy_name=decision_strategy_name_for_trade,
+                            decision_id=decision_id,
+                            decision_reason=decision_reason_for_trade,
+                            exit_rule_name=decision_exit_rule_name,
+                        ):
+                            suppression_conn.commit()
+                            continue
+                    finally:
+                        suppression_conn.close()
                 try:
                     try:
                         trade = live_execute_signal(

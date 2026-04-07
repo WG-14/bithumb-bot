@@ -1092,6 +1092,41 @@ def _record_harmless_dust_exit_suppression(
     return True
 
 
+def record_harmless_dust_exit_suppression(
+    *,
+    conn,
+    state,
+    signal: str,
+    side: str,
+    requested_qty: float,
+    market_price: float,
+    normalized_qty: float,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+) -> bool:
+    """Public wrapper for harmless dust sell suppression.
+
+    Engine-level gating uses this before live execution so we do not create a
+    submit attempt, client_order_id, or orders row for harmless dust exits.
+    """
+
+    return _record_harmless_dust_exit_suppression(
+        conn=conn,
+        state=state,
+        signal=signal,
+        side=side,
+        requested_qty=requested_qty,
+        market_price=market_price,
+        normalized_qty=normalized_qty,
+        strategy_name=strategy_name,
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+    )
+
+
 def _validate_live_price_protection(
     *,
     side: str,

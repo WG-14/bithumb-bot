@@ -2420,6 +2420,14 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
 def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_row(monkeypatch, tmp_path):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live._submit_attempt_id",
+        lambda: (_ for _ in ()).throw(AssertionError("client_order_id must not be generated")),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live._client_order_id",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("client_order_id must not be generated")),
+    )
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_harmless_dust_suppression.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
