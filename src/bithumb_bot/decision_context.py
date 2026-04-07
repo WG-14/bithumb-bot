@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-_CANONICAL_CONTEXT_VERSION = 4
+_CANONICAL_CONTEXT_VERSION = 5
 
 
 def _as_text(value: Any, *, default: str = "") -> str:
@@ -339,6 +339,10 @@ def normalize_strategy_decision_context(
         "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
         "sell_open_exposure_qty": float(sell_open_exposure_qty),
         "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
+        "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
+        "sell_normalized_exposure_qty_truth_source": normalized_exposure_qty_truth_source,
+        "sell_open_exposure_qty_truth_source": open_exposure_qty_truth_source,
+        "sell_dust_tracking_qty_truth_source": dust_tracking_qty_truth_source,
         "position_state_source": position_state_source,
         "decision_truth_sources": decision_truth_sources,
     }

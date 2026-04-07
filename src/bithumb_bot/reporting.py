@@ -124,6 +124,8 @@ class DecisionTelemetrySummary:
     normalized_exposure_qty: float
     open_exposure_qty: float
     dust_tracking_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
     sell_normalized_exposure_qty: float
@@ -157,6 +159,8 @@ class RecentDecisionFlowSummary:
     normalized_exposure_qty: float
     open_exposure_qty: float
     dust_tracking_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
     sell_normalized_exposure_qty: float
@@ -175,9 +179,14 @@ class SellSuppressionSummary:
     side: str
     reason_code: str
     suppression_category: str
+    submit_qty_source: str
+    sell_submit_qty_source: str
     requested_qty: float | None
     normalized_qty: float | None
     market_price: float | None
+    open_exposure_qty: float | None
+    dust_tracking_qty: float | None
+    sell_failure_detail: str | None
     dust_state: str | None
     dust_action: str | None
     summary: str | None
@@ -589,6 +598,16 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS dust_tracking_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_open_exposure_qty'),
+                json_extract(oe.submit_evidence, '$.open_exposure_qty'),
+                0.0
+            ) AS sell_open_exposure_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_dust_tracking_qty'),
+                json_extract(oe.submit_evidence, '$.dust_tracking_qty'),
+                0.0
+            ) AS sell_dust_tracking_qty,
+            COALESCE(
                 json_extract(oe.submit_evidence, '$.sell_failure_detail'),
                 '-'
             ) AS sell_failure_detail,
@@ -626,9 +645,34 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
             signal,
             side,
             reason_code,
+            COALESCE(
+                json_extract(context_json, '$.submit_qty_source'),
+                json_extract(context_json, '$.sell_submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS submit_qty_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_submit_qty_source'),
+                json_extract(context_json, '$.submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS sell_submit_qty_source,
             requested_qty,
             normalized_qty,
             market_price,
+            COALESCE(
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                0.0
+            ) AS open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.dust_tracking_qty'),
+                json_extract(context_json, '$.sell_dust_tracking_qty'),
+                0.0
+            ) AS dust_tracking_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_failure_detail'),
+                json_extract(context_json, '$.sell_failure_category'),
+                reason
+            ) AS sell_failure_detail,
             dust_state,
             dust_action,
             summary
@@ -653,9 +697,14 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                     message=str(row["summary"] or ""),
                     submit_evidence=None,
                 ),
+                submit_qty_source=str(row["submit_qty_source"] or "-"),
+                sell_submit_qty_source=str(row["sell_submit_qty_source"] or "-"),
                 requested_qty=(float(row["requested_qty"]) if row["requested_qty"] is not None else None),
                 normalized_qty=(float(row["normalized_qty"]) if row["normalized_qty"] is not None else None),
                 market_price=(float(row["market_price"]) if row["market_price"] is not None else None),
+                open_exposure_qty=(float(row["open_exposure_qty"]) if row["open_exposure_qty"] is not None else None),
+                dust_tracking_qty=(float(row["dust_tracking_qty"]) if row["dust_tracking_qty"] is not None else None),
+                sell_failure_detail=str(row["sell_failure_detail"] or "-"),
                 dust_state=(str(row["dust_state"]) if row["dust_state"] is not None else None),
                 dust_action=(str(row["dust_action"]) if row["dust_action"] is not None else None),
                 summary=(str(row["summary"]) if row["summary"] is not None else None),
@@ -920,6 +969,18 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS dust_tracking_qty,
             COALESCE(
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                0.0
+            ) AS sell_open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
+                0.0
+            ) AS sell_dust_tracking_qty,
+            COALESCE(
                 json_extract(context_json, '$.submit_qty_source'),
                 json_extract(context_json, '$.position_state.normalized_exposure.submit_qty_source'),
                 json_extract(context_json, '$.position_gate.submit_qty_source'),
@@ -993,6 +1054,8 @@ def fetch_recent_decision_flow(
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
             open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
             dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
+            sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
+            sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
             submit_qty_source=str(row["submit_qty_source"]),
             sell_submit_qty_source=str(row["sell_submit_qty_source"]),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
@@ -1187,6 +1250,18 @@ def fetch_decision_telemetry_summary(
                 0.0
             ) AS dust_tracking_qty,
             COALESCE(
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                0.0
+            ) AS sell_open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
+                0.0
+            ) AS sell_dust_tracking_qty,
+            COALESCE(
                 json_extract(context_json, '$.submit_qty_source'),
                 json_extract(context_json, '$.position_state.normalized_exposure.submit_qty_source'),
                 json_extract(context_json, '$.position_gate.submit_qty_source'),
@@ -1253,6 +1328,8 @@ def fetch_decision_telemetry_summary(
             normalized_exposure_qty,
             open_exposure_qty,
             dust_tracking_qty,
+            sell_open_exposure_qty,
+            sell_dust_tracking_qty,
             submit_qty_source,
             sell_submit_qty_source,
             sell_normalized_exposure_qty,
@@ -1287,6 +1364,8 @@ def fetch_decision_telemetry_summary(
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
             open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
             dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
+            sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
+            sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
             submit_qty_source=str(row["submit_qty_source"]),
             sell_submit_qty_source=str(row["sell_submit_qty_source"]),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
@@ -3060,6 +3139,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "normalized_exposure_qty": row.normalized_exposure_qty,
                 "open_exposure_qty": row.open_exposure_qty,
                 "dust_tracking_qty": row.dust_tracking_qty,
+                "sell_open_exposure_qty": row.sell_open_exposure_qty,
+                "sell_dust_tracking_qty": row.sell_dust_tracking_qty,
                 "submit_qty_source": row.submit_qty_source,
                 "sell_submit_qty_source": row.sell_submit_qty_source,
                 "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
@@ -3285,6 +3366,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"raw_total_asset_qty={_fmt_float(float(row['raw_total_asset_qty'] or 0.0), 8)} "
                 f"open_exposure_qty={_fmt_float(float(row['open_exposure_qty'] or 0.0), 8)} "
                 f"dust_tracking_qty={_fmt_float(float(row['dust_tracking_qty'] or 0.0), 8)} "
+                f"sell_open_exposure_qty={_fmt_float(float(row['sell_open_exposure_qty'] or 0.0), 8)} "
+                f"sell_dust_tracking_qty={_fmt_float(float(row['sell_dust_tracking_qty'] or 0.0), 8)} "
                 f"price={_fmt_float(float(row['price'] or 0.0), 0)} "
                 f"reason={row['submission_reason_code'] or '-'} note={message or '-'}"
             )
@@ -3298,8 +3381,13 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "  "
                 f"{kst_str(int(row.event_ts))} strategy={row.strategy_name} signal={row.signal} side={row.side} "
                 f"reason={row.reason_code} sell_failure_category={row.suppression_category} "
+                f"sell_failure_detail={row.sell_failure_detail or '-'} "
+                f"submit_qty_source={row.submit_qty_source} "
+                f"sell_submit_qty_source={row.sell_submit_qty_source} "
                 f"requested_qty={_fmt_float(float(row.requested_qty or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row.normalized_qty or 0.0), 8)} "
+                f"open_exposure_qty={_fmt_float(float(row.open_exposure_qty or 0.0), 8)} "
+                f"dust_tracking_qty={_fmt_float(float(row.dust_tracking_qty or 0.0), 8)} "
                 f"market_price={_fmt_float(float(row.market_price or 0.0), 0)} "
                 f"dust_state={row.dust_state or '-'} dust_action={row.dust_action or '-'} "
                 f"summary={row.summary or '-'}"
@@ -3389,7 +3477,8 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
         "raw_total_asset_qty,position_qty,submit_payload_qty,normalized_exposure_active,normalized_exposure_qty,"
-        "open_exposure_qty,dust_tracking_qty,submit_qty_source,sell_submit_qty_source,"
+        "open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
+        "submit_qty_source,sell_submit_qty_source,"
         "sell_normalized_exposure_qty,position_state_source,entry_allowed_truth_source,"
         "effective_flat_truth_source,strategy_name,pair,interval,count"
     )
@@ -3400,7 +3489,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
             f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
             f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_qty:.8f},"
-            f"{row.open_exposure_qty:.8f},{row.dust_tracking_qty:.8f},{row.submit_qty_source},{row.sell_submit_qty_source},"
+            f"{row.open_exposure_qty:.8f},{row.dust_tracking_qty:.8f},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},{row.submit_qty_source},{row.sell_submit_qty_source},"
             f"{row.sell_normalized_exposure_qty:.8f},{row.position_state_source},"
             f"{row.entry_allowed_truth_source},{row.effective_flat_truth_source},"
             f"{row.strategy_name},{row.pair},{row.interval},{row.count}"

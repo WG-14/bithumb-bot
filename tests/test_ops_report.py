@@ -696,6 +696,16 @@ def test_sell_failure_category_from_observability_flags_boundary_below_min_from_
     assert category == SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
 
 
+def test_sell_failure_category_from_observability_flags_qty_step_mismatch_from_message():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code="SUBMIT_FAILED",
+        message="state=EXIT_PARTIAL_LEFT_DUST;qty_step=0.0001;normalized_qty=0.00009",
+        submit_evidence=None,
+    )
+
+    assert category == "qty_step_mismatch"
+
+
 def test_sell_failure_category_from_observability_flags_unsafe_mismatch_from_evidence():
     category = _sell_failure_category_from_observability(
         submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
@@ -711,6 +721,26 @@ def test_sell_failure_category_from_observability_flags_unsafe_mismatch_from_evi
     )
 
     assert category == SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
+
+
+def test_sell_failure_category_from_observability_flags_submission_halt_from_message():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code="RISKY_ORDER_BLOCK",
+        message="runtime halted: code=KILL_SWITCH reason=operator stop",
+        submit_evidence=None,
+    )
+
+    assert category == "submission_halt"
+
+
+def test_sell_failure_category_from_observability_flags_unresolved_risk_gate_from_message():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code="RISKY_ORDER_BLOCK",
+        message="category=unresolved_risk_gate;code=open_order_timeout;reason=unresolved",
+        submit_evidence=None,
+    )
+
+    assert category == "unresolved_risk_gate"
 
 
 def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, capsys):
@@ -733,6 +763,16 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
             requested_qty=0.0002,
             normalized_qty=0.00009629,
             market_price=102_500_000.0,
+            context={
+                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "open_exposure_qty": 0.00009629,
+                "dust_tracking_qty": 0.00009563,
+                "sell_open_exposure_qty": 0.00009629,
+                "sell_dust_tracking_qty": 0.00009563,
+                "sell_failure_category": "dust_suppression",
+                "sell_failure_detail": "dust_suppression",
+            },
             dust_present=True,
             dust_allow_resume=True,
             dust_effective_flat=True,
@@ -751,4 +791,9 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "[RECENT-SELL-SUPPRESSIONS]" in out
     assert "reason=DUST_RESIDUAL_SUPPRESSED" in out
     assert "sell_failure_category=dust_suppression" in out
+    assert "sell_failure_detail=dust_suppression" in out
+    assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "open_exposure_qty=0.00009629" in out
+    assert "dust_tracking_qty=0.00009563" in out
     assert "harmless_dust_tracked_resume_allowed" in out
