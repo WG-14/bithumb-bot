@@ -365,7 +365,7 @@ def test_flat_start_safety_check_blocks_local_dust_position_without_broker_confi
 
     assert allowed is False
     assert "flat_start_requires_operator_review" in reason
-    assert "state=dangerous_dust" in reason
+    assert "state=blocking_dust" in reason
     assert "broker_qty=0.00000000" in reason
     assert "local_qty=0.00009629" in reason
     assert "min_qty=0.00010000" in reason

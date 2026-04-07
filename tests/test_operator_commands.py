@@ -21,6 +21,7 @@ from bithumb_bot.app import (
     cmd_resume,
 )
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_resume_eligibility
@@ -770,13 +771,13 @@ def test_resume_blocks_risk_halt_when_only_matched_dust_policy_review_remains(tm
         reason_code="RECENT_FILL_APPLIED",
         metadata={
             "balance_split_mismatch_count": 0,
-            "dust_classification": "matched_harmless_dust",
+            "dust_classification": "harmless_dust",
             "dust_residual_present": 1,
             "dust_residual_allow_resume": 0,
             "dust_effective_flat": 1,
             "submit_unknown_count": 1,
             "dust_policy_reason": "matched_harmless_dust_operator_review_required",
-            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 min_qty=0.00010000 submit_unknown_count=1 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
+            "dust_residual_summary": "broker_qty=0.00009629 local_qty=0.00009629 classification=harmless_dust harmless_dust=1 broker_local_match=1 min_qty=0.00010000 submit_unknown_count=1 allow_resume=0 effective_flat=1 policy_reason=matched_harmless_dust_operator_review_required",
         },
     )
     monkeypatch.setattr("bithumb_bot.app.reconcile_with_broker", lambda _broker: None)
@@ -788,11 +789,11 @@ def test_resume_blocks_risk_halt_when_only_matched_dust_policy_review_remains(tm
     out = capsys.readouterr().out
     state = runtime_state.snapshot()
     assert exc.value.code == 1
-    assert "code=MATCHED_DUST_POLICY_REVIEW_REQUIRED" in out
+    assert "code=HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in out
     assert state.trading_enabled is False
     assert state.resume_gate_blocked is True
     assert state.resume_gate_reason is not None
-    assert "MATCHED_DUST_POLICY_REVIEW_REQUIRED" in state.resume_gate_reason
+    assert "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in state.resume_gate_reason
 
 
 def test_resume_refuses_when_dust_residual_policy_requires_review(tmp_path, capsys):
@@ -2134,6 +2135,79 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "BUY(min_total_krw=5500.0 (source=chance_doc), price_unit=10.0 (source=chance_doc))" in out
 
 
+def test_health_reports_order_rule_fallback_risk_when_autosync_degrades(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 2.0,
+            "error_count": 0,
+            "trading_enabled": True,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": None,
+            "halt_new_orders_blocked": False,
+            "halt_reason_code": None,
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.DerivedOrderConstraints(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=0.0,
+                ask_price_unit=0.0,
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "local_fallback",
+                "ask_min_total_krw": "local_fallback",
+                "bid_price_unit": "local_fallback",
+                "ask_price_unit": "local_fallback",
+                "ruleset": "merged",
+            },
+            fallback_used=True,
+            fallback_reason_code="AUTH_QUERY_HASH_MISMATCH",
+            fallback_reason_summary="JWT query_hash mismatch; GET query string/body hash must match transmitted params",
+            fallback_reason_detail="BrokerRejectError: invalid_query_payload",
+            fallback_risk=(
+                "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
+                "may stay on local fallback until /v1/orders/chance succeeds again"
+            ),
+        ),
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "order_rules_autosync=FALLBACK" in out
+    assert "reason_code=AUTH_QUERY_HASH_MISMATCH" in out
+    assert "risk=order-rule auto-sync unavailable" in out
+
+
 def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
     monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
@@ -2397,6 +2471,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "broker_recent_orders_snapshot_error",
         "balance_split_mismatch_summary",
         "dust_classification",
+        "dust_effective_flat",
         "dust_residual_present",
         "dust_residual_allow_resume",
         "dust_policy_reason",
@@ -2418,6 +2493,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "dust_local_qty_below_min",
         "dust_broker_notional_below_min",
         "dust_local_notional_below_min",
+        "effective_flat_due_to_harmless_dust",
         "recent_dust_unsellable_event",
         "active_blocker_summary",
         "blocker_summary",
@@ -2721,7 +2797,7 @@ def test_resume_eligibility_allows_matched_harmless_dust_when_policy_marks_it_tr
             "dust_residual_summary": (
                 "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
                 "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
             ),
             "remote_open_order_found": 0,
@@ -2766,7 +2842,7 @@ def test_resume_eligibility_keeps_unresolved_open_order_block_even_when_dust_is_
     assert eligible is False
     blocker_codes = [b.code for b in blockers]
     assert "STARTUP_SAFETY_GATE_BLOCKED" in blocker_codes
-    assert "DANGEROUS_DUST_REVIEW_REQUIRED" not in blocker_codes
+    assert "BLOCKING_DUST_REVIEW_REQUIRED" not in blocker_codes
 
 
 def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):
@@ -2791,10 +2867,10 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
 
     assert report["resume_allowed"] is False
     assert report["can_resume"] is False
-    assert "MATCHED_DUST_POLICY_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in report["resume_blockers"]
     assert report["operator_next_action"] != "resume_now"
-    assert report["operator_next_action"] == "review_matched_dust_policy"
-    assert report["dust_state"] == "matched_harmless_dust"
+    assert report["operator_next_action"] == "review_harmless_dust_policy"
+    assert report["dust_state"] == "harmless_dust"
     assert report["dust_new_orders_allowed"] is False
     assert report["dust_resume_allowed_by_policy"] is False
 
@@ -2812,7 +2888,7 @@ def test_recovery_report_allows_resume_now_for_matched_harmless_dust_when_tracke
             "dust_residual_summary": (
                 "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
                 "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
             ),
             "remote_open_order_found": 0,
@@ -2827,7 +2903,7 @@ def test_recovery_report_allows_resume_now_for_matched_harmless_dust_when_tracke
     assert report["can_resume"] is True
     assert report["resume_blockers"] == []
     assert report["operator_next_action"] == "resume_now"
-    assert report["dust_state"] == "matched_harmless_dust"
+    assert report["dust_state"] == "harmless_dust"
     assert report["dust_new_orders_allowed"] is True
     assert report["dust_resume_allowed_by_policy"] is True
 
@@ -2853,7 +2929,7 @@ def test_recovery_report_prioritizes_dangerous_dust_when_unresolved_order_also_b
             "dust_residual_summary": (
                 "broker_qty=0.00009900 local_qty=0.00001000 delta=0.00008900 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=0 "
-                "classification=dangerous_dust matched_harmless=0 broker_local_match=0 "
+                "classification=blocking_dust harmless_dust=0 broker_local_match=0 "
                 "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required"
             ),
             "remote_open_order_found": 1,
@@ -2864,12 +2940,12 @@ def test_recovery_report_prioritizes_dangerous_dust_when_unresolved_order_also_b
 
     report = _load_recovery_report()
 
-    assert report["dust_state"] == "dangerous_dust"
+    assert report["dust_state"] == "blocking_dust"
     assert report["dust_broker_local_match"] is False
     assert report["dust_resume_allowed_by_policy"] is False
     assert report["can_resume"] is False
     assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
-    assert "DANGEROUS_DUST_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert "BLOCKING_DUST_REVIEW_REQUIRED" in report["resume_blockers"]
     assert report["operator_next_action"] == "manual_dust_review_required"
 
 
@@ -2900,11 +2976,11 @@ def test_recovery_report_keeps_effective_flat_dust_visible_when_unresolved_order
 
     report = _load_recovery_report()
 
-    assert report["dust_state"] == "matched_harmless_dust"
+    assert report["dust_state"] == "harmless_dust"
     assert report["dust_resume_allowed_by_policy"] is True
     assert report["can_resume"] is False
     assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
-    assert "DANGEROUS_DUST_REVIEW_REQUIRED" not in report["resume_blockers"]
+    assert "BLOCKING_DUST_REVIEW_REQUIRED" not in report["resume_blockers"]
     assert report["operator_next_action"] == "investigate_blockers"
 
 
@@ -3877,7 +3953,7 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
             "dust_residual_summary": (
                 "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
             ),
             "oversized_debug_blob": "x" * 5000,
         },
@@ -3888,8 +3964,8 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_residual_present=1" in health_out
     assert "dust_residual_allow_resume=1" in health_out
     assert "dust_policy_reason=matched_harmless_dust_resume_allowed" in health_out
-    assert "dust_state=matched_harmless_dust" in health_out
-    assert "dust_operator_action=matched_dust_tracked_resume_allowed" in health_out
+    assert "dust_state=harmless_dust" in health_out
+    assert "dust_operator_action=harmless_dust_tracked_resume_allowed" in health_out
     assert "dust_resume_allowed_by_policy=1" in health_out
     assert "dust_treat_as_flat=1" in health_out
     assert "dust_broker_qty=0.00009629" in health_out
@@ -3897,6 +3973,8 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_broker_local_match=1" in health_out
     assert "dust_qty_below_min=broker=1 local=1" in health_out
     assert "dust_notional_below_min=broker=0 local=0" in health_out
+    assert "position=flat effective_flat_due_to_harmless_dust=1" in health_out
+    assert "dust_effective_flat=1" in health_out
     assert "balance_source_flat_start_allowed=True" in health_out
     assert "balance_source_flat_start_reason=flat_start_effective_flat(" in health_out
 
@@ -3906,10 +3984,12 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "present=1" in report_out
     assert "allow_resume=1" in report_out
     assert "policy_reason=matched_harmless_dust_resume_allowed" in report_out
-    assert "state=matched_harmless_dust" in report_out
-    assert "operator_action=matched_dust_tracked_resume_allowed" in report_out
+    assert "state=harmless_dust" in report_out
+    assert "operator_action=harmless_dust_tracked_resume_allowed" in report_out
     assert "resume_allowed_by_policy=1" in report_out
     assert "treat_as_flat=1" in report_out
+    assert "dust_effective_flat=1" in report_out
+    assert "effective_flat_due_to_harmless_dust=1" in report_out
     assert (
         "broker_qty=0.00009629 local_qty=0.00009629 delta_qty=0.00000000 "
         "min_qty=0.00010000 min_notional_krw=5000.0"

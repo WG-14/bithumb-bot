@@ -30,6 +30,7 @@ from .runtime_state import disable_trading_until, enable_trading, refresh_open_o
 from .notifier import notify
 from .observability import safety_event
 from .broker.order_rules import get_effective_order_rules, rule_source_for
+from .broker.bithumb import build_broker_with_auth_diagnostics
 from .broker import bithumb as bithumb_broker_module
 from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
@@ -49,6 +50,7 @@ from .reporting import (
     parse_kst_date_range_to_ts_ms,
 )
 from .storage_io import write_json_atomic
+from .bootstrap import get_last_explicit_env_load_summary
 
 import httpx
 
@@ -182,17 +184,22 @@ def cmd_status():
     }
     try:
         broker = DEFAULT_BITHUMB_BROKER_CLASS()
+        auth_diag = getattr(broker, "get_auth_runtime_diagnostics", lambda **_kwargs: {})(
+            caller="cmd_health",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+        )
         raw_diag = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
         if isinstance(raw_diag, dict):
             balance_diag.update(raw_diag)
     except Exception as exc:
+        auth_diag = {}
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
     dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
     dust_view = dust_context.operator_view
     if dust_view.resume_allowed and dust_view.treat_as_flat:
         balance_diag["flat_start_allowed"] = True
         balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
-            balance_diag.get("flat_start_reason"),
+            balance_diag.get("flat_start_reason") or "flat_start_safe",
             dust_context,
         )
     raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
@@ -518,9 +525,9 @@ def cmd_health() -> None:
         )
     elif dust.present and not dust_view.resume_allowed:
         halt_reason_for_summary = (
-            "MATCHED_DUST_POLICY_REVIEW_REQUIRED"
-            if dust_view.state == "matched_harmless_dust"
-            else "DANGEROUS_DUST_REVIEW_REQUIRED"
+            "HARMLESS_DUST_POLICY_REVIEW_REQUIRED"
+            if dust_view.state == "harmless_dust"
+            else "BLOCKING_DUST_REVIEW_REQUIRED"
         )
         recommended_commands = "uv run python bot.py recovery-report"
     elif halt_reason_for_summary == "KILL_SWITCH":
@@ -556,8 +563,13 @@ def cmd_health() -> None:
         "last_observed_ts_ms": None,
         "last_asset_ts_ms": None,
     }
+    auth_diag: dict[str, object] = {}
     try:
-        broker = DEFAULT_BITHUMB_BROKER_CLASS()
+        broker, auth_diag = build_broker_with_auth_diagnostics(
+            caller="cmd_health",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+            broker_factory=DEFAULT_BITHUMB_BROKER_CLASS,
+        )
         raw_diag = getattr(broker, "get_accounts_validation_diagnostics", lambda: {})()
         if isinstance(raw_diag, dict):
             balance_diag.update(raw_diag)
@@ -566,7 +578,7 @@ def cmd_health() -> None:
     if dust_view.resume_allowed and dust_view.treat_as_flat:
         balance_diag["flat_start_allowed"] = True
         balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
-            balance_diag.get("flat_start_reason"),
+            balance_diag.get("flat_start_reason") or "flat_start_safe",
             dust_context,
         )
 
@@ -589,7 +601,11 @@ def cmd_health() -> None:
         print("    broker_open_order_count=unknown")
     else:
         print(f"    broker_open_order_count={remote_open_order_count}")
-    print(f"    position={position_summary}")
+    print(
+        "    "
+        f"position={position_summary} "
+        f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0}"
+    )
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
     print(f"    resume_safety={resume_safety}")
@@ -627,6 +643,34 @@ def cmd_health() -> None:
         f"base_missing_policy={balance_diag.get('base_currency_missing_policy') or '-'} "
         f"preflight_outcome={balance_diag.get('preflight_outcome') or '-'}"
     )
+    if isinstance(auth_diag, dict) and auth_diag:
+        env_summary = auth_diag.get("env") if isinstance(auth_diag.get("env"), dict) else {}
+        chance_auth = auth_diag.get("chance_auth") if isinstance(auth_diag.get("chance_auth"), dict) else {}
+        print(
+            "    "
+            f"env_source_key={env_summary.get('source_key') or '-'} "
+            f"env_file={env_summary.get('env_file') or '-'} "
+            f"env_loaded={1 if env_summary.get('loaded') else 0} "
+            f"env_override={1 if env_summary.get('override') else 0}"
+        )
+        print(
+            "    "
+            f"auth_api_key_present={1 if auth_diag.get('api_key_present') else 0} "
+            f"auth_api_key_length={auth_diag.get('api_key_length')} "
+            f"auth_api_secret_present={1 if auth_diag.get('api_secret_present') else 0} "
+            f"auth_api_secret_length={auth_diag.get('api_secret_length')} "
+            f"auth_balance_source={auth_diag.get('balance_source_selected') or '-'} "
+            f"auth_ws_myasset_enabled={1 if auth_diag.get('ws_myasset_enabled') else 0}"
+        )
+        print(
+            "    "
+            f"auth_preview_endpoint={chance_auth.get('endpoint') or '-'} "
+            f"auth_preview_method={chance_auth.get('method') or '-'} "
+            f"auth_branch={chance_auth.get('auth_branch') or '-'} "
+            f"auth_query_hash_included={1 if chance_auth.get('query_hash_included') else 0} "
+            f"auth_query_hash_preview={chance_auth.get('query_hash_preview') or '-'} "
+            f"auth_fallback_branch_used={1 if chance_auth.get('fallback_branch_used') else 0}"
+        )
 
     print("  [RISK-SNAPSHOT]")
     print(
@@ -670,6 +714,7 @@ def cmd_health() -> None:
             f"unresolved_order_count={health['unresolved_open_order_count']} "
             f"open_order_count={open_order_count} "
             f"position={position_summary} "
+            f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0} "
             f"dust_state={dust_view.state}"
         )
         print(f"    next_commands={recommended_commands}")
@@ -678,6 +723,14 @@ def cmd_health() -> None:
         resolved_rules = get_effective_order_rules(PAIR)
         rules = resolved_rules.rules
         source = resolved_rules.source or {}
+        if getattr(resolved_rules, "fallback_used", False):
+            print(
+                "    "
+                f"order_rules_autosync=FALLBACK "
+                f"reason_code={resolved_rules.fallback_reason_code or '-'} "
+                f"reason={resolved_rules.fallback_reason_summary or '-'} "
+                f"risk={resolved_rules.fallback_risk or '-'}"
+            )
         print(
             "    "
             f"min_qty={_format_rule_value_with_source(field='min_qty', value=rules.min_qty, source=source)} "
@@ -1715,20 +1768,20 @@ def _load_recovery_report(
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
         recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
         resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
-    elif "MATCHED_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
-        operator_next_action = "review_matched_dust_policy"
+    elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "review_harmless_dust_policy"
         recommended_command = "uv run python bot.py recovery-report --json"
         recommended_next_action = (
-            "Confirm matched broker/local dust is harmless, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
+            "Confirm harmless broker/local dust is truly safe, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
         )
-        resume_blocked_reason = "resume blocked by matched dust policy review"
-    elif "DANGEROUS_DUST_REVIEW_REQUIRED" in blocker_codes:
+        resume_blocked_reason = "resume blocked by harmless dust policy review"
+    elif "BLOCKING_DUST_REVIEW_REQUIRED" in blocker_codes:
         operator_next_action = "manual_dust_review_required"
         recommended_command = "uv run python bot.py recovery-report --json"
         recommended_next_action = (
             "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
         )
-        resume_blocked_reason = "resume blocked by dangerous dust manual review"
+        resume_blocked_reason = "resume blocked by blocking dust manual review"
     else:
         operator_next_action = "investigate_blockers"
         recommended_command = "uv run python bot.py recovery-report --json"
@@ -1761,7 +1814,7 @@ def _load_recovery_report(
             return "uv run python bot.py reconcile"
         if code == "HALT_RISK_OPEN_POSITION":
             return "uv run python bot.py flatten-position"
-        if code in {"MATCHED_DUST_POLICY_REVIEW_REQUIRED", "DANGEROUS_DUST_REVIEW_REQUIRED"}:
+        if code in {"HARMLESS_DUST_POLICY_REVIEW_REQUIRED", "BLOCKING_DUST_REVIEW_REQUIRED"}:
             return "uv run python bot.py recovery-report --json"
         if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
             return "uv run python bot.py restart-checklist"
@@ -1988,6 +2041,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    new_orders_allowed={1 if bool(report.get('dust_new_orders_allowed')) else 0}")
     print(f"    resume_allowed_by_policy={1 if bool(report.get('dust_resume_allowed_by_policy')) else 0}")
     print(f"    treat_as_flat={1 if bool(report.get('dust_treat_as_flat')) else 0}")
+    print(f"    dust_effective_flat={1 if bool(report.get('dust_effective_flat')) else 0}")
+    print(
+        "    "
+        f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0}"
+    )
     print(f"    summary={report.get('dust_residual_summary') or 'none'}")
     recent_dust_unsellable_event = report.get("recent_dust_unsellable_event")
     print("  [P3.0a] recent_dust_unsellable_event")

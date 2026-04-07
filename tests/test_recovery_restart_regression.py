@@ -27,6 +27,9 @@ import bithumb_bot.recovery as recovery_module
 from tests.test_failsafe import _set_live_runtime_paths
 
 
+pytestmark = pytest.mark.slow_integration
+
+
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
     old_db_path = settings.DB_PATH
@@ -563,7 +566,7 @@ def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(i
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 1
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_resume_allowed"
-    assert metadata["dust_classification"] == "matched_harmless_dust"
+    assert metadata["dust_classification"] == "harmless_dust"
     assert int(metadata["dust_partial_flatten_recent"]) == 1
 
 
@@ -590,7 +593,7 @@ def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_n
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 1
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_resume_allowed"
-    assert metadata["dust_classification"] == "matched_harmless_dust"
+    assert metadata["dust_classification"] == "harmless_dust"
     assert int(metadata["dust_partial_flatten_recent"]) == 0
 
 
@@ -614,8 +617,8 @@ def test_reconcile_blocks_local_only_dust_gap_without_broker_match(isolated_db, 
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
     assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
-    assert metadata["dust_classification"] == "dangerous_dust"
-    assert "classification=dangerous_dust" in str(metadata["dust_residual_summary"])
+    assert metadata["dust_classification"] == "blocking_dust"
+    assert "classification=blocking_dust" in str(metadata["dust_residual_summary"])
 
 
 @pytest.mark.parametrize(
@@ -651,9 +654,9 @@ def test_reconcile_blocks_one_sided_dust_gap_without_broker_local_match(
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
     assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
-    assert metadata["dust_classification"] == "dangerous_dust"
+    assert metadata["dust_classification"] == "blocking_dust"
     summary = str(metadata["dust_residual_summary"])
-    assert "classification=dangerous_dust" in summary
+    assert "classification=blocking_dust" in summary
     assert f"broker_qty={broker_qty:.8f}" in summary
     assert f"local_qty={local_qty:.8f}" in summary
     assert f"delta={(broker_qty - local_qty):.8f}" in summary
@@ -679,11 +682,11 @@ def test_reconcile_blocks_matched_dust_when_broker_local_gap_exceeds_tolerance(i
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 0
     assert metadata["dust_policy_reason"] == "dangerous_dust_operator_review_required"
-    assert metadata["dust_classification"] == "dangerous_dust"
+    assert metadata["dust_classification"] == "blocking_dust"
 
     assert int(metadata["dust_qty_gap_small"]) == 0
     summary = str(metadata["dust_residual_summary"])
-    assert "classification=dangerous_dust" in summary
+    assert "classification=blocking_dust" in summary
     assert "broker_qty=0.00009900" in summary
     assert "local_qty=0.00001000" in summary
 
@@ -708,8 +711,8 @@ def test_reconcile_blocks_qty_dust_when_notional_is_still_tradeable(isolated_db,
     assert int(metadata["dust_residual_present"]) == 1
     assert int(metadata["dust_residual_allow_resume"]) == 1
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_resume_allowed"
-    assert metadata["dust_classification"] == "matched_harmless_dust"
-    assert "classification=matched_harmless_dust" in str(metadata["dust_residual_summary"])
+    assert metadata["dust_classification"] == "harmless_dust"
+    assert "classification=harmless_dust" in str(metadata["dust_residual_summary"])
 
 
 def test_restart_after_submit_immediate_exit_keeps_gate_blocked(isolated_db):

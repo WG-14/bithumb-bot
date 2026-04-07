@@ -6,72 +6,41 @@ import time
 from pathlib import Path
 
 
-def _resolve_explicit_env_file() -> str | None:
-    explicit_env_file = os.getenv("BITHUMB_ENV_FILE")
-    if explicit_env_file:
-        return explicit_env_file
+def _validate_healthcheck_env():
+    from bithumb_bot.bootstrap import describe_explicit_env_file, load_explicit_env_file
 
-    normalized_mode = (os.getenv("MODE") or "").strip().lower()
-    if normalized_mode == "live":
-        return os.getenv("BITHUMB_ENV_FILE_LIVE")
-    if normalized_mode in {"paper", "test"}:
-        return os.getenv("BITHUMB_ENV_FILE_PAPER")
-    return None
-
-
-def _load_env_file(env_file: Path, *, override: bool = False) -> None:
-    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key:
-            continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
-            value = value[1:-1]
-        if override:
-            os.environ[key] = value
-        else:
-            os.environ.setdefault(key, value)
-
-
-def _validate_healthcheck_env() -> str | None:
-    env_file_value = _resolve_explicit_env_file()
+    mode = (os.getenv("MODE") or "").strip().lower() or None
+    summary = describe_explicit_env_file(mode)
+    env_file_value = summary.env_file
     if env_file_value is None or not env_file_value.strip():
-        return (
+        return None, (
             "healthcheck config error: explicit env file is required; "
             "set BITHUMB_ENV_FILE (or BITHUMB_ENV_FILE_LIVE/BITHUMB_ENV_FILE_PAPER)"
         )
 
     env_file = Path(env_file_value).expanduser()
     if not env_file.exists() or not env_file.is_file():
-        return f"healthcheck config error: env file not found: {env_file}"
+        return None, f"healthcheck config error: env file not found: {env_file}"
 
-    _load_env_file(env_file, override=True)
+    load_explicit_env_file(mode)
 
     db_path_env = os.getenv("DB_PATH")
     if db_path_env is None or not db_path_env.strip():
-        return (
+        return summary, (
             f"healthcheck config error: DB_PATH is missing or empty in env file {env_file}; "
             "refusing to fall back to default DB"
         )
 
-    return None
+    return summary, None
 
 
 def main() -> int:
-    env_error = _validate_healthcheck_env()
+    env_summary, env_error = _validate_healthcheck_env()
     if env_error:
         print(f"[HEALTHCHECK] FAIL {env_error}")
         return 1
 
+    from bithumb_bot.bootstrap import get_last_explicit_env_load_summary
     from bithumb_bot.config import PROJECT_ROOT, settings
     from bithumb_bot.notifier import notify
     from bithumb_bot.broker.bithumb import BithumbBroker
@@ -98,6 +67,18 @@ def main() -> int:
         f"runtime_state={pm.runtime_state_path()} "
         f"backup_db_dir={pm.config.backup_root / pm.config.mode / 'db'}"
     )
+    active_env_summary = get_last_explicit_env_load_summary().as_dict()
+    if env_summary is not None and not active_env_summary.get("env_file"):
+        active_env_summary = env_summary.as_dict()
+    print(
+        "[HEALTHCHECK] ENV_SOURCE "
+        f"mode={active_env_summary.get('mode') or '-'} "
+        f"source_key={active_env_summary.get('source_key') or '-'} "
+        f"env_file={active_env_summary.get('env_file') or '-'} "
+        f"exists={1 if active_env_summary.get('exists') else 0} "
+        f"loaded={1 if active_env_summary.get('loaded') else 0} "
+        f"override={1 if active_env_summary.get('override') else 0}"
+    )
 
     state = snapshot()
     health = {
@@ -123,6 +104,43 @@ def main() -> int:
     }
     try:
         broker = BithumbBroker()
+        auth_diag = broker.get_auth_runtime_diagnostics(
+            caller="healthcheck",
+            env_summary=active_env_summary,
+        )
+        print(
+            "[HEALTHCHECK] AUTH_INIT "
+            f"caller={auth_diag.get('caller') or '-'} "
+            f"mode={auth_diag.get('mode') or '-'} "
+            f"balance_source={auth_diag.get('balance_source_selected') or '-'} "
+            f"api_key_present={1 if auth_diag.get('api_key_present') else 0} "
+            f"api_key_length={auth_diag.get('api_key_length')} "
+            f"api_secret_present={1 if auth_diag.get('api_secret_present') else 0} "
+            f"api_secret_length={auth_diag.get('api_secret_length')} "
+            f"live_dry_run={1 if auth_diag.get('live_dry_run') else 0} "
+            f"live_real_order_armed={1 if auth_diag.get('live_real_order_armed') else 0} "
+            f"ws_myasset_enabled={1 if auth_diag.get('ws_myasset_enabled') else 0}"
+        )
+        accounts_auth = auth_diag.get("accounts_auth") if isinstance(auth_diag.get("accounts_auth"), dict) else {}
+        chance_auth = auth_diag.get("chance_auth") if isinstance(auth_diag.get("chance_auth"), dict) else {}
+        print(
+            "[HEALTHCHECK] AUTH_PREVIEW "
+            f"endpoint={accounts_auth.get('endpoint') or '-'} "
+            f"method={accounts_auth.get('method') or '-'} "
+            f"auth_branch={accounts_auth.get('auth_branch') or '-'} "
+            f"query_hash_included={1 if accounts_auth.get('query_hash_included') else 0} "
+            f"fallback_branch_used={1 if accounts_auth.get('fallback_branch_used') else 0}"
+        )
+        print(
+            "[HEALTHCHECK] AUTH_PREVIEW "
+            f"endpoint={chance_auth.get('endpoint') or '-'} "
+            f"method={chance_auth.get('method') or '-'} "
+            f"auth_branch={chance_auth.get('auth_branch') or '-'} "
+            f"query_hash_included={1 if chance_auth.get('query_hash_included') else 0} "
+            f"query_hash_preview={chance_auth.get('query_hash_preview') or '-'} "
+            f"payload_keys={','.join(str(item) for item in list(chance_auth.get('payload_keys') or [])) or '-'} "
+            f"fallback_branch_used={1 if chance_auth.get('fallback_branch_used') else 0}"
+        )
         try:
             broker.get_balance_snapshot()
         except Exception:

@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, dust_qty_gap_tolerance
+from bithumb_bot.dust import (
+    build_dust_display_context,
+    build_dust_operator_view,
+    classify_dust_residual,
+    dust_qty_gap_tolerance,
+)
+
+
+pytestmark = pytest.mark.fast_regression
 
 
 @pytest.mark.parametrize(
@@ -29,7 +37,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             False,
             "matched_harmless_dust_operator_review_required",
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             True,
         ),
@@ -42,7 +50,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             True,
             "matched_harmless_dust_resume_allowed",
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             True,
         ),
@@ -55,7 +63,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             False,
             "matched_harmless_dust_operator_review_required",
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             True,
         ),
@@ -68,7 +76,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             False,
             "dangerous_dust_operator_review_required",
-            "dangerous_dust",
+            "blocking_dust",
             False,
             False,
         ),
@@ -81,7 +89,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             False,
             "dangerous_dust_operator_review_required",
-            "dangerous_dust",
+            "blocking_dust",
             False,
             False,
         ),
@@ -94,7 +102,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             True,
             False,
             "matched_harmless_dust_operator_review_required",
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             True,
         ),
@@ -107,7 +115,7 @@ from bithumb_bot.dust import build_dust_operator_view, classify_dust_residual, d
             False,
             False,
             "no_dust_residual",
-            "none",
+            "no_dust",
             True,
             True,
         ),
@@ -174,9 +182,9 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
             "dust_residual_summary": (
                 "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
                 "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-                "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
-                "allow_resume=0 effective_flat=1 "
-                "policy_reason=matched_harmless_dust_operator_review_required"
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+            "allow_resume=0 effective_flat=1 "
+            "policy_reason=matched_harmless_dust_operator_review_required"
             ),
             "dust_latest_price": 100000000.0,
         }
@@ -194,7 +202,7 @@ def test_dust_operator_view_recovers_detail_from_summary_only_metadata() -> None
     assert view.local_notional_below_min is False
     assert view.resume_allowed is True
     assert view.new_orders_allowed is True
-    assert view.operator_action == "matched_dust_tracked_resume_allowed"
+    assert view.operator_action == "harmless_dust_tracked_resume_allowed"
     assert "tracked only" in view.operator_message
     assert "resume/new orders are allowed" in view.operator_message
 
@@ -214,7 +222,7 @@ def test_matched_dust_operator_message_does_not_imply_mismatch_or_recovery_conce
         )
     )
 
-    assert view.state == "matched_harmless_dust"
+    assert view.state == "harmless_dust"
     assert "matches across broker/local state" in view.operator_message
     assert "below minimum tradable quantity" in view.operator_message
     assert "mismatch" not in view.operator_message.lower()
@@ -239,7 +247,7 @@ def test_matched_dust_resume_safe_operator_view_marks_residual_as_tracked_only()
     assert view.resume_allowed is True
     assert view.new_orders_allowed is True
     assert view.treat_as_flat is True
-    assert view.operator_action == "matched_dust_tracked_resume_allowed"
+    assert view.operator_action == "harmless_dust_tracked_resume_allowed"
     assert "tracked only" in view.operator_message
     assert "resume/new orders are allowed" in view.operator_message
 
@@ -258,24 +266,24 @@ def test_matched_dust_resume_safe_operator_view_marks_residual_as_tracked_only()
         (
             "broker_qty=0.00009193 local_qty=0.00009193 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-            "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 "
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
             "allow_resume=0 effective_flat=1 submit_unknown_count=1 "
             "policy_reason=matched_harmless_dust_operator_review_required",
             100000000.0,
             0.00009193,
             False,
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             False,
         ),
         (
             "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
             "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
-            "classification=matched_harmless_dust matched_harmless=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed",
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed",
             40000000.0,
             0.00009629,
             True,
-            "matched_harmless_dust",
+            "harmless_dust",
             True,
             True,
         ),
@@ -325,3 +333,24 @@ def test_dust_operator_view_keeps_summary_and_detail_consistent(
         f"resume_allowed={1 if expected_resume_allowed else 0}" in view.compact_summary
     )
     assert "broker_local_match=1" in view.compact_summary
+
+
+def test_dust_display_context_exposes_effective_flat_due_to_harmless_dust() -> None:
+    context = build_dust_display_context(
+        classify_dust_residual(
+            broker_qty=0.00009193,
+            local_qty=0.00009193,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=100_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=True,
+        )
+    )
+
+    assert context.classification.classification == "harmless_dust"
+    assert context.effective_flat_due_to_harmless_dust is True
+    assert context.fields["effective_flat_due_to_harmless_dust"] is True
+    assert context.fields["dust_effective_flat"] is True

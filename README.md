@@ -32,6 +32,8 @@ uv run pytest -q
 BITHUMB_ENV_FILE=.env uv run bithumb-bot health
 ```
 
+Runtime artifacts such as health/recovery reports and operator snapshots belong under env-injected runtime roots, not repo-relative paths like `./data`, `./backups`, or `./tmp`.
+
 ## 자주 쓰는 명령
 
 ```bash
@@ -162,6 +164,8 @@ STRATEGY_NAME=sma_cross
 - Bithumb `/v2/orders` payload 규칙: 문서 필드(`market`, `side`, `volume`, `price`, `order_type`) 기준으로 전송합니다. 시장가 매수는 `side=bid`, `order_type=price`, `price=<총 주문금액 KRW>`로 전송하고 `volume`은 보내지 않습니다. 시장가 매도는 `side=ask`, `order_type=market`, `volume=<매도 수량>`을 사용합니다.
 - Bithumb private `GET /v1/orders` 서명 규칙: JWT `query_hash`는 **실제 전송되는 query string과 완전히 동일한 문자열**(파라미터 순서/배열 표기 포함)로 계산해야 합니다. 본 프로젝트는 배열 파라미터를 `uuids[]`, `client_order_ids[]` 반복 키 형식으로 직렬화하며, 동일 문자열을 HTTP query에도 그대로 사용합니다.
 - Bithumb private 조회 응답(`GET /v1/order`, `GET /v1/orders`)은 거래소 응답 시점/상태에 따라 일부 수치 필드(`fee`, `volume`)가 누락되거나 alias 필드로 내려올 수 있습니다. 본 프로젝트는 식별자/상태 검증은 엄격히 유지하면서, 누락된 수치 필드는 보수적 fallback(0 또는 유도 계산)으로 처리해 false schema HALT를 줄입니다.
+- `order_rules_autosync=FALLBACK` 또는 `health`/`ops-report`의 order-rule snapshot fallback 경고는, 거래소의 `/v1/orders/chance` rule data를 직접 확보하지 못해 로컬 보수 규칙을 쓰고 있다는 뜻입니다. 이 경고는 "실주문이 안전하다"는 확인이 아니라, 문서화된 chance-derived rule source가 아직 회복되지 않았다는 신호입니다. live 모드에서는 required rule source가 `chance_doc`가 아니면 preflight가 fail-fast 되어야 합니다.
+- `/v2/orders` 사전 검증은 실제 전송 직전의 마지막 안전장치입니다. submit payload는 `validate_order_submit_payload`와 rule-source 검사를 통과해야 하며, 시장가 매수/매도는 각각 `side=bid, order_type=price, price=<KRW>`와 `side=ask, order_type=market, volume=<수량>` 형태로만 허용됩니다. live 경로에서 rule source가 local fallback에 머무르면, 이를 주문 승인으로 읽지 말고 preflight 경고로 읽어야 합니다.
 
 ### 실주문 arming 방법
 
@@ -290,3 +294,10 @@ uv run bithumb-bot health
 - Windows:
   - native Windows는 run lock(`fcntl`) 미지원으로 `run` 루프 운영 대상이 아닙니다.
   - 개발/실행은 WSL2(Linux 사용자공간)에서 수행하세요.
+## Test Groups
+
+- Fast regression set:
+  - `uv run pytest -q -m fast_regression`
+- Slow integration/live-like set:
+  - `uv run pytest -q -m slow_integration`
+- Prefer running the fast regression set first. Keep the slow set separate unless you are validating restart, recovery, or live-like execution paths.

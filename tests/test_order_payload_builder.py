@@ -6,6 +6,9 @@ from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.broker.order_payloads import build_order_payload, validate_client_order_id
 
 
+pytestmark = pytest.mark.fast_regression
+
+
 def test_build_limit_order_payload_uses_doc_fields() -> None:
     payload = build_order_payload(
         market="KRW-BTC",
@@ -59,7 +62,7 @@ def test_build_payload_rejects_unsupported_side() -> None:
 
 
 def test_build_payload_rejects_unsupported_order_type() -> None:
-    with pytest.raises(BrokerRejectError, match="unsupported ord_type"):
+    with pytest.raises(BrokerRejectError, match="unsupported order_type"):
         build_order_payload(market="KRW-BTC", side="buy", ord_type="ioc", volume="0.1", price="10000")
 
 

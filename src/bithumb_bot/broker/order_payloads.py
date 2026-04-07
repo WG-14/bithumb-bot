@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
+from ..markets import ExchangeMarketCodeError, parse_documented_market_code
 from .base import BrokerRejectError
 
 OrderSide = Literal["bid", "ask"]
 OrderKind = Literal["limit", "price", "market"]
 CLIENT_ORDER_ID_MAX_LENGTH = 36
 CLIENT_ORDER_ID_ALLOWED_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_ORDER_SUBMIT_ALLOWED_FIELDS = frozenset(
+    {
+        "market",
+        "side",
+        "order_type",
+        "price",
+        "volume",
+        "client_order_id",
+    }
+)
 
 
 def normalize_order_side(side: str) -> OrderSide:
@@ -36,42 +48,118 @@ def validate_client_order_id(client_order_id: str) -> str:
     return client_order_id
 
 
+def normalize_order_type(order_type: str) -> OrderKind:
+    token = str(order_type).strip().lower()
+    if token in {"limit", "price", "market"}:
+        return token
+    raise BrokerRejectError(f"unsupported order_type: {order_type}")
+
+
+def _positive_decimal(value: object, *, field_name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise BrokerRejectError(f"{field_name} must be numeric")
+    text = str(value).strip()
+    if text == "":
+        raise BrokerRejectError(f"{field_name} must not be empty")
+    try:
+        decimal_value = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise BrokerRejectError(f"{field_name} must be numeric") from exc
+    if not decimal_value.is_finite() or decimal_value <= 0:
+        raise BrokerRejectError(f"{field_name} must be > 0")
+    return decimal_value
+
+
+def _decimal_to_plain_string(value: Decimal) -> str:
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def validate_order_submit_payload(payload: dict[str, object]) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise BrokerRejectError(f"/v2/orders payload must be object, got {type(payload).__name__}")
+    if "ord_type" in payload:
+        raise BrokerRejectError("/v2/orders payload must use documented key 'order_type'; 'ord_type' is not allowed")
+    unknown_fields = sorted(str(key) for key in payload.keys() if str(key) not in _ORDER_SUBMIT_ALLOWED_FIELDS)
+    if unknown_fields:
+        raise BrokerRejectError(f"/v2/orders payload contains unsupported fields: {', '.join(unknown_fields)}")
+
+    try:
+        market = parse_documented_market_code(str(payload.get("market") or ""))
+    except ExchangeMarketCodeError as exc:
+        raise BrokerRejectError(f"/v2/orders payload market must use canonical QUOTE-BASE code: {payload.get('market')!r}") from exc
+    side = normalize_order_side(str(payload.get("side") or ""))
+    order_type = normalize_order_type(str(payload.get("order_type") or ""))
+    client_order_id_value = payload.get("client_order_id")
+    client_order_id = (
+        validate_client_order_id(str(client_order_id_value))
+        if client_order_id_value not in (None, "")
+        else None
+    )
+
+    price_value = payload.get("price")
+    volume_value = payload.get("volume")
+    price_text: str | None = None
+    volume_text: str | None = None
+    if price_value not in (None, ""):
+        price_text = _decimal_to_plain_string(_positive_decimal(price_value, field_name="price"))
+    if volume_value not in (None, ""):
+        volume_text = _decimal_to_plain_string(_positive_decimal(volume_value, field_name="volume"))
+
+    if order_type == "limit":
+        if price_text is None or volume_text is None:
+            raise BrokerRejectError("limit order requires both price and volume")
+    elif order_type == "price":
+        if side != "bid":
+            raise BrokerRejectError("order_type=price is only valid for side=bid")
+        if price_text is None:
+            raise BrokerRejectError("order_type=price requires price")
+        if volume_text is not None:
+            raise BrokerRejectError("order_type=price must not include volume")
+    else:
+        if side != "ask":
+            raise BrokerRejectError("order_type=market is only valid for side=ask")
+        if volume_text is None:
+            raise BrokerRejectError("order_type=market requires volume")
+        if price_text is not None:
+            raise BrokerRejectError("order_type=market must not include price")
+
+    normalized_payload: dict[str, str] = {
+        "market": market,
+        "side": side,
+        "order_type": order_type,
+    }
+    if price_text is not None:
+        normalized_payload["price"] = price_text
+    if volume_text is not None:
+        normalized_payload["volume"] = volume_text
+    if client_order_id is not None:
+        normalized_payload["client_order_id"] = client_order_id
+    return normalized_payload
+
+
 def build_order_payload(
     *,
     market: str,
     side: str,
-    ord_type: str,
+    ord_type: str | None = None,
+    order_type: str | None = None,
     volume: str | None = None,
     price: str | None = None,
+    client_order_id: str | None = None,
 ) -> dict[str, str]:
-    normalized_side = normalize_order_side(side)
-    ord_type_token = str(ord_type).strip().lower()
-    if ord_type_token not in {"limit", "price", "market"}:
-        raise BrokerRejectError(f"unsupported ord_type: {ord_type}")
-
-    payload: dict[str, str] = {
-        "market": str(market),
-        "side": normalized_side,
-        "order_type": ord_type_token,
-    }
-    if ord_type_token == "limit":
-        if not volume or not price:
-            raise BrokerRejectError("limit order requires both volume and price")
-        payload["volume"] = str(volume)
-        payload["price"] = str(price)
-        return payload
-
-    if ord_type_token == "price":
-        if normalized_side != "bid":
-            raise BrokerRejectError("ord_type=price is only valid for side=bid")
-        if not price:
-            raise BrokerRejectError("ord_type=price requires price")
-        payload["price"] = str(price)
-        return payload
-
-    if normalized_side != "ask":
-        raise BrokerRejectError("ord_type=market is only valid for side=ask")
-    if not volume:
-        raise BrokerRejectError("ord_type=market requires volume")
-    payload["volume"] = str(volume)
-    return payload
+    resolved_order_type = order_type if order_type is not None else ord_type
+    if order_type is not None and ord_type is not None and str(order_type).strip().lower() != str(ord_type).strip().lower():
+        raise BrokerRejectError(f"conflicting order_type aliases: order_type={order_type} ord_type={ord_type}")
+    return validate_order_submit_payload(
+        {
+            "market": market,
+            "side": side,
+            "order_type": resolved_order_type,
+            "price": price,
+            "volume": volume,
+            "client_order_id": client_order_id,
+        }
+    )

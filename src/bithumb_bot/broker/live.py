@@ -8,6 +8,7 @@ import time
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
+from ..dust import DustState, build_dust_display_context
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
@@ -15,6 +16,7 @@ from ..public_api_orderbook import BestQuote
 from ..reason_codes import (
     AMBIGUOUS_SUBMIT,
     DUST_RESIDUAL_UNSELLABLE,
+    DUST_RESIDUAL_SUPPRESSED,
     EXIT_PARTIAL_LEFT_DUST,
     MANUAL_DUST_REVIEW_REQUIRED,
     RISKY_ORDER_BLOCK,
@@ -30,11 +32,13 @@ from ..oms import (
     build_client_order_id,
     TERMINAL_ORDER_STATUSES,
     build_order_intent_key,
+    build_order_suppression_key,
     claim_order_intent_dedup,
     evaluate_unresolved_order_gate,
     new_client_order_id,
     payload_fingerprint,
     record_status_transition,
+    record_order_suppression,
     record_submit_attempt,
     record_submit_blocked,
     record_submit_started,
@@ -545,7 +549,7 @@ def _normalize_sell_dust_details(
             "broker_volume_decimals": broker_volume_decimals,
             "dust_signature": dust_signature,
             "summary": summary,
-            "notify_dust_state": str(normalized.get("notify_dust_state") or "dangerous_dust"),
+            "notify_dust_state": str(normalized.get("notify_dust_state") or DustState.BLOCKING_DUST.value),
             "notify_dust_action": str(
                 normalized.get("notify_dust_action") or "manual_review_before_resume"
             ),
@@ -923,6 +927,155 @@ def _record_sell_dust_unsellable(
             dust_qty_below_min=str(dust_details["qty_below_min"]),
             dust_notional_below_min=str(dust_details["notional_below_min"]),
             reason=dust_message,
+        )
+    )
+    return True
+
+
+def _record_harmless_dust_exit_suppression(
+    *,
+    conn,
+    state,
+    signal: str,
+    side: str,
+    requested_qty: float,
+    market_price: float,
+    normalized_qty: float,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+) -> bool:
+    if side != "SELL":
+        return False
+
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    dust = dust_context.classification
+    dust_view = dust_context.operator_view
+    if not (
+        dust.present
+        and dust.classification == DustState.HARMLESS_DUST.value
+        and dust_view.resume_allowed
+        and dust_view.treat_as_flat
+    ):
+        return False
+
+    requested_qty = float(requested_qty)
+    normalized_qty = float(normalized_qty)
+    market_price = float(market_price)
+    qty_below_min = bool(dust.min_qty > 0 and requested_qty < dust.min_qty)
+    normalized_non_positive = not math.isfinite(normalized_qty) or normalized_qty <= 0
+    normalized_below_min = bool(dust.min_qty > 0 and normalized_qty > 0 and normalized_qty < dust.min_qty)
+    notional_below_min = bool(
+        dust.min_notional_krw > 0 and normalized_qty > 0 and (normalized_qty * market_price) < dust.min_notional_krw
+    )
+    if not any((qty_below_min, normalized_non_positive, normalized_below_min, notional_below_min)):
+        return False
+
+    strategy_name_value = strategy_name or settings.STRATEGY_NAME
+    strategy_context = f"{settings.MODE}:{strategy_name_value}:{settings.INTERVAL}"
+    suppression_reason = "decision_suppressed:harmless_dust_exit"
+    suppression_summary = (
+        f"{suppression_reason};{dust_context.compact_summary};"
+        f"requested_qty={requested_qty:.12f};normalized_qty={normalized_qty:.12f};"
+        f"market_price={market_price:.8f};qty_below_min={1 if qty_below_min else 0};"
+        f"normalized_non_positive={1 if normalized_non_positive else 0};"
+        f"normalized_below_min={1 if normalized_below_min else 0};"
+        f"notional_below_min={1 if notional_below_min else 0}"
+    )
+    suppression_key = build_order_suppression_key(
+        mode=settings.MODE,
+        strategy_context=strategy_context,
+        strategy_name=strategy_name_value,
+        signal=signal,
+        side=side,
+        reason_code=DUST_RESIDUAL_SUPPRESSED,
+        dust_signature=str(dust.summary),
+        requested_qty=requested_qty,
+        normalized_qty=normalized_qty,
+        market_price=market_price,
+    )
+    suppression_context = {
+        **dust_context.fields,
+        "signal": signal,
+        "side": side,
+        "requested_qty": requested_qty,
+        "normalized_qty": normalized_qty,
+        "market_price": market_price,
+        "strategy_name": strategy_name_value,
+        "strategy_context": strategy_context,
+        "decision_id": decision_id,
+        "decision_reason": decision_reason,
+        "exit_rule_name": exit_rule_name,
+        "suppression_reason_code": DUST_RESIDUAL_SUPPRESSED,
+        "suppression_reason": suppression_reason,
+        "suppression_summary": suppression_summary,
+        "suppression_key": suppression_key,
+    }
+    record_order_suppression(
+        conn=conn,
+        suppression_key=suppression_key,
+        event_kind="decision_suppressed",
+        mode=settings.MODE,
+        strategy_context=strategy_context,
+        strategy_name=strategy_name_value,
+        signal=signal,
+        side=side,
+        reason_code=DUST_RESIDUAL_SUPPRESSED,
+        reason=suppression_reason,
+        requested_qty=requested_qty,
+        normalized_qty=normalized_qty,
+        market_price=market_price,
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        dust_present=bool(dust.present),
+        dust_allow_resume=bool(dust.allow_resume),
+        dust_effective_flat=bool(dust.effective_flat),
+        dust_state=dust_view.state,
+        dust_action=dust_view.operator_action,
+        dust_signature=str(dust.summary),
+        qty_below_min=qty_below_min,
+        normalized_non_positive=normalized_non_positive,
+        normalized_below_min=normalized_below_min,
+        notional_below_min=notional_below_min,
+        summary=suppression_summary,
+        context=suppression_context,
+    )
+    RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_SKIP] harmless dust exit suppressed",
+            signal=signal,
+            side=side,
+            reason_code=DUST_RESIDUAL_SUPPRESSED,
+            state=dust_view.state,
+            operator_action=dust_view.operator_action,
+            requested_qty=requested_qty,
+            normalized_qty=normalized_qty,
+            market_price=market_price,
+            dust_signature=suppression_key,
+        )
+    )
+    notify(
+        safety_event(
+            "decision_suppressed",
+            client_order_id=UNSET_EVENT_FIELD,
+            submit_attempt_id=UNSET_EVENT_FIELD,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            reason_code=DUST_RESIDUAL_SUPPRESSED,
+            side=side,
+            status="SUPPRESSED",
+            reason=suppression_summary,
+            dust_state=dust_view.state,
+            dust_action=dust_view.operator_action,
+            dust_residual_present=1 if dust.present else 0,
+            dust_residual_allow_resume=1 if dust.allow_resume else 0,
+            dust_effective_flat=1 if dust.effective_flat else 0,
+            qty_below_min=1 if qty_below_min else 0,
+            normalized_non_positive=1 if normalized_non_positive else 0,
+            normalized_below_min=1 if normalized_below_min else 0,
+            notional_below_min=1 if notional_below_min else 0,
+            dust_signature=suppression_key,
         )
     )
     return True
@@ -1703,6 +1856,24 @@ def live_execute_signal(
             skip_reason = "no actionable position state for signal"
             RUN_LOG.info(format_log_kv("[ORDER_SKIP] no-op signal", side=signal, reason=skip_reason, signal=signal, position_qty=f"{float(qty):.12f}"))
             return None
+
+        if side == "SELL":
+            suppression_preview = _normalize_order_qty_snapshot(qty=order_qty)
+            if _record_harmless_dust_exit_suppression(
+                conn=conn,
+                state=state,
+                signal=signal,
+                side=side,
+                requested_qty=float(order_qty),
+                market_price=float(market_price),
+                normalized_qty=float(suppression_preview["normalized_qty"]),
+                strategy_name=strategy_name,
+                decision_id=decision_id,
+                decision_reason=decision_reason,
+                exit_rule_name=exit_rule_name,
+            ):
+                conn.commit()
+                return None
 
         reference_quote: dict[str, float | str] | None = None
         pretrade_needs_live_reference = any(

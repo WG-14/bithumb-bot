@@ -347,8 +347,15 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     assert resolved.source["max_qty_decimals"] == "local_fallback"
     assert resolved.source["bid_min_total_krw"] == "unsupported_by_doc"
     assert resolved.source["ruleset"] == "merged"
+    assert resolved.fallback_used is True
+    assert resolved.fallback_reason_code == "UNRECOVERABLE"
+    assert resolved.fallback_reason_summary == "unclassified private API failure; operator investigation required"
+    assert "RuntimeError: boom" in resolved.fallback_reason_detail
+    assert "order-rule auto-sync unavailable" in resolved.fallback_risk
     assert warnings
-    assert "auto-sync failed" in warnings[0]
+    assert "using local fallback only" in warnings[0]
+    assert "reason_code=UNRECOVERABLE" in warnings[0]
+    assert "risk=order-rule auto-sync unavailable" in warnings[0]
 
 
 def test_get_effective_order_rules_cached_result_preserves_source_metadata(monkeypatch):

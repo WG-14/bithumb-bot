@@ -19,14 +19,15 @@ from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.paper import paper_execute
 from .broker.live import live_execute_signal
-from .broker.bithumb import BithumbBroker
+from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import ensure_db
 from .db_core import record_strategy_decision
-from .dust import DustClassification
+from .dust import DustClassification, DustState
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
+from .bootstrap import get_last_explicit_env_load_summary
 from .reason_codes import CANCEL_FAILURE, POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
@@ -115,19 +116,19 @@ def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
 def _dust_residual_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str] | None:
     if not bool(dust_context["present"]) or bool(dust_context["allow_resume"]):
         return None
-    if str(dust_context.get("classification") or "") == "matched_harmless_dust":
+    if str(dust_context.get("classification") or "") == DustState.HARMLESS_DUST.value:
         return (
-            "MATCHED_DUST_POLICY_REVIEW_REQUIRED",
+            "HARMLESS_DUST_POLICY_REVIEW_REQUIRED",
             (
-                "matched harmless dust is visible and treated as flat, but current policy still blocks resume/new orders: "
+                "harmless dust is visible and treated as flat, but current policy still blocks resume/new orders: "
                 f"policy={str(dust_context['policy_reason'])} "
                 f"summary={str(dust_context['summary'])}"
             ),
         )
     return (
-        "DANGEROUS_DUST_REVIEW_REQUIRED",
+        "BLOCKING_DUST_REVIEW_REQUIRED",
         (
-            "dangerous dust residual requires operator review before resume: "
+            "blocking dust residual requires operator review before resume: "
             f"policy={str(dust_context['policy_reason'])} "
             f"summary={str(dust_context['summary'])}"
         ),
@@ -1079,7 +1080,11 @@ def run_loop(short_n: int, long_n: int) -> None:
 
     broker = None
     if settings.MODE == "live":
-        broker = BithumbBroker()
+        broker, _auth_diag = build_broker_with_auth_diagnostics(
+            caller="run_loop",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+            broker_factory=BithumbBroker,
+        )
         try:
             reconcile_with_broker(broker)
         except Exception as e:

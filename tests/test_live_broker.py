@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from bithumb_bot.broker.bithumb import BithumbBroker
+from bithumb_bot.broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerTemporaryError
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
@@ -19,12 +19,20 @@ from bithumb_bot.broker.live import (
 )
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, set_portfolio_breakdown
-from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE, EXIT_PARTIAL_LEFT_DUST, MANUAL_DUST_REVIEW_REQUIRED
+from bithumb_bot.reason_codes import (
+    DUST_RESIDUAL_SUPPRESSED,
+    DUST_RESIDUAL_UNSELLABLE,
+    EXIT_PARTIAL_LEFT_DUST,
+    MANUAL_DUST_REVIEW_REQUIRED,
+)
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.public_api_orderbook import BestQuote
 from tests.fakes import FakeMarketData
+
+
+pytestmark = pytest.mark.slow_integration
 
 
 class _FakeBroker:
@@ -521,6 +529,63 @@ def test_bithumb_broker_dry_run(monkeypatch):
     assert order.exchange_order_id.startswith("dry_")
 
 
+def test_broker_auth_runtime_diagnostics_redact_secret_values(monkeypatch) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "live-key-visible-length-only")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "super-secret-value-should-not-appear")
+    object.__setattr__(settings, "BITHUMB_WS_MYASSET_ENABLED", False)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
+
+    broker = BithumbBroker()
+    diag = broker.get_auth_runtime_diagnostics(
+        caller="test",
+        env_summary={"source_key": "BITHUMB_ENV_FILE", "env_file": "/runtime/live.env", "loaded": True},
+    )
+
+    assert diag["api_key_present"] is True
+    assert diag["api_key_length"] == len("live-key-visible-length-only")
+    assert diag["api_secret_present"] is True
+    assert diag["api_secret_length"] == len("super-secret-value-should-not-appear")
+    assert "super-secret-value-should-not-appear" not in json.dumps(diag, ensure_ascii=False)
+    assert diag["chance_auth"]["endpoint"] == "/v1/orders/chance"
+    assert diag["chance_auth"]["query_hash_included"] is True
+    assert diag["accounts_auth"]["endpoint"] == "/v1/accounts"
+    assert diag["accounts_auth"]["query_hash_included"] is False
+
+
+def test_build_broker_with_auth_diagnostics_reuses_same_private_auth_preview_for_health_and_run(monkeypatch) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "live-key-visible-length-only")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "super-secret-value-should-not-appear")
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
+
+    health_broker, health_diag = build_broker_with_auth_diagnostics(
+        caller="cmd_health",
+        env_summary={"source_key": "BITHUMB_ENV_FILE_LIVE", "loaded": True},
+        broker_factory=BithumbBroker,
+    )
+    run_broker, run_diag = build_broker_with_auth_diagnostics(
+        caller="run_loop",
+        env_summary={"source_key": "BITHUMB_ENV_FILE_LIVE", "loaded": True},
+        broker_factory=BithumbBroker,
+    )
+
+    assert isinstance(health_broker, BithumbBroker)
+    assert isinstance(run_broker, BithumbBroker)
+    assert health_diag["chance_auth"]["endpoint"] == "/v1/orders/chance"
+    assert run_diag["chance_auth"]["endpoint"] == "/v1/orders/chance"
+    assert health_diag["chance_auth"]["query_hash_included"] is True
+    assert run_diag["chance_auth"]["query_hash_included"] is True
+    assert health_diag["accounts_auth"]["endpoint"] == "/v1/accounts"
+    assert run_diag["accounts_auth"]["endpoint"] == "/v1/accounts"
+
+
 def test_validate_pretrade_price_protection_buy_within_threshold() -> None:
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
 
@@ -583,6 +648,7 @@ def test_validate_pretrade_price_protection_blocks_missing_reference_price(monke
 def test_validate_pretrade_price_protection_uses_fresh_quote_age_not_last_candle_age() -> None:
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 60.0)
     object.__setattr__(settings, "LIVE_PRICE_REFERENCE_MAX_AGE_SEC", 5)
+    object.__setattr__(settings, "MODE", "paper")
     runtime_state.set_last_candle_age_sec(30.0)
 
     validate_pretrade(
@@ -1977,6 +2043,7 @@ def test_normalize_order_qty_does_not_apply_notional_guard():
     assert normalized == pytest.approx(1.0)
 
 
+@pytest.mark.fast_regression
 def test_adjust_buy_order_qty_for_dust_safety_floors_to_sellable_qty():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
@@ -1987,6 +2054,7 @@ def test_adjust_buy_order_qty_for_dust_safety_floors_to_sellable_qty():
     assert adjusted == pytest.approx(0.0001)
 
 
+@pytest.mark.fast_regression
 def test_adjust_buy_order_qty_for_dust_safety_rejects_when_no_sellable_qty_remains():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
@@ -1996,6 +2064,7 @@ def test_adjust_buy_order_qty_for_dust_safety_rejects_when_no_sellable_qty_remai
         adjust_buy_order_qty_for_dust_safety(qty=0.00009193, market_price=100_000_000.0)
 
 
+@pytest.mark.fast_regression
 @pytest.mark.parametrize(
     ("qty", "expected_qty"),
     [
@@ -2014,6 +2083,7 @@ def test_adjust_buy_order_qty_for_dust_safety_preserves_only_sellable_entry_qty(
     assert adjusted == pytest.approx(expected_qty)
 
 
+@pytest.mark.fast_regression
 def test_adjust_sell_order_qty_for_dust_safety_uses_full_position_qty_when_step_floor_would_leave_dust():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
@@ -2025,6 +2095,7 @@ def test_adjust_sell_order_qty_for_dust_safety_uses_full_position_qty_when_step_
     assert adjusted == pytest.approx(0.00019193)
 
 
+@pytest.mark.fast_regression
 def test_adjust_sell_order_qty_for_dust_safety_blocks_when_broker_precision_still_leaves_dust():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
@@ -2035,6 +2106,7 @@ def test_adjust_sell_order_qty_for_dust_safety_blocks_when_broker_precision_stil
         adjust_sell_order_qty_for_dust_safety(qty=0.000191939, market_price=100_000_000.0)
 
 
+@pytest.mark.fast_regression
 def test_adjust_sell_order_qty_for_dust_safety_exposes_remainder_dust_guard_details():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
@@ -2077,6 +2149,7 @@ def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tm
     assert broker._last_qty == pytest.approx(0.0002)
 
 
+@pytest.mark.fast_regression
 def test_live_execute_signal_buy_adjusts_dust_creating_entry_qty(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_safe.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -2098,6 +2171,7 @@ def test_live_execute_signal_buy_adjusts_dust_creating_entry_qty(tmp_path):
     assert broker._last_qty == pytest.approx(0.0001)
 
 
+@pytest.mark.fast_regression
 def test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_zero(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_blocked.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -2188,6 +2262,7 @@ def test_live_execute_signal_sell_uses_full_position_qty_to_avoid_unsellable_rem
     assert latest_order["status"] == "FILLED"
 
 
+@pytest.mark.fast_regression
 def test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unsellable_dust(tmp_path):
     notifications: list[str] = []
     monkeypatch = pytest.MonkeyPatch()
@@ -2248,6 +2323,7 @@ def test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unse
     monkeypatch.undo()
 
 
+@pytest.mark.fast_regression
 def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_dedups(tmp_path):
     notifications: list[str] = []
     monkeypatch = pytest.MonkeyPatch()
@@ -2332,13 +2408,119 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert MANUAL_DUST_REVIEW_REQUIRED in str(event_rows[0]["message"])
     assert len(notifications) == 1
     assert "event=order_submit_blocked" in notifications[0]
-    assert "dust_state=dangerous_dust" in notifications[0]
+    assert "dust_state=blocking_dust" in notifications[0]
     assert "dust_action=manual_review_before_resume" in notifications[0]
     assert "dust_new_orders_allowed=0" in notifications[0]
     assert "dust_resume_allowed=0" in notifications[0]
     monkeypatch.undo()
 
 
+@pytest.mark.fast_regression
+def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_row(monkeypatch, tmp_path):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_harmless_dust_suppression.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 1,
+            "dust_broker_qty": 0.00009193,
+            "dust_local_qty": 0.00009193,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5_000.0,
+            "dust_latest_price": 100_000_000.0,
+            "dust_broker_notional_krw": 9_193.0,
+            "dust_local_notional_krw": 9_193.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 0,
+            "dust_local_notional_is_dust": 0,
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+        },
+    )
+
+    conn = ensure_db(str(tmp_path / "sell_harmless_dust_suppression.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00009193,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade_first = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    trade_second = live_execute_signal(
+        broker,
+        "SELL",
+        1001,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade_first is None
+    assert trade_second is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "sell_harmless_dust_suppression.sqlite"))
+    order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, seen_count, dust_state, dust_action
+        FROM order_suppressions
+        WHERE strategy_name='dust_exit_test' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert order_count == 0
+    assert event_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    assert int(suppression_row["seen_count"]) == 2
+    assert suppression_row["dust_state"] == "harmless_dust"
+    assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
+    assert any("event=decision_suppressed" in msg for msg in notifications)
+    assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
 def test_live_execute_signal_sell_with_dust_and_unresolved_open_order_still_records_dust_evidence(monkeypatch, tmp_path):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
@@ -2552,7 +2734,3 @@ def test_reconcile_persists_broker_read_journal_metadata(tmp_path):
     payload = json.loads(state.last_reconcile_metadata)
     assert "broker_read_journal" in payload
     assert "/v1/accounts" in str(payload["broker_read_journal"])
-
-
-
-

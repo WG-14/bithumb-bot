@@ -229,6 +229,47 @@ def build_order_intent_key(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def build_order_suppression_key(
+    *,
+    mode: str,
+    strategy_context: str,
+    strategy_name: str,
+    signal: str,
+    side: str,
+    reason_code: str,
+    dust_signature: str | None,
+    requested_qty: float | None,
+    normalized_qty: float | None,
+    market_price: float | None,
+) -> str:
+    payload = {
+        "mode": str(mode),
+        "strategy_context": str(strategy_context),
+        "strategy_name": str(strategy_name),
+        "signal": str(signal).upper(),
+        "side": str(side).upper(),
+        "reason_code": str(reason_code),
+        "dust_signature": str(dust_signature or ""),
+        "requested_qty": (
+            round(float(requested_qty), 12)
+            if requested_qty is not None and math.isfinite(float(requested_qty))
+            else None
+        ),
+        "normalized_qty": (
+            round(float(normalized_qty), 12)
+            if normalized_qty is not None and math.isfinite(float(normalized_qty))
+            else None
+        ),
+        "market_price": (
+            round(float(market_price), 8)
+            if market_price is not None and math.isfinite(float(market_price))
+            else None
+        ),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def claim_order_intent_dedup(
     conn: sqlite3.Connection,
     *,
@@ -535,6 +576,198 @@ def record_submit_blocked(
             order_status=status,
             message=reason,
         )
+        if own_conn:
+            conn.commit()
+    except Exception:
+        if own_conn:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def record_order_suppression(
+    *,
+    suppression_key: str,
+    event_kind: str,
+    mode: str,
+    strategy_context: str,
+    strategy_name: str,
+    signal: str,
+    side: str,
+    reason_code: str,
+    reason: str,
+    requested_qty: float | None,
+    normalized_qty: float | None,
+    market_price: float | None,
+    decision_id: int | None = None,
+    decision_reason: str | None = None,
+    exit_rule_name: str | None = None,
+    dust_present: bool = False,
+    dust_allow_resume: bool = False,
+    dust_effective_flat: bool = False,
+    dust_state: str | None = None,
+    dust_action: str | None = None,
+    dust_signature: str | None = None,
+    qty_below_min: bool = False,
+    normalized_non_positive: bool = False,
+    normalized_below_min: bool = False,
+    notional_below_min: bool = False,
+    summary: str | None = None,
+    context: dict[str, Any] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> None:
+    ts = int(time.time() * 1000)
+    own_conn = conn is None
+    conn = conn or ensure_db()
+    context_json = json.dumps(context or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    try:
+        existing = conn.execute(
+            """
+            SELECT seen_count
+            FROM order_suppressions
+            WHERE suppression_key=?
+            """,
+            (suppression_key,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO order_suppressions(
+                    suppression_key,
+                    event_kind,
+                    event_ts,
+                    mode,
+                    strategy_context,
+                    strategy_name,
+                    signal,
+                    side,
+                    reason_code,
+                    reason,
+                    requested_qty,
+                    normalized_qty,
+                    market_price,
+                    decision_id,
+                    decision_reason,
+                    exit_rule_name,
+                    dust_present,
+                    dust_allow_resume,
+                    dust_effective_flat,
+                    dust_state,
+                    dust_action,
+                    dust_signature,
+                    qty_below_min,
+                    normalized_non_positive,
+                    normalized_below_min,
+                    notional_below_min,
+                    summary,
+                    context_json,
+                    created_ts,
+                    updated_ts,
+                    seen_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    suppression_key,
+                    event_kind,
+                    ts,
+                    mode,
+                    strategy_context,
+                    strategy_name,
+                    signal,
+                    side,
+                    reason_code,
+                    reason[:500],
+                    requested_qty,
+                    normalized_qty,
+                    market_price,
+                    decision_id,
+                    (decision_reason[:500] if decision_reason else None),
+                    (exit_rule_name[:500] if exit_rule_name else None),
+                    1 if dust_present else 0,
+                    1 if dust_allow_resume else 0,
+                    1 if dust_effective_flat else 0,
+                    dust_state,
+                    dust_action,
+                    dust_signature,
+                    1 if qty_below_min else 0,
+                    1 if normalized_non_positive else 0,
+                    1 if normalized_below_min else 0,
+                    1 if notional_below_min else 0,
+                    (summary[:1000] if summary else None),
+                    context_json,
+                    ts,
+                    ts,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE order_suppressions
+                SET event_kind=?,
+                    event_ts=?,
+                    mode=?,
+                    strategy_context=?,
+                    strategy_name=?,
+                    signal=?,
+                    side=?,
+                    reason_code=?,
+                    reason=?,
+                    requested_qty=?,
+                    normalized_qty=?,
+                    market_price=?,
+                    decision_id=?,
+                    decision_reason=?,
+                    exit_rule_name=?,
+                    dust_present=?,
+                    dust_allow_resume=?,
+                    dust_effective_flat=?,
+                    dust_state=?,
+                    dust_action=?,
+                    dust_signature=?,
+                    qty_below_min=?,
+                    normalized_non_positive=?,
+                    normalized_below_min=?,
+                    notional_below_min=?,
+                    summary=?,
+                    context_json=?,
+                    updated_ts=?,
+                    seen_count=seen_count + 1
+                WHERE suppression_key=?
+                """,
+                (
+                    event_kind,
+                    ts,
+                    mode,
+                    strategy_context,
+                    strategy_name,
+                    signal,
+                    side,
+                    reason_code,
+                    reason[:500],
+                    requested_qty,
+                    normalized_qty,
+                    market_price,
+                    decision_id,
+                    (decision_reason[:500] if decision_reason else None),
+                    (exit_rule_name[:500] if exit_rule_name else None),
+                    1 if dust_present else 0,
+                    1 if dust_allow_resume else 0,
+                    1 if dust_effective_flat else 0,
+                    dust_state,
+                    dust_action,
+                    dust_signature,
+                    1 if qty_below_min else 0,
+                    1 if normalized_non_positive else 0,
+                    1 if normalized_below_min else 0,
+                    1 if notional_below_min else 0,
+                    (summary[:1000] if summary else None),
+                    context_json,
+                    ts,
+                    suppression_key,
+                ),
+            )
         if own_conn:
             conn.commit()
     except Exception:

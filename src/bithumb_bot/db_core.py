@@ -533,6 +533,70 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS order_suppressions (
+            suppression_key TEXT PRIMARY KEY,
+            event_kind TEXT NOT NULL,
+            event_ts INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            strategy_context TEXT NOT NULL,
+            strategy_name TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            side TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            requested_qty REAL,
+            normalized_qty REAL,
+            market_price REAL,
+            decision_id INTEGER,
+            decision_reason TEXT,
+            exit_rule_name TEXT,
+            dust_present INTEGER NOT NULL DEFAULT 0,
+            dust_allow_resume INTEGER NOT NULL DEFAULT 0,
+            dust_effective_flat INTEGER NOT NULL DEFAULT 0,
+            dust_state TEXT,
+            dust_action TEXT,
+            dust_signature TEXT,
+            qty_below_min INTEGER NOT NULL DEFAULT 0,
+            normalized_non_positive INTEGER NOT NULL DEFAULT 0,
+            normalized_below_min INTEGER NOT NULL DEFAULT 0,
+            notional_below_min INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            context_json TEXT,
+            created_ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL,
+            seen_count INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+
+    _ensure_column(conn, "order_suppressions", "requested_qty", "requested_qty REAL")
+    _ensure_column(conn, "order_suppressions", "normalized_qty", "normalized_qty REAL")
+    _ensure_column(conn, "order_suppressions", "market_price", "market_price REAL")
+    _ensure_column(conn, "order_suppressions", "decision_id", "decision_id INTEGER")
+    _ensure_column(conn, "order_suppressions", "decision_reason", "decision_reason TEXT")
+    _ensure_column(conn, "order_suppressions", "exit_rule_name", "exit_rule_name TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_present", "dust_present INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_allow_resume", "dust_allow_resume INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_effective_flat", "dust_effective_flat INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_state", "dust_state TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_action", "dust_action TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_signature", "dust_signature TEXT")
+    _ensure_column(conn, "order_suppressions", "qty_below_min", "qty_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "normalized_non_positive", "normalized_non_positive INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "normalized_below_min", "normalized_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "notional_below_min", "notional_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "summary", "summary TEXT")
+    _ensure_column(conn, "order_suppressions", "context_json", "context_json TEXT")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_suppressions_lookup
+        ON order_suppressions(mode, strategy_name, signal, side, updated_ts)
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS strategy_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             decision_ts INTEGER NOT NULL,

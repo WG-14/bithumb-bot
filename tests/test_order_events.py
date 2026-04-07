@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+import pytest
+
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_attempt, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
-from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
+from bithumb_bot.oms import (
+    add_fill,
+    create_order,
+    record_order_suppression,
+    record_status_transition,
+    record_submit_attempt,
+    record_submit_started,
+    set_exchange_order_id,
+    set_status,
+    validate_status_transition,
+)
+from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.observability import safety_event
+
+
+pytestmark = pytest.mark.fast_regression
 
 
 def test_order_events_written_for_major_transitions(tmp_path):
@@ -348,3 +363,62 @@ def test_submit_attempt_event_persists_custom_dust_unsellable_reason_code(tmp_pa
     assert float(row["price"]) == 100000000.0
     assert row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
     assert row["broker_response_summary"] == "blocked_before_submit:dust_residual_unsellable"
+
+
+def test_order_suppression_records_without_order_row_and_dedups(tmp_path):
+    db_path = tmp_path / "order_suppression.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        suppression_kwargs = dict(
+            suppression_key="dust-suppression-key",
+            event_kind="decision_suppressed",
+            mode="live",
+            strategy_context="live:dust_exit:1m",
+            strategy_name="dust_exit",
+            signal="SELL",
+            side="SELL",
+            reason_code=DUST_RESIDUAL_SUPPRESSED,
+            reason="decision_suppressed:harmless_dust_exit",
+            requested_qty=0.00009193,
+            normalized_qty=0.00009193,
+            market_price=100000000.0,
+            decision_id=101,
+            decision_reason="partial_take_profit",
+            exit_rule_name="exit_signal",
+            dust_present=True,
+            dust_allow_resume=True,
+            dust_effective_flat=True,
+            dust_state="harmless_dust",
+            dust_action="harmless_dust_tracked_resume_allowed",
+            dust_signature="dust_scope=position_qty|position_qty=0.00009193",
+            qty_below_min=True,
+            normalized_non_positive=False,
+            normalized_below_min=True,
+            notional_below_min=False,
+            summary="decision_suppressed:harmless_dust_exit;state=harmless_dust",
+            context={"dust_signature": "dust_scope=position_qty|position_qty=0.00009193"},
+            conn=conn,
+        )
+        record_order_suppression(**suppression_kwargs)
+        record_order_suppression(**suppression_kwargs)
+        conn.commit()
+
+        order_row = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()
+        suppression_row = conn.execute(
+            """
+            SELECT event_kind, reason_code, seen_count, dust_state, dust_action
+            FROM order_suppressions
+            WHERE suppression_key='dust-suppression-key'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert order_row is not None
+    assert int(order_row["n"]) == 0
+    assert suppression_row is not None
+    assert suppression_row["event_kind"] == "decision_suppressed"
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    assert int(suppression_row["seen_count"]) == 2
+    assert suppression_row["dust_state"] == "harmless_dust"
+    assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"

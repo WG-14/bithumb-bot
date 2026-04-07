@@ -280,7 +280,7 @@ class AccountsV1BalanceSource:
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
     from .. import runtime_state
-    from ..dust import DustClassification
+    from ..dust import DustClassification, DustState
 
     db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -302,7 +302,7 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         if abs(asset_qty) > 1e-12:
             dust = DustClassification.from_metadata(runtime_state.snapshot().last_reconcile_metadata)
             dust_context = build_dust_display_context(dust)
-            if dust.classification == "matched_harmless_dust" and dust.allow_resume and dust.effective_flat:
+            if dust.classification == DustState.HARMLESS_DUST.value and dust.allow_resume and dust.effective_flat:
                 return True, f"flat_start_effective_flat({dust_context.compact_summary})"
             if dust.present:
                 return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"
@@ -317,7 +317,7 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
                     default_abs_tolerance=1e-12,
                 )
                 local_only_summary = (
-                    "state=dangerous_dust "
+                    "state=blocking_dust "
                     f"broker_qty={0.0:.8f} "
                     f"local_qty={asset_qty:.8f} "
                     f"delta_qty={-asset_qty:.8f} "

@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -46,7 +47,12 @@ from .order_lookup_v1 import (
     status_from_state as v1_status_from_state,
 )
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
-from .order_payloads import build_order_payload, normalize_order_side, validate_client_order_id
+from .order_payloads import (
+    build_order_payload,
+    normalize_order_side,
+    validate_client_order_id,
+    validate_order_submit_payload,
+)
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
 
@@ -62,6 +68,12 @@ _HTTPX_TRANSIENT_ERRORS = tuple(
 )
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
+
+
+class BithumbAuthError(BrokerRejectError):
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class _OrderSubmitAuthContext(TypedDict):
@@ -136,6 +148,16 @@ class BithumbPrivateAPI:
         nonce: str | None = None,
         timestamp: int | None = None,
     ) -> dict[str, object]:
+        if not str(self.api_key or "").strip():
+            raise BithumbAuthError(
+                "AUTH_KEY_MISSING",
+                "private request rejected before signing: missing API key",
+            )
+        if not str(self.api_secret or "").strip():
+            raise BithumbAuthError(
+                "AUTH_SECRET_MISSING",
+                "private request rejected before signing: missing API secret",
+            )
         resolved_nonce = nonce or str(uuid.uuid4())
         resolved_timestamp = round(time.time() * 1000) if timestamp is None else int(timestamp)
         return {
@@ -225,6 +247,80 @@ class BithumbPrivateAPI:
     def _form_body_bytes(cls, payload: dict[str, object]) -> bytes:
         return cls._query_string(payload).encode("utf-8")
 
+    def describe_request_auth(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: dict[str, object] | None = None,
+        json_body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        normalized_method = str(method or "").strip().upper()
+        is_read_only = self._is_read_only_private_request(normalized_method)
+        auth_payload = params if normalized_method in {"GET", "DELETE"} else json_body
+        canonical_payload = self._query_string(auth_payload) if auth_payload else ""
+        query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload)
+        if self.dry_run and not is_read_only:
+            auth_branch = "dry_run_write_block"
+        elif normalized_method in {"GET", "DELETE"}:
+            auth_branch = "params_query_hash" if canonical_payload else "empty_params_no_query_hash"
+        elif normalized_method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and json_body:
+            auth_branch = "order_submit_json_query_hash"
+        else:
+            auth_branch = "json_body_query_hash" if canonical_payload else "json_body_no_query_hash"
+
+        payload_items = self._payload_items(auth_payload)
+        return {
+            "method": normalized_method,
+            "endpoint": endpoint,
+            "auth_mode": "jwt_hs256",
+            "request_kind": "private_read" if is_read_only else "private_write",
+            "auth_branch": auth_branch,
+            "query_hash_included": bool(query_hash_claims.get("query_hash")),
+            "query_hash_alg": query_hash_claims.get("query_hash_alg"),
+            "query_hash_preview": self._mask_query_hash(str(query_hash_claims.get("query_hash") or "")),
+            "canonical_payload_present": bool(canonical_payload),
+            "canonical_payload_length": len(canonical_payload),
+            "payload_key_count": len(payload_items),
+            "payload_keys": [key for key, _value in payload_items[:5]],
+            "dry_run_write_blocked": bool(self.dry_run and not is_read_only),
+            "fallback_branch_used": False,
+            "content_type": (
+                self.ORDER_SUBMIT_CONTENT_TYPE
+                if normalized_method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and json_body
+                else ("application/json" if json_body else None)
+            ),
+            "api_key_present": bool(self.api_key),
+            "api_key_length": len(self.api_key or ""),
+            "api_secret_present": bool(self.api_secret),
+            "api_secret_length": len(self.api_secret or ""),
+        }
+
+    @staticmethod
+    def _mask_query_hash(query_hash: str) -> str:
+        if len(query_hash) <= 24:
+            return query_hash
+        return f"{query_hash[:12]}...{query_hash[-12:]}"
+
+    @staticmethod
+    def _response_error_details(response: httpx.Response) -> tuple[str, str]:
+        error_name = ""
+        error_message = ""
+        try:
+            payload = response.json()
+        except ValueError:
+            return error_name, error_message
+
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                error_name = str(error.get("name") or "").strip()
+                error_message = str(error.get("message") or "").strip()
+            else:
+                error_name = str(payload.get("name") or "").strip()
+                error_message = str(payload.get("message") or "").strip()
+        return error_name, error_message
+
     def request(
         self,
         method: str,
@@ -242,10 +338,12 @@ class BithumbPrivateAPI:
             # - allow read-only private diagnostics (GET) to reach exchange
             # - block private state-changing requests (POST/DELETE/...) from reaching exchange
             return {}
+        is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
+        if is_order_submit:
+            json_body = validate_order_submit_payload(json_body or {})
 
         attempts = 3 if retry_safe else 1
         backoffs = (0.2, 0.5)
-        is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = is_order_submit
         request_kwargs: dict[str, object] = {}
@@ -359,8 +457,18 @@ class BithumbPrivateAPI:
                         f"bithumb private {endpoint} server error status={exc.response.status_code} body={body}"
                     ) from exc
                 body = response_excerpt(exc.response) if response_excerpt else ""
+                error_name, error_message = self._response_error_details(exc.response)
+                detail_parts = [
+                    f"bithumb private {endpoint} rejected with http status={exc.response.status_code}",
+                ]
+                if error_name:
+                    detail_parts.append(f"error_name={error_name}")
+                if error_message:
+                    detail_parts.append(f"error_message={error_message}")
+                if body:
+                    detail_parts.append(f"body={body}")
                 raise BrokerRejectError(
-                    f"bithumb private {endpoint} rejected with http status={exc.response.status_code} body={body}"
+                    " ".join(detail_parts)
                 ) from exc
 
             if isinstance(data, dict) and data.get("status") not in (None, "0000"):
@@ -385,6 +493,12 @@ def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
 
 def classify_private_api_error(exc: Exception) -> tuple[str, str]:
     detail = str(exc).lower()
+    if isinstance(exc, BithumbAuthError):
+        if exc.reason_code == "AUTH_KEY_MISSING":
+            return "AUTH_KEY_MISSING", "API key missing before JWT signing"
+        if exc.reason_code == "AUTH_SECRET_MISSING":
+            return "AUTH_SECRET_MISSING", "API secret missing before JWT signing"
+        return exc.reason_code, "private API auth material missing before signing"
     if isinstance(exc, BrokerTemporaryError) or any(
         token in detail for token in ("transport error", "server error", "timeout", "timed out", "temporar")
     ):
@@ -393,10 +507,16 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "IDENTIFIER_MISMATCH", "request/response identifiers conflict; reject and investigate"
     if isinstance(exc, BrokerSchemaError) or "schema mismatch" in detail:
         return "DOC_SCHEMA", "documented response schema mismatch (/v1/orders or /v1/order)"
+    if any(token in detail for token in ("invalid_query_payload", "query hash mismatch", "query_hash mismatch")):
+        return "AUTH_QUERY_HASH_MISMATCH", "JWT query_hash mismatch; GET query string/body hash must match transmitted params"
+    if "invalid_access_key" in detail:
+        return "AUTH_INVALID_ACCESS_KEY", "API access key rejected by broker"
     if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail or "signature" in detail:
         return "AUTH_SIGN", "authentication/signature failed (401 / invalid JWT / key-secret mismatch)"
     if "status=403" in detail or "out_of_scope" in detail or "permission" in detail:
         return "PERMISSION", "API key scope/permission denied"
+    if any(token in detail for token in ("unexpected broker response", "unexpected /v1/orders/chance payload type", "unexpected /v1/accounts payload type")):
+        return "AUTH_RESPONSE_UNEXPECTED", "private broker returned an unexpected response shape"
     if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
         return "RECOVERY_REQUIRED", "startup/recovery path requires identifier-based lookup only"
     if any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
@@ -404,6 +524,27 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
     if any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
         return "PARAM", "market/order parameter validation failed"
     return "UNRECOVERABLE", "unclassified private API failure; operator investigation required"
+
+
+def build_broker_with_auth_diagnostics(
+    *,
+    caller: str,
+    env_summary: dict[str, object] | None = None,
+    broker_factory=None,
+) -> tuple[BithumbBroker, dict[str, object]]:
+    factory = broker_factory or BithumbBroker
+    broker = factory()
+    diagnostics = getattr(broker, "get_auth_runtime_diagnostics", lambda **_kwargs: {})(
+        caller=caller,
+        env_summary=env_summary,
+    )
+    should_log = bool(getattr(broker, "auth_diagnostics_enabled", lambda: False)())
+    if should_log:
+        getattr(broker, "log_auth_runtime_diagnostics", lambda **_kwargs: None)(
+            caller=caller,
+            env_summary=env_summary,
+        )
+    return broker, diagnostics
 
 
 class BithumbBroker:
@@ -550,6 +691,92 @@ class BithumbBroker:
 
     def get_read_journal_summary(self) -> dict[str, str]:
         return dict(self._read_journal)
+
+    @staticmethod
+    def auth_diagnostics_enabled() -> bool:
+        return str(os.getenv("BITHUMB_AUTH_DIAGNOSTICS", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+
+    def get_auth_runtime_diagnostics(
+        self,
+        *,
+        caller: str,
+        env_summary: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        accounts_preview = self._private_api.describe_request_auth(
+            "GET",
+            "/v1/accounts",
+            params={},
+        )
+        chance_preview = self._private_api.describe_request_auth(
+            "GET",
+            "/v1/orders/chance",
+            params={"market": self._market()},
+        )
+        return {
+            "caller": caller,
+            "mode": settings.MODE,
+            "market": self._market(),
+            "base_url": self.base_url,
+            "live_dry_run": bool(self.dry_run),
+            "live_real_order_armed": bool(settings.LIVE_REAL_ORDER_ARMED),
+            "ws_myasset_enabled": bool(settings.BITHUMB_WS_MYASSET_ENABLED),
+            "balance_source_selected": self.get_balance_source_id(),
+            "api_key_present": bool(self.api_key),
+            "api_key_length": len(self.api_key or ""),
+            "api_secret_present": bool(self.api_secret),
+            "api_secret_length": len(self.api_secret or ""),
+            "env": dict(env_summary or {}),
+            "accounts_auth": accounts_preview,
+            "chance_auth": chance_preview,
+        }
+
+    def log_auth_runtime_diagnostics(
+        self,
+        *,
+        caller: str,
+        env_summary: dict[str, object] | None = None,
+        level: int = logging.INFO,
+    ) -> dict[str, object]:
+        diagnostics = self.get_auth_runtime_diagnostics(caller=caller, env_summary=env_summary)
+        env = diagnostics.get("env") if isinstance(diagnostics.get("env"), dict) else {}
+        accounts_auth = diagnostics.get("accounts_auth") if isinstance(diagnostics.get("accounts_auth"), dict) else {}
+        chance_auth = diagnostics.get("chance_auth") if isinstance(diagnostics.get("chance_auth"), dict) else {}
+        RUN_LOG.log(
+            level,
+            format_log_kv(
+                "[AUTH_INIT_DIAG]",
+                caller=caller,
+                mode=diagnostics.get("mode"),
+                market=diagnostics.get("market"),
+                env_source_key=env.get("source_key"),
+                env_file=env.get("env_file"),
+                env_loaded=env.get("loaded"),
+                env_exists=env.get("exists"),
+                env_override=env.get("override"),
+                api_key_present=diagnostics.get("api_key_present"),
+                api_key_length=diagnostics.get("api_key_length"),
+                api_secret_present=diagnostics.get("api_secret_present"),
+                api_secret_length=diagnostics.get("api_secret_length"),
+                live_dry_run=diagnostics.get("live_dry_run"),
+                live_real_order_armed=diagnostics.get("live_real_order_armed"),
+                ws_myasset_enabled=diagnostics.get("ws_myasset_enabled"),
+                balance_source_selected=diagnostics.get("balance_source_selected"),
+                accounts_auth_branch=accounts_auth.get("auth_branch"),
+                accounts_query_hash_included=accounts_auth.get("query_hash_included"),
+                chance_auth_branch=chance_auth.get("auth_branch"),
+                chance_query_hash_included=chance_auth.get("query_hash_included"),
+                chance_query_hash_preview=chance_auth.get("query_hash_preview"),
+                chance_payload_keys=chance_auth.get("payload_keys"),
+                fallback_branch_used=chance_auth.get("fallback_branch_used"),
+            ),
+        )
+        return diagnostics
 
     def get_accounts_validation_diagnostics(self) -> dict[str, object]:
         source = self._balance_source
@@ -739,6 +966,46 @@ class BithumbBroker:
             return "0"
         rounded = volume.quantize(quantizer, rounding=ROUND_DOWN)
         return format(rounded, "f").rstrip("0").rstrip(".") or "0"
+
+    @classmethod
+    def _validate_volume_constraints(
+        cls,
+        *,
+        qty: object,
+        volume_text: str,
+        min_qty: object,
+        qty_step: object,
+        max_qty_decimals: int,
+        context: str,
+    ) -> None:
+        requested_qty = cls._decimal_from_value(qty)
+        serialized_qty = cls._decimal_from_value(volume_text)
+        if serialized_qty != requested_qty:
+            raise BrokerRejectError(
+                f"{context} qty requires explicit normalization before submit: "
+                f"requested={format(requested_qty, 'f')} serialized={format(serialized_qty, 'f')}"
+            )
+
+        minimum_qty = cls._decimal_from_value(min_qty) if min_qty not in (None, "") else Decimal("0")
+        if minimum_qty > 0 and serialized_qty < minimum_qty:
+            raise BrokerRejectError(
+                f"{context} qty below minimum: "
+                f"qty={format(serialized_qty, 'f')} min_qty={format(minimum_qty, 'f')}"
+            )
+
+        step = cls._decimal_from_value(qty_step) if qty_step not in (None, "") else Decimal("0")
+        if step > 0 and (serialized_qty % step) != 0:
+            raise BrokerRejectError(
+                f"{context} qty does not match qty_step: "
+                f"qty={format(serialized_qty, 'f')} qty_step={format(step, 'f')}"
+            )
+
+        decimals = len(volume_text.split(".", 1)[1]) if "." in volume_text else 0
+        if max_qty_decimals > 0 and decimals > max_qty_decimals:
+            raise BrokerRejectError(
+                f"{context} qty exceeds max decimals: "
+                f"qty={volume_text} decimals={decimals} max_qty_decimals={max_qty_decimals}"
+            )
 
     @staticmethod
     def _parse_ts(raw: object) -> int:
@@ -1200,6 +1467,15 @@ class BithumbBroker:
         rules = get_effective_order_rules(market).rules
         order_side = "BUY" if normalized_side == "bid" else "SELL"
         volume_text = self._format_volume(qty)
+        if price is not None or normalized_side == "ask":
+            self._validate_volume_constraints(
+                qty=qty,
+                volume_text=volume_text,
+                min_qty=getattr(rules, "min_qty", 0.0),
+                qty_step=getattr(rules, "qty_step", 0.0),
+                max_qty_decimals=int(getattr(rules, "max_qty_decimals", 0) or 0),
+                context="/v2/orders",
+            )
         if price is None:
             if normalized_side == "bid":
                 try:
@@ -1225,6 +1501,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="price",
                     price=self._format_krw_amount(notional),
+                    client_order_id=validated_client_order_id,
                 )
             else:
                 payload = build_order_payload(
@@ -1232,6 +1509,7 @@ class BithumbBroker:
                     side=normalized_side,
                     ord_type="market",
                     volume=volume_text,
+                    client_order_id=validated_client_order_id,
                 )
         else:
             requested_limit_price = self._decimal_from_value(price)
@@ -1262,18 +1540,21 @@ class BithumbBroker:
                 ord_type="limit",
                 volume=volume_text,
                 price=self._format_krw_amount(requested_limit_price),
+                client_order_id=validated_client_order_id,
             )
 
+        canonical_payload = BithumbPrivateAPI._query_string(payload)
         RUN_LOG.info(
             format_log_kv(
-                "[ORDER_SUBMIT] broker payload",
+                "[ORDER_SUBMIT] validated payload",
                 market=payload.get("market"),
                 side=normalized_side,
                 order_type=payload.get("order_type"),
                 volume=payload.get("volume"),
                 price=payload.get("price"),
-                payload=payload,
                 client_order_id=validated_client_order_id,
+                canonical_query_string=canonical_payload,
+                payload_fields=",".join(payload.keys()),
             )
         )
 

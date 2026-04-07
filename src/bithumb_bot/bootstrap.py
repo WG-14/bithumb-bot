@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import os
 import sys
+from dataclasses import dataclass
 
 # legacy flags that may appear in old commands
 FLAGS_WITH_VALUE = {
@@ -17,6 +18,36 @@ FLAGS_WITH_VALUE = {
     "--min-gap",
     "--min_gap",
 }
+
+
+@dataclass(frozen=True)
+class ExplicitEnvLoadSummary:
+    mode: str | None
+    env_file: str | None
+    source_key: str | None
+    loaded: bool
+    exists: bool
+    override: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "env_file": self.env_file,
+            "source_key": self.source_key,
+            "loaded": self.loaded,
+            "exists": self.exists,
+            "override": self.override,
+        }
+
+
+_LAST_ENV_LOAD_SUMMARY = ExplicitEnvLoadSummary(
+    mode=None,
+    env_file=None,
+    source_key=None,
+    loaded=False,
+    exists=False,
+    override=False,
+)
 
 
 def _pop_flag_value(argv: list[str], flag: str) -> str | None:
@@ -45,16 +76,50 @@ def _strip_legacy_flags(argv: list[str]) -> list[str]:
 
 
 def resolve_explicit_env_file(mode: str | None) -> str | None:
+    return describe_explicit_env_file(mode).env_file
+
+
+def describe_explicit_env_file(mode: str | None) -> ExplicitEnvLoadSummary:
     explicit_env_file = os.getenv("BITHUMB_ENV_FILE")
     if explicit_env_file:
-        return explicit_env_file
+        return ExplicitEnvLoadSummary(
+            mode=(mode or os.getenv("MODE") or None),
+            env_file=explicit_env_file,
+            source_key="BITHUMB_ENV_FILE",
+            loaded=False,
+            exists=os.path.isfile(explicit_env_file),
+            override=False,
+        )
 
     normalized_mode = (mode or os.getenv("MODE") or "").strip().lower()
     if normalized_mode == "live":
-        return os.getenv("BITHUMB_ENV_FILE_LIVE")
+        env_file = os.getenv("BITHUMB_ENV_FILE_LIVE")
+        return ExplicitEnvLoadSummary(
+            mode=normalized_mode,
+            env_file=env_file,
+            source_key="BITHUMB_ENV_FILE_LIVE" if env_file else None,
+            loaded=False,
+            exists=bool(env_file and os.path.isfile(env_file)),
+            override=False,
+        )
     if normalized_mode in {"paper", "test"}:
-        return os.getenv("BITHUMB_ENV_FILE_PAPER")
-    return None
+        env_file = os.getenv("BITHUMB_ENV_FILE_PAPER")
+        return ExplicitEnvLoadSummary(
+            mode=normalized_mode,
+            env_file=env_file,
+            source_key="BITHUMB_ENV_FILE_PAPER" if env_file else None,
+            loaded=False,
+            exists=bool(env_file and os.path.isfile(env_file)),
+            override=False,
+        )
+    return ExplicitEnvLoadSummary(
+        mode=normalized_mode or None,
+        env_file=None,
+        source_key=None,
+        loaded=False,
+        exists=False,
+        override=False,
+    )
 
 
 def _load_dotenv(dotenv_path: str) -> None:
@@ -65,9 +130,25 @@ def _load_dotenv(dotenv_path: str) -> None:
 
 
 def load_explicit_env_file(mode: str | None) -> None:
-    env_file = resolve_explicit_env_file(mode)
+    global _LAST_ENV_LOAD_SUMMARY
+    summary = describe_explicit_env_file(mode)
+    env_file = summary.env_file
     if env_file:
         _load_dotenv(env_file)
+        _LAST_ENV_LOAD_SUMMARY = ExplicitEnvLoadSummary(
+            mode=summary.mode,
+            env_file=summary.env_file,
+            source_key=summary.source_key,
+            loaded=True,
+            exists=summary.exists,
+            override=False,
+        )
+        return
+    _LAST_ENV_LOAD_SUMMARY = summary
+
+
+def get_last_explicit_env_load_summary() -> ExplicitEnvLoadSummary:
+    return _LAST_ENV_LOAD_SUMMARY
 
 
 def bootstrap_argv(argv: list[str]) -> list[str]:

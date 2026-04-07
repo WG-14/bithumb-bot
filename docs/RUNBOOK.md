@@ -466,10 +466,21 @@ BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
 uv run bithumb-bot run
 ```
 
+## Health / Recovery Reading
+
+- Runtime artifacts such as health/recovery reports and snapshots belong under env-injected runtime roots, not repo-relative paths like `./data`, `./backups`, or `./tmp`.
+- `health` is a live status snapshot, not a green/red verdict. Read `trading_enabled`, `halt_new_orders_blocked`, `unresolved_open_order_count`, and `recovery_required_count` together before deciding to resume.
+- `effective_flat_due_to_harmless_dust=1` can still mean a real BTC remainder exists. Treat it as an operator interpretation of a small remainder, not a literal zero-balance claim.
+- `dust_state=matched_harmless_dust` means broker/local dust is close enough to be harmless under policy. It is only resume-safe when the matching policy also allows resume.
+- `dust_state=dangerous_dust` means the remainder is not safely resumable yet. Keep new orders blocked until the broker, DB, and recovery evidence all line up.
+- `accounts_flat_start_allowed=True` is only a `/v1/accounts` diagnostic. It does not override `recovery-report` blockers.
+- `order_rules_autosync=FALLBACK` means `/v1/orders/chance` rule data was not available and the bot is using local fallback constraints. In live mode, clear that warning before real-order arming.
+- `/v2/orders` pre-validation still applies after the rule snapshot is loaded: market buys are `side=bid, order_type=price, price=<KRW>`, and market sells are `side=ask, order_type=market, volume=<qty>`.
+
 ## Dust Residual Operational Reading
 
 - `dust residual` means the remaining BTC is small enough that one or both exchange sell gates may fail: minimum quantity and minimum notional. "Dust" is about sellability, not about whether order recovery is complete.
-- `matched dust` means broker/app balance and local DB balance match closely enough, and the remaining position is classified as `matched_harmless_dust`.
+- `matched dust` means broker/app balance and local DB balance match closely enough, and the remaining position is classified as `matched_harmless_dust`. That label can still mean a real BTC remainder exists; it is an operator reading that the remainder is harmless enough to resume only when policy also allows it.
 - `dangerous dust` means the remainder is classified as `dangerous_dust`: broker/local quantities do not match safely, or the quantity is small but still operationally risky.
 - `unresolved order` means order lifecycle consistency is still unclear. This is not the same as dust and must be treated as a higher-risk condition.
 - Before restart, check in this order:
@@ -494,6 +505,7 @@ uv run bithumb-bot run
   3. broker view: `/v1/accounts` diagnostics and broker quantity represented by `dust_broker_qty`
 - `dust_broker_qty` and `dust_local_qty` should be read together with `dust_broker_local_match`. A small remainder is only resume-safe when the broker/local remainder matches closely enough and the policy marks it resume-safe.
 - `dust_min_qty` and `dust_min_notional_krw` are different gates. A sell can be blocked because quantity is below minimum, because notional is below minimum, or because both are below minimum. Do not assume one implies the other, and do not assume a remainder above one minimum is tradable before checking the other.
+- `effective_flat_due_to_harmless_dust=1` is a reporting convenience, not proof of a literal zero balance. If the bot is in this state, keep reading the broker/DB quantities before deciding whether the position is actually flat.
 
 ## Manual App Sell Caution
 

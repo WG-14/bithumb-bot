@@ -11,7 +11,7 @@ from ..notifier import notify
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
-_cached_rules: dict[str, tuple[float, "DerivedOrderConstraints", "DerivedOrderConstraints", dict[str, str]]] = {}
+_cached_rules: dict[str, tuple[float, "RuleResolution", "DerivedOrderConstraints"]] = {}
 KNOWN_RULE_SOURCES = frozenset(
     {
         "chance_doc",
@@ -88,6 +88,11 @@ class LocalFallbackConstraints:
 class RuleResolution:
     rules: DerivedOrderConstraints
     source: dict[str, str]
+    fallback_used: bool = False
+    fallback_reason_code: str = ""
+    fallback_reason_summary: str = ""
+    fallback_reason_detail: str = ""
+    fallback_risk: str = ""
 
 
 class OrderChanceSchemaError(RuntimeError):
@@ -326,14 +331,19 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
 
     cached = _cached_rules.get(pair)
     if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
-        return RuleResolution(rules=cached[1], source=cached[3])
+        return cached[1]
     try:
         exchange = fetch_exchange_order_rules(pair)
     except Exception as exc:
         code, summary = classify_private_api_error(exc)
+        detail = f"{type(exc).__name__}: {exc}"
+        fallback_risk = (
+            "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
+            "may stay on local fallback until /v1/orders/chance succeeds again"
+        )
         notify(
-            f"[WARN] order rules auto-sync failed for {pair}; using manual config only "
-            f"({code}: {summary}; {type(exc).__name__}: {exc})"
+            f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "
+            f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
         )
         source = {
             "min_qty": "local_fallback",
@@ -353,8 +363,17 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             "maker_ask_fee": "unsupported_by_doc",
             "ruleset": "merged",
         }
-        _cached_rules[pair] = (now, fallback, fallback, source)
-        return RuleResolution(rules=fallback, source=source)
+        resolution = RuleResolution(
+            rules=fallback,
+            source=source,
+            fallback_used=True,
+            fallback_reason_code=code,
+            fallback_reason_summary=summary,
+            fallback_reason_detail=detail,
+            fallback_risk=fallback_risk,
+        )
+        _cached_rules[pair] = (now, resolution, fallback)
+        return resolution
 
     merged = DerivedOrderConstraints(
         market_id=exchange.market_id,
@@ -391,7 +410,8 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         "max_qty_decimals": "local_fallback",
         "ruleset": "merged",
     }
-    _cached_rules[pair] = (now, merged, fallback, source)
-    return RuleResolution(rules=merged, source=source)
+    resolution = RuleResolution(rules=merged, source=source)
+    _cached_rules[pair] = (now, resolution, fallback)
+    return resolution
 
 OrderRules = DerivedOrderConstraints
