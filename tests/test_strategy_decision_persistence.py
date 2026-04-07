@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 
 
@@ -71,3 +73,56 @@ def test_record_strategy_decisions_for_trade_and_non_trade_cases(tmp_path):
     hold_context = json.loads(str(rows[1]["context_json"]))
     assert buy_context["features"]["curr_s"] == 103.0
     assert hold_context["position_open"] is True
+
+
+def test_record_strategy_decision_preserves_buy_to_hold_explanation_fields(tmp_path):
+    conn = ensure_db(str(tmp_path / "decision_buy_to_hold.sqlite"))
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1_710_000_120_000,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="position held: no exit rule triggered",
+            candle_ts=1_710_000_060_000,
+            market_price=102_500_000.0,
+            confidence=None,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "raw_qty_open": 0.00009629,
+                "normalized_exposure_active": True,
+                "normalized_exposure_qty": 0.00009629,
+                "effective_flat": False,
+                "dust_classification": "harmless_dust",
+                "position_gate": {
+                    "dust_state": "harmless_dust",
+                    "effective_flat_due_to_harmless_dust": False,
+                    "raw_qty_open": 0.00009629,
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["raw_signal"] == "BUY"
+    assert ctx["final_signal"] == "HOLD"
+    assert ctx["entry_blocked"] is True
+    assert ctx["entry_block_reason"] == "position held: no exit rule triggered"
+    assert ctx["dust_classification"] == "harmless_dust"
+    assert ctx["effective_flat"] is False
+    assert ctx["raw_qty_open"] == pytest.approx(0.00009629)
+    assert ctx["normalized_exposure_active"] is True
+    assert ctx["normalized_exposure_qty"] == pytest.approx(0.00009629)
+    assert ctx["position_state"]["raw_holdings"]["classification"] == "harmless_dust"
+    assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is True
+    assert ctx["position_state"]["operator_diagnostics"]["state"] == "harmless_dust"
+    assert ctx["decision_summary"]["raw_signal"] == "BUY"
+    assert ctx["decision_summary"]["final_signal"] == "HOLD"

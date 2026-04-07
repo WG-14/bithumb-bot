@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 
+from .dust import DustClassification, DustDisplayContext, DustState, build_dust_display_context
+
+OPEN_POSITION_STATE = "open_exposure"
+DUST_TRACKING_STATE = "dust_tracking"
+
 
 _ENTRY_DECISION_FALLBACK_LOOKBACK_MS = 15 * 60 * 1000
 
@@ -103,11 +108,12 @@ def apply_fill_lifecycle(
                 entry_ts,
                 entry_price,
                 qty_open,
+                position_state,
                 entry_fee_total,
                 strategy_name,
                 entry_decision_id,
                 entry_decision_linkage
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(pair),
@@ -117,6 +123,7 @@ def apply_fill_lifecycle(
                 int(fill_ts),
                 float(price),
                 float(qty),
+                OPEN_POSITION_STATE,
                 float(fee),
                 resolved_strategy_name,
                 resolved_entry_decision_id,
@@ -138,15 +145,16 @@ def apply_fill_lifecycle(
             entry_ts,
             entry_price,
             qty_open,
+            position_state,
             entry_fee_total,
             strategy_name,
             entry_decision_id,
             entry_decision_linkage
         FROM open_position_lots
-        WHERE pair=? AND qty_open > 0
+        WHERE pair=? AND position_state=? AND qty_open > 0
         ORDER BY entry_ts ASC, id ASC
         """,
-        (str(pair),),
+        (str(pair), OPEN_POSITION_STATE),
     ).fetchall()
 
     remaining = float(qty)
@@ -296,6 +304,48 @@ def apply_fill_lifecycle(
         )
 
     conn.execute(
-        "DELETE FROM open_position_lots WHERE pair=? AND qty_open <= ?",
-        (str(pair), eps),
+        "DELETE FROM open_position_lots WHERE pair=? AND position_state=? AND qty_open <= ?",
+        (str(pair), OPEN_POSITION_STATE, eps),
     )
+
+
+def mark_harmless_dust_positions(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    dust_metadata: DustDisplayContext | DustClassification | str | dict[str, object] | None,
+) -> int:
+    dust_context = (
+        dust_metadata
+        if isinstance(dust_metadata, DustDisplayContext)
+        else build_dust_display_context(dust_metadata)
+    )
+    dust = dust_context.classification
+    if not (
+        dust.present
+        and dust.classification == DustState.HARMLESS_DUST.value
+        and dust_context.effective_flat_due_to_harmless_dust
+    ):
+        return 0
+
+    min_qty = max(0.0, float(dust.min_qty))
+    if min_qty <= 0.0:
+        return 0
+
+    res = conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_state=?
+        WHERE pair=?
+          AND position_state=?
+          AND qty_open > 1e-12
+          AND qty_open < ?
+        """,
+        (
+            DUST_TRACKING_STATE,
+            str(pair),
+            OPEN_POSITION_STATE,
+            float(min_qty),
+        ),
+    )
+    return int(res.rowcount or 0)

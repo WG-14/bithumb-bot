@@ -216,6 +216,7 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=0" in out
     assert "dust_broker_qty=0.00009000 dust_local_qty=0.00009000 dust_delta_qty=0.00000000" in out
     assert "dust_min_qty=0.00010000 dust_min_notional_krw=5000.0" in out
+    assert "raw_holdings_state=blocking_dust" in out
     assert "accounts_flat_start_allowed=None" in out
     assert "unresolved_attribution_count=1 recent_recovery_derived_trade_count=1" in out
 
@@ -225,6 +226,9 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert payload["recovery_attribution_quality_signals"]["ambiguous_linkage_after_recent_reconcile"] is False
     assert payload["operator_recovery_summary"]["dust_state"] == "blocking_dust"
     assert payload["operator_recovery_summary"]["dust_new_orders_allowed"] is False
+    assert payload["operator_recovery_summary"]["raw_holdings"]["classification"] == "blocking_dust"
+    assert payload["operator_recovery_summary"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert payload["operator_recovery_summary"]["operator_diagnostics"]["state"] == "blocking_dust"
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):
@@ -547,6 +551,8 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert "dust_state=harmless_dust" in out
     assert "dust_action=harmless_dust_tracked_resume_allowed" in out
     assert "dust_new_orders_allowed=1 dust_resume_allowed=1 dust_treat_as_flat=1" in out
+    assert "raw_holdings_state=harmless_dust" in out
+    assert "entry_allowed=1 normalized_exposure_active=0" in out
     assert (
         f"dust_broker_qty={expected_qty:.8f} dust_local_qty={expected_qty:.8f} "
         "dust_delta_qty=0.00000000 dust_min_qty=0.00010000 dust_min_notional_krw=5000.0"
@@ -565,6 +571,9 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert summary["dust_treat_as_flat"] is True
     assert summary["dust_effective_flat"] is True
     assert summary["effective_flat_due_to_harmless_dust"] is True
+    assert summary["raw_holdings"]["classification"] == "harmless_dust"
+    assert summary["normalized_exposure"]["normalized_exposure_active"] is False
+    assert summary["operator_diagnostics"]["resume_allowed"] is True
     assert summary["dust_broker_qty"] == pytest.approx(expected_qty)
     assert summary["dust_local_qty"] == pytest.approx(expected_qty)
     assert summary["dust_broker_local_match"] is True

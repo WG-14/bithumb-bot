@@ -5,8 +5,11 @@ import pytest
 from bithumb_bot.dust import (
     build_dust_display_context,
     build_dust_operator_view,
+    build_normalized_exposure,
+    build_position_state_model,
     classify_dust_residual,
     dust_qty_gap_tolerance,
+    should_treat_as_flat_for_entry_gate,
 )
 
 
@@ -353,4 +356,120 @@ def test_dust_display_context_exposes_effective_flat_due_to_harmless_dust() -> N
     assert context.classification.classification == "harmless_dust"
     assert context.effective_flat_due_to_harmless_dust is True
     assert context.fields["effective_flat_due_to_harmless_dust"] is True
-    assert context.fields["dust_effective_flat"] is True
+
+
+def test_flat_entry_gate_reuses_effective_flat_truth_for_harmless_dust() -> None:
+    context = build_dust_display_context(
+        classify_dust_residual(
+            broker_qty=0.00009193,
+            local_qty=0.00009193,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=100_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=True,
+        )
+    )
+
+    assert should_treat_as_flat_for_entry_gate(context) is True
+
+
+def test_flat_entry_gate_keeps_blocking_dust_conservative() -> None:
+    context = build_dust_display_context(
+        classify_dust_residual(
+            broker_qty=0.000099,
+            local_qty=0.000010,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=40_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=False,
+        )
+    )
+
+    assert should_treat_as_flat_for_entry_gate(context) is False
+    assert context.fields["dust_effective_flat"] is False
+
+
+def test_normalized_exposure_reuses_shared_dust_truth_for_harmless_dust() -> None:
+    exposure = build_normalized_exposure(
+        raw_qty_open=0.00009629,
+        dust_context=build_dust_display_context(
+            classify_dust_residual(
+                broker_qty=0.00009629,
+                local_qty=0.00009629,
+                min_qty=0.0001,
+                min_notional_krw=5000.0,
+                latest_price=40_000_000.0,
+                partial_flatten_recent=False,
+                partial_flatten_reason="not_recent",
+                qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+                matched_harmless_resume_allowed=True,
+            )
+        ),
+    )
+
+    assert exposure.dust_classification == "harmless_dust"
+    assert exposure.harmless_dust_effective_flat is True
+    assert exposure.effective_flat is True
+    assert exposure.entry_allowed is True
+    assert exposure.normalized_exposure_active is False
+    assert exposure.normalized_exposure_qty == pytest.approx(0.0)
+    assert exposure.as_dict()["normalized_exposure_active"] is False
+
+
+def test_normalized_exposure_keeps_blocking_dust_active_and_entry_blocked() -> None:
+    exposure = build_normalized_exposure(
+        raw_qty_open=0.000099,
+        dust_context=build_dust_display_context(
+            classify_dust_residual(
+                broker_qty=0.000099,
+                local_qty=0.000010,
+                min_qty=0.0001,
+                min_notional_krw=5000.0,
+                latest_price=40_000_000.0,
+                partial_flatten_recent=False,
+                partial_flatten_reason="not_recent",
+                qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+                matched_harmless_resume_allowed=False,
+            )
+        ),
+    )
+
+    assert exposure.dust_classification == "blocking_dust"
+    assert exposure.harmless_dust_effective_flat is False
+    assert exposure.effective_flat is False
+    assert exposure.entry_allowed is False
+    assert exposure.normalized_exposure_active is True
+    assert exposure.normalized_exposure_qty == pytest.approx(0.000099)
+
+
+def test_position_state_model_exposes_separate_raw_normalized_and_operator_layers() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009629,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+
+    model = build_position_state_model(raw_qty_open=0.00009629, metadata_raw=dust)
+
+    assert model.raw_holdings.classification == "harmless_dust"
+    assert model.raw_holdings.broker_qty == pytest.approx(0.00009629)
+    assert model.normalized_exposure.dust_classification == "harmless_dust"
+    assert model.normalized_exposure.effective_flat is True
+    assert model.normalized_exposure.normalized_exposure_active is False
+    assert model.operator_diagnostics.state == "harmless_dust"
+    assert model.operator_diagnostics.treat_as_flat is True
+    assert model.fields["raw_holdings"]["broker_local_match"] is True
+    assert model.fields["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
+    assert model.fields["operator_diagnostics"]["resume_allowed"] is True

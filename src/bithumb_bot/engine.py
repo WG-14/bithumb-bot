@@ -23,7 +23,11 @@ from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import ensure_db
 from .db_core import record_strategy_decision
-from .dust import DustClassification, DustState
+from .dust import (
+    DustClassification,
+    DustState,
+    build_position_state_model,
+)
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
@@ -103,13 +107,14 @@ def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
 
 def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
     dust = DustClassification.from_metadata(metadata_raw)
+    raw_holdings = dust.to_raw_holdings()
     return {
-        "classification": dust.classification,
-        "present": dust.present,
+        "classification": raw_holdings.classification,
+        "present": raw_holdings.present,
         "allow_resume": dust.allow_resume,
         "effective_flat": dust.effective_flat,
         "policy_reason": dust.policy_reason,
-        "summary": dust.summary,
+        "summary": raw_holdings.compact_summary,
     }
 
 
@@ -262,11 +267,16 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     conn = ensure_db()
     try:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        state = runtime_state.snapshot()
     finally:
         conn.close()
 
     asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
-    return open_count > 0, asset_qty > 1e-12
+    position_state = build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+    )
+    return open_count > 0, position_state.normalized_exposure.normalized_exposure_active
 
 
 def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
@@ -1617,6 +1627,22 @@ def run_loop(short_n: int, long_n: int) -> None:
                 candle_ts_raw = context.get("ts")
                 market_price_raw = context.get("last_close")
                 confidence_raw = context.get("confidence")
+                _log_loop_event(
+                    logging.INFO,
+                    "[RUN] strategy decision",
+                    strategy=strategy_name,
+                    decision_type=str(context.get("decision_type") or "-"),
+                    raw_signal=str(context.get("raw_signal") or context.get("base_signal") or signal),
+                    final_signal=signal,
+                    entry_blocked=1 if bool(context.get("entry_blocked")) else 0,
+                    entry_block_reason=str(context.get("entry_block_reason") or "-"),
+                    dust_classification=str(context.get("dust_classification") or context.get("position_gate", {}).get("dust_state") or "-"),
+                    effective_flat=1 if bool(context.get("effective_flat")) else 0,
+                    raw_qty_open=f"{float(context.get('raw_qty_open', 0.0) or 0.0):.8f}",
+                    normalized_exposure_active=1 if bool(context.get("normalized_exposure_active")) else 0,
+                    normalized_exposure_qty=f"{float(context.get('normalized_exposure_qty', 0.0) or 0.0):.8f}",
+                    reason=reason,
+                )
                 try:
                     decision_id = record_strategy_decision(
                         conn,

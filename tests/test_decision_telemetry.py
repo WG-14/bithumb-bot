@@ -100,6 +100,92 @@ def test_record_strategy_decision_normalizes_hold_context_without_filter_block(t
     assert ctx["signal_strength_label"] == "neutral"
 
 
+def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "decision-buy-to-hold-cli.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="position held: no exit rule triggered",
+            candle_ts=1,
+            market_price=1.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "raw_qty_open": 0.00009629,
+                "normalized_exposure_active": True,
+                "normalized_exposure_qty": 0.00009629,
+                "effective_flat": False,
+                "dust_classification": "harmless_dust",
+                "position_gate": {
+                    "dust_state": "harmless_dust",
+                    "effective_flat_due_to_harmless_dust": False,
+                    "raw_qty_open": 0.00009629,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc = main(["decision-telemetry", "--limit", "20"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "[DECISION-TELEMETRY]" in out
+    assert "BUY,HOLD,1,position held: no exit rule triggered" in out
+    assert "harmless_dust" in out
+    assert "0.00009629" in out
+
+
+def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-entry-allowed.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1,
+            market_price=1.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "raw_qty_open": 0.00009629,
+                "position_gate": {
+                    "entry_allowed": True,
+                    "effective_flat_due_to_harmless_dust": True,
+                    "raw_qty_open": 0.00009629,
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["entry_allowed"] is True
+    assert ctx["effective_flat"] is True
+    assert ctx["normalized_exposure_active"] is False
+    assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
+    assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+
+
 def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "decision-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
@@ -153,8 +239,9 @@ def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monke
     assert rc == 0
     assert "[DECISION-TELEMETRY]" in out
     assert "BLOCKED_ENTRY" in out
-    assert "BUY,sma_with_filter" in out
-    assert "HOLD,sma_with_filter" in out
+    assert "BLOCKED_ENTRY,BUY,HOLD,1,filtered entry: gap" in out
+    assert "BUY,BUY,BUY,0,sma golden cross" in out
+    assert "HOLD,HOLD,HOLD,0,position held: no exit rule triggered" in out
 
 
 def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeypatch):

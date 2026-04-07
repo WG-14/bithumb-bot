@@ -6,6 +6,13 @@ from statistics import fmean
 from typing import Any
 
 from ..config import settings
+from ..dust import (
+    NormalizedExposure,
+    build_dust_display_context,
+    build_position_state_model,
+    PositionStateModel,
+)
+from ..lifecycle import OPEN_POSITION_STATE, mark_harmless_dust_positions
 from .base import PositionContext, StrategyDecision
 from .exit_rules import ExitRule, create_exit_rules
 
@@ -50,6 +57,18 @@ def _base_signal(*, prev_s: float, prev_l: float, curr_s: float, curr_l: float) 
 
 def _resolve_exit_rule_names(raw: str) -> list[str]:
     return [token.strip().lower() for token in str(raw or "").split(",") if token.strip()]
+
+
+def _load_last_reconcile_metadata(conn: sqlite3.Connection) -> str | None:
+    try:
+        row = conn.execute(
+            "SELECT last_reconcile_metadata FROM bot_health WHERE id=1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
 
 
 def _compute_entry_cost_floor_ratio(*, slippage_bps: float, live_fee_rate_estimate: float, buffer_ratio: float) -> float:
@@ -128,7 +147,17 @@ def _load_position_context(
     candle_ts: int,
     market_price: float,
     signal_context: dict[str, Any],
-) -> PositionContext:
+) -> tuple[PositionContext, NormalizedExposure, PositionStateModel]:
+    dust_context = build_dust_display_context(_load_last_reconcile_metadata(conn))
+    try:
+        if mark_harmless_dust_positions(
+            conn,
+            pair=pair,
+            dust_metadata=dust_context,
+        ) > 0:
+            conn.commit()
+    except sqlite3.OperationalError:
+        pass
     try:
         row = conn.execute(
             """
@@ -137,32 +166,54 @@ def _load_position_context(
                 SUM(entry_price * qty_open) / NULLIF(SUM(qty_open), 0.0) AS avg_entry_price,
                 SUM(qty_open) AS qty_open
             FROM open_position_lots
-            WHERE pair=? AND qty_open > 1e-12
+            WHERE pair=? AND position_state=? AND qty_open > 1e-12
             """,
-            (pair,),
+            (pair, OPEN_POSITION_STATE),
         ).fetchone()
     except sqlite3.OperationalError:
         row = None
 
-    if row is None or row["entry_ts"] is None or row["qty_open"] is None:
-        return PositionContext(in_position=False, recent_signal_context=dict(signal_context))
+    if row is None or row[0] is None or row[2] is None:
+        position_state = build_position_state_model(
+            raw_qty_open=0.0,
+            metadata_raw=dust_context.classification,
+        )
+        exposure = position_state.normalized_exposure
+        return (
+            PositionContext(
+                in_position=exposure.normalized_exposure_active,
+                qty_open=exposure.raw_qty_open,
+                recent_signal_context=dict(signal_context),
+            ),
+            exposure,
+            position_state,
+        )
 
-    entry_ts = int(row["entry_ts"])
-    entry_price = float(row["avg_entry_price"])
-    qty_open = float(row["qty_open"])
+    entry_ts = int(row[0])
+    entry_price = float(row[1])
+    qty_open = float(row[2])
+    position_state = build_position_state_model(
+        raw_qty_open=qty_open,
+        metadata_raw=dust_context.classification,
+    )
+    exposure = position_state.normalized_exposure
     holding_time_sec = max(0.0, (int(candle_ts) - entry_ts) / 1000.0)
     unrealized_pnl = (float(market_price) - entry_price) * qty_open
     unrealized_pnl_ratio = _safe_ratio(float(market_price) - entry_price, entry_price)
 
-    return PositionContext(
-        in_position=qty_open > 1e-12,
-        entry_ts=entry_ts,
-        entry_price=entry_price,
-        qty_open=qty_open,
-        holding_time_sec=holding_time_sec,
-        unrealized_pnl=unrealized_pnl,
-        unrealized_pnl_ratio=unrealized_pnl_ratio,
-        recent_signal_context=dict(signal_context),
+    return (
+        PositionContext(
+            in_position=exposure.normalized_exposure_active,
+            entry_ts=entry_ts,
+            entry_price=entry_price,
+            qty_open=qty_open,
+            holding_time_sec=holding_time_sec,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_ratio=unrealized_pnl_ratio,
+            recent_signal_context=dict(signal_context),
+        ),
+        exposure,
+        position_state,
     )
 
 
@@ -174,8 +225,74 @@ def _apply_entry_exit_policy(
     position: PositionContext,
     exit_rules: list[ExitRule],
 ) -> StrategyDecision:
+    def _annotate_decision_context(
+        context: dict[str, Any],
+        *,
+        raw_signal: str,
+        final_signal: str,
+        final_reason: str,
+        position: PositionContext,
+    ) -> dict[str, Any]:
+        entry = context.get("entry") if isinstance(context.get("entry"), dict) else {}
+        position_gate = context.get("position_gate") if isinstance(context.get("position_gate"), dict) else {}
+        entry_signal = str(entry.get("entry_signal", raw_signal)).strip().upper() or raw_signal
+        filtered_entry = raw_signal in {"BUY", "SELL"} and raw_signal != entry_signal
+        entry_blocked = raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
+        entry_block_reason: str | None = None
+        if entry_blocked:
+            if filtered_entry:
+                entry_block_reason = str(entry.get("entry_reason") or context.get("reason") or "").strip() or None
+            else:
+                entry_block_reason = str(final_reason or "").strip() or None
+        dust_classification = str(
+            position_gate.get("dust_classification") or position_gate.get("dust_state") or ""
+        ).strip()
+        entry_allowed = bool(
+            position_gate.get(
+                "entry_allowed",
+                position_gate.get("effective_flat_due_to_harmless_dust", position_gate.get("dust_treat_as_flat")),
+            )
+        )
+        effective_flat = bool(position_gate.get("effective_flat_due_to_harmless_dust"))
+        raw_qty_open = float(position.qty_open)
+        normalized_exposure_active = bool(
+            position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed)
+        )
+        normalized_exposure_qty = float(raw_qty_open if normalized_exposure_active else 0.0)
+
+        context["raw_signal"] = raw_signal
+        context["final_signal"] = final_signal
+        context["entry_blocked"] = entry_blocked
+        context["entry_block_reason"] = entry_block_reason
+        context["dust_classification"] = dust_classification
+        context["entry_allowed"] = entry_allowed
+        context["effective_flat"] = effective_flat
+        context["raw_qty_open"] = raw_qty_open
+        context["normalized_exposure_active"] = normalized_exposure_active
+        context["normalized_exposure_qty"] = normalized_exposure_qty
+        context["decision_summary"] = {
+            "raw_signal": raw_signal,
+            "final_signal": final_signal,
+            "entry_blocked": entry_blocked,
+            "entry_block_reason": entry_block_reason,
+            "dust_classification": dust_classification,
+            "entry_allowed": entry_allowed,
+            "effective_flat": effective_flat,
+            "raw_qty_open": raw_qty_open,
+            "normalized_exposure_active": normalized_exposure_active,
+            "normalized_exposure_qty": normalized_exposure_qty,
+        }
+        return context
+
     if not position.in_position:
-        return StrategyDecision(signal=base_signal, reason=base_reason, context=base_context)
+        context = _annotate_decision_context(
+            dict(base_context),
+            raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+            final_signal=base_signal,
+            final_reason=base_reason,
+            position=position,
+        )
+        return StrategyDecision(signal=base_signal, reason=base_reason, context=context)
 
     exit_results: list[dict[str, Any]] = []
     for rule in exit_rules:
@@ -207,6 +324,13 @@ def _apply_entry_exit_policy(
                 "reason": rule_result.reason,
                 "evaluations": exit_results,
             }
+            context = _annotate_decision_context(
+                context,
+                raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+                final_signal="SELL",
+                final_reason=rule_result.reason,
+                position=position,
+            )
             return StrategyDecision(signal="SELL", reason=rule_result.reason, context=context)
 
     context = dict(base_context)
@@ -217,6 +341,13 @@ def _apply_entry_exit_policy(
         "reason": "no exit rule triggered",
         "evaluations": exit_results,
     }
+    context = _annotate_decision_context(
+        context,
+        raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
+        final_signal="HOLD",
+        final_reason="position held: no exit rule triggered",
+        position=position,
+    )
     return StrategyDecision(signal="HOLD", reason="position held: no exit rule triggered", context=context)
 
 
@@ -298,7 +429,7 @@ class SmaCrossStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
-        position = _load_position_context(
+        position, exposure, position_state = _load_position_context(
             conn,
             pair=self.pair,
             candle_ts=ts_list[-1],
@@ -337,6 +468,24 @@ class SmaCrossStrategy:
                 "base_reason": base_reason,
                 "entry_signal": entry_signal,
                 "entry_reason": entry_reason,
+            },
+            "position_gate": {
+                **exposure.as_dict(),
+                "effective_flat_due_to_harmless_dust": bool(exposure.harmless_dust_effective_flat),
+            },
+            "position_state": {
+                "raw_holdings": position_state.raw_holdings.as_dict(),
+                "normalized_exposure": exposure.as_dict(),
+                "operator_diagnostics": {
+                    "state": exposure.dust_operator_view.state,
+                    "state_label": exposure.dust_operator_view.state_label,
+                    "operator_action": exposure.dust_operator_view.operator_action,
+                    "operator_message": exposure.dust_operator_view.operator_message,
+                    "broker_local_match": bool(exposure.dust_operator_view.broker_local_match),
+                    "new_orders_allowed": bool(exposure.dust_operator_view.new_orders_allowed),
+                    "resume_allowed": bool(exposure.dust_operator_view.resume_allowed),
+                    "treat_as_flat": bool(exposure.dust_operator_view.treat_as_flat),
+                },
             },
             "filters": {
                 "cost_edge": {
@@ -483,7 +632,7 @@ class SmaWithFilterStrategy:
             "curr_s": curr_s,
             "curr_l": curr_l,
         }
-        position = _load_position_context(
+        position, exposure, position_state = _load_position_context(
             conn,
             pair=self.pair,
             candle_ts=ts_list[-1],
@@ -516,6 +665,24 @@ class SmaWithFilterStrategy:
                 "overextended_abs_return_ratio": overextended_ratio,
                 "base_signal": base_signal,
                 "base_reason": base_reason,
+            },
+            "position_gate": {
+                **exposure.as_dict(),
+                "effective_flat_due_to_harmless_dust": bool(exposure.harmless_dust_effective_flat),
+            },
+            "position_state": {
+                "raw_holdings": exposure.raw_holdings.as_dict(),
+                "normalized_exposure": exposure.as_dict(),
+                "operator_diagnostics": {
+                    "state": exposure.dust_operator_view.state,
+                    "state_label": exposure.dust_operator_view.state_label,
+                    "operator_action": exposure.dust_operator_view.operator_action,
+                    "operator_message": exposure.dust_operator_view.operator_message,
+                    "broker_local_match": bool(exposure.dust_operator_view.broker_local_match),
+                    "new_orders_allowed": bool(exposure.dust_operator_view.new_orders_allowed),
+                    "resume_allowed": bool(exposure.dust_operator_view.resume_allowed),
+                    "treat_as_flat": bool(exposure.dust_operator_view.treat_as_flat),
+                },
             },
             "filters": {
                 "gap": {

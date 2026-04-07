@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
-from ..dust import build_dust_display_context, dust_qty_gap_tolerance
+from ..dust import build_dust_display_context, build_normalized_exposure, dust_qty_gap_tolerance
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -280,7 +280,6 @@ class AccountsV1BalanceSource:
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
     from .. import runtime_state
-    from ..dust import DustClassification, DustState
 
     db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -300,11 +299,11 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
-            dust = DustClassification.from_metadata(runtime_state.snapshot().last_reconcile_metadata)
-            dust_context = build_dust_display_context(dust)
-            if dust.classification == DustState.HARMLESS_DUST.value and dust.allow_resume and dust.effective_flat:
+            dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+            exposure = build_normalized_exposure(raw_qty_open=asset_qty, dust_context=dust_context)
+            if exposure.harmless_dust_effective_flat:
                 return True, f"flat_start_effective_flat({dust_context.compact_summary})"
-            if dust.present:
+            if dust_context.classification.present:
                 return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"
             try:
                 from . import order_rules

@@ -91,6 +91,28 @@ class DustClassification:
     def state_label(self) -> str:
         return _dust_state_label(self.classification)
 
+    def to_raw_holdings(self) -> "RawHoldingsSnapshot":
+        return RawHoldingsSnapshot(
+            classification=self.classification,
+            present=self.present,
+            broker_qty=self.broker_qty,
+            local_qty=self.local_qty,
+            delta_qty=self.delta_qty,
+            min_qty=self.min_qty,
+            min_notional_krw=self.min_notional_krw,
+            latest_price=self.latest_price,
+            broker_notional_krw=self.broker_notional_krw,
+            local_notional_krw=self.local_notional_krw,
+            partial_flatten_recent=self.partial_flatten_recent,
+            partial_flatten_reason=self.partial_flatten_reason,
+            qty_gap_tolerance=self.qty_gap_tolerance,
+            qty_gap_small=self.qty_gap_small,
+            broker_qty_is_dust=self.broker_qty_is_dust,
+            local_qty_is_dust=self.local_qty_is_dust,
+            broker_notional_is_dust=self.broker_notional_is_dust,
+            local_notional_is_dust=self.local_notional_is_dust,
+        )
+
     def to_metadata(self) -> dict[str, int | float | str]:
         return {
             "dust_state": self.classification,
@@ -381,8 +403,79 @@ class DustOperatorView:
 
 
 @dataclass(frozen=True)
+class RawHoldingsSnapshot:
+    classification: str
+    present: bool
+    broker_qty: float
+    local_qty: float
+    delta_qty: float
+    min_qty: float
+    min_notional_krw: float
+    latest_price: float | None
+    broker_notional_krw: float | None
+    local_notional_krw: float | None
+    partial_flatten_recent: bool
+    partial_flatten_reason: str
+    qty_gap_tolerance: float
+    qty_gap_small: bool
+    broker_qty_is_dust: bool
+    local_qty_is_dust: bool
+    broker_notional_is_dust: bool
+    local_notional_is_dust: bool
+
+    @property
+    def state(self) -> str:
+        return self.classification
+
+    @property
+    def broker_local_match(self) -> bool:
+        return bool(self.qty_gap_small)
+
+    @property
+    def compact_summary(self) -> str:
+        return (
+            f"state={self.state} "
+            f"broker_qty={self.broker_qty:.8f} "
+            f"local_qty={self.local_qty:.8f} "
+            f"delta_qty={self.delta_qty:.8f} "
+            f"min_qty={self.min_qty:.8f} "
+            f"min_notional_krw={self.min_notional_krw:.1f} "
+            f"qty_below_min(broker={1 if self.broker_qty_is_dust else 0} local={1 if self.local_qty_is_dust else 0}) "
+            f"notional_below_min(broker={1 if self.broker_notional_is_dust else 0} local={1 if self.local_notional_is_dust else 0}) "
+            f"broker_local_match={1 if self.broker_local_match else 0}"
+        )
+
+    def as_dict(self) -> dict[str, bool | float | str]:
+        return {
+            "classification": self.classification,
+            "present": bool(self.present),
+            "broker_qty": float(self.broker_qty),
+            "local_qty": float(self.local_qty),
+            "delta_qty": float(self.delta_qty),
+            "min_qty": float(self.min_qty),
+            "min_notional_krw": float(self.min_notional_krw),
+            "latest_price": self.latest_price if self.latest_price is not None else "",
+            "broker_notional_krw": (
+                self.broker_notional_krw if self.broker_notional_krw is not None else ""
+            ),
+            "local_notional_krw": self.local_notional_krw if self.local_notional_krw is not None else "",
+            "partial_flatten_recent": bool(self.partial_flatten_recent),
+            "partial_flatten_reason": self.partial_flatten_reason,
+            "qty_gap_tolerance": float(self.qty_gap_tolerance),
+            "qty_gap_small": bool(self.qty_gap_small),
+            "broker_qty_is_dust": bool(self.broker_qty_is_dust),
+            "local_qty_is_dust": bool(self.local_qty_is_dust),
+            "broker_notional_is_dust": bool(self.broker_notional_is_dust),
+            "local_notional_is_dust": bool(self.local_notional_is_dust),
+            "broker_local_match": bool(self.broker_local_match),
+            "compact_summary": self.compact_summary,
+        }
+
+
+@dataclass(frozen=True)
 class DustDisplayContext:
     classification: DustClassification
+    raw_holdings: RawHoldingsSnapshot
     operator_view: DustOperatorView
     fields: dict[str, bool | float | str]
 
@@ -406,6 +499,115 @@ class DustDisplayContext:
             and self.operator_view.resume_allowed
             and self.operator_view.treat_as_flat
         )
+
+
+@dataclass(frozen=True)
+class NormalizedExposure:
+    raw_qty_open: float
+    dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None
+    effective_flat: bool
+    entry_allowed: bool
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+
+    @property
+    def dust_classification(self) -> str:
+        if isinstance(self.dust_context, DustDisplayContext):
+            return self.dust_context.classification.classification
+        if isinstance(self.dust_context, DustClassification):
+            return self.dust_context.classification
+        return DustClassification.from_metadata(self.dust_context).classification
+
+    @property
+    def dust_state(self) -> str:
+        if isinstance(self.dust_context, DustDisplayContext):
+            return self.dust_context.operator_view.state
+        if isinstance(self.dust_context, DustClassification):
+            return self.dust_context.classification
+        return DustClassification.from_metadata(self.dust_context).classification
+
+    @property
+    def dust_operator_view(self) -> DustOperatorView:
+        if isinstance(self.dust_context, DustDisplayContext):
+            return self.dust_context.operator_view
+        if isinstance(self.dust_context, DustClassification):
+            return build_dust_operator_view(self.dust_context)
+        return build_dust_operator_view(self.dust_context)
+
+    @property
+    def raw_holdings(self) -> RawHoldingsSnapshot:
+        if isinstance(self.dust_context, DustDisplayContext):
+            return self.dust_context.raw_holdings
+        if isinstance(self.dust_context, DustClassification):
+            return self.dust_context.to_raw_holdings()
+        return DustClassification.from_metadata(self.dust_context).to_raw_holdings()
+
+    @property
+    def harmless_dust_effective_flat(self) -> bool:
+        return self.dust_context.effective_flat_due_to_harmless_dust
+
+    def as_dict(self) -> dict[str, bool | float | str]:
+        return {
+            "raw_qty_open": float(self.raw_qty_open),
+            "dust_classification": self.dust_classification,
+            "dust_state": self.dust_state,
+            "effective_flat": bool(self.effective_flat),
+            "entry_allowed": bool(self.entry_allowed),
+            "harmless_dust_effective_flat": bool(self.harmless_dust_effective_flat),
+            "normalized_exposure_active": bool(self.normalized_exposure_active),
+            "normalized_exposure_qty": float(self.normalized_exposure_qty),
+            "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),
+            "dust_resume_allowed": bool(self.dust_operator_view.resume_allowed),
+            "dust_treat_as_flat": bool(self.dust_operator_view.treat_as_flat),
+        }
+
+
+@dataclass(frozen=True)
+class PositionStateModel:
+    raw_holdings: RawHoldingsSnapshot
+    normalized_exposure: NormalizedExposure
+    operator_diagnostics: DustOperatorView
+    fields: dict[str, object]
+
+    @property
+    def raw_qty_open(self) -> float:
+        return float(self.normalized_exposure.raw_qty_open)
+
+    @property
+    def effective_flat(self) -> bool:
+        return bool(self.normalized_exposure.effective_flat)
+
+    @property
+    def effective_flat_due_to_harmless_dust(self) -> bool:
+        return bool(self.normalized_exposure.harmless_dust_effective_flat)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "raw_holdings": self.raw_holdings.as_dict(),
+            "normalized_exposure": self.normalized_exposure.as_dict(),
+            "operator_diagnostics": {
+                "state": self.operator_diagnostics.state,
+                "state_label": self.operator_diagnostics.state_label,
+                "operator_action": self.operator_diagnostics.operator_action,
+                "operator_message": self.operator_diagnostics.operator_message,
+                "broker_local_match": bool(self.operator_diagnostics.broker_local_match),
+                "new_orders_allowed": bool(self.operator_diagnostics.new_orders_allowed),
+                "resume_allowed": bool(self.operator_diagnostics.resume_allowed),
+                "treat_as_flat": bool(self.operator_diagnostics.treat_as_flat),
+                "compact_summary": self.operator_diagnostics.compact_summary,
+            },
+            "raw_qty_open": float(self.raw_qty_open),
+            "effective_flat": bool(self.effective_flat),
+            "effective_flat_due_to_harmless_dust": bool(self.effective_flat_due_to_harmless_dust),
+            "fields": dict(self.fields),
+        }
+
+
+def should_treat_as_flat_for_entry_gate(
+    dust_context: DustDisplayContext | None,
+) -> bool:
+    """Return True when harmless dust should not block fresh BUY entries."""
+    return bool(dust_context and dust_context.effective_flat_due_to_harmless_dust)
 
 
 def format_flat_start_reason_with_dust(
@@ -666,6 +868,7 @@ def build_dust_display_context(
     view = build_dust_operator_view(dust)
     return DustDisplayContext(
         classification=dust,
+        raw_holdings=dust.to_raw_holdings(),
         operator_view=view,
         fields={
             "dust_classification": dust.classification,
@@ -698,6 +901,70 @@ def build_dust_display_context(
             "dust_broker_notional_below_min": bool(view.broker_notional_below_min),
             "dust_local_notional_below_min": bool(view.local_notional_below_min),
         },
+    )
+
+
+def build_position_state_model(
+    *,
+    raw_qty_open: float,
+    metadata_raw: str | dict[str, object] | DustClassification | None,
+) -> PositionStateModel:
+    dust = (
+        metadata_raw
+        if isinstance(metadata_raw, DustClassification)
+        else DustClassification.from_metadata(metadata_raw)
+    )
+    display_context = build_dust_display_context(dust)
+    normalized_exposure = build_normalized_exposure(
+        raw_qty_open=raw_qty_open,
+        dust_context=display_context,
+    )
+    return PositionStateModel(
+        raw_holdings=display_context.raw_holdings,
+        normalized_exposure=normalized_exposure,
+        operator_diagnostics=display_context.operator_view,
+        fields={
+            **display_context.fields,
+            **normalized_exposure.as_dict(),
+            "raw_holdings": display_context.raw_holdings.as_dict(),
+            "normalized_exposure": normalized_exposure.as_dict(),
+            "operator_diagnostics": {
+                "state": display_context.operator_view.state,
+                "state_label": display_context.operator_view.state_label,
+                "operator_action": display_context.operator_view.operator_action,
+                "operator_message": display_context.operator_view.operator_message,
+                "broker_local_match": bool(display_context.operator_view.broker_local_match),
+                "new_orders_allowed": bool(display_context.operator_view.new_orders_allowed),
+                "resume_allowed": bool(display_context.operator_view.resume_allowed),
+                "treat_as_flat": bool(display_context.operator_view.treat_as_flat),
+            },
+            "raw_qty_open": float(normalized_exposure.raw_qty_open),
+        },
+    )
+
+
+def build_normalized_exposure(
+    *,
+    raw_qty_open: float,
+    dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None,
+) -> NormalizedExposure:
+    display_context = (
+        dust_context
+        if isinstance(dust_context, DustDisplayContext)
+        else build_dust_display_context(dust_context)
+    )
+    normalized_raw_qty = max(0.0, float(raw_qty_open))
+    entry_allowed = should_treat_as_flat_for_entry_gate(display_context)
+    effective_flat = bool(normalized_raw_qty <= DUST_POSITION_EPS or entry_allowed)
+    normalized_active = bool(normalized_raw_qty > DUST_POSITION_EPS and not entry_allowed)
+    normalized_qty = float(normalized_raw_qty if normalized_active else 0.0)
+    return NormalizedExposure(
+        raw_qty_open=normalized_raw_qty,
+        dust_context=display_context,
+        effective_flat=effective_flat,
+        entry_allowed=entry_allowed,
+        normalized_exposure_active=normalized_active,
+        normalized_exposure_qty=normalized_qty,
     )
 
 

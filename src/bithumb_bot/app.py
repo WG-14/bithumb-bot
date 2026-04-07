@@ -38,7 +38,7 @@ from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .markets import canonical_market_with_raw
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
-from .dust import build_dust_display_context, format_flat_start_reason_with_dust
+from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .reporting import (
     cmd_experiment_report,
     cmd_decision_telemetry,
@@ -194,8 +194,13 @@ def cmd_status():
     except Exception as exc:
         auth_diag = {}
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    position_state = build_position_state_model(
+        raw_qty_open=qty,
+        metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+    )
     dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
-    dust_view = dust_context.operator_view
+    dust = position_state.raw_holdings
+    dust_view = position_state.operator_diagnostics
     if dust_view.resume_allowed and dust_view.treat_as_flat:
         balance_diag["flat_start_allowed"] = True
         balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
@@ -214,6 +219,27 @@ def cmd_status():
         f"reason={balance_diag.get('reason') or '-'} "
         f"category={balance_diag.get('failure_category') or '-'} "
         f"stale={balance_diag.get('stale')}"
+    )
+    print("  [RAW-HOLDINGS]")
+    print(
+        "    "
+        f"state={dust.state} broker_qty={dust.broker_qty:.8f} local_qty={dust.local_qty:.8f} "
+        f"delta_qty={dust.delta_qty:.8f} broker_local_match={1 if dust.broker_local_match else 0}"
+    )
+    print("  [NORMALIZED-EXPOSURE]")
+    print(
+        "    "
+        f"effective_flat={1 if position_state.effective_flat else 0} "
+        f"normalized_exposure_active={1 if position_state.normalized_exposure.normalized_exposure_active else 0} "
+        f"normalized_exposure_qty={position_state.normalized_exposure.normalized_exposure_qty:.8f}"
+    )
+    print("  [OPERATOR-DIAGNOSTICS]")
+    print(
+        "    "
+        f"state={dust_view.state} action={dust_view.operator_action} "
+        f"resume_allowed={1 if dust_view.resume_allowed else 0} "
+        f"new_orders_allowed={1 if dust_view.new_orders_allowed else 0} "
+        f"treat_as_flat={1 if dust_view.treat_as_flat else 0}"
     )
 
 
@@ -493,9 +519,14 @@ def cmd_health() -> None:
     elif not bool(health["trading_enabled"]):
         state_label = "paused"
 
+    position_qty = float(portfolio_row["asset_qty"]) if portfolio_row is not None else 0.0
+    position_state = build_position_state_model(
+        raw_qty_open=position_qty,
+        metadata_raw=health.get("last_reconcile_metadata"),
+    )
     dust_context = build_dust_display_context(health.get("last_reconcile_metadata"))
-    dust = dust_context.classification
-    dust_view = dust_context.operator_view
+    dust = position_state.raw_holdings
+    dust_view = position_state.operator_diagnostics
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
     can_resume_label = "true" if bool(resume_allowed) else "false"
@@ -604,7 +635,8 @@ def cmd_health() -> None:
     print(
         "    "
         f"position={position_summary} "
-        f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0}"
+        f"entry_allowed={1 if position_state.normalized_exposure.entry_allowed else 0} "
+        f"effective_flat_due_to_harmless_dust={1 if position_state.effective_flat_due_to_harmless_dust else 0}"
     )
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
@@ -2042,6 +2074,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    resume_allowed_by_policy={1 if bool(report.get('dust_resume_allowed_by_policy')) else 0}")
     print(f"    treat_as_flat={1 if bool(report.get('dust_treat_as_flat')) else 0}")
     print(f"    dust_effective_flat={1 if bool(report.get('dust_effective_flat')) else 0}")
+    print(f"    entry_allowed={1 if dust_context.effective_flat_due_to_harmless_dust else 0}")
     print(
         "    "
         f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0}"

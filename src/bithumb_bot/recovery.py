@@ -22,6 +22,7 @@ from .config import settings
 from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
 from .dust import classify_dust_residual, dust_qty_gap_tolerance
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .lifecycle import mark_harmless_dust_positions
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
 from .notifier import format_event, notify
@@ -1517,6 +1518,12 @@ def reconcile_with_broker(broker: Broker) -> None:
         )
         for key, value in dust_eval.items():
             metadata[key] = value
+        dust_tracking_count = mark_harmless_dust_positions(
+            conn,
+            pair=settings.PAIR,
+            dust_metadata=dust_eval,
+        )
+        metadata["dust_tracking_position_lot_count"] = dust_tracking_count
 
         set_portfolio_breakdown(
             conn,

@@ -634,6 +634,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
+            position_state TEXT NOT NULL DEFAULT 'open_exposure',
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
             entry_decision_id INTEGER,
@@ -643,16 +644,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "position_state",
+        "position_state TEXT NOT NULL DEFAULT 'open_exposure'",
+    )
     _ensure_column(conn, "open_position_lots", "entry_fill_id", "entry_fill_id TEXT")
     _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "open_position_lots", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "open_position_lots", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "open_position_lots", "entry_decision_linkage", "entry_decision_linkage TEXT")
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_state='open_exposure'
+        WHERE position_state IS NULL OR TRIM(position_state)=''
+        """
+    )
 
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_open_position_lots_pair_ts
         ON open_position_lots(pair, entry_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_open_position_lots_pair_state_ts
+        ON open_position_lots(pair, position_state, entry_ts, id)
         """
     )
 

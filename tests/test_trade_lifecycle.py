@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from bithumb_bot.db_core import ensure_db
@@ -165,6 +167,56 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "entry_decision_linkage" in lifecycle_cols
     assert "exit_reason" in lifecycle_cols
     assert "exit_rule_name" in lifecycle_cols
+    assert "position_state" in lot_cols
+
+
+def test_schema_bootstrap_backfills_open_position_lot_state_for_legacy_rows(tmp_path):
+    db_path = tmp_path / "legacy_lot_state.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            entry_client_order_id TEXT NOT NULL,
+            entry_fill_id TEXT,
+            entry_ts INTEGER NOT NULL,
+            entry_price REAL NOT NULL,
+            qty_open REAL NOT NULL,
+            entry_fee_total REAL NOT NULL DEFAULT 0,
+            strategy_name TEXT,
+            entry_decision_id INTEGER,
+            entry_decision_linkage TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 1, "legacy_entry", 1_700_000_000_000, 40_000_000.0, 0.00009629),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = ensure_db(str(db_path))
+    lot_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(open_position_lots)").fetchall()}
+    state_row = conn.execute(
+        "SELECT position_state FROM open_position_lots WHERE entry_client_order_id='legacy_entry'"
+    ).fetchone()
+    conn.close()
+
+    assert "position_state" in lot_cols
+    assert state_row["position_state"] == "open_exposure"
 
 
 def test_sell_without_known_entry_writes_unknown_lifecycle_row(tmp_path):

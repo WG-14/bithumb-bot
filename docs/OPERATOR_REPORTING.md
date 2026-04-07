@@ -88,8 +88,14 @@ BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit
 - `unresolved_open_order_count`: order lifecycle state is still unclear; resolve recovery before restarting.
 - `recovery_required_count`: orders need explicit recovery action before the bot can be considered safe to resume.
 - `last_reconcile_*`: the most recent reconciliation evidence, including status, reason, and timestamp.
+- Dust vocabulary used in this document and in the code:
+  - `harmless_dust`: broker/local remainder is matched closely enough to be policy-classified as harmless dust. It can still be a real BTC remainder.
+  - `unsafe dust` / `mismatch dust`: any dust-like residual that is not policy-approved to resume, including broker/local mismatch, one-sided remainder, or recovery-unclear residue.
+  - `effective flat`: the remainder is treated as flat for the strategy entry gate. This is a trading-gate interpretation, not a literal zero-balance claim.
+  - `resume allowed` / `new orders allowed`: operator-facing policy flags. For dust, both are true only when the matched harmless residual is also policy-approved to resume.
 - `effective_flat_due_to_harmless_dust`: the position can be interpreted as flat for operator purposes, but a real small BTC remainder may still exist on broker or in the DB.
-- `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_treat_as_flat`: always read together. `matched_harmless_dust` is not "zero balance"; it means a small remainder is policy-controlled and may be resume-safe only when `dust_resume_allowed=1`.
+- `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, `dust_treat_as_flat`: always read together. `harmless_dust` is not "zero balance"; it means a small remainder is policy-controlled and may be resume-safe only when `dust_resume_allowed=1` and `dust_new_orders_allowed=1`. Legacy reconcile metadata may still say `matched_harmless_dust_*` for the same class.
+- `strategy.context.position_gate.in_position` should be read as exposure state, not dust state. When `effective_flat_due_to_harmless_dust=1`, the strategy may treat the position as flat for fresh BUY entries even though the broker may still show a small remainder.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, `dust_broker_local_match`: broker, local DB, and their difference. A small remainder is only harmless when the quantities match closely enough and policy allows resume.
 - `dust_min_qty`, `dust_min_notional_krw`: separate sellability gates. One can fail while the other still passes.
 - `diag_execution_mode`, `quote_currency`, `base_currency`, `base_missing_policy`, `preflight_outcome`: `/v1/accounts` preflight context. `accounts_flat_start_allowed` remains only a diagnostic, not resume permission.
@@ -246,12 +252,16 @@ JSON 출력이 필요하면 `--json`을 사용합니다.
 
 - `ops-report` now separates dust interpretation from `/v1/accounts` preflight. `accounts_flat_start_allowed` is only an accounts-row diagnostic and must not be read as automatic resume permission.
 - Check `dust_state`, `dust_action`, `dust_new_orders_allowed`, `dust_resume_allowed`, and `dust_treat_as_flat` together.
-- `dust_state=matched_harmless_dust` means broker/local dust matches closely enough to be treated as harmless dust. New orders and resume are allowed only when `dust_resume_allowed=1`.
-- `dust_state=matched_harmless_dust` can still mean a real BTC remainder exists. Treat it as an operator interpretation of a small remainder, not a literal zero-balance claim.
+- `dust_state=harmless_dust` means broker/local dust matches closely enough to be treated as harmless dust. New orders and resume are allowed only when `dust_resume_allowed=1`.
+- `dust_state=harmless_dust` can still mean a real BTC remainder exists. Treat it as an operator interpretation of a small remainder, not a literal zero-balance claim.
 - `dust_state=dangerous_dust` means "not an unresolved order yet still not safely resumable". New orders stay blocked until operator review.
+- For a harmless dust remainder, the answer to "can I place a fresh BUY?" is:
+  - yes only when `dust_state=harmless_dust`, `dust_new_orders_allowed=1`, `dust_resume_allowed=1`, `dust_treat_as_flat=1`, and `effective_flat_due_to_harmless_dust=1`
+  - no when `dust_state=harmless_dust` but the policy review path is still open, or when any recovery blocker remains
+- If strategy telemetry shows `position.in_position=False` because of harmless dust, that means the entry gate has already accepted the residual as flat. If it shows `True`, the bot is still carrying exposure for BUY-gate purposes.
 - Use the field groups this way:
   1. restart gate: `resume_allowed`, `can_resume`, `blockers`
-  2. dust policy: `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_treat_as_flat`
+  2. dust policy: `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, `dust_treat_as_flat`
   3. quantity cross-check: `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, `dust_broker_local_match`
   4. exchange minimum cross-check: `dust_min_qty`, `dust_min_notional_krw`, `dust_qty_below_min`, `dust_notional_below_min`
 - `dust_min_qty` and `dust_min_notional_krw` answer different questions. Operators should not conclude "sellable" until both minimums are satisfied after rounding and quantity-step normalization.
