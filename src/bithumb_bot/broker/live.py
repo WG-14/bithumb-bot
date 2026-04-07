@@ -1918,6 +1918,21 @@ def live_execute_signal(
                 reference_source=(str(reference_quote["reference_source"]) if reference_quote is not None else None),
             )
         except SellDustGuardError as e:
+            if side == "SELL" and _record_harmless_dust_exit_suppression(
+                conn=conn,
+                state=state,
+                signal=signal,
+                side=side,
+                requested_qty=float(order_qty),
+                market_price=float(market_price),
+                normalized_qty=float(suppression_preview["normalized_qty"]),
+                strategy_name=strategy_name,
+                decision_id=decision_id,
+                decision_reason=decision_reason,
+                exit_rule_name=exit_rule_name,
+            ):
+                conn.commit()
+                return None
             if side == "SELL" and _record_sell_dust_unsellable(
                 conn=conn,
                 ts=int(ts),
@@ -1944,6 +1959,21 @@ def live_execute_signal(
             notify(f"live pretrade validation blocked ({side}): {e}")
             return None
         except ValueError as e:
+            if side == "SELL" and _record_harmless_dust_exit_suppression(
+                conn=conn,
+                state=state,
+                signal=signal,
+                side=side,
+                requested_qty=float(order_qty),
+                market_price=float(market_price),
+                normalized_qty=float(suppression_preview["normalized_qty"]),
+                strategy_name=strategy_name,
+                decision_id=decision_id,
+                decision_reason=decision_reason,
+                exit_rule_name=exit_rule_name,
+            ):
+                conn.commit()
+                return None
             if side == "SELL" and _record_sell_dust_unsellable(
                 conn=conn,
                 ts=int(ts),

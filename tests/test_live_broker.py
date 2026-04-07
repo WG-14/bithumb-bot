@@ -2522,6 +2522,138 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_sell_guard_raises(
+    monkeypatch,
+    tmp_path,
+):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_harmless_dust_fallback.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 1,
+            "dust_broker_qty": 0.00009193,
+            "dust_local_qty": 0.00009193,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5_000.0,
+            "dust_latest_price": 100_000_000.0,
+            "dust_broker_notional_krw": 9_193.0,
+            "dust_local_notional_krw": 9_193.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 0,
+            "dust_local_notional_is_dust": 0,
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+        },
+    )
+
+    conn = ensure_db(str(tmp_path / "sell_harmless_dust_fallback.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00009193,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    original_suppression = live_module._record_harmless_dust_exit_suppression
+    suppression_calls = {"count": 0}
+
+    def _suppression_with_one_miss(*args, **kwargs):
+        suppression_calls["count"] += 1
+        if suppression_calls["count"] == 1:
+            return False
+        return original_suppression(*args, **kwargs)
+
+    monkeypatch.setattr(
+        live_module,
+        "_record_harmless_dust_exit_suppression",
+        _suppression_with_one_miss,
+    )
+
+    broker = _FakeBroker()
+    trade_first = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    trade_second = live_execute_signal(
+        broker,
+        "SELL",
+        1001,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade_first is None
+    assert trade_second is None
+    assert broker.place_order_calls == 0
+    assert suppression_calls["count"] >= 2
+
+    conn = ensure_db(str(tmp_path / "sell_harmless_dust_fallback.sqlite"))
+    order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    submit_attempt_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type IN ('submit_attempt_preflight', 'submit_attempt_recorded', 'submit_blocked')
+        """
+    ).fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, seen_count, dust_state, dust_action
+        FROM order_suppressions
+        WHERE strategy_name='dust_exit_test' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert order_count == 0
+    assert event_count == 0
+    assert submit_attempt_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    assert int(suppression_row["seen_count"]) == 2
+    assert suppression_row["dust_state"] == "harmless_dust"
+    assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
+    assert any("event=decision_suppressed" in msg for msg in notifications)
+    assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
 def test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qty_preview(monkeypatch, tmp_path):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
