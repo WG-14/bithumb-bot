@@ -263,7 +263,7 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
     assert decision.context["entry"]["cost_edge_blocked"] is False
 
 
-def test_harmless_dust_effective_flat_does_not_block_buy_entry() -> None:
+def test_harmless_dust_effective_flat_keeps_buy_entry_intentable() -> None:
     conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
     dust = classify_dust_residual(
         broker_qty=0.00009629,
@@ -296,9 +296,19 @@ def test_harmless_dust_effective_flat_does_not_block_buy_entry() -> None:
 
     assert decision is not None
     assert decision.signal == "BUY"
+    assert decision.context["raw_signal"] == "BUY"
+    assert decision.context["entry_allowed"] is True
+    assert decision.context["normalized_exposure_active"] is False
+    assert decision.context["normalized_exposure_qty"] == pytest.approx(0.0)
     assert decision.context["entry"]["base_signal"] == "BUY"
     assert decision.context["entry"]["entry_signal"] == "BUY"
     assert decision.context["position_gate"]["effective_flat_due_to_harmless_dust"] is True
+    assert decision.context["position_gate"]["entry_allowed"] is True
+    assert decision.context["position_gate"]["normalized_exposure_active"] is False
+    assert decision.context["position_state"]["raw_holdings"]["classification"] == "harmless_dust"
+    assert decision.context["position_state"]["raw_holdings"]["present"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["entry_allowed"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
     assert decision.context["position_gate"]["dust_new_orders_allowed"] is True
     assert decision.context["position_gate"]["dust_resume_allowed"] is True
     assert decision.context["position_gate"]["dust_treat_as_flat"] is True

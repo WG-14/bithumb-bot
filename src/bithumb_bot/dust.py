@@ -554,6 +554,7 @@ class NormalizedExposure:
             "effective_flat": bool(self.effective_flat),
             "entry_allowed": bool(self.entry_allowed),
             "harmless_dust_effective_flat": bool(self.harmless_dust_effective_flat),
+            "effective_flat_due_to_harmless_dust": bool(self.harmless_dust_effective_flat),
             "normalized_exposure_active": bool(self.normalized_exposure_active),
             "normalized_exposure_qty": float(self.normalized_exposure_qty),
             "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),

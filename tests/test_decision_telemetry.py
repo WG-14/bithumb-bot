@@ -61,6 +61,10 @@ def test_record_strategy_decision_normalizes_blocked_entry_context(tmp_path, mon
     assert ctx["strategy_name"] == "sma_with_filter"
     assert ctx["pair"] == "KRW-BTC"
     assert ctx["interval"] == "1m"
+    assert ctx["entry_allowed_truth_source"] == "default:false"
+    assert ctx["effective_flat_truth_source"] == "default:false"
+    assert ctx["decision_truth_sources"]["entry_allowed"] == "default:false"
+    assert ctx["decision_truth_sources"]["raw_qty_open"] == "default:0.0"
 
 
 def test_record_strategy_decision_normalizes_hold_context_without_filter_block(tmp_path, monkeypatch):
@@ -140,9 +144,11 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
 
     assert rc == 0
     assert "[DECISION-TELEMETRY]" in out
-    assert "BUY,HOLD,1,position held: no exit rule triggered" in out
+    assert "base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,entry_allowed" in out
+    assert "BUY,HOLD,BUY,HOLD,BUY_BLOCKED,1,0,position held: no exit rule triggered" in out
     assert "harmless_dust" in out
     assert "0.00009629" in out
+    assert "position_gate.effective_flat_due_to_harmless_dust" in out
 
 
 def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, monkeypatch):
@@ -182,6 +188,9 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["entry_allowed"] is True
     assert ctx["effective_flat"] is True
     assert ctx["normalized_exposure_active"] is False
+    assert ctx["entry_allowed_truth_source"] == "position_gate.entry_allowed"
+    assert ctx["effective_flat_truth_source"] == "position_gate.effective_flat_due_to_harmless_dust"
+    assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:raw_qty_open_and_entry_allowed"
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
 
@@ -239,9 +248,9 @@ def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monke
     assert rc == 0
     assert "[DECISION-TELEMETRY]" in out
     assert "BLOCKED_ENTRY" in out
-    assert "BLOCKED_ENTRY,BUY,HOLD,1,filtered entry: gap" in out
-    assert "BUY,BUY,BUY,0,sma golden cross" in out
-    assert "HOLD,HOLD,HOLD,0,position held: no exit rule triggered" in out
+    assert "BUY,BLOCKED_ENTRY,BUY,HOLD,BUY_BLOCKED,1,0,filtered entry: gap" in out
+    assert "BUY,BUY,BUY,BUY,BUY_SUBMIT,0,0,sma golden cross" in out
+    assert "HOLD,HOLD,HOLD,HOLD,HOLD,0,0,position held: no exit rule triggered" in out
 
 
 def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeypatch):

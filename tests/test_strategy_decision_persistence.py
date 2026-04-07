@@ -126,3 +126,81 @@ def test_record_strategy_decision_preserves_buy_to_hold_explanation_fields(tmp_p
     assert ctx["position_state"]["operator_diagnostics"]["state"] == "harmless_dust"
     assert ctx["decision_summary"]["raw_signal"] == "BUY"
     assert ctx["decision_summary"]["final_signal"] == "HOLD"
+
+
+def test_record_strategy_decision_prefers_position_state_normalized_exposure_truth(tmp_path):
+    conn = ensure_db(str(tmp_path / "decision_normalized_truth.sqlite"))
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1_710_000_240_000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1_710_000_180_000,
+            market_price=102_500_000.0,
+            confidence=None,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "raw_qty_open": 0.25,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "effective_flat": True,
+                "entry_allowed": True,
+                "dust_classification": "harmless_dust",
+                "position_gate": {
+                    "dust_state": "harmless_dust",
+                    "effective_flat_due_to_harmless_dust": True,
+                    "raw_qty_open": 0.25,
+                },
+                "position_state": {
+                    "raw_holdings": {
+                        "classification": "harmless_dust",
+                        "present": True,
+                        "broker_qty": 0.00009629,
+                        "local_qty": 0.00009629,
+                        "delta_qty": 0.0,
+                        "min_qty": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "broker_local_match": True,
+                        "compact_summary": "state=harmless_dust",
+                    },
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.00009629,
+                        "dust_classification": "harmless_dust",
+                        "dust_state": "harmless_dust",
+                        "entry_allowed": True,
+                        "effective_flat": True,
+                        "effective_flat_due_to_harmless_dust": True,
+                        "normalized_exposure_active": False,
+                        "normalized_exposure_qty": 0.0,
+                    },
+                    "operator_diagnostics": {
+                        "state": "harmless_dust",
+                        "state_label": "harmless dust residual",
+                        "operator_action": "harmless_dust_tracked_resume_allowed",
+                        "operator_message": "ok",
+                        "broker_local_match": True,
+                        "new_orders_allowed": True,
+                        "resume_allowed": True,
+                        "treat_as_flat": True,
+                    },
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["raw_qty_open"] == pytest.approx(0.00009629)
+    assert ctx["entry_allowed"] is True
+    assert ctx["effective_flat"] is True
+    assert ctx["normalized_exposure_active"] is False
+    assert ctx["normalized_exposure_qty"] == pytest.approx(0.0)

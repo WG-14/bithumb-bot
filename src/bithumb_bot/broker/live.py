@@ -8,7 +8,7 @@ import time
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..execution import apply_fill_and_trade, record_order_if_missing
-from ..dust import DustState, build_dust_display_context
+from ..dust import DustState, build_dust_display_context, build_normalized_exposure
 from ..marketdata import fetch_orderbook_top
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
@@ -274,6 +274,157 @@ def _client_order_id(*, ts: int, side: str, submit_attempt_id: str) -> str:
             f"client_order_id={client_order_id}"
         )
     return client_order_id
+
+
+def _load_strategy_decision_observability(
+    *,
+    conn,
+    decision_id: int | None,
+    fallback_signal: str,
+) -> dict[str, object]:
+    observability: dict[str, object] = {
+        "decision_id": decision_id,
+        "base_signal": fallback_signal,
+        "final_signal": fallback_signal,
+        "entry_allowed": False,
+        "effective_flat": False,
+        "raw_qty_open": 0.0,
+        "normalized_exposure_active": False,
+        "normalized_exposure_qty": 0.0,
+        "entry_allowed_truth_source": "-",
+        "effective_flat_truth_source": "-",
+        "raw_qty_open_truth_source": "-",
+        "normalized_exposure_active_truth_source": "-",
+        "normalized_exposure_qty_truth_source": "-",
+    }
+    if decision_id is None:
+        return observability
+
+    row = conn.execute(
+        """
+        SELECT signal, reason, context_json
+        FROM strategy_decisions
+        WHERE id=?
+        """,
+        (int(decision_id),),
+    ).fetchone()
+    if row is None:
+        return observability
+
+    try:
+        context = json.loads(str(row["context_json"] or "{}"))
+    except json.JSONDecodeError:
+        context = {}
+    if not isinstance(context, dict):
+        context = {}
+
+    position_state = context.get("position_state") if isinstance(context.get("position_state"), dict) else {}
+    position_normalized = (
+        position_state.get("normalized_exposure")
+        if isinstance(position_state.get("normalized_exposure"), dict)
+        else {}
+    )
+    position_gate = context.get("position_gate") if isinstance(context.get("position_gate"), dict) else {}
+    decision_truth_sources = (
+        context.get("decision_truth_sources") if isinstance(context.get("decision_truth_sources"), dict) else {}
+    )
+
+    base_signal = str(context.get("base_signal") or context.get("raw_signal") or fallback_signal)
+    final_signal = str(context.get("final_signal") or row["signal"] or fallback_signal)
+    entry_allowed = bool(
+        context.get(
+            "entry_allowed",
+            position_normalized.get(
+                "entry_allowed",
+                position_gate.get(
+                    "entry_allowed",
+                    position_gate.get(
+                        "effective_flat_due_to_harmless_dust",
+                        position_gate.get("dust_treat_as_flat", False),
+                    ),
+                ),
+            ),
+        )
+    )
+    effective_flat = bool(
+        context.get(
+            "effective_flat",
+            position_normalized.get(
+                "effective_flat",
+                position_gate.get(
+                    "effective_flat_due_to_harmless_dust",
+                    position_gate.get("dust_treat_as_flat", False),
+                ),
+            ),
+        )
+    )
+    raw_qty_open = float(
+        context.get(
+            "raw_qty_open",
+            position_normalized.get("raw_qty_open", position_gate.get("raw_qty_open", 0.0)),
+        )
+        or 0.0
+    )
+    normalized_exposure_active = bool(
+        context.get(
+            "normalized_exposure_active",
+            position_normalized.get(
+                "normalized_exposure_active",
+                position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed),
+            ),
+        )
+    )
+    normalized_exposure_qty = float(
+        context.get(
+            "normalized_exposure_qty",
+            position_normalized.get(
+                "normalized_exposure_qty",
+                position_gate.get(
+                    "normalized_exposure_qty",
+                    raw_qty_open if normalized_exposure_active else 0.0,
+                ),
+            ),
+        )
+        or 0.0
+    )
+
+    observability.update(
+        {
+            "base_signal": base_signal,
+            "final_signal": final_signal,
+            "entry_allowed": entry_allowed,
+            "effective_flat": effective_flat,
+            "raw_qty_open": raw_qty_open,
+            "normalized_exposure_active": normalized_exposure_active,
+            "normalized_exposure_qty": normalized_exposure_qty,
+            "entry_allowed_truth_source": str(
+                context.get("entry_allowed_truth_source")
+                or decision_truth_sources.get("entry_allowed")
+                or "context.entry_allowed"
+            ),
+            "effective_flat_truth_source": str(
+                context.get("effective_flat_truth_source")
+                or decision_truth_sources.get("effective_flat")
+                or "context.effective_flat"
+            ),
+            "raw_qty_open_truth_source": str(
+                context.get("raw_qty_open_truth_source")
+                or decision_truth_sources.get("raw_qty_open")
+                or "context.raw_qty_open"
+            ),
+            "normalized_exposure_active_truth_source": str(
+                context.get("normalized_exposure_active_truth_source")
+                or decision_truth_sources.get("normalized_exposure_active")
+                or "context.normalized_exposure_active"
+            ),
+            "normalized_exposure_qty_truth_source": str(
+                context.get("normalized_exposure_qty_truth_source")
+                or decision_truth_sources.get("normalized_exposure_qty")
+                or "context.normalized_exposure_qty"
+            ),
+        }
+    )
+    return observability
 
 
 def _as_bps(value: float, base: float) -> float:
@@ -949,6 +1100,11 @@ def _record_harmless_dust_exit_suppression(
     if side != "SELL":
         return False
 
+    decision_observability = _load_strategy_decision_observability(
+        conn=conn,
+        decision_id=decision_id,
+        fallback_signal=signal,
+    )
     dust_context = build_dust_display_context(state.last_reconcile_metadata)
     dust = dust_context.classification
     dust_view = dust_context.operator_view
@@ -981,7 +1137,15 @@ def _record_harmless_dust_exit_suppression(
     suppression_reason = "decision_suppressed:harmless_dust_exit"
     suppression_summary = (
         f"{suppression_reason};{dust_context.compact_summary};"
+        f"base_signal={decision_observability['base_signal']};final_signal={decision_observability['final_signal']};"
+        f"entry_allowed={1 if bool(decision_observability['entry_allowed']) else 0};"
+        f"effective_flat={1 if bool(decision_observability['effective_flat']) else 0};"
+        f"normalized_exposure_active={1 if bool(decision_observability['normalized_exposure_active']) else 0};"
+        f"normalized_exposure_qty={float(decision_observability['normalized_exposure_qty']):.12f};"
+        f"raw_qty_open={float(decision_observability['raw_qty_open']):.12f};"
         f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0};"
+        f"entry_allowed_truth_source={decision_observability['entry_allowed_truth_source']};"
+        f"effective_flat_truth_source={decision_observability['effective_flat_truth_source']};"
         f"suppression_scope={suppression_scope};"
         f"requested_qty={requested_qty:.12f};normalized_qty={normalized_qty:.12f};"
         f"market_price={market_price:.8f};qty_below_min={1 if qty_below_min else 0};"
@@ -1008,6 +1172,15 @@ def _record_harmless_dust_exit_suppression(
         "requested_qty": requested_qty,
         "normalized_qty": normalized_qty,
         "market_price": market_price,
+        "base_signal": decision_observability["base_signal"],
+        "final_signal": decision_observability["final_signal"],
+        "entry_allowed": bool(decision_observability["entry_allowed"]),
+        "effective_flat": bool(decision_observability["effective_flat"]),
+        "raw_qty_open": float(decision_observability["raw_qty_open"]),
+        "normalized_exposure_active": bool(decision_observability["normalized_exposure_active"]),
+        "normalized_exposure_qty": float(decision_observability["normalized_exposure_qty"]),
+        "entry_allowed_truth_source": str(decision_observability["entry_allowed_truth_source"]),
+        "effective_flat_truth_source": str(decision_observability["effective_flat_truth_source"]),
         "strategy_name": strategy_name_value,
         "strategy_context": strategy_context,
         "decision_id": decision_id,
@@ -1019,6 +1192,7 @@ def _record_harmless_dust_exit_suppression(
         "suppression_key": suppression_key,
         "effective_flat_due_to_harmless_dust": bool(dust_context.effective_flat_due_to_harmless_dust),
         "suppression_scope": suppression_scope,
+        "decision_observability": decision_observability,
     }
     record_order_suppression(
         conn=conn,
@@ -1053,11 +1227,20 @@ def _record_harmless_dust_exit_suppression(
     RUN_LOG.info(
         format_log_kv(
             "[ORDER_SKIP] harmless dust exit suppressed",
+            base_signal=decision_observability["base_signal"],
+            final_signal=decision_observability["final_signal"],
             signal=signal,
             side=side,
             reason_code=DUST_RESIDUAL_SUPPRESSED,
             state=dust_view.state,
             operator_action=dust_view.operator_action,
+            entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+            effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+            normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+            normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+            raw_qty_open=float(decision_observability["raw_qty_open"]),
+            entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+            effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
             suppression_scope=suppression_scope,
             requested_qty=requested_qty,
             normalized_qty=normalized_qty,
@@ -1075,6 +1258,15 @@ def _record_harmless_dust_exit_suppression(
             side=side,
             status="SUPPRESSED",
             reason=suppression_summary,
+            base_signal=decision_observability["base_signal"],
+            final_signal=decision_observability["final_signal"],
+            entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+            effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+            normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+            normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+            raw_qty_open=float(decision_observability["raw_qty_open"]),
+            entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+            effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
             dust_state=dust_view.state,
             dust_action=dust_view.operator_action,
             dust_residual_present=1 if dust.present else 0,
@@ -1872,23 +2064,85 @@ def live_execute_signal(
 
         cash, qty = get_portfolio(conn)
 
-        if signal == "BUY" and qty <= POSITION_EPSILON:
+        normalized_exposure = build_normalized_exposure(
+            raw_qty_open=float(qty),
+            dust_context=state.last_reconcile_metadata,
+        )
+        decision_observability = _load_strategy_decision_observability(
+            conn=conn,
+            decision_id=decision_id,
+            fallback_signal=signal,
+        )
+
+        if signal == "BUY" and normalized_exposure.effective_flat:
             if not math.isfinite(float(market_price)) or float(market_price) <= 0:
                 reason = f"invalid market/reference price: {market_price}"
-                RUN_LOG.info(format_log_kv("[ORDER_SKIP] invalid market price", side="BUY", reason=reason, signal=signal))
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] invalid market price",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
+                        side="BUY",
+                        reason=reason,
+                        signal=signal,
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    )
+                )
                 notify(f"live pretrade validation blocked (BUY): {reason}")
                 return None
 
-            blocked, guardrail_reason = evaluate_buy_guardrails(conn=conn, ts_ms=ts, cash=cash, qty=qty, price=market_price)
+            guardrail_qty = float(normalized_exposure.normalized_exposure_qty if normalized_exposure.entry_allowed else qty)
+            blocked, guardrail_reason = evaluate_buy_guardrails(
+                conn=conn,
+                ts_ms=ts,
+                cash=cash,
+                qty=guardrail_qty,
+                price=market_price,
+            )
             if blocked:
-                RUN_LOG.info(format_log_kv("[ORDER_SKIP] buy guardrails", signal=signal, side="BUY", reason=guardrail_reason or "blocked"))
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] buy guardrails",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
+                        signal=signal,
+                        side="BUY",
+                        reason=guardrail_reason or "blocked",
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    )
+                )
                 return None
 
             spend = cash * float(settings.BUY_FRACTION)
             if settings.MAX_ORDER_KRW > 0:
                 spend = min(spend, float(settings.MAX_ORDER_KRW))
             if spend <= 0:
-                RUN_LOG.info(format_log_kv("[ORDER_SKIP] non-positive spend", side="BUY", reason=f"spend={float(spend):.8f}", signal=signal))
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] non-positive spend",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
+                        side="BUY",
+                        reason=f"spend={float(spend):.8f}",
+                        signal=signal,
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    )
+                )
                 return None
 
             order_qty = max(0.0, spend / market_price)
@@ -1899,8 +2153,36 @@ def live_execute_signal(
             side = "SELL"
 
         else:
-            skip_reason = "no actionable position state for signal"
-            RUN_LOG.info(format_log_kv("[ORDER_SKIP] no-op signal", side=signal, reason=skip_reason, signal=signal, position_qty=f"{float(qty):.12f}"))
+            skip_reason = (
+                "no actionable position state for signal "
+                f"base_signal={decision_observability['base_signal']} "
+                f"final_signal={decision_observability['final_signal']} "
+                f"raw_qty_open={float(normalized_exposure.raw_qty_open):.12f} "
+                f"normalized_exposure_active={1 if normalized_exposure.normalized_exposure_active else 0} "
+                f"normalized_exposure_qty={float(normalized_exposure.normalized_exposure_qty):.12f} "
+                f"entry_allowed={1 if normalized_exposure.entry_allowed else 0} "
+                f"effective_flat={1 if normalized_exposure.effective_flat else 0} "
+                f"entry_allowed_truth_source={decision_observability['entry_allowed_truth_source']} "
+                f"effective_flat_truth_source={decision_observability['effective_flat_truth_source']}"
+            )
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SKIP] no-op signal",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
+                    side=signal,
+                    reason=skip_reason,
+                    signal=signal,
+                    position_qty=f"{float(qty):.12f}",
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
+                )
+            )
             return None
 
         if side == "SELL":
@@ -1984,11 +2266,20 @@ def live_execute_signal(
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SKIP] sell dust guard blocked",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
                     signal=signal,
                     side=side,
                     reason=str(e),
                     market_price=market_price,
                     order_qty=order_qty,
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
                 )
             )
             notify(f"live pretrade validation blocked ({side}): {e}")
@@ -2024,11 +2315,20 @@ def live_execute_signal(
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SKIP] pretrade blocked",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
                     signal=signal,
                     side=side,
                     reason=str(e),
                     market_price=market_price,
                     order_qty=order_qty,
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
                 )
             )
             notify(f"live pretrade validation blocked ({side}): {e}")
@@ -2091,9 +2391,17 @@ def live_execute_signal(
                 RUN_LOG.info(
                     format_log_kv(
                         "[ORDER_SKIP] unresolved risk gate",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
                         signal=signal,
                         side=side,
                         reason=gate_reason,
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
                     )
                 )
                 _block_new_submission_for_unresolved_risk(
@@ -2108,7 +2416,22 @@ def live_execute_signal(
                 conn.commit()
                 return None
 
-            RUN_LOG.info(format_log_kv("[ORDER_SKIP] submission halt", signal=signal, side=side, reason=reason))
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SKIP] submission halt",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
+                    signal=signal,
+                    side=side,
+                    reason=reason,
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                )
+            )
             notify(f"live order placement blocked ({side}): {reason}")
             return None
 
@@ -2120,7 +2443,23 @@ def live_execute_signal(
             existing_status = str(existing["status"])
             if existing_status in TERMINAL_ORDER_STATUSES:
                 reason = f"duplicate submit blocked: terminal status {existing_status}"
-                RUN_LOG.info(format_log_kv("[ORDER_SKIP] duplicate client order id", signal=signal, side=side, reason=reason, client_order_id=client_order_id))
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] duplicate client order id",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
+                        signal=signal,
+                        side=side,
+                        reason=reason,
+                        client_order_id=client_order_id,
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    )
+                )
                 record_submit_blocked(client_order_id, status=existing_status, reason=reason, conn=conn)
                 notify(
                     safety_event(  # CHANGED
@@ -2166,6 +2505,8 @@ def live_execute_signal(
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SKIP] duplicate order intent",
+                    base_signal=decision_observability["base_signal"],
+                    final_signal=decision_observability["final_signal"],
                     mode=settings.MODE,
                     symbol=settings.PAIR,
                     side=side,
@@ -2173,6 +2514,12 @@ def live_execute_signal(
                     intent_ts=int(ts),
                     intent_key=intent_key,
                     reason=skip_reason,
+                    entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                    effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                    normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                    normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                    raw_qty_open=float(decision_observability["raw_qty_open"]),
+                    entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
                 )
             )
             notify(
@@ -2197,6 +2544,8 @@ def live_execute_signal(
                 "[ORDER_DECISION] submit order intent",
                 mode=settings.MODE,
                 symbol=settings.PAIR,
+                base_signal=decision_observability["base_signal"],
+                final_signal=decision_observability["final_signal"],
                 signal=signal,
                 side=side,
                 market_price=market_price,
@@ -2206,6 +2555,13 @@ def live_execute_signal(
                 client_order_id=client_order_id,
                 intent_ts=int(ts),
                 intent_key=intent_key,
+                entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                raw_qty_open=float(decision_observability["raw_qty_open"]),
+                entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                effective_flat_truth_source=decision_observability["effective_flat_truth_source"],
                 top_of_book=top_of_book_summary,
             )
         )

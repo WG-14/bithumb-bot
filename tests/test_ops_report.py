@@ -8,7 +8,7 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
-from bithumb_bot.db_core import ensure_db, init_portfolio
+from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision
 from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.reporting import cmd_ops_report
@@ -589,3 +589,72 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
         "broker_local_match=1 operator_action=harmless_dust_tracked_resume_allowed "
         "new_orders_allowed=1 resume_allowed=1 treat_as_flat=1)"
     )
+
+
+def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-decision-flow.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=3,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=3,
+            market_price=102_500_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "effective_flat": True,
+                "raw_qty_open": 0.00009629,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.00009629,
+                        "entry_allowed": True,
+                        "effective_flat": True,
+                        "normalized_exposure_active": False,
+                        "normalized_exposure_qty": 0.0,
+                    }
+                },
+            },
+        )
+        record_strategy_decision(
+            conn,
+            decision_ts=2,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="position held: no exit rule triggered",
+            candle_ts=2,
+            market_price=102_400_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "filtered entry: gap",
+                "blocked_filters": ["gap"],
+                "filter_blocked": True,
+                "position_gate": {
+                    "effective_flat_due_to_harmless_dust": False,
+                    "raw_qty_open": 0.00009629,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "[RECENT-STRATEGY-DECISION-FLOW]" in out
+    assert "flow=BUY_SUBMIT" in out
+    assert "flow=BUY_BLOCKED" in out
+    assert "entry_allowed_truth_source=context.entry_allowed" in out
+    assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out

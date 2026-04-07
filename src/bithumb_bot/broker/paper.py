@@ -9,6 +9,8 @@ from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..marketdata import fetch_orderbook_top, validated_best_quote_prices
 from ..notifier import notify
 from ..observability import format_log_kv
+from .. import runtime_state
+from ..dust import build_normalized_exposure
 from ..oms import (
     build_client_order_id,
     build_order_intent_key,
@@ -69,16 +71,20 @@ def paper_execute(
     try:
         init_portfolio(conn)
         cash, qty = get_portfolio(conn)
+        normalized_exposure = build_normalized_exposure(
+            raw_qty_open=float(qty),
+            dust_context=runtime_state.snapshot().last_reconcile_metadata,
+        )
 
         fee = 0.0
         trade_qty = 0.0
 
-        if signal == "BUY" and qty <= POSITION_EPSILON:
+        if signal == "BUY" and normalized_exposure.effective_flat:
             blocked, _ = evaluate_buy_guardrails(
                 conn=conn,
                 ts_ms=int(ts),
                 cash=cash,
-                qty=qty,
+                qty=float(normalized_exposure.normalized_exposure_qty if normalized_exposure.entry_allowed else qty),
                 price=float(fill_price),
             )
             if blocked:

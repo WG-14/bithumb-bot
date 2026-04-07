@@ -92,20 +92,47 @@ class FeeDiagnosticSummary:
 
 @dataclass
 class DecisionTelemetrySummary:
+    base_signal: str
     decision_type: str
     raw_signal: str
     final_signal: str
+    buy_flow_state: str
     entry_blocked: bool
+    entry_allowed: bool
     block_reason: str
     dust_classification: str
     effective_flat: bool
     raw_qty_open: float
     normalized_exposure_active: bool
     normalized_exposure_qty: float
+    entry_allowed_truth_source: str
+    effective_flat_truth_source: str
     strategy_name: str
     pair: str
     interval: str
     count: int
+
+
+@dataclass
+class RecentDecisionFlowSummary:
+    decision_id: int
+    decision_ts: int
+    strategy_name: str
+    decision_type: str
+    base_signal: str
+    raw_signal: str
+    final_signal: str
+    buy_flow_state: str
+    entry_blocked: bool
+    entry_allowed: bool
+    effective_flat: bool
+    raw_qty_open: float
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+    entry_allowed_truth_source: str
+    effective_flat_truth_source: str
+    block_reason: str
+    reason: str
 
 
 @dataclass
@@ -497,6 +524,182 @@ def _fetch_recent_trade_ops(conn: sqlite3.Connection, *, limit: int) -> list[sql
     ).fetchall()
 
 
+def _derive_buy_flow_state(*, raw_signal: str, final_signal: str, entry_blocked: bool) -> str:
+    raw = str(raw_signal or "").strip().upper()
+    final = str(final_signal or "").strip().upper()
+    if raw == "BUY":
+        if final == "BUY":
+            return "BUY_BLOCKED" if entry_blocked else "BUY_SUBMIT"
+        if final == "HOLD":
+            return "BUY_BLOCKED" if entry_blocked else "BUY_NO_OP"
+        return f"BUY_{final or 'UNKNOWN'}"
+    if raw == "SELL":
+        if final == "SELL":
+            return "SELL_SUPPRESSED" if entry_blocked else "SELL_SUBMIT"
+        if final == "HOLD":
+            return "SELL_SUPPRESSED" if entry_blocked else "SELL_NO_OP"
+        return f"SELL_{final or 'UNKNOWN'}"
+    return final or "UNKNOWN"
+
+
+def fetch_recent_decision_flow(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[RecentDecisionFlowSummary]:
+    rows = conn.execute(
+        """
+        SELECT
+            id AS decision_id,
+            decision_ts,
+            strategy_name,
+            COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
+            COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
+            COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
+            COALESCE(json_extract(context_json, '$.final_signal'), signal) AS final_signal,
+            COALESCE(
+                CAST(json_extract(context_json, '$.entry_blocked') AS INTEGER),
+                CASE
+                    WHEN COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) IN ('BUY', 'SELL')
+                     AND COALESCE(json_extract(context_json, '$.final_signal'), signal) != COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal)
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS entry_blocked,
+            COALESCE(
+                CAST(json_extract(context_json, '$.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                0
+            ) AS entry_allowed,
+            COALESCE(
+                json_extract(context_json, '$.entry_block_reason'),
+                json_extract(context_json, '$.block_reason'),
+                json_extract(context_json, '$.entry_reason'),
+                json_extract(context_json, '$.reason'),
+                reason
+            ) AS block_reason,
+            COALESCE(
+                json_extract(context_json, '$.dust_classification'),
+                json_extract(context_json, '$.position_gate.dust_classification'),
+                json_extract(context_json, '$.position_gate.dust_state'),
+                ''
+            ) AS dust_classification,
+            COALESCE(
+                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                0
+            ) AS effective_flat,
+            COALESCE(
+                json_extract(context_json, '$.raw_qty_open'),
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                json_extract(context_json, '$.position_gate.raw_qty_open'),
+                0.0
+            ) AS raw_qty_open,
+            COALESCE(
+                CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        0.0
+                    ) > 0
+                    AND COALESCE(
+                        CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                        0
+                    ) = 0
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS normalized_exposure_active,
+            COALESCE(
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
+                CASE
+                    WHEN COALESCE(
+                        CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
+                        CASE
+                            WHEN COALESCE(
+                                json_extract(context_json, '$.raw_qty_open'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                                json_extract(context_json, '$.position_gate.raw_qty_open'),
+                                0.0
+                            ) > 0
+                            AND COALESCE(
+                                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                                0
+                            ) = 0
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) = 1
+                    THEN COALESCE(
+                        json_extract(context_json, '$.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                        json_extract(context_json, '$.position_gate.raw_qty_open'),
+                        0.0
+                    )
+                    ELSE 0.0
+                END
+            ) AS normalized_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.entry_allowed_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.entry_allowed'),
+                'context.entry_allowed'
+            ) AS entry_allowed_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.effective_flat_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.effective_flat'),
+                'context.effective_flat'
+            ) AS effective_flat_truth_source
+        FROM (
+            SELECT *
+            FROM strategy_decisions
+            ORDER BY decision_ts DESC, id DESC
+            LIMIT ?
+        ) recent
+        ORDER BY decision_ts DESC, decision_id DESC
+        """,
+        (int(max(1, limit)),),
+    ).fetchall()
+    return [
+        RecentDecisionFlowSummary(
+            decision_id=int(row["decision_id"]),
+            decision_ts=int(row["decision_ts"] or 0),
+            strategy_name=str(row["strategy_name"]),
+            decision_type=str(row["decision_type"]),
+            base_signal=str(row["base_signal"]),
+            raw_signal=str(row["raw_signal"]),
+            final_signal=str(row["final_signal"]),
+            buy_flow_state=_derive_buy_flow_state(
+                raw_signal=str(row["raw_signal"]),
+                final_signal=str(row["final_signal"]),
+                entry_blocked=bool(row["entry_blocked"]),
+            ),
+            entry_blocked=bool(row["entry_blocked"]),
+            entry_allowed=bool(row["entry_allowed"]),
+            effective_flat=bool(row["effective_flat"]),
+            raw_qty_open=float(row["raw_qty_open"] or 0.0),
+            normalized_exposure_active=bool(row["normalized_exposure_active"]),
+            normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
+            entry_allowed_truth_source=str(row["entry_allowed_truth_source"]),
+            effective_flat_truth_source=str(row["effective_flat_truth_source"]),
+            block_reason=str(row["block_reason"]),
+            reason=str(row["block_reason"]),
+        )
+        for row in rows
+    ]
+
+
 def _fetch_recent_fills_with_side(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
     return conn.execute(
         """
@@ -536,6 +739,7 @@ def fetch_decision_telemetry_summary(
     rows = conn.execute(
         """
         SELECT
+            COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
             COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
             COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
             COALESCE(json_extract(context_json, '$.final_signal'), signal) AS final_signal,
@@ -548,6 +752,13 @@ def fetch_decision_telemetry_summary(
                     ELSE 0
                 END
             ) AS entry_blocked,
+            COALESCE(
+                CAST(json_extract(context_json, '$.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                0
+            ) AS entry_allowed,
             COALESCE(json_extract(context_json, '$.strategy_name'), strategy_name, '<unknown>') AS strategy_name,
             COALESCE(json_extract(context_json, '$.pair'), '<unknown>') AS pair,
             COALESCE(json_extract(context_json, '$.interval'), '<unknown>') AS interval,
@@ -571,14 +782,18 @@ def fetch_decision_telemetry_summary(
             ) AS effective_flat,
             COALESCE(
                 json_extract(context_json, '$.raw_qty_open'),
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                 json_extract(context_json, '$.position_gate.raw_qty_open'),
                 0.0
             ) AS raw_qty_open,
             COALESCE(
                 CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                 CASE
                     WHEN COALESCE(
                         json_extract(context_json, '$.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                         json_extract(context_json, '$.position_gate.raw_qty_open'),
                         0.0
                     ) > 0
@@ -593,12 +808,17 @@ def fetch_decision_telemetry_summary(
             ) AS normalized_exposure_active,
             COALESCE(
                 json_extract(context_json, '$.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
                 CASE
                     WHEN COALESCE(
                         CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                         CASE
                             WHEN COALESCE(
                                 json_extract(context_json, '$.raw_qty_open'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                                 json_extract(context_json, '$.position_gate.raw_qty_open'),
                                 0.0
                             ) > 0
@@ -613,12 +833,23 @@ def fetch_decision_telemetry_summary(
                     ) = 1
                     THEN COALESCE(
                         json_extract(context_json, '$.raw_qty_open'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                         json_extract(context_json, '$.position_gate.raw_qty_open'),
                         0.0
                     )
                     ELSE 0.0
                 END
             ) AS normalized_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.entry_allowed_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.entry_allowed'),
+                'context.entry_allowed'
+            ) AS entry_allowed_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.effective_flat_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.effective_flat'),
+                'context.effective_flat'
+            ) AS effective_flat_truth_source,
             COUNT(*) AS decision_count
         FROM (
             SELECT *
@@ -627,10 +858,12 @@ def fetch_decision_telemetry_summary(
             LIMIT ?
         ) recent
         GROUP BY
+            base_signal,
             decision_type,
             raw_signal,
             final_signal,
             entry_blocked,
+            entry_allowed,
             strategy_name,
             pair,
             interval,
@@ -639,23 +872,34 @@ def fetch_decision_telemetry_summary(
             effective_flat,
             raw_qty_open,
             normalized_exposure_active,
-            normalized_exposure_qty
-        ORDER BY decision_count DESC, decision_type ASC, raw_signal ASC, final_signal ASC, strategy_name ASC, pair ASC, interval ASC
+            normalized_exposure_qty,
+            entry_allowed_truth_source,
+            effective_flat_truth_source
+        ORDER BY decision_count DESC, decision_type ASC, base_signal ASC, raw_signal ASC, final_signal ASC, strategy_name ASC, pair ASC, interval ASC
         """,
         (int(max(1, limit)),),
     ).fetchall()
     return [
         DecisionTelemetrySummary(
+            base_signal=str(row["base_signal"]),
             decision_type=str(row["decision_type"]),
             raw_signal=str(row["raw_signal"]),
             final_signal=str(row["final_signal"]),
+            buy_flow_state=_derive_buy_flow_state(
+                raw_signal=str(row["raw_signal"]),
+                final_signal=str(row["final_signal"]),
+                entry_blocked=bool(row["entry_blocked"]),
+            ),
             entry_blocked=bool(row["entry_blocked"]),
+            entry_allowed=bool(row["entry_allowed"]),
             block_reason=str(row["block_reason"]),
             dust_classification=str(row["dust_classification"]),
             effective_flat=bool(row["effective_flat"]),
             raw_qty_open=float(row["raw_qty_open"] or 0.0),
             normalized_exposure_active=bool(row["normalized_exposure_active"]),
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
+            entry_allowed_truth_source=str(row["entry_allowed_truth_source"]),
+            effective_flat_truth_source=str(row["effective_flat_truth_source"]),
             strategy_name=str(row["strategy_name"]),
             pair=str(row["pair"]),
             interval=str(row["interval"]),
@@ -2298,6 +2542,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     try:
         strategy_stats = _fetch_strategy_stats(conn)
         recent_flow = _fetch_recent_flow(conn, limit=max(1, int(limit)))
+        recent_decision_flow = fetch_recent_decision_flow(conn, limit=max(1, int(limit)))
         recent_trades = _fetch_recent_trade_ops(conn, limit=max(1, int(limit)))
         fee_summary = fetch_fee_diagnostics(
             conn,
@@ -2383,6 +2628,29 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             for stat in strategy_stats
         ],
         "recent_flow": [dict(row) for row in recent_flow],
+        "recent_decision_flow": [
+            {
+                "decision_id": row.decision_id,
+                "decision_ts": row.decision_ts,
+                "strategy_name": row.strategy_name,
+                "decision_type": row.decision_type,
+                "base_signal": row.base_signal,
+                "raw_signal": row.raw_signal,
+                "final_signal": row.final_signal,
+                "buy_flow_state": row.buy_flow_state,
+                "entry_blocked": row.entry_blocked,
+                "entry_allowed": row.entry_allowed,
+                "effective_flat": row.effective_flat,
+                "raw_qty_open": row.raw_qty_open,
+                "normalized_exposure_active": row.normalized_exposure_active,
+                "normalized_exposure_qty": row.normalized_exposure_qty,
+                "entry_allowed_truth_source": row.entry_allowed_truth_source,
+                "effective_flat_truth_source": row.effective_flat_truth_source,
+                "block_reason": row.block_reason,
+                "reason": row.reason,
+            }
+            for row in recent_decision_flow
+        ],
         "recent_trades": [dict(row) for row in recent_trades],
         "order_rule_snapshot": order_rule_snapshot,
         "fee_diagnostics_snapshot": {
@@ -2569,6 +2837,25 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"reason={row['submission_reason_code'] or '-'} note={message or '-'}"
             )
 
+    print("\n[RECENT-STRATEGY-DECISION-FLOW]")
+    if not recent_decision_flow:
+        print("  no strategy_decisions rows")
+    else:
+        for row in recent_decision_flow:
+            print(
+                "  "
+                f"{kst_str(int(row.decision_ts))} decision_id={row.decision_id} strategy={row.strategy_name} "
+                f"base={row.base_signal} raw={row.raw_signal} final={row.final_signal} "
+                f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
+                f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
+                f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
+                f"normalized_exposure_qty={_fmt_float(float(row.normalized_exposure_qty), 8)} "
+                f"raw_qty_open={_fmt_float(float(row.raw_qty_open), 8)} "
+                f"entry_allowed_truth_source={row.entry_allowed_truth_source} "
+                f"effective_flat_truth_source={row.effective_flat_truth_source} "
+                f"reason={row.reason}"
+            )
+
     print("\n[RECENT-TRADES-OPERATIONS]")
     if not recent_trades:
         print("  no trades rows")
@@ -2622,15 +2909,18 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         print("  no strategy_decisions rows")
         return
     print(
-        "  decision_type,raw_signal,final_signal,entry_blocked,block_reason,"
-        "dust_classification,effective_flat,raw_qty_open,normalized_exposure_active,"
-        "normalized_exposure_qty,strategy_name,pair,interval,count"
+        "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
+        "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
+        "normalized_exposure_active,normalized_exposure_qty,entry_allowed_truth_source,"
+        "effective_flat_truth_source,strategy_name,pair,interval,count"
     )
     for row in rows:
         print(
             "  "
-            f"{row.decision_type},{row.raw_signal},{row.final_signal},{1 if row.entry_blocked else 0},"
-            f"{row.block_reason},{row.dust_classification},{1 if row.effective_flat else 0},"
-            f"{row.raw_qty_open:.8f},{1 if row.normalized_exposure_active else 0},"
-            f"{row.normalized_exposure_qty:.8f},{row.strategy_name},{row.pair},{row.interval},{row.count}"
+            f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
+            f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
+            f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
+            f"{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_qty:.8f},"
+            f"{row.entry_allowed_truth_source},{row.effective_flat_truth_source},"
+            f"{row.strategy_name},{row.pair},{row.interval},{row.count}"
         )

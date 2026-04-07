@@ -235,6 +235,12 @@ def _apply_entry_exit_policy(
     ) -> dict[str, Any]:
         entry = context.get("entry") if isinstance(context.get("entry"), dict) else {}
         position_gate = context.get("position_gate") if isinstance(context.get("position_gate"), dict) else {}
+        position_state = context.get("position_state") if isinstance(context.get("position_state"), dict) else {}
+        normalized_state = (
+            position_state.get("normalized_exposure")
+            if isinstance(position_state.get("normalized_exposure"), dict)
+            else {}
+        )
         entry_signal = str(entry.get("entry_signal", raw_signal)).strip().upper() or raw_signal
         filtered_entry = raw_signal in {"BUY", "SELL"} and raw_signal != entry_signal
         entry_blocked = raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
@@ -245,20 +251,47 @@ def _apply_entry_exit_policy(
             else:
                 entry_block_reason = str(final_reason or "").strip() or None
         dust_classification = str(
-            position_gate.get("dust_classification") or position_gate.get("dust_state") or ""
+            normalized_state.get(
+                "dust_classification",
+                position_gate.get("dust_classification", position_gate.get("dust_state", "")),
+            )
         ).strip()
         entry_allowed = bool(
-            position_gate.get(
+            normalized_state.get(
                 "entry_allowed",
+                position_gate.get(
+                    "entry_allowed",
+                    position_gate.get(
+                        "effective_flat_due_to_harmless_dust",
+                        position_gate.get("dust_treat_as_flat"),
+                    ),
+                ),
+            )
+        )
+        effective_flat = bool(
+            normalized_state.get(
+                "effective_flat",
                 position_gate.get("effective_flat_due_to_harmless_dust", position_gate.get("dust_treat_as_flat")),
             )
         )
-        effective_flat = bool(position_gate.get("effective_flat_due_to_harmless_dust"))
-        raw_qty_open = float(position.qty_open)
-        normalized_exposure_active = bool(
-            position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed)
+        raw_qty_open = float(
+            normalized_state.get(
+                "raw_qty_open",
+                position_gate.get("raw_qty_open", position.qty_open),
+            )
         )
-        normalized_exposure_qty = float(raw_qty_open if normalized_exposure_active else 0.0)
+        normalized_exposure_active = bool(
+            normalized_state.get(
+                "normalized_exposure_active",
+                position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed),
+            )
+        )
+        normalized_exposure_qty = float(
+            normalized_state.get(
+                "normalized_exposure_qty",
+                position_gate.get("normalized_exposure_qty", raw_qty_open if normalized_exposure_active else 0.0),
+            )
+        )
 
         context["raw_signal"] = raw_signal
         context["final_signal"] = final_signal
@@ -471,7 +504,6 @@ class SmaCrossStrategy:
             },
             "position_gate": {
                 **exposure.as_dict(),
-                "effective_flat_due_to_harmless_dust": bool(exposure.harmless_dust_effective_flat),
             },
             "position_state": {
                 "raw_holdings": position_state.raw_holdings.as_dict(),
@@ -668,7 +700,6 @@ class SmaWithFilterStrategy:
             },
             "position_gate": {
                 **exposure.as_dict(),
-                "effective_flat_due_to_harmless_dust": bool(exposure.harmless_dust_effective_flat),
             },
             "position_state": {
                 "raw_holdings": exposure.raw_holdings.as_dict(),

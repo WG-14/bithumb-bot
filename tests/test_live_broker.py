@@ -2202,6 +2202,198 @@ def test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_z
     assert event_count == 0
 
 
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_flat(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_harmless_dust.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 1,
+            "dust_broker_qty": 0.00009193,
+            "dust_local_qty": 0.00009193,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5_000.0,
+            "dust_latest_price": 100_000_000.0,
+            "dust_broker_notional_krw": 9_193.0,
+            "dust_local_notional_krw": 9_193.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 0,
+            "dust_local_notional_is_dust": 0,
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+        },
+    )
+
+    conn = ensure_db(str(tmp_path / "market_buy_harmless_dust.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00009193,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_side == "BUY"
+    assert broker._last_qty > 0
+
+    conn = ensure_db(str(tmp_path / "market_buy_harmless_dust.sqlite"))
+    order_row = conn.execute(
+        """
+        SELECT client_order_id, side, status, qty_req
+        FROM orders
+        WHERE client_order_id LIKE 'live_1000_buy_%'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert order_row is not None
+    intent_row = conn.execute(
+        """
+        SELECT event_type, side, qty, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='intent_created'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (order_row["client_order_id"],),
+    ).fetchone()
+    submit_attempt_row = conn.execute(
+        """
+        SELECT event_type, side, qty, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (order_row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    assert order_row["side"] == "BUY"
+    assert order_row["status"] in {"NEW", "FILLED"}
+    assert float(order_row["qty_req"]) > 0
+    assert intent_row is not None
+    assert intent_row["side"] == "BUY"
+    assert float(intent_row["qty"]) > 0
+    assert submit_attempt_row is not None
+    assert submit_attempt_row["side"] == "BUY"
+    assert float(submit_attempt_row["qty"]) > 0
+
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_blocks_defensively_for_blocking_dust_mismatch(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_blocking_dust.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "blocking_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 0,
+            "dust_effective_flat": 0,
+            "dust_policy_reason": "dangerous_dust_operator_review_required",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 0,
+            "dust_broker_qty": 0.000099,
+            "dust_local_qty": 0.000010,
+            "dust_delta_qty": 0.000089,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5_000.0,
+            "dust_latest_price": 40_000_000.0,
+            "dust_broker_notional_krw": 3_960.0,
+            "dust_local_notional_krw": 400.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 1,
+            "dust_local_notional_is_dust": 1,
+            "dust_broker_local_match": 0,
+            "dust_residual_summary": (
+                "classification=blocking_dust harmless_dust=0 broker_local_match=0 "
+                "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required"
+            ),
+        },
+    )
+
+    conn = ensure_db(str(tmp_path / "market_buy_blocking_dust.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.000099,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "market_buy_blocking_dust.sqlite"))
+    order_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM orders WHERE side='BUY'"
+    ).fetchone()["n"]
+    intent_count = conn.execute(
+        "SELECT COUNT(*) AS n FROM order_events WHERE event_type='intent_created'"
+    ).fetchone()["n"]
+    submit_attempt_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type IN ('submit_attempt_preflight', 'submit_attempt_recorded', 'submit_blocked')
+        """
+    ).fetchone()["n"]
+    conn.close()
+
+    assert order_count == 0
+    assert intent_count == 0
+    assert submit_attempt_count == 0
+
+
 def test_live_execute_signal_sell_uses_full_position_qty_to_avoid_unsellable_remainder(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_dust_safe_full_qty.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)

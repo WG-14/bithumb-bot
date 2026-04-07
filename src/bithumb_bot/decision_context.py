@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-_CANONICAL_CONTEXT_VERSION = 2
+_CANONICAL_CONTEXT_VERSION = 3
 
 
 def _as_text(value: Any, *, default: str = "") -> str:
@@ -49,6 +49,28 @@ def _as_filter_list(raw: Any) -> list[str]:
         parts = [part.strip() for part in raw.split(",")]
         return [part for part in parts if part]
     return []
+
+
+def _resolve_with_source(
+    *candidates: tuple[str, Any],
+    default_value: Any,
+    default_source: str,
+    value_kind: str,
+) -> tuple[Any, str]:
+    for source, raw in candidates:
+        if raw is not None:
+            if value_kind == "bool":
+                return _as_bool(raw), source
+            if value_kind == "float":
+                resolved = _as_float_or_none(raw)
+                return (0.0 if resolved is None else float(resolved)), source
+            return raw, source
+    if value_kind == "bool":
+        return _as_bool(default_value), default_source
+    if value_kind == "float":
+        resolved = _as_float_or_none(default_value)
+        return (0.0 if resolved is None else float(resolved)), default_source
+    return default_value, default_source
 
 
 def _extract_market_observations(context: dict[str, Any]) -> dict[str, float | None]:
@@ -140,46 +162,79 @@ def normalize_strategy_decision_context(
         ),
         default="",
     )
-    entry_allowed = _as_bool(
-        payload.get(
-            "entry_allowed",
-            position_gate.get(
-                "entry_allowed",
-                position_gate.get(
-                    "effective_flat_due_to_harmless_dust",
-                    position_gate.get("dust_treat_as_flat"),
-                ),
-            ),
-        )
+    position_state = payload.get("position_state") if isinstance(payload.get("position_state"), dict) else {}
+    position_normalized = (
+        position_state.get("normalized_exposure")
+        if isinstance(position_state.get("normalized_exposure"), dict)
+        else {}
     )
-    effective_flat = _as_bool(
-        payload.get(
-            "effective_flat",
-            position_gate.get("effective_flat_due_to_harmless_dust", position_gate.get("dust_treat_as_flat")),
-        )
+    entry_allowed, entry_allowed_truth_source = _resolve_with_source(
+        ("context.entry_allowed", payload.get("entry_allowed")),
+        ("position_state.normalized_exposure.entry_allowed", position_normalized.get("entry_allowed")),
+        ("position_gate.entry_allowed", position_gate.get("entry_allowed")),
+        (
+            "position_gate.effective_flat_due_to_harmless_dust",
+            position_gate.get("effective_flat_due_to_harmless_dust"),
+        ),
+        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
+        default_value=False,
+        default_source="default:false",
+        value_kind="bool",
     )
-    raw_qty_open = _as_float_or_none(
-        payload.get("raw_qty_open", position_gate.get("raw_qty_open"))
+    effective_flat, effective_flat_truth_source = _resolve_with_source(
+        ("context.effective_flat", payload.get("effective_flat")),
+        ("position_state.normalized_exposure.effective_flat", position_normalized.get("effective_flat")),
+        (
+            "position_gate.effective_flat_due_to_harmless_dust",
+            position_gate.get("effective_flat_due_to_harmless_dust"),
+        ),
+        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
+        default_value=False,
+        default_source="default:false",
+        value_kind="bool",
+    )
+    raw_qty_open, raw_qty_open_truth_source = _resolve_with_source(
+        ("position_state.normalized_exposure.raw_qty_open", position_normalized.get("raw_qty_open")),
+        ("context.raw_qty_open", payload.get("raw_qty_open")),
+        ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
     )
     if raw_qty_open is None:
         raw_qty_open = 0.0
-    normalized_exposure_active = _as_bool(
-        payload.get(
-            "normalized_exposure_active",
-            position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed),
-        )
+    normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
+        ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
+        (
+            "position_state.normalized_exposure.normalized_exposure_active",
+            position_normalized.get("normalized_exposure_active"),
+        ),
+        ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
+        default_value=raw_qty_open > 1e-12 and not entry_allowed,
+        default_source="fallback:raw_qty_open_and_entry_allowed",
+        value_kind="bool",
     )
-    normalized_exposure_qty = _as_float_or_none(
-        payload.get(
-            "normalized_exposure_qty",
-            position_gate.get(
-                "normalized_exposure_qty",
-                raw_qty_open if normalized_exposure_active else 0.0,
-            ),
-        )
+    normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
+        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
+        (
+            "position_state.normalized_exposure.normalized_exposure_qty",
+            position_normalized.get("normalized_exposure_qty"),
+        ),
+        ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
+        default_value=raw_qty_open if normalized_exposure_active else 0.0,
+        default_source="fallback:raw_qty_open_or_zero",
+        value_kind="float",
     )
     if normalized_exposure_qty is None:
         normalized_exposure_qty = raw_qty_open if normalized_exposure_active else 0.0
+
+    decision_truth_sources = {
+        "entry_allowed": entry_allowed_truth_source,
+        "effective_flat": effective_flat_truth_source,
+        "raw_qty_open": raw_qty_open_truth_source,
+        "normalized_exposure_active": normalized_exposure_active_truth_source,
+        "normalized_exposure_qty": normalized_exposure_qty_truth_source,
+    }
 
     decision_summary = {
         "raw_signal": raw_signal,
@@ -192,6 +247,7 @@ def normalize_strategy_decision_context(
         "raw_qty_open": float(raw_qty_open),
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
+        "decision_truth_sources": decision_truth_sources,
     }
 
     payload["decision_context_version"] = _CANONICAL_CONTEXT_VERSION
@@ -212,6 +268,12 @@ def normalize_strategy_decision_context(
     payload["raw_qty_open"] = float(raw_qty_open)
     payload["normalized_exposure_active"] = bool(normalized_exposure_active)
     payload["normalized_exposure_qty"] = float(normalized_exposure_qty)
+    payload["decision_truth_sources"] = decision_truth_sources
+    payload["entry_allowed_truth_source"] = entry_allowed_truth_source
+    payload["effective_flat_truth_source"] = effective_flat_truth_source
+    payload["raw_qty_open_truth_source"] = raw_qty_open_truth_source
+    payload["normalized_exposure_active_truth_source"] = normalized_exposure_active_truth_source
+    payload["normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
     payload["decision_summary"] = decision_summary
 
     payload["strategy_name"] = _as_text(payload.get("strategy_name", strategy_name), default=strategy_name)
@@ -256,8 +318,10 @@ def normalize_strategy_decision_context(
                 "entry_allowed": bool(entry_allowed),
                 "effective_flat": bool(effective_flat),
                 "harmless_dust_effective_flat": bool(entry_allowed and dust_classification == "harmless_dust"),
+                "effective_flat_due_to_harmless_dust": bool(entry_allowed and dust_classification == "harmless_dust"),
                 "normalized_exposure_active": bool(normalized_exposure_active),
                 "normalized_exposure_qty": float(normalized_exposure_qty),
+                "decision_truth_sources": decision_truth_sources,
             },
             "operator_diagnostics": {
                 "state": dust_classification or "no_dust",
