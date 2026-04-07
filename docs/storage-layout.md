@@ -406,3 +406,21 @@ runtime_snapshot_YYYYMMDD_HHMMSS.tar.gz
 - retention 규칙이 필요한가
 
 이 체크리스트를 통과하지 못한 저장 패치는 병합하지 않는다.
+## 16. Lot state quantity contract
+
+`open_position_lots.position_state` is part of the storage contract and must keep the
+following meaning stable:
+
+- `open_exposure`: the real strategy-visible position. SELL submission logic should
+  read this quantity as the sellable lot base.
+- `dust_tracking`: operator tracking only. It records harmless dust evidence and is
+  excluded from SELL submission by default.
+
+Practical routing rules:
+
+- BUY fills create `open_exposure` lots.
+- SELL matching consumes `open_exposure` lots first.
+- `dust_tracking` lots are not sellable inventory and must not be counted as the
+  basis for a normal SELL order.
+- harmless dust suppression is defined around the `dust_tracking` path, not the
+  `open_exposure` path.

@@ -305,10 +305,14 @@ def test_harmless_dust_effective_flat_keeps_buy_entry_intentable() -> None:
     assert decision.context["position_gate"]["effective_flat_due_to_harmless_dust"] is True
     assert decision.context["position_gate"]["entry_allowed"] is True
     assert decision.context["position_gate"]["normalized_exposure_active"] is False
+    assert decision.context["position_gate"]["open_exposure_qty"] == pytest.approx(0.0)
+    assert decision.context["position_gate"]["dust_tracking_qty"] == pytest.approx(0.00009629)
     assert decision.context["position_state"]["raw_holdings"]["classification"] == "harmless_dust"
     assert decision.context["position_state"]["raw_holdings"]["present"] is True
     assert decision.context["position_state"]["normalized_exposure"]["entry_allowed"] is True
     assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert decision.context["position_state"]["normalized_exposure"]["open_exposure_qty"] == pytest.approx(0.0)
+    assert decision.context["position_state"]["normalized_exposure"]["dust_tracking_qty"] == pytest.approx(0.00009629)
     assert decision.context["position_gate"]["dust_new_orders_allowed"] is True
     assert decision.context["position_gate"]["dust_resume_allowed"] is True
     assert decision.context["position_gate"]["dust_treat_as_flat"] is True

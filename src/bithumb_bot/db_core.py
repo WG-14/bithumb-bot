@@ -5,6 +5,7 @@ import sqlite3
 from typing import Any
 
 from .config import prepare_db_path_for_connection, settings
+from .dust import OPEN_EXPOSURE_LOT_STATE
 from .sqlite_resilience import configure_connection
 from .decision_context import normalize_strategy_decision_context
 
@@ -634,21 +635,21 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
-            position_state TEXT NOT NULL DEFAULT 'open_exposure',
+            position_state TEXT NOT NULL DEFAULT '{open_state}',
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
             entry_decision_id INTEGER,
             entry_decision_linkage TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
-        """
+        """.format(open_state=OPEN_EXPOSURE_LOT_STATE)
     )
 
     _ensure_column(
         conn,
         "open_position_lots",
         "position_state",
-        "position_state TEXT NOT NULL DEFAULT 'open_exposure'",
+        f"position_state TEXT NOT NULL DEFAULT '{OPEN_EXPOSURE_LOT_STATE}'",
     )
     _ensure_column(conn, "open_position_lots", "entry_fill_id", "entry_fill_id TEXT")
     _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
@@ -658,9 +659,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         UPDATE open_position_lots
-        SET position_state='open_exposure'
+        SET position_state=?
         WHERE position_state IS NULL OR TRIM(position_state)=''
         """
+        ,
+        (OPEN_EXPOSURE_LOT_STATE,),
     )
 
     conn.execute(

@@ -12,6 +12,8 @@ from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decis
 from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.reporting import cmd_ops_report
+from bithumb_bot.oms import record_order_suppression
+from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED
 
 
 def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
@@ -203,8 +205,11 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "market=KRW-BTC" in out
     assert f"db_path={db_path}" in out
     assert "paper:sma_cross:1m,1,1,100000.00,0.00,50.00,-100050.00" in out
+    assert "order_events_qty=" in out
+    assert "submit_payload_qty=" in out
     assert "event=submit_attempt_recorded" in out
     assert "reason=DUST_RESIDUAL_UNSELLABLE" in out
+    assert "sell_failure_category=unsafe_dust_mismatch_dust" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "note=paper fill" in out
     assert "[ORDER-RULE-SNAPSHOT]" in out
@@ -613,11 +618,21 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
                 "entry_allowed": True,
                 "effective_flat": True,
                 "raw_qty_open": 0.00009629,
+                "raw_total_asset_qty": 0.00019192,
+                "open_exposure_qty": 0.00009629,
+                "dust_tracking_qty": 0.00009563,
+                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": False,
                 "normalized_exposure_qty": 0.0,
                 "position_state": {
                     "normalized_exposure": {
                         "raw_qty_open": 0.00009629,
+                        "raw_total_asset_qty": 0.00019192,
+                        "open_exposure_qty": 0.00009629,
+                        "dust_tracking_qty": 0.00009563,
+                        "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "position_state_source": "context.raw_qty_open",
                         "entry_allowed": True,
                         "effective_flat": True,
                         "normalized_exposure_active": False,
@@ -656,5 +671,53 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "[RECENT-STRATEGY-DECISION-FLOW]" in out
     assert "flow=BUY_SUBMIT" in out
     assert "flow=BUY_BLOCKED" in out
+    assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_normalized_exposure_qty=0.00009629" in out
+    assert "position_state_source=context.raw_qty_open" in out
+    assert "raw_total_asset_qty=0.00019192" in out
+    assert "open_exposure_qty=0.00009629" in out
+    assert "dust_tracking_qty=0.00009563" in out
     assert "entry_allowed_truth_source=context.entry_allowed" in out
     assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
+
+
+def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-sell-suppression.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_order_suppression(
+            suppression_key="sell-suppression-1",
+            event_kind="sell_dust_exit",
+            mode="live",
+            strategy_context="live:sma_with_filter:1m",
+            strategy_name="sma_with_filter",
+            signal="SELL",
+            side="SELL",
+            reason_code=DUST_RESIDUAL_SUPPRESSED,
+            reason="category=dust_suppression;decision_suppressed:harmless_dust_exit",
+            requested_qty=0.0002,
+            normalized_qty=0.00009629,
+            market_price=102_500_000.0,
+            dust_present=True,
+            dust_allow_resume=True,
+            dust_effective_flat=True,
+            dust_state="harmless_dust",
+            dust_action="harmless_dust_tracked_resume_allowed",
+            summary="state=harmless_dust;operator_action=harmless_dust_tracked_resume_allowed",
+            conn=conn,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "[RECENT-SELL-SUPPRESSIONS]" in out
+    assert "reason=DUST_RESIDUAL_SUPPRESSED" in out
+    assert "sell_failure_category=dust_suppression" in out
+    assert "harmless_dust_tracked_resume_allowed" in out

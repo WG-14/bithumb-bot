@@ -4,10 +4,30 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Final
 
 
 DUST_POSITION_EPS = 1e-12
+OPEN_EXPOSURE_LOT_STATE: Final = "open_exposure"
+DUST_TRACKING_LOT_STATE: Final = "dust_tracking"
 _SUMMARY_TOKEN_RE = re.compile(r"([a-z_]+)=([^\s]+)")
+
+LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
+    OPEN_EXPOSURE_LOT_STATE: {
+        "meaning": "real strategy-visible position",
+        "strategy_qty_source": "open_exposure_qty",
+        "sell_submit_qty_source": "open_exposure_qty",
+        "sell_submit_includes_dust_tracking": False,
+        "operator_tracking_only": False,
+    },
+    DUST_TRACKING_LOT_STATE: {
+        "meaning": "operator tracking residual",
+        "strategy_qty_source": "dust_tracking_qty",
+        "sell_submit_qty_source": "excluded_from_sell_qty",
+        "sell_submit_includes_dust_tracking": False,
+        "operator_tracking_only": True,
+    },
+}
 
 
 class DustState(str, Enum):
@@ -504,6 +524,9 @@ class DustDisplayContext:
 @dataclass(frozen=True)
 class NormalizedExposure:
     raw_qty_open: float
+    raw_total_asset_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
     dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None
     effective_flat: bool
     entry_allowed: bool
@@ -546,9 +569,27 @@ class NormalizedExposure:
     def harmless_dust_effective_flat(self) -> bool:
         return self.dust_context.effective_flat_due_to_harmless_dust
 
+    @property
+    def sell_submit_qty(self) -> float:
+        """Return the canonical SELL submission quantity.
+
+        This intentionally follows `open_exposure_qty` and excludes
+        `dust_tracking_qty`, because dust tracking is operator evidence rather
+        than sellable exposure.
+        """
+
+        return float(self.open_exposure_qty)
+
+    @property
+    def sell_submit_qty_source(self) -> str:
+        return "open_exposure_qty"
+
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
             "raw_qty_open": float(self.raw_qty_open),
+            "raw_total_asset_qty": float(self.raw_total_asset_qty),
+            "open_exposure_qty": float(self.open_exposure_qty),
+            "dust_tracking_qty": float(self.dust_tracking_qty),
             "dust_classification": self.dust_classification,
             "dust_state": self.dust_state,
             "effective_flat": bool(self.effective_flat),
@@ -560,6 +601,8 @@ class NormalizedExposure:
             "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),
             "dust_resume_allowed": bool(self.dust_operator_view.resume_allowed),
             "dust_treat_as_flat": bool(self.dust_operator_view.treat_as_flat),
+            "sell_submit_qty": float(self.sell_submit_qty),
+            "sell_submit_qty_source": self.sell_submit_qty_source,
         }
 
 
@@ -598,10 +641,22 @@ class PositionStateModel:
                 "compact_summary": self.operator_diagnostics.compact_summary,
             },
             "raw_qty_open": float(self.raw_qty_open),
+            "raw_total_asset_qty": float(self.normalized_exposure.raw_total_asset_qty),
             "effective_flat": bool(self.effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.effective_flat_due_to_harmless_dust),
             "fields": dict(self.fields),
         }
+
+
+def lot_state_quantity_contract() -> dict[str, dict[str, object]]:
+    """Return the canonical quantity routing rules for lot states.
+
+    `open_exposure` is the quantity strategy and SELL submission logic should
+    use as the real position. `dust_tracking` is an operator-only residual and
+    is excluded from SELL submission by default.
+    """
+
+    return {state: dict(contract) for state, contract in LOT_STATE_QUANTITY_CONTRACT.items()}
 
 
 def should_treat_as_flat_for_entry_gate(
@@ -909,6 +964,9 @@ def build_position_state_model(
     *,
     raw_qty_open: float,
     metadata_raw: str | dict[str, object] | DustClassification | None,
+    raw_total_asset_qty: float | None = None,
+    open_exposure_qty: float | None = None,
+    dust_tracking_qty: float | None = None,
 ) -> PositionStateModel:
     dust = (
         metadata_raw
@@ -919,6 +977,9 @@ def build_position_state_model(
     normalized_exposure = build_normalized_exposure(
         raw_qty_open=raw_qty_open,
         dust_context=display_context,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
     )
     return PositionStateModel(
         raw_holdings=display_context.raw_holdings,
@@ -940,6 +1001,9 @@ def build_position_state_model(
                 "treat_as_flat": bool(display_context.operator_view.treat_as_flat),
             },
             "raw_qty_open": float(normalized_exposure.raw_qty_open),
+            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+            "open_exposure_qty": float(normalized_exposure.open_exposure_qty),
+            "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
         },
     )
 
@@ -948,6 +1012,9 @@ def build_normalized_exposure(
     *,
     raw_qty_open: float,
     dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None,
+    raw_total_asset_qty: float | None = None,
+    open_exposure_qty: float | None = None,
+    dust_tracking_qty: float | None = None,
 ) -> NormalizedExposure:
     display_context = (
         dust_context
@@ -955,12 +1022,30 @@ def build_normalized_exposure(
         else build_dust_display_context(dust_context)
     )
     normalized_raw_qty = max(0.0, float(raw_qty_open))
+    normalized_total_asset_qty = (
+        max(0.0, float(raw_total_asset_qty))
+        if raw_total_asset_qty is not None
+        else normalized_raw_qty
+    )
+    normalized_open_exposure_qty = (
+        max(0.0, float(open_exposure_qty))
+        if open_exposure_qty is not None
+        else normalized_raw_qty
+    )
+    normalized_dust_tracking_qty = (
+        max(0.0, float(dust_tracking_qty))
+        if dust_tracking_qty is not None
+        else 0.0
+    )
     entry_allowed = should_treat_as_flat_for_entry_gate(display_context)
-    effective_flat = bool(normalized_raw_qty <= DUST_POSITION_EPS or entry_allowed)
-    normalized_active = bool(normalized_raw_qty > DUST_POSITION_EPS and not entry_allowed)
-    normalized_qty = float(normalized_raw_qty if normalized_active else 0.0)
+    effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
+    normalized_active = bool(normalized_open_exposure_qty > DUST_POSITION_EPS and not entry_allowed)
+    normalized_qty = float(normalized_open_exposure_qty if normalized_active else 0.0)
     return NormalizedExposure(
         raw_qty_open=normalized_raw_qty,
+        raw_total_asset_qty=normalized_total_asset_qty,
+        open_exposure_qty=normalized_open_exposure_qty,
+        dust_tracking_qty=normalized_dust_tracking_qty,
         dust_context=display_context,
         effective_flat=effective_flat,
         entry_allowed=entry_allowed,

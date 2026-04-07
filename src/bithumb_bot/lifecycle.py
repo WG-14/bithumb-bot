@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import sqlite3
 
-from .dust import DustClassification, DustDisplayContext, DustState, build_dust_display_context
+from .dust import (
+    DUST_TRACKING_LOT_STATE,
+    OPEN_EXPOSURE_LOT_STATE,
+    DustClassification,
+    DustDisplayContext,
+    DustState,
+    build_dust_display_context,
+)
 
-OPEN_POSITION_STATE = "open_exposure"
-DUST_TRACKING_STATE = "dust_tracking"
+OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
+DUST_TRACKING_STATE = DUST_TRACKING_LOT_STATE
 
 
 _ENTRY_DECISION_FALLBACK_LOOKBACK_MS = 15 * 60 * 1000
@@ -80,6 +87,9 @@ def apply_fill_lifecycle(
     allow_entry_decision_fallback: bool = True,
 ) -> None:
     if side == "BUY":
+        # BUY fills always create the real position lot; dust_tracking is a
+        # downstream operator-only state used only when harmless dust is later
+        # reclassified.
         resolved_entry_decision_id = entry_decision_id
         resolved_strategy_name = strategy_name
         resolved_entry_decision_linkage = "direct" if resolved_entry_decision_id is not None else "unattributed"
@@ -123,7 +133,7 @@ def apply_fill_lifecycle(
                 int(fill_ts),
                 float(price),
                 float(qty),
-                OPEN_POSITION_STATE,
+                OPEN_EXPOSURE_LOT_STATE,
                 float(fee),
                 resolved_strategy_name,
                 resolved_entry_decision_id,
@@ -135,27 +145,7 @@ def apply_fill_lifecycle(
     if side != "SELL":
         raise RuntimeError(f"unsupported lifecycle side: {side}")
 
-    rows = conn.execute(
-        """
-        SELECT
-            id,
-            entry_trade_id,
-            entry_client_order_id,
-            entry_fill_id,
-            entry_ts,
-            entry_price,
-            qty_open,
-            position_state,
-            entry_fee_total,
-            strategy_name,
-            entry_decision_id,
-            entry_decision_linkage
-        FROM open_position_lots
-        WHERE pair=? AND position_state=? AND qty_open > 0
-        ORDER BY entry_ts ASC, id ASC
-        """,
-        (str(pair), OPEN_POSITION_STATE),
-    ).fetchall()
+    rows = _fetch_sellable_open_exposure_lots(conn, pair=str(pair))
 
     remaining = float(qty)
     if remaining <= 0:
@@ -305,7 +295,7 @@ def apply_fill_lifecycle(
 
     conn.execute(
         "DELETE FROM open_position_lots WHERE pair=? AND position_state=? AND qty_open <= ?",
-        (str(pair), OPEN_POSITION_STATE, eps),
+        (str(pair), OPEN_EXPOSURE_LOT_STATE, eps),
     )
 
 
@@ -342,10 +332,44 @@ def mark_harmless_dust_positions(
           AND qty_open < ?
         """,
         (
-            DUST_TRACKING_STATE,
+            DUST_TRACKING_LOT_STATE,
             str(pair),
-            OPEN_POSITION_STATE,
+            OPEN_EXPOSURE_LOT_STATE,
             float(min_qty),
         ),
     )
     return int(res.rowcount or 0)
+
+
+def _fetch_sellable_open_exposure_lots(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+) -> list[sqlite3.Row]:
+    """Return lots that can actually be sold.
+
+    Only `open_exposure` lots are eligible. `dust_tracking` lots are operator
+    evidence and must not be counted as sellable inventory.
+    """
+
+    return conn.execute(
+        """
+        SELECT
+            id,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_fill_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            position_state,
+            entry_fee_total,
+            strategy_name,
+            entry_decision_id,
+            entry_decision_linkage
+        FROM open_position_lots
+        WHERE pair=? AND position_state=? AND qty_open > 0
+        ORDER BY entry_ts ASC, id ASC
+        """,
+        (str(pair), OPEN_EXPOSURE_LOT_STATE),
+    ).fetchall()

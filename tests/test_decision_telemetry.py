@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
@@ -124,6 +126,11 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
                 "base_reason": "sma golden cross",
                 "entry_reason": "sma golden cross",
                 "raw_qty_open": 0.00009629,
+                "raw_total_asset_qty": 0.00019192,
+                "open_exposure_qty": 0.00009629,
+                "dust_tracking_qty": 0.00009563,
+                "submit_qty_source": "position_state.normalized_exposure.normalized_exposure_qty",
+                "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
                 "normalized_exposure_qty": 0.00009629,
                 "effective_flat": False,
@@ -145,6 +152,12 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert rc == 0
     assert "[DECISION-TELEMETRY]" in out
     assert "base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,entry_allowed" in out
+    assert "raw_total_asset_qty" in out
+    assert "open_exposure_qty" in out
+    assert "dust_tracking_qty" in out
+    assert "submit_qty_source" in out
+    assert "sell_submit_qty_source" in out
+    assert "sell_normalized_exposure_qty" in out
     assert "BUY,HOLD,BUY,HOLD,BUY_BLOCKED,1,0,position held: no exit rule triggered" in out
     assert "harmless_dust" in out
     assert "0.00009629" in out
@@ -171,6 +184,11 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
                 "base_reason": "sma golden cross",
                 "entry_reason": "sma golden cross",
                 "raw_qty_open": 0.00009629,
+                "raw_total_asset_qty": 0.00019192,
+                "open_exposure_qty": 0.00009629,
+                "dust_tracking_qty": 0.00009563,
+                "submit_qty_source": "position_state.normalized_exposure.normalized_exposure_qty",
+                "position_state_source": "context.raw_qty_open",
                 "position_gate": {
                     "entry_allowed": True,
                     "effective_flat_due_to_harmless_dust": True,
@@ -188,6 +206,13 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["entry_allowed"] is True
     assert ctx["effective_flat"] is True
     assert ctx["normalized_exposure_active"] is False
+    assert ctx["raw_total_asset_qty"] == 0.00019192
+    assert ctx["open_exposure_qty"] == 0.00009629
+    assert ctx["dust_tracking_qty"] == 0.00009563
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.normalized_exposure_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.normalized_exposure_qty"
+    assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["position_state_source"] == "context.raw_qty_open"
     assert ctx["entry_allowed_truth_source"] == "position_gate.entry_allowed"
     assert ctx["effective_flat_truth_source"] == "position_gate.effective_flat_due_to_harmless_dust"
     assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:raw_qty_open_and_entry_allowed"

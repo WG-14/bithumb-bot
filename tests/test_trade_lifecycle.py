@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 
 
@@ -399,3 +400,83 @@ def test_buy_recovery_mode_keeps_degraded_unattributed_without_fallback(tmp_path
     assert row is not None
     assert row["entry_decision_id"] is None
     assert row["entry_decision_linkage"] == "degraded_recovery_unattributed"
+
+
+def test_sell_lifecycle_uses_open_exposure_lots_and_keeps_dust_tracking_operator_only(tmp_path):
+    conn = ensure_db(str(tmp_path / "state_routing.sqlite"))
+    base_ts = 1_700_001_000_000
+
+    _record_order(conn, client_order_id="entry_open", side="BUY", qty_req=1.0, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_open",
+        side="BUY",
+        fill_id="fill_entry_open",
+        fill_ts=base_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+        entry_decision_id=301,
+        note="entry_open",
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 999, "entry_dust", base_ts + 1_000, 100.0, 0.00009193, DUST_TRACKING_LOT_STATE),
+    )
+    conn.commit()
+
+    _record_order(conn, client_order_id="exit_sell", side="SELL", qty_req=0.5, ts_ms=base_ts + 2_000)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="exit_sell",
+        side="SELL",
+        fill_id="fill_exit_sell",
+        fill_ts=base_ts + 2_000,
+        price=110.0,
+        qty=0.5,
+        fee=0.05,
+        strategy_name="sma_with_filter",
+        entry_decision_id=301,
+        exit_decision_id=401,
+        exit_reason="take_profit",
+        exit_rule_name="signal_exit",
+        note="exit_sell",
+    )
+
+    rows = conn.execute(
+        """
+        SELECT entry_client_order_id, position_state, qty_open
+        FROM open_position_lots
+        ORDER BY entry_client_order_id ASC
+        """
+    ).fetchall()
+    lifecycle_row = conn.execute(
+        """
+        SELECT entry_client_order_id, exit_client_order_id, matched_qty
+        FROM trade_lifecycles
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    conn.close()
+
+    assert rows[0]["entry_client_order_id"] == "entry_dust"
+    assert rows[0]["position_state"] == DUST_TRACKING_LOT_STATE
+    assert float(rows[0]["qty_open"]) == pytest.approx(0.00009193)
+    assert rows[1]["entry_client_order_id"] == "entry_open"
+    assert rows[1]["position_state"] == OPEN_EXPOSURE_LOT_STATE
+    assert float(rows[1]["qty_open"]) == pytest.approx(0.5)
+    assert len(lifecycle_row) == 1
+    assert lifecycle_row[0]["entry_client_order_id"] == "entry_open"
+    assert lifecycle_row[0]["exit_client_order_id"] == "exit_sell"
+    assert float(lifecycle_row[0]["matched_qty"]) == pytest.approx(0.5)

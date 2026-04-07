@@ -356,3 +356,18 @@ P2:
 > 운영 구조가 먼저이고, 코드는 그 운영 구조를 깨지 않도록 만들어져야 한다.
 
 이 문서는 그 운영 구조를 정의하는 기준 문서다.
+## 16. Lot state routing rule
+
+When runtime code classifies lot state, the quantity contract is:
+
+- `open_exposure`: the strategy-visible position and the default SELL submission base.
+- `dust_tracking`: operator-only residual tracking, used for harmless dust evidence
+  and excluded from normal SELL submission.
+
+This means:
+
+- BUY flows should create or update `open_exposure` lots.
+- SELL flows should read `open_exposure` first and must not count `dust_tracking`
+  as sellable exposure.
+- harmless dust suppression is keyed off the `dust_tracking` branch, not the
+  `open_exposure` branch.

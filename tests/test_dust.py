@@ -3,12 +3,15 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.dust import (
+    DUST_TRACKING_LOT_STATE,
+    OPEN_EXPOSURE_LOT_STATE,
     build_dust_display_context,
     build_dust_operator_view,
     build_normalized_exposure,
     build_position_state_model,
     classify_dust_residual,
     dust_qty_gap_tolerance,
+    lot_state_quantity_contract,
     should_treat_as_flat_for_entry_gate,
 )
 
@@ -472,4 +475,19 @@ def test_position_state_model_exposes_separate_raw_normalized_and_operator_layer
     assert model.operator_diagnostics.treat_as_flat is True
     assert model.fields["raw_holdings"]["broker_local_match"] is True
     assert model.fields["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
+    assert model.fields["normalized_exposure"]["sell_submit_qty"] == pytest.approx(0.00009629)
+    assert model.fields["normalized_exposure"]["sell_submit_qty_source"] == "open_exposure_qty"
     assert model.fields["operator_diagnostics"]["resume_allowed"] is True
+
+
+def test_lot_state_quantity_contract_routes_open_exposure_and_dust_tracking_separately() -> None:
+    contract = lot_state_quantity_contract()
+
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["meaning"] == "real strategy-visible position"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_qty_source"] == "open_exposure_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "open_exposure_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
+    assert contract[DUST_TRACKING_LOT_STATE]["meaning"] == "operator tracking residual"
+    assert contract[DUST_TRACKING_LOT_STATE]["strategy_qty_source"] == "dust_tracking_qty"
+    assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_qty_source"] == "excluded_from_sell_qty"
+    assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_includes_dust_tracking"] is False

@@ -173,10 +173,28 @@ def _load_position_context(
     except sqlite3.OperationalError:
         row = None
 
+    dust_tracking_qty = 0.0
+    try:
+        dust_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(qty_open), 0.0) AS dust_tracking_qty
+            FROM open_position_lots
+            WHERE pair=? AND position_state=? AND qty_open > 1e-12
+            """,
+            (pair, "dust_tracking"),
+        ).fetchone()
+        if dust_row is not None and dust_row[0] is not None:
+            dust_tracking_qty = max(0.0, float(dust_row[0]))
+    except sqlite3.OperationalError:
+        dust_tracking_qty = 0.0
+
     if row is None or row[0] is None or row[2] is None:
         position_state = build_position_state_model(
             raw_qty_open=0.0,
             metadata_raw=dust_context.classification,
+            raw_total_asset_qty=float(dust_tracking_qty),
+            open_exposure_qty=0.0,
+            dust_tracking_qty=float(dust_tracking_qty),
         )
         exposure = position_state.normalized_exposure
         return (
@@ -195,6 +213,9 @@ def _load_position_context(
     position_state = build_position_state_model(
         raw_qty_open=qty_open,
         metadata_raw=dust_context.classification,
+        raw_total_asset_qty=qty_open + float(dust_tracking_qty),
+        open_exposure_qty=qty_open,
+        dust_tracking_qty=float(dust_tracking_qty),
     )
     exposure = position_state.normalized_exposure
     holding_time_sec = max(0.0, (int(candle_ts) - entry_ts) / 1000.0)
@@ -280,16 +301,34 @@ def _apply_entry_exit_policy(
                 position_gate.get("raw_qty_open", position.qty_open),
             )
         )
+        open_exposure_qty = float(
+            normalized_state.get(
+                "open_exposure_qty",
+                position_gate.get("open_exposure_qty", raw_qty_open),
+            )
+        )
+        dust_tracking_qty = float(
+            normalized_state.get(
+                "dust_tracking_qty",
+                position_gate.get("dust_tracking_qty", 0.0),
+            )
+        )
         normalized_exposure_active = bool(
             normalized_state.get(
                 "normalized_exposure_active",
-                position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12 and not entry_allowed),
+                position_gate.get(
+                    "normalized_exposure_active",
+                    open_exposure_qty > 1e-12 and not entry_allowed,
+                ),
             )
         )
         normalized_exposure_qty = float(
             normalized_state.get(
                 "normalized_exposure_qty",
-                position_gate.get("normalized_exposure_qty", raw_qty_open if normalized_exposure_active else 0.0),
+                position_gate.get(
+                    "normalized_exposure_qty",
+                    open_exposure_qty if normalized_exposure_active else 0.0,
+                ),
             )
         )
 
@@ -301,6 +340,8 @@ def _apply_entry_exit_policy(
         context["entry_allowed"] = entry_allowed
         context["effective_flat"] = effective_flat
         context["raw_qty_open"] = raw_qty_open
+        context["open_exposure_qty"] = open_exposure_qty
+        context["dust_tracking_qty"] = dust_tracking_qty
         context["normalized_exposure_active"] = normalized_exposure_active
         context["normalized_exposure_qty"] = normalized_exposure_qty
         context["decision_summary"] = {
@@ -312,6 +353,8 @@ def _apply_entry_exit_policy(
             "entry_allowed": entry_allowed,
             "effective_flat": effective_flat,
             "raw_qty_open": raw_qty_open,
+            "open_exposure_qty": open_exposure_qty,
+            "dust_tracking_qty": dust_tracking_qty,
             "normalized_exposure_active": normalized_exposure_active,
             "normalized_exposure_qty": normalized_exposure_qty,
         }
