@@ -38,14 +38,22 @@ from bithumb_bot.utils_time import kst_str
 
 
 @pytest.fixture(autouse=True)
-def _default_operator_mode(monkeypatch: pytest.MonkeyPatch):
+def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
     original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_start_cash = settings.START_CASH_KRW
+    original_db_path = settings.DB_PATH
+
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "MODE", "paper")
+
     try:
         yield
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+        object.__setattr__(settings, "DB_PATH", original_db_path)
 
 
 def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
@@ -1368,7 +1376,11 @@ def test_resume_force_enables_for_safe_manual_pause(tmp_path):
 def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(app_module.settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "LIVE_DRY_RUN", False)
 
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
@@ -1393,6 +1405,9 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path, capsys
         cmd_cancel_open_orders()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     out = capsys.readouterr().out
     state = runtime_state.snapshot()
@@ -1412,6 +1427,8 @@ def test_cancel_open_orders_refuses_in_live_dry_run(monkeypatch, tmp_path, capsy
     original_live_dry_run = settings.LIVE_DRY_RUN
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(app_module.settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "LIVE_DRY_RUN", True)
 
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
     broker_created = {"called": False}
@@ -1428,6 +1445,8 @@ def test_cancel_open_orders_refuses_in_live_dry_run(monkeypatch, tmp_path, capsy
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     out = capsys.readouterr().out
     assert exc.value.code == 1

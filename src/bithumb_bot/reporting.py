@@ -127,6 +127,41 @@ class DecisionTelemetrySummary:
     block_reason: str
     dust_classification: str
     effective_flat: bool
+    raw_qty_open: float
+    raw_qty_open_truth_source: str
+    raw_total_asset_qty: float
+    raw_total_asset_qty_truth_source: str
+    position_qty: float
+    position_qty_truth_source: str
+    submit_payload_qty: float
+    submit_payload_qty_truth_source: str
+    normalized_exposure_active: bool
+    normalized_exposure_active_truth_source: str
+    normalized_exposure_qty: float
+    normalized_exposure_qty_truth_source: str
+    open_exposure_qty: float
+    open_exposure_qty_truth_source: str
+    dust_tracking_qty: float
+    dust_tracking_qty_truth_source: str
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
+    sell_qty_basis_qty: float
+    sell_qty_basis_source: str
+    sell_qty_boundary_kind: str
+    submit_qty_source: str
+    submit_qty_source_truth_source: str
+    sell_submit_qty_source: str
+    sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
+    position_state_source: str
+    position_state_source_truth_source: str
+    entry_allowed_truth_source: str
+    effective_flat_truth_source: str
+    strategy_name: str
+    pair: str
+    interval: str
+    count: int
 
 
 def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) -> str:
@@ -2161,6 +2196,8 @@ def fetch_decision_telemetry_summary(
             sell_qty_basis_qty,
             sell_qty_basis_source,
             sell_qty_boundary_kind,
+            sell_failure_category,
+            sell_failure_detail,
             submit_qty_source,
             submit_qty_source_truth_source,
             sell_submit_qty_source,

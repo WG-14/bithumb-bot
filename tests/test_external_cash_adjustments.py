@@ -64,13 +64,25 @@ class _VariableCashDriftBroker(_CashOnlyDriftBroker):
         return self._balance
 
 
+@pytest.fixture(autouse=True)
+def _restore_settings_state():
+    original_mode = settings.MODE
+    original_start_cash = settings.START_CASH_KRW
+    original_db_path = settings.DB_PATH
+    original_live_dry_run = settings.LIVE_DRY_RUN
+
+    try:
+        yield
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+        object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+
+
 @pytest.fixture
 def mixed_trade_cash_ledger(tmp_path, monkeypatch):
     db_path = tmp_path / "mixed_trade_cash_ledger.sqlite"
-    original_db_path = settings.DB_PATH
-    original_mode = settings.MODE
-    original_start_cash = settings.START_CASH_KRW
-
     monkeypatch.setenv("DB_PATH", str(db_path))
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "DB_PATH", str(db_path))
@@ -124,17 +136,11 @@ def mixed_trade_cash_ledger(tmp_path, monkeypatch):
     finally:
         conn.close()
 
-    try:
-        yield {
-            "db_path": db_path,
-            "trade_cash_after": 1_009_890.0,
-            "trade_asset_after": 0.0,
-        }
-    finally:
-        object.__setattr__(settings, "DB_PATH", original_db_path)
-        object.__setattr__(settings, "MODE", original_mode)
-        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
-
+    yield {
+        "db_path": db_path,
+        "trade_cash_after": 1_009_890.0,
+        "trade_asset_after": 0.0,
+    }
 
 def _reconcile_cash_drift_at(*, cash_available: float) -> None:
     reconcile_with_broker(_VariableCashDriftBroker(cash_available=cash_available))
@@ -144,49 +150,51 @@ def test_external_cash_adjustment_is_idempotent_and_updates_portfolio(tmp_path):
     db_path = tmp_path / "cash_adjustment.sqlite"
     original_start_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
-    conn = ensure_db(str(db_path))
     try:
-        first = record_external_cash_adjustment(
-            conn,
-            event_ts=1_700_000_000_000,
-            currency="KRW",
-            delta_amount=123.0,
-            source="manual_deposit",
-            reason="operator_correction",
-            broker_snapshot_basis={
-                "balance_source": "manual",
-                "broker_cash_total": 1_000_123.0,
-                "local_cash_total": 1_000_000.0,
-            },
-            correlation_metadata={"ticket": "ops-42"},
-            note="manual cash top-up",
-            adjustment_key="manual_deposit:ops-42",
-        )
-        second = record_external_cash_adjustment(
-            conn,
-            event_ts=1_700_000_000_999,
-            currency="KRW",
-            delta_amount=123.0,
-            source="manual_deposit",
-            reason="operator_correction",
-            broker_snapshot_basis={
-                "balance_source": "manual",
-                "broker_cash_total": 1_000_123.0,
-                "local_cash_total": 1_000_000.0,
-            },
-            correlation_metadata={"ticket": "ops-42"},
-            note="manual cash top-up",
-            adjustment_key="manual_deposit:ops-42",
-        )
-        row = conn.execute(
-            "SELECT COUNT(*) AS adjustment_count, COALESCE(SUM(delta_amount), 0.0) AS total_delta FROM external_cash_adjustments"
-        ).fetchone()
-        portfolio = conn.execute(
-            "SELECT cash_krw, cash_available, cash_locked FROM portfolio WHERE id=1"
-        ).fetchone()
-        summary = get_external_cash_adjustment_summary(conn)
+        conn = ensure_db(str(db_path))
+        try:
+            first = record_external_cash_adjustment(
+                conn,
+                event_ts=1_700_000_000_000,
+                currency="KRW",
+                delta_amount=123.0,
+                source="manual_deposit",
+                reason="operator_correction",
+                broker_snapshot_basis={
+                    "balance_source": "manual",
+                    "broker_cash_total": 1_000_123.0,
+                    "local_cash_total": 1_000_000.0,
+                },
+                correlation_metadata={"ticket": "ops-42"},
+                note="manual cash top-up",
+                adjustment_key="manual_deposit:ops-42",
+            )
+            second = record_external_cash_adjustment(
+                conn,
+                event_ts=1_700_000_000_999,
+                currency="KRW",
+                delta_amount=123.0,
+                source="manual_deposit",
+                reason="operator_correction",
+                broker_snapshot_basis={
+                    "balance_source": "manual",
+                    "broker_cash_total": 1_000_123.0,
+                    "local_cash_total": 1_000_000.0,
+                },
+                correlation_metadata={"ticket": "ops-42"},
+                note="manual cash top-up",
+                adjustment_key="manual_deposit:ops-42",
+            )
+            row = conn.execute(
+                "SELECT COUNT(*) AS adjustment_count, COALESCE(SUM(delta_amount), 0.0) AS total_delta FROM external_cash_adjustments"
+            ).fetchone()
+            portfolio = conn.execute(
+                "SELECT cash_krw, cash_available, cash_locked FROM portfolio WHERE id=1"
+            ).fetchone()
+            summary = get_external_cash_adjustment_summary(conn)
+        finally:
+            conn.close()
     finally:
-        conn.close()
         object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
 
     assert first is not None and first["created"] is True
@@ -364,8 +372,9 @@ def test_reconcile_records_cumulative_external_cash_adjustments_and_survives_res
 def test_external_cash_adjustments_remain_db_scoped(tmp_path):
     paper_db = tmp_path / "paper.sqlite"
     live_db = tmp_path / "live.sqlite"
+    expected_start_cash = 1_000_000.0
     original_start_cash = settings.START_CASH_KRW
-    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "START_CASH_KRW", expected_start_cash)
     paper_conn = ensure_db(str(paper_db))
     live_conn = ensure_db(str(live_db))
     try:
@@ -393,4 +402,4 @@ def test_external_cash_adjustments_remain_db_scoped(tmp_path):
     assert paper_count == 1
     assert live_count == 0
     assert float(paper_portfolio) == pytest.approx(1_000_077.0)
-    assert float(live_portfolio) == pytest.approx(float(settings.START_CASH_KRW))
+    assert float(live_portfolio) == pytest.approx(expected_start_cash)
