@@ -47,6 +47,7 @@ from .order_lookup_v1 import (
     status_from_state as v1_status_from_state,
 )
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
+from .order_list_v1 import V1ListNormalizedOrder
 from .order_payloads import (
     build_order_payload,
     normalize_order_side,
@@ -894,6 +895,51 @@ class BithumbBroker:
                 uuid_present=bool(self._clean_identifier(row.get("uuid"))),
                 client_order_id_present=bool(self._clean_identifier(row.get("client_order_id"))),
                 parser_failure_reason=reason,
+            )
+        )
+
+    def _log_v1_orders_price_resolution(
+        self,
+        *,
+        endpoint: str,
+        state: str,
+        exchange_ids_count: int,
+        client_ids_count: int,
+        row: dict[str, object],
+        normalized: V1ListNormalizedOrder,
+    ) -> None:
+        if normalized.price_source == "price" and not normalized.price_missing:
+            return
+        present_fields = [
+            key
+            for key in (
+                "price",
+                "avg_price",
+                "average_price",
+                "avg_execution_price",
+                "trade_price",
+                "price_avg",
+                "executed_volume",
+                "executed_funds",
+                "volume",
+                "remaining_volume",
+            )
+            if row.get(key) not in (None, "")
+        ]
+        RUN_LOG.info(
+            format_log_kv(
+                "[V1_ORDERS_PRICE_RESOLUTION]",
+                endpoint=endpoint,
+                state=state,
+                exchange_ids_count=exchange_ids_count,
+                client_ids_count=client_ids_count,
+                uuid_present=bool(self._clean_identifier(row.get("uuid"))),
+                client_order_id_present=bool(self._clean_identifier(row.get("client_order_id"))),
+                price_source=normalized.price_source or "missing",
+                price_missing=int(normalized.price_missing),
+                terminal_confirmation_only=int(normalized.price_missing and state in {"done", "cancel"}),
+                present_fields=",".join(present_fields) if present_fields else "-",
+                degraded_fields=",".join(normalized.degraded_fields) if normalized.degraded_fields else "-",
             )
         )
 
@@ -1806,13 +1852,21 @@ class BithumbBroker:
                 raise
             qty_req, qty_filled = self._v1_list_quantities(normalized)
             status = v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled)
+            self._log_v1_orders_price_resolution(
+                endpoint="/v1/orders",
+                state="wait",
+                exchange_ids_count=exchange_ids_count,
+                client_ids_count=client_ids_count,
+                row=row,
+                normalized=normalized,
+            )
             out.append(
                 BrokerOrder(
                     client_order_id=normalized.client_order_id,
                     exchange_order_id=normalized.uuid,
                     side=normalized.side,
                     status=status,
-                    price=float(normalized.price),
+                    price=normalized.price,
                     qty_req=qty_req,
                     qty_filled=qty_filled,
                     created_ts=int(normalized.created_ts),
@@ -2026,12 +2080,20 @@ class BithumbBroker:
                     )
                     raise
                 qty_req, qty_filled = self._v1_list_quantities(normalized)
+                self._log_v1_orders_price_resolution(
+                    endpoint="/v1/orders",
+                    state=state,
+                    exchange_ids_count=exchange_ids_count,
+                    client_ids_count=client_ids_count,
+                    row=row,
+                    normalized=normalized,
+                )
                 order = BrokerOrder(
                     client_order_id=normalized.client_order_id,
                     exchange_order_id=normalized.uuid,
                     side=normalized.side,
                     status=v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled),
-                    price=float(normalized.price),
+                    price=normalized.price,
                     qty_req=qty_req,
                     qty_filled=qty_filled,
                     created_ts=int(normalized.created_ts),

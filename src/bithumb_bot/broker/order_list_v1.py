@@ -47,7 +47,9 @@ class V1ListNormalizedOrder:
     side: str
     ord_type: str
     state: str
-    price: float
+    price: float | None
+    price_missing: bool
+    price_source: str | None
     volume: float | None
     remaining_volume: float | None
     executed_volume: float | None
@@ -114,6 +116,42 @@ def _first_optional_number(
         if value is not None:
             return value
     return None
+
+
+def _resolve_list_order_price(
+    row: dict[str, object],
+    *,
+    state: str,
+    executed_volume: float | None,
+    executed_funds: float | None,
+    context: str,
+) -> tuple[float | None, bool, str | None, tuple[str, ...]]:
+    degraded: list[str] = []
+    price = _optional_number(row, "price", context=context)
+    if price is not None:
+        return price, False, "price", tuple(degraded)
+
+    avg_price = _first_optional_number(
+        row,
+        ("avg_price", "average_price", "avg_execution_price", "trade_price", "price_avg"),
+        context=context,
+    )
+    if avg_price is not None:
+        degraded.append("price:derived_from_avg_price")
+        return avg_price, False, "avg_price", tuple(degraded)
+
+    if executed_funds is not None and executed_volume is not None and executed_volume > 0:
+        derived_price = executed_funds / executed_volume
+        if math.isfinite(derived_price):
+            degraded.append("price:derived_from_executed_funds_over_executed_volume")
+            return derived_price, False, "executed_funds/executed_volume", tuple(degraded)
+
+    if state in {"done", "cancel"}:
+        degraded.append("price:missing_terminal_confirmation_only")
+        return None, True, "terminal_confirmation_only", tuple(degraded)
+
+    degraded.append("price:missing")
+    return None, True, None, tuple(degraded)
 
 
 def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
@@ -245,14 +283,18 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
     remaining_volume = _first_optional_number(row, ("remaining_volume", "units_remaining"), context=context)
     executed_volume = _first_optional_number(row, ("executed_volume", "filled_volume"), context=context)
     executed_funds = _optional_number(row, "executed_funds", context=context)
+    price_hint = _optional_number(row, "price", context=context)
+    avg_price_hint = _first_optional_number(
+        row,
+        ("avg_price", "average_price", "avg_execution_price", "trade_price", "price_avg"),
+        context=context,
+    )
+    reference_price = avg_price_hint if avg_price_hint is not None and avg_price_hint > 0 else price_hint
     paid_fee = _first_optional_number(
         row,
         ("paid_fee", "trade_fee", "fee", "reserved_fee", "remaining_fee"),
         context=context,
     )
-    price = _required_number(row, "price", context=context)
-    avg_price = _first_optional_number(row, ("avg_price", "average_price"), context=context)
-    reference_price = avg_price if avg_price is not None and avg_price > 0 else price
 
     if remaining_volume is None and volume is not None and executed_volume is not None:
         remaining_volume = max(0.0, volume - executed_volume)
@@ -268,7 +310,7 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
         if state == "done" and executed_volume is not None:
             volume = max(0.0, executed_volume)
             degraded_fields.append("volume:derived_from_executed_volume")
-        elif state == "done" and executed_funds is not None and reference_price > 0:
+        elif state == "done" and executed_funds is not None and reference_price is not None and reference_price > 0:
             volume = max(0.0, executed_funds / reference_price)
             if executed_volume is None:
                 executed_volume = volume
@@ -285,6 +327,15 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
             executed_volume = max(0.0, volume or 0.0)
     if remaining_volume is None and state == "done":
         remaining_volume = 0.0
+
+    price, price_missing, price_source, price_degraded_fields = _resolve_list_order_price(
+        row,
+        state=state,
+        executed_volume=executed_volume,
+        executed_funds=executed_funds,
+        context=context,
+    )
+    degraded_fields.extend(price_degraded_fields)
 
     if state in {"wait", "watch"} and remaining_volume is None:
         raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
@@ -304,6 +355,8 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
         ord_type=_required_text(row, "ord_type", context=context),
         state=state,
         price=price,
+        price_missing=price_missing,
+        price_source=price_source,
         volume=volume,
         remaining_volume=remaining_volume,
         executed_volume=executed_volume,

@@ -458,6 +458,81 @@ class _RecoverUnresolvedHighConfidenceTerminalBroker(_RecoverSuccessBroker):
             1,
         )
 
+
+class _RecoveryReportMissingPriceBroker(_RecoverSuccessBroker):
+    def __init__(self) -> None:
+        self.recent_orders = [
+            BrokerOrder(
+                "live_1775658600000_sell_ae61703f",
+                "C0101000002903202695",
+                "SELL",
+                "FILLED",
+                None,
+                0.0001,
+                0.0001,
+                1775658600000,
+                1775658605000,
+            )
+        ]
+
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return list(self.recent_orders)[:limit]
+
+    def get_order(
+        self, *, client_order_id: str, exchange_order_id: str | None = None
+    ) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "C0101000002903202695",
+            "SELL",
+            "FILLED",
+            105950000.0,
+            0.0001,
+            0.0001,
+            1775658600000,
+            1775658605000,
+        )
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+    ) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id=str(client_order_id or "live_1775658600000_sell_ae61703f"),
+                fill_id="C0101000002903202695:trade:1",
+                fill_ts=1775658605000,
+                price=105950000.0,
+                qty=0.0001,
+                fee=4.23,
+                exchange_order_id=str(exchange_order_id or "C0101000002903202695"),
+            )
+        ]
+
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return []
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(
+            cash_available=1_010_590.77,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+
 class _SubmitUnknownRecoveredByRecentFillBroker:
     def get_order(
         self, *, client_order_id: str, exchange_order_id: str | None = None
@@ -3865,6 +3940,88 @@ def test_resume_eligibility_clears_stale_lock_halt_after_successful_reconcile_ev
     assert state.halt_state_unresolved is False
 
 
+def test_reconcile_recovery_report_and_resume_clear_terminal_recent_order_with_missing_price(
+    tmp_path, monkeypatch, capsys
+):
+    _set_tmp_db(tmp_path)
+    now_ms = 1775658600000
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET cash_krw=1000000.0,
+                asset_qty=0.0001,
+                cash_available=1000000.0,
+                cash_locked=0.0,
+                asset_available=0.0001,
+                asset_locked=0.0
+            WHERE id=1
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price,
+                qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, 'NEW', 'SELL', ?, ?, 0.0, ?, ?, NULL)
+            """,
+            (
+                "live_1775658600000_sell_ae61703f",
+                "C0101000002903202695",
+                105950000.0,
+                0.0001,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="BrokerRejectError: missing required numeric field 'price'",
+        reason_code="LIVE_EXECUTION_BROKER_ERROR",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    broker = _RecoveryReportMissingPriceBroker()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    try:
+        cmd_reconcile(broker_factory=lambda: broker, reconcile_fn=reconcile_with_broker)
+        report = _load_recovery_report()
+        state_after_report = runtime_state.snapshot()
+
+        assert report["unresolved_count"] == 0
+        assert report["recovery_required_count"] == 0
+        assert report["can_resume"] is True
+        assert report["resume_blockers"] == []
+        assert "no local unresolved identifiers available for broker snapshot" in str(
+            report["broker_recent_orders_snapshot_error"]
+        )
+        assert state_after_report.halt_reason_code is None
+        assert state_after_report.halt_state_unresolved is False
+        assert state_after_report.resume_gate_reason is None
+
+        cmd_resume(force=False, broker_factory=lambda: broker, reconcile_fn=reconcile_with_broker)
+        out = capsys.readouterr().out
+        state_after_resume = runtime_state.snapshot()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert "[RECONCILE] completed one live reconciliation pass" in out
+    assert "[RESUME] trading enabled" in out
+    assert state_after_resume.trading_enabled is True
+    assert state_after_resume.halt_reason_code is None
+    assert state_after_resume.resume_gate_reason is None
+
+
 def test_reconcile_skips_in_non_live_mode(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
@@ -4999,4 +5156,3 @@ def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, ca
     assert f"reason_code={DUST_RESIDUAL_UNSELLABLE}" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "MANUAL_DUST_REVIEW_REQUIRED" in out
-

@@ -133,7 +133,7 @@ RUNTIME_ROOT/
 
 ## Allowed Overrides
 
-These env vars are compatibility overrides, not new path conventions:
+These env vars are compatibility overrides only, not new path conventions:
 
 - `DB_PATH`
 - `RUN_LOCK_PATH`
@@ -143,7 +143,7 @@ These env vars are compatibility overrides, not new path conventions:
 Rules for overrides:
 
 - The override value must be an absolute path.
-- Live mode requires a repository-external path.
+- Live mode requires a repository-external absolute path.
 - Live mode must not use a path inside the repository.
 - Live mode must not use a path that contains the wrong environment segment.
 - The override must still map to the correct mode-specific storage bucket.
@@ -262,7 +262,7 @@ Backups are mode-specific. Do not let paper and live share backup storage.
 
 - Live is for real orders and recovery-critical evidence.
 - Live requires explicit DB path configuration, notifier readiness, risk-limit configuration, and arming requirements.
-- Live paths must be absolute and repository-external.
+- Live paths must be absolute, repository-external, and mode-correct.
 
 ### dryrun
 

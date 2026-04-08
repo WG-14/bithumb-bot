@@ -38,11 +38,11 @@ The `project.scripts` entry in `pyproject.toml` defines the canonical CLI.
 ## Env Loading Rules
 
 - Do not rely on implicit `.env` autoloading.
-- Use explicit env files.
+- Use explicit env files for operator, live, and healthcheck operations.
 - `BITHUMB_ENV_FILE` takes priority when it is set.
 - `MODE=live` uses `BITHUMB_ENV_FILE_LIVE` when `BITHUMB_ENV_FILE` is not set.
 - `MODE=paper` and `MODE=test` use `BITHUMB_ENV_FILE_PAPER` when `BITHUMB_ENV_FILE` is not set.
-- Healthcheck and live-operation scripts must fail fast when the explicit env file is missing.
+- Healthcheck and live-operation commands must fail fast when the explicit env file is missing.
 
 Example:
 
@@ -50,7 +50,7 @@ Example:
 BITHUMB_ENV_FILE=.env uv run bithumb-bot health
 ```
 
-Real runtime artifacts such as health reports, recovery reports, and operator snapshots must live under env-injected runtime roots, not repo-relative paths such as `./data`, `./backups`, or `./tmp`.
+Runtime artifacts must live outside the repository under env-injected runtime roots.
 
 ## Common Commands
 

@@ -1,6 +1,6 @@
 # Operator Reporting Workflow (Ops / Trade / Strategy Analysis)
 
-배경: 이 문서는 기존 리포팅 의도를 유지하면서 제목과 체크리스트를 영어 우선으로 정리한 자료다.
+Background: This document preserves the existing reporting intent while standardizing terminology.
 
 This document helps operators answer:
 
@@ -29,7 +29,7 @@ Recommended context values:
 Path note:
 
 - Do not hardcode DB paths into code.
-- Use the existing env-file loading pattern when you need `DB_PATH`.
+- Use the explicit env file loading pattern when you need `DB_PATH`.
 
 ## 2. Execution Modes
 
@@ -42,13 +42,13 @@ MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.small.safe.sqlit
 ### AWS / systemd
 
 ```bash
-BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit 50
+BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env uv run bithumb-bot ops-report --limit 50
 ```
 
 If needed, run directly as the service user:
 
 ```bash
-sudo -u <service-user> BITHUMB_ENV_FILE=/etc/bithumb-bot/live.env uv run bithumb-bot ops-report --limit 50
+sudo -u <service-user> BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env uv run bithumb-bot ops-report --limit 50
 ```
 
 The default output is `stdout`. Redirect to a file only when the output itself is needed as an artifact.
@@ -104,7 +104,7 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
 
 ## 3-1-1. Preflight Interpretation
 
-- In live dry-run, a missing base row can still be `pass_no_position_allowed`.
+- In live dry-run, a missing base row can still yield `pass_no_position_allowed`.
 - A missing quote row is a preflight failure.
 - In live real-order mode, the same missing-base policy must remain a blocker until explicitly cleared.
 
@@ -124,10 +124,10 @@ Useful outputs:
 Example:
 
 ```bash
-MODE=live DB_PATH=/var/lib/bithumb-bot/live.sqlite \
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.sqlite \
   uv run bithumb-bot fee-diagnostics --fill-limit 200 --roundtrip-limit 100
 
-MODE=live DB_PATH=/var/lib/bithumb-bot/live.sqlite \
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.sqlite \
   uv run bithumb-bot fee-diagnostics --fill-limit 200 --roundtrip-limit 100 --json
 ```
 
@@ -226,4 +226,4 @@ When in doubt, prefer:
 3. Operator review
 4. Resume safety
 
-Korean note: This report workflow remains a diagnostic workflow, not an execution workflow.
+Note: This report workflow remains a diagnostic workflow, not an execution workflow.

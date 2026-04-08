@@ -2,7 +2,7 @@
 
 > Scope: Bithumb BTC live operations with limited unattended runtime and explicit human intervention gates.
 >
-> 배경: 이 문서는 제한적 무인 운용을 위한 기존 운영 절차를 빠르게 확인하기 위한 요약본이다.
+> Background: This runbook preserves the existing operating procedure and serves as a quick reference for limited unattended operations.
 
 ## Operating Model Summary
 
@@ -14,9 +14,9 @@
 ## Mode Classification Before Start
 
 - [ ] `paper`: simulation only. No real orders, no loss exposure.
-- [ ] `live + dry-run`: live environment checks only. Private reads are allowed, but private writes are blocked (`LIVE_DRY_RUN=true`).
-- [ ] `live + armed`: real-order mode (`LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true`).
-- [ ] `live + not armed`: fail fast if `LIVE_DRY_RUN=false` and `LIVE_REAL_ORDER_ARMED` is not `true`.
+- [ ] `live dry-run`: live environment checks only. Private reads are allowed, but private writes are blocked (`LIVE_DRY_RUN=true`).
+- [ ] `live armed`: real-order mode (`LIVE_DRY_RUN=false`, `LIVE_REAL_ORDER_ARMED=true`).
+- [ ] `live not armed`: fail fast if `LIVE_DRY_RUN=false` and `LIVE_REAL_ORDER_ARMED` is not `true`.
 
 Starting assumptions:
 
@@ -187,7 +187,7 @@ After a live change, verify:
 python3 tools/verify_sqlite_restore.py /var/lib/bithumb-bot/backup/live/db/<backup_file>.sqlite
 ```
 
-Korean note: backup verification is a recovery safety check, not a convenience-only workflow.
+Note: backup verification is a recovery safety check, not a convenience-only workflow.
 
 ## Test Groups
 

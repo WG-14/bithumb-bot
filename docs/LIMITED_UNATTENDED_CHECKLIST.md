@@ -1,12 +1,12 @@
 # Limited Unattended Live Ops Checklist (Bithumb BTC)
 
-배경: 이 문서는 제한적 라이브 운영 체크리스트이며 완전한 24/7 자율 운용을 의미하지 않는다.
+Background: This document is a limited live operations checklist and does not imply full 24/7 autonomous operation.
 
 > Current model: explicit live arming, safety-halting, and operator-confirmed resume gates.
 
 ## 1. Mode and Path Separation
 
-- [ ] The current session mode is explicit: `paper`, `live dry-run`, or `live armed`
+- [ ] The current session mode is explicitly one of `paper`, `live dry-run`, or `live armed`
 - [ ] `paper` and `live` use separate `DB_PATH` values
 - [ ] Live dry-run starts with `LIVE_DRY_RUN=true`
 - [ ] Real-order mode requires `LIVE_DRY_RUN=false` and `LIVE_REAL_ORDER_ARMED=true`
@@ -40,7 +40,7 @@ Live safety reminders:
 - `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, and `MAX_DAILY_ORDER_COUNT` must be finite positive values
 - `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, and `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS` must be finite positive values in live mode
 - Notifier configuration must be present
-- Paper-only settings must stay unset in live mode
+- Paper-only settings must remain unset in live mode
 
 ## 3. API and Notifier Checks
 
@@ -112,7 +112,7 @@ Backup verification:
 
 ```bash
 BACKUP_VERIFY_RESTORE=1 ./scripts/backup_sqlite.sh
-python3 tools/verify_sqlite_restore.py backups/<backup_file>.sqlite
+python3 tools/verify_sqlite_restore.py /var/lib/bithumb-bot/backup/live/db/<backup_file>.sqlite
 ```
 
 ## 8. systemd Env File Separation
@@ -123,5 +123,5 @@ python3 tools/verify_sqlite_restore.py backups/<backup_file>.sqlite
 
 ## 9. Pass / Fail
 
-- Pass: paper/live storage is separated, live preflight passes, and recovery evidence is clear
+- Pass: paper/live storage remains separated, live preflight passes, and recovery evidence is clear
 - Fail: any rule breaks storage separation, live safety, or recovery integrity

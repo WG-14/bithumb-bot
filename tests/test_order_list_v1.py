@@ -262,6 +262,59 @@ def test_parse_v1_order_list_row_executed_funds_forward_compatibility() -> None:
     assert parsed.volume == pytest.approx(0.01)
 
 
+def test_parse_v1_order_list_row_done_uses_avg_price_when_price_missing() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            price="",
+            avg_price="149000000",
+            executed_volume="0.01",
+            executed_funds="1490000",
+        )
+    )
+
+    assert parsed.price == pytest.approx(149_000_000.0)
+    assert parsed.price_missing is False
+    assert parsed.price_source == "avg_price"
+    assert "price:derived_from_avg_price" in parsed.degraded_fields
+
+
+def test_parse_v1_order_list_row_done_derives_price_from_executed_funds_and_volume() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            price="",
+            avg_price="",
+            executed_volume="0.01",
+            executed_funds="1490000",
+        )
+    )
+
+    assert parsed.price == pytest.approx(149_000_000.0)
+    assert parsed.price_missing is False
+    assert parsed.price_source == "executed_funds/executed_volume"
+    assert "price:derived_from_executed_funds_over_executed_volume" in parsed.degraded_fields
+
+
+def test_parse_v1_order_list_row_done_allows_terminal_confirmation_only_when_price_missing() -> None:
+    parsed = parse_v1_order_list_row(
+        _v1_orders_row(
+            state="done",
+            price="",
+            avg_price="",
+            executed_volume="",
+            executed_funds="",
+            volume="",
+            remaining_volume="",
+        )
+    )
+
+    assert parsed.price is None
+    assert parsed.price_missing is True
+    assert parsed.price_source == "terminal_confirmation_only"
+    assert "price:missing_terminal_confirmation_only" in parsed.degraded_fields
+
+
 def test_parse_v1_order_list_row_tolerates_missing_updated_at_with_created_at_fallback() -> None:
     parsed = parse_v1_order_list_row(_v1_orders_row(state="done", updated_at=""))
 

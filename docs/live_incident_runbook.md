@@ -4,7 +4,7 @@
 
 This document gives operators a short, English-first checklist for live incidents.
 
-배경: 운영 의도는 그대로이며, 이 문서는 빠른 분류와 복구 확인을 위한 요약본이다.
+Background: This document preserves the operational intent while providing a short checklist for rapid triage and recovery verification.
 
 ## 1. Initial Checks
 
@@ -104,4 +104,4 @@ Use this order when you need to reason about a live incident:
 2. `recovery-report`
 3. `ops-report --limit 20`
 
-Korean note: If the above three outputs disagree, treat the discrepancy as a recovery task, not as a cosmetic issue.
+Note: If the above three outputs disagree, treat the discrepancy as a recovery task, not as a cosmetic issue.

@@ -4,15 +4,15 @@
 
 Confirm that live mode is safe when `LIVE_DRY_RUN=true`.
 
-배경: 이 체크리스트는 검증용이며 실주문을 허용하지 않는다.
+Background: This checklist is for validation only and does not permit real orders.
 
 ## Startup Checks
 
-- [ ] `.env.live` uses live DB and lock paths
+- [ ] `BITHUMB_ENV_FILE` points to the explicit live env file with live DB and run-lock paths
 - [ ] `LIVE_DRY_RUN=true`
 - [ ] `LIVE_REAL_ORDER_ARMED=false`
-- [ ] Notifier configuration is valid
-- [ ] `/var/lib/bithumb-bot/data/live/trades/live.sqlite` backup is possible
+- [ ] Notifier configuration is present and valid
+- [ ] `/var/lib/bithumb-bot/data/live/trades/live.sqlite` backup is reachable
 - [ ] `bithumb-bot.service` is running normally
 - [ ] `bithumb-bot-healthcheck.timer` is enabled
 - [ ] `bithumb-bot-backup.timer` is enabled
@@ -23,7 +23,7 @@ Confirm that live mode is safe when `LIVE_DRY_RUN=true`.
 - [ ] `sudo journalctl -u bithumb-bot.service -n 100 --no-pager`
 - [ ] No healthcheck error is present
 - [ ] No halt state is present
-- [ ] The service can still recover itself
+- [ ] The service can still recover after restart
 
 ## During Dry-Run
 

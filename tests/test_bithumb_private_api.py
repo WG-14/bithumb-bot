@@ -16,6 +16,7 @@ from bithumb_bot.broker.base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
+from bithumb_bot.broker.order_list_v1 import parse_v1_order_list_row
 from bithumb_bot.broker.order_payloads import build_order_payload, validate_order_submit_payload
 from bithumb_bot.config import settings
 from bithumb_bot.public_api_orderbook import BestQuote
@@ -3254,6 +3255,126 @@ def test_get_recent_orders_tolerates_done_row_missing_updated_at_for_identifier_
     assert order.client_order_id == "live_1712230310689_buy_abcd1234"
     assert order.status == "FILLED"
     assert order.updated_ts == order.created_ts
+
+
+def test_get_recent_orders_tolerates_done_row_missing_price_with_avg_price_fallback(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint: str, params: dict[str, object], retry_safe: bool = False):
+        assert endpoint == "/v1/orders"
+        state = params.get("state")
+        if state == "wait":
+            return []
+        if state == "done":
+            return [
+                {
+                    "uuid": "done-missing-price-avg-1",
+                    "client_order_id": "live_1775658600000_sell_ae61703f",
+                    "market": "KRW-BTC",
+                    "side": "ask",
+                    "ord_type": "limit",
+                    "state": "done",
+                    "price": "",
+                    "avg_price": "105950000",
+                    "volume": "0.0001",
+                    "remaining_volume": "",
+                    "executed_volume": "0.0001",
+                    "executed_funds": "10595",
+                    "created_at": "2024-04-04T13:45:10+09:00",
+                    "updated_at": "2024-04-04T13:45:10+09:00",
+                }
+            ]
+        if state == "cancel":
+            return []
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        orders = broker.get_recent_orders(limit=10, exchange_order_ids=["done-missing-price-avg-1"])
+
+    assert len(orders) == 1
+    order = orders[0]
+    assert order.exchange_order_id == "done-missing-price-avg-1"
+    assert order.status == "FILLED"
+    assert order.price == pytest.approx(105_950_000.0)
+    assert "[V1_ORDERS_PRICE_RESOLUTION]" in caplog.text
+    assert "price_source=avg_price" in caplog.text
+    assert "price_missing=0" in caplog.text
+
+
+def test_get_recent_orders_tolerates_done_row_missing_price_with_executed_funds_fallback(
+    monkeypatch, caplog
+):
+    _configure_live()
+    broker = BithumbBroker()
+
+    def _fake_get(endpoint: str, params: dict[str, object], retry_safe: bool = False):
+        assert endpoint == "/v1/orders"
+        state = params.get("state")
+        if state == "wait":
+            return []
+        if state == "done":
+            return [
+                {
+                    "uuid": "done-missing-price-funds-1",
+                    "client_order_id": "live_1775658600000_sell_ae61703f",
+                    "market": "KRW-BTC",
+                    "side": "ask",
+                    "ord_type": "limit",
+                    "state": "done",
+                    "price": "",
+                    "volume": "0.0001",
+                    "remaining_volume": "",
+                    "executed_volume": "0.0001",
+                    "executed_funds": "10595",
+                    "created_at": "2024-04-04T13:45:10+09:00",
+                    "updated_at": "2024-04-04T13:45:10+09:00",
+                }
+            ]
+        if state == "cancel":
+            return []
+        return []
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        orders = broker.get_recent_orders(limit=10, exchange_order_ids=["done-missing-price-funds-1"])
+
+    assert len(orders) == 1
+    order = orders[0]
+    assert order.exchange_order_id == "done-missing-price-funds-1"
+    assert order.status == "FILLED"
+    assert order.price == pytest.approx(105_950_000.0)
+    assert "[V1_ORDERS_PRICE_RESOLUTION]" in caplog.text
+    assert "price_source=executed_funds/executed_volume" in caplog.text
+    assert "price_missing=0" in caplog.text
+
+
+def test_parse_v1_order_list_row_tolerates_terminal_price_missing_confirmation_only() -> None:
+    parsed = parse_v1_order_list_row(
+        {
+            "uuid": "done-missing-price-terminal-1",
+            "client_order_id": "live_1775658600000_sell_ae61703f",
+            "market": "KRW-BTC",
+            "side": "ask",
+            "ord_type": "limit",
+            "state": "done",
+            "price": "",
+            "volume": "",
+            "remaining_volume": "",
+            "executed_volume": "",
+            "created_at": "2024-04-04T13:45:10+09:00",
+            "updated_at": "2024-04-04T13:45:10+09:00",
+        }
+    )
+
+    assert parsed.state == "done"
+    assert parsed.price is None
+    assert parsed.price_missing is True
+    assert parsed.price_source == "terminal_confirmation_only"
+    assert "price:missing_terminal_confirmation_only" in parsed.degraded_fields
 
 def test_get_recent_orders_logs_parser_failure_context_for_v1_orders(monkeypatch, caplog):
     _configure_live()

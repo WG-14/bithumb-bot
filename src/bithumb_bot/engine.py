@@ -519,8 +519,43 @@ def maybe_clear_stale_initial_reconcile_halt() -> bool:
     )
     return True
 
+
+def maybe_clear_stale_live_execution_broker_halt(*, startup_gate_reason: str | None = None) -> bool:
+    runtime_state.refresh_open_order_health()
+    state = runtime_state.snapshot()
+
+    if not (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
+    ):
+        return False
+
+    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
+    if not _can_clear_reconcile_failure_halt(
+        state=runtime_state.snapshot(),
+        startup_gate_reason=gate_reason,
+    ):
+        return False
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=state.last_disable_reason,
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    _log_loop_event(
+        logging.INFO,
+        "[RUN] stale_live_execution_broker_halt_cleared",
+        halt_reason_code=state.halt_reason_code or "-",
+        reconcile_reason_code=state.last_reconcile_reason_code or "-",
+    )
+    return True
+
 def get_health_status() -> dict[str, float | int | bool | str | None]:
     maybe_clear_stale_initial_reconcile_halt()
+    maybe_clear_stale_live_execution_broker_halt()
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
@@ -677,6 +712,8 @@ def evaluate_startup_safety_gate() -> str | None:
 def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     """Returns whether operator resume may proceed and structured blockers."""
     maybe_clear_stale_initial_reconcile_halt()
+    startup_gate_reason = evaluate_startup_safety_gate()
+    maybe_clear_stale_live_execution_broker_halt(startup_gate_reason=startup_gate_reason)
     startup_gate_reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
 
@@ -1341,6 +1378,8 @@ def run_loop(short_n: int, long_n: int) -> None:
             raise
     validate_live_mode_preflight(settings)
 
+    maybe_clear_stale_initial_reconcile_halt()
+    maybe_clear_stale_live_execution_broker_halt()
     state = runtime_state.snapshot()
     if state.halt_new_orders_blocked:
         reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
@@ -2045,4 +2084,3 @@ def run_loop(short_n: int, long_n: int) -> None:
             interval=settings.INTERVAL,
             reason="stopped by user (Ctrl+C)",
         )
-

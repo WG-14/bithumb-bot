@@ -30,7 +30,7 @@ Anything outside this scope is not a runtime artifact.
 ## Non-Negotiable Rules
 
 - Do not write runtime artifacts into the repository.
-- Do not invent new path conventions outside the managed path layer.
+- Do not use repo-relative runtime paths or invent new path conventions outside the managed path layer.
 - Do not share storage between paper and live.
 - Do not overwrite live evidence in place.
 - Do not log secrets or full credentials.
@@ -246,8 +246,8 @@ These overrides must remain compatible with the storage contract:
 ### live
 
 - Live is for real orders and recovery-critical evidence.
-- Live requires explicit preflight checks, notifier readiness, arming requirements, and mode-correct paths.
-- Live failures should stop execution rather than continue ambiguously.
+- Live requires explicit preflight checks, notifier readiness, live arming requirements, and mode-correct paths.
+- Live failures must fail fast rather than continue ambiguously.
 
 ### dryrun
 
