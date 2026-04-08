@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import math
@@ -860,11 +860,12 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     runtime_state.set_resume_gate(blocked=bool(reasons), reason=gate_reason)
     return (len(reasons) == 0), reasons
 
-def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
+def _halt_trading(reason: HaltReason, *, unresolved: bool = False, attempt_flatten: bool = False) -> None:
     runtime_state.enter_halt(
         reason_code=reason.code,
         reason=reason.detail,
         unresolved=unresolved,
+        attempt_flatten=attempt_flatten,
     )
     halt_state = runtime_state.snapshot()
     _, resume_blockers = evaluate_resume_eligibility()
@@ -1600,6 +1601,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                     _halt_trading(
                         halt_reason,
                         unresolved=unresolved,
+                        attempt_flatten=bool(settings.KILL_SWITCH_LIQUIDATE),
                     )
                     continue
 
@@ -2043,3 +2045,4 @@ def run_loop(short_n: int, long_n: int) -> None:
             interval=settings.INTERVAL,
             reason="stopped by user (Ctrl+C)",
         )
+

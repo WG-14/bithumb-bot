@@ -1480,6 +1480,9 @@ def _record_sell_dust_unsellable(
             side="SELL",
             signal="SELL",
             reason_code=DUST_RESIDUAL_UNSELLABLE,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(submit_attempt_id),
             sell_failure_category=sell_failure_category,
             sell_failure_detail=sell_failure_detail,
             state=dust_details["state"],
@@ -1946,9 +1949,9 @@ def validate_pretrade(
     buffer_mult = 1.0 + max(0.0, float(settings.PRETRADE_BALANCE_BUFFER_BPS)) / 10_000.0
     if side == "BUY":
         # NOTE:
-        # - LIVE_FEE_RATE_ESTIMATE: live pretrade ?袁㏉닊/?遺쏀?癰귣똾???癰귣똻????곕뗄?숂㎉?
-        # - PAPER_FEE_RATE/FEE_RATE: paper 筌ｋ떯猿??????됱뵠??獄?疫꿸퀣????륁맄?紐낆넎 fee rate
-        # ??揶쏅?????釉???브쑬???live pretrade ?④쑴沅??????怨몄몵嚥??⑥눘?쇘빊遺우젟??? ??꾩쓺 ??뺣뼄.
+        # - LIVE_FEE_RATE_ESTIMATE: live pretrade ??ш낄猷????釉????怨뚮옖?????怨뚮옖??????⑤베毓??洹숇윦?
+        # - PAPER_FEE_RATE/FEE_RATE: paper 癲ル슪???????????源낇꼧??????れ삀??????쒓낮彛?嶺뚮ㅏ援??fee rate
+        # ????좊즴??????????됰슣維???live pretrade ??節뚮쳮雅????????ㅼ굣筌뤿뱶????貫????롰돯?釉먯뒭???? ??熬곣뫗踰???筌먲퐢??
         fee_mult = 1.0 + max(0.0, float(settings.LIVE_FEE_RATE_ESTIMATE))
         required_cash = notional * fee_mult * buffer_mult
         if float(balance.cash_available) + POSITION_EPSILON < required_cash:
@@ -2039,6 +2042,9 @@ def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, 
             state_from="PENDING_SUBMIT",
             state_to="SUBMIT_UNKNOWN",
             reason_code=SUBMIT_TIMEOUT,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(submit_attempt_id),
             side=side,
             status="SUBMIT_UNKNOWN",
             reason=reason,
@@ -2064,6 +2070,9 @@ def _mark_submit_failed(*, conn, client_order_id: str, submit_attempt_id: str, s
             state_from="PENDING_SUBMIT",
             state_to="FAILED",
             reason_code=SUBMIT_FAILED,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(submit_attempt_id),
             side=side,
             status="FAILED",
             reason=reason,
@@ -2129,6 +2138,9 @@ def _block_new_submission_for_unresolved_risk(
             client_order_id=client_order_id,
             submit_attempt_id=client_order_id.split("_")[-1],
             reason_code=RISKY_ORDER_BLOCK,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(submit_attempt_id),
             side=side,
             status="FAILED",
             reason_detail_code=reason_code,
@@ -2344,7 +2356,15 @@ def _submit_via_standard_path(
         ts_ms=ts,
         status="PENDING_SUBMIT",
     )
-    record_submit_started(client_order_id, conn=conn)
+    record_submit_started(
+        client_order_id,
+        conn=conn,
+        submit_attempt_id=submit_attempt_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        mode=settings.MODE,
+    )
     _record_submit_attempt_preflight(
         conn=conn,
         client_order_id=client_order_id,
@@ -2365,6 +2385,9 @@ def _submit_via_standard_path(
             exchange_order_id=UNSET_EVENT_FIELD,
             state_to="PENDING_SUBMIT",
             reason_code=UNSET_EVENT_FIELD,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(submit_attempt_id),
             side=side,
             status="PENDING_SUBMIT",
         )
@@ -2631,6 +2654,9 @@ def _submit_via_standard_path(
                 submit_attempt_id=submit_attempt_id,
                 exchange_order_id=order.exchange_order_id,
                 reason_code=UNSET_EVENT_FIELD,
+                signal_ts=int(ts),
+                decision_ts=int(ts),
+                decision_id=str(submit_attempt_id),
                 side=side,
                 status=order.status,
             )
@@ -2770,6 +2796,9 @@ def live_execute_signal(
                     submit_attempt_id=UNSET_EVENT_FIELD,
                     exchange_order_id=UNSET_EVENT_FIELD,
                     status="HALTED",
+                    signal_ts=int(ts),
+                    decision_ts=int(ts),
+                    decision_id=(str(decision_id) if decision_id is not None else "-"),
                     state_to="HALTED",
                     reason_code=RISKY_ORDER_BLOCK,
                     sell_failure_category=SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
@@ -3351,6 +3380,9 @@ def live_execute_signal(
                         side=side,
                         status=existing_status,
                         reason_code=RISKY_ORDER_BLOCK,
+                        signal_ts=int(ts),
+                        decision_ts=int(ts),
+                        decision_id=str(submit_attempt_id),
                         reason=reason,
                     )
                 )

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -688,6 +688,7 @@ def test_run_loop_kill_switch_liquidate_with_open_position_triggers_flatten(monk
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is True
     assert state.last_flatten_position_status == "dry_run"
     assert state.last_flatten_position_summary is not None
     assert '"trigger": "kill-switch"' in state.last_flatten_position_summary
@@ -730,6 +731,7 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is True
     assert state.halt_state_unresolved is True
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
@@ -1190,3 +1192,4 @@ def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
         "operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n
         for n in halted
     )
+

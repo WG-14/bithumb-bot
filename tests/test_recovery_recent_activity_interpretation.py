@@ -124,8 +124,36 @@ def test_interpret_submit_unknown_recent_activity_accepts_client_id_when_exchang
         recent_fills=[],
     )
 
-    assert result.outcome == "insufficient_evidence"
-    assert result.candidate_count == 0
+    assert result.outcome == "success"
+    assert result.candidate_count == 1
+    assert result.matched_exchange_order_id is None
+    assert result.matched_order is not None
+    assert result.matched_order.status == "CANCELED"
+
+
+def test_interpret_submit_unknown_recent_activity_fill_only_evidence_resolves_with_timeout_metadata() -> None:
+    result = _interpret_submit_unknown_recent_activity(
+        local_row=_local_submit_unknown_row(qty_req=1.0),
+        submit_attempt_context=_timeout_submit_context(qty=1.0),
+        recent_orders=[],
+        recent_fills=[
+            BrokerFill(
+                client_order_id="submit_timeout_restart",
+                fill_id="fill-only",
+                fill_ts=111,
+                price=100.0,
+                qty=0.4,
+                fee=0.0,
+                exchange_order_id="ex-fill-only",
+            )
+        ],
+    )
+
+    assert result.outcome == "success"
+    assert result.candidate_count == 1
+    assert result.matched_exchange_order_id == "ex-fill-only"
+    assert len(result.matched_fills) == 1
+    assert result.has_partial_fill_evidence is True
 
 
 def test_apply_recent_fills_allows_client_id_linkage_for_non_submit_unknown_when_exchange_missing(tmp_path) -> None:

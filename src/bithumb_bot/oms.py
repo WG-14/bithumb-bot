@@ -535,6 +535,13 @@ def create_order(
 def record_submit_started(
     client_order_id: str,
     conn: sqlite3.Connection | None = None,
+    *,
+    submit_attempt_id: str | None = None,
+    symbol: str | None = None,
+    side: str | None = None,
+    qty: float | None = None,
+    mode: str | None = None,
+    message: str | None = None,
 ) -> None:
     ts = int(time.time() * 1000)
     own_conn = conn is None
@@ -545,6 +552,13 @@ def record_submit_started(
             client_order_id=client_order_id,
             event_type="submit_started",
             event_ts=ts,
+            order_status="PENDING_SUBMIT",
+            symbol=symbol,
+            side=side,
+            submit_attempt_id=submit_attempt_id,
+            mode=mode,
+            qty=qty,
+            message=message or "submit intent staged before broker dispatch",
         )
         if own_conn:
             conn.commit()

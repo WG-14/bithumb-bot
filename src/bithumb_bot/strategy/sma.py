@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Any
@@ -13,6 +14,7 @@ from ..dust import (
     PositionStateModel,
 )
 from ..lifecycle import OPEN_POSITION_STATE, mark_harmless_dust_positions
+from ..utils_time import parse_interval_sec
 from .base import PositionContext, StrategyDecision
 from .exit_rules import ExitRule, create_exit_rules
 
@@ -31,6 +33,14 @@ def _load_signal_rows(
         params.append(int(through_ts_ms))
     query += " ORDER BY ts ASC"
     return conn.execute(query, tuple(params)).fetchall()
+
+def _closed_candle_cutoff_ts_ms(*, interval_sec: int, now_ms: int | None = None) -> int | None:
+    """Return the latest candle start timestamp that is safely closed now."""
+    interval_ms = max(1, int(interval_sec)) * 1000
+    close_guard_ms = max(2_000, min(30_000, interval_ms // 20))
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    cutoff_ts_ms = current_ms - interval_ms - close_guard_ms
+    return cutoff_ts_ms if cutoff_ts_ms >= 0 else None
 
 
 def _sma(values: list[float], n: int, end: int) -> float:
@@ -455,11 +465,18 @@ class SmaCrossStrategy:
         if self.short_n >= self.long_n:
             raise ValueError("short는 long보다 작아야 해. 예: short=7 long=30")
 
+        interval_sec = parse_interval_sec(self.interval)
+        signal_through_ts_ms = through_ts_ms
+        if signal_through_ts_ms is None:
+            signal_through_ts_ms = _closed_candle_cutoff_ts_ms(interval_sec=interval_sec)
+            if signal_through_ts_ms is None:
+                return None
+
         rows = _load_signal_rows(
             conn,
             pair=self.pair,
             interval=self.interval,
-            through_ts_ms=through_ts_ms,
+            through_ts_ms=signal_through_ts_ms,
         )
         if len(rows) < self.long_n + 2:
             return None
@@ -624,11 +641,18 @@ class SmaWithFilterStrategy:
             int(self.volatility_window),
             int(self.overextended_lookback) + 1,
         )
+        interval_sec = parse_interval_sec(self.interval)
+        signal_through_ts_ms = through_ts_ms
+        if signal_through_ts_ms is None:
+            signal_through_ts_ms = _closed_candle_cutoff_ts_ms(interval_sec=interval_sec)
+            if signal_through_ts_ms is None:
+                return None
+
         rows = _load_signal_rows(
             conn,
             pair=self.pair,
             interval=self.interval,
-            through_ts_ms=through_ts_ms,
+            through_ts_ms=signal_through_ts_ms,
         )
         if len(rows) < min_rows:
             return None

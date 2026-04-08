@@ -291,6 +291,27 @@ class _SubmitUnknownRecentOrderBroker(_NoopBroker):
         ]
 
 
+class _SubmitUnknownRecentOrderNoExchangeBroker(_NoopBroker):
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return [
+            BrokerOrder(
+                client_order_id="submit_timeout_restart",
+                exchange_order_id=None,
+                side="BUY",
+                status="CANCELED",
+                price=100.0,
+                qty_req=1.0,
+                qty_filled=0.0,
+                created_ts=250,
+                updated_ts=260,
+            )
+        ]
 
 
 class _SubmitUnknownStrongCorrelationBroker(_NoopBroker):
@@ -898,6 +919,110 @@ def test_submit_unknown_recent_fill_restart_path_escalates_instead_of_silent_res
     assert state.unresolved_open_order_count == 1
 
 
+def test_submit_unknown_timeout_metadata_recent_order_without_exchange_resolves_on_restart(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentOrderNoExchangeBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error, qty_filled FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert row is not None
+    assert row["status"] == "CANCELED"
+    assert row["exchange_order_id"] is None
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert autolink is not None
+    assert "outcome=order_only" in str(autolink["message"])
+    assert gate_reason is None
+
+
+def test_submit_unknown_timeout_metadata_recent_fill_only_resolves_on_restart(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    reconcile_with_broker(_SubmitUnknownRecentFillBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error, qty_filled FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        autolink = conn.execute(
+            """
+            SELECT message
+            FROM order_events
+            WHERE client_order_id='submit_timeout_restart' AND event_type='reconcile_submit_unknown_autolink'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert row["exchange_order_id"] == "ex-submit-unknown-fill"
+    assert float(row["qty_filled"]) == pytest.approx(1.0)
+    assert autolink is not None
+    assert "outcome=fill_only" in str(autolink["message"])
+    assert gate_reason is None
+
+
 def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
@@ -1101,7 +1226,7 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
     assert row["status"] == "CANCELED"
     assert row["exchange_order_id"] == "ex-submit-unknown-strong"
     assert autolink is not None
-    assert "outcome=success" in str(autolink["message"])
+    assert "outcome=order_only" in str(autolink["message"])
     assert gate_reason is None
 
 

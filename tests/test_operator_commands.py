@@ -1790,6 +1790,7 @@ def test_panic_stop_blocks_new_orders_and_cancels_open_orders_without_flatten(mo
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is False
     assert state.last_cancel_open_orders_status == "ok"
     assert state.last_flatten_position_status == "skipped"
     assert state.last_flatten_position_summary is not None
@@ -1877,6 +1878,7 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
     assert state.trading_enabled is False
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is True
     assert state.last_flatten_position_status == "submitted"
     assert state.last_cancel_open_orders_status == "ok"
     assert "flatten_status=submitted" in str(state.last_disable_reason)
@@ -2646,6 +2648,7 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "[P1] order_recovery_status" in out
     assert "unresolved_count=6" in out
     assert "recovery_required_count=3" in out
+    assert "[RUN-LOCK]" in out
     assert "[P2] resume_eligibility" in out
     assert "active_blocker_summary=" in out
     assert "risk_level=high" in out
@@ -2910,6 +2913,8 @@ def test_health_prints_risk_snapshot_for_operator_visibility(monkeypatch, capsys
     assert "blockers=none" in out
     assert "resume_safety=unsafe" in out
     assert "unresolved_open_order_count=4 recovery_required_count=2 submit_unknown_count=0" in out
+    assert "recovery_required_present=1" in out
+    assert "run_lock=path=" in out
     assert "current_halt_reason=code=PERIODIC_RECONCILE_FAILED reason=periodic reconcile failed" in out
     assert "reconcile_latest=epoch_sec=1000.0 status=error reason_code=RECONCILE_TIMEOUT" in out
     assert (
@@ -4994,3 +4999,4 @@ def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, ca
     assert f"reason_code={DUST_RESIDUAL_UNSELLABLE}" in out
     assert "EXIT_PARTIAL_LEFT_DUST" in out
     assert "MANUAL_DUST_REVIEW_REQUIRED" in out
+

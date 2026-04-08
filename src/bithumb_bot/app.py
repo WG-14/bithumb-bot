@@ -42,6 +42,7 @@ from .recovery import (
     reconcile_with_broker,
     recover_order_with_exchange_id,
 )
+from .run_lock import read_run_lock_status
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
@@ -99,17 +100,32 @@ def _format_rule_value_with_source(*, field: str, value: object, source: dict[st
     return f"{value} (source={rule_source_for(field, source)})"
 
 
+def _closed_candle_cutoff_ts_ms(*, interval: str, now_ms: int | None = None) -> int | None:
+    interval_sec = parse_interval_sec(interval)
+    interval_ms = max(1, int(interval_sec)) * 1000
+    close_guard_ms = max(2_000, min(30_000, interval_ms // 20))
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    cutoff_ts_ms = current_ms - interval_ms - close_guard_ms
+    return cutoff_ts_ms if cutoff_ts_ms >= 0 else None
+
+
 def load_recent(conn: sqlite3.Connection, need: int):
-    rows = conn.execute(
-        """
+    through_ts_ms = _closed_candle_cutoff_ts_ms(interval=INTERVAL)
+    query = """
         SELECT ts, close
         FROM candles
         WHERE pair=? AND interval=?
+    """
+    params: list[object] = [PAIR, INTERVAL]
+    if through_ts_ms is not None:
+        query += " AND ts <= ?"
+        params.append(int(through_ts_ms))
+    query += """
         ORDER BY ts DESC
         LIMIT ?
-        """,
-        (PAIR, INTERVAL, need),
-    ).fetchall()
+    """
+    params.append(need)
+    rows = conn.execute(query, tuple(params)).fetchall()
 
     if len(rows) < need:
         return None
@@ -128,7 +144,7 @@ def cmd_signal(short_n: int, long_n: int):
     r = compute_signal(conn, short_n, long_n)
     conn.close()
     if r is None:
-        print(f"[SIGNAL] 데이터가 부족해. 먼저 sync를 실행해줘.")
+        print(f"[SIGNAL] ?????????? ???????繹먮끍???????????????????嫄????? ???????곗뿨????癲ル슢???? sync?????????????????")
         return
 
     raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
@@ -140,19 +156,19 @@ def cmd_signal(short_n: int, long_n: int):
 
 
 def cmd_explain(short_n: int, long_n: int):
-    """왜 HOLD/BUY/SELL이 나왔는지 '마지막 구간 숫자'를 눈으로 보게 해줌"""
+    """Print recent signal explanation details."""
     need = long_n + 2
     conn = ensure_db()
     rows_closes = load_recent(conn, need)
     conn.close()
 
     if rows_closes is None:
-        print(f"[EXPLAIN] 데이터가 부족해. need={need}")
+        print(f"[EXPLAIN] ?????????? ???????繹먮끍???????????????????嫄????? need={need}")
         return
 
     rows, closes = rows_closes
     raw_suffix = f" raw_symbol={RAW_SYMBOL}" if RAW_SYMBOL else ""
-    print(f"[EXPLAIN {MARKET} {INTERVAL}{raw_suffix}] last {need} closes (시간순)")
+    print(f"[EXPLAIN {MARKET} {INTERVAL}{raw_suffix}] last {need} closes (???????")
     for (ts, close) in rows:
         print(f"  {kst_str(int(ts))}  close={float(close):.2f}")
 
@@ -160,11 +176,11 @@ def cmd_explain(short_n: int, long_n: int):
     r = compute_signal(conn, short_n, long_n)
     conn.close()
     print("")
-    print("계산 요약:")
-    print(f"  prev short SMA = 평균(직전 {short_n}개 close)")
-    print(f"  prev long  SMA = 평균(직전 {long_n}개 close)")
-    print(f"  curr short SMA = 평균(현재 {short_n}개 close)")
-    print(f"  curr long  SMA = 평균(현재 {long_n}개 close)")
+    print("????????????????????")
+    print(f"  prev short SMA = ??????????됰Ŧ?????????{short_n}??close)")
+    print(f"  prev long  SMA = ??????????됰Ŧ?????????{long_n}??close)")
+    print(f"  curr short SMA = ????????????ш끽維뽳쭩?뱀땡???얩맪??{short_n}??close)")
+    print(f"  curr long  SMA = ????????????ш끽維뽳쭩?뱀땡???얩맪??{long_n}??close)")
     print("")
     print(f"  prev_s={r['prev_s']:.2f}, prev_l={r['prev_l']:.2f}")
     print(f"  curr_s={r['curr_s']:.2f}, curr_l={r['curr_l']:.2f}")
@@ -185,7 +201,7 @@ def cmd_status():
     conn.close()
 
     if row is None:
-        print("[STATUS] 캔들이 없음. 먼저 sync 실행")
+        print("[STATUS] ??????????????????筌?? ???????곗뿨????癲ル슢???? sync ????????")
         return
 
     last_close = float(row[0])
@@ -471,6 +487,7 @@ def cmd_run(short_n: int, long_n: int):
         with acquire_run_lock(Path(settings.RUN_LOCK_PATH)):
             run_loop(short_n, long_n)
     except RunLockError as e:
+        run_lock_status = read_run_lock_status(Path(settings.RUN_LOCK_PATH))
         notify(
             safety_event(
                 "run_lock_conflict",
@@ -479,6 +496,15 @@ def cmd_run(short_n: int, long_n: int):
                 exchange_order_id="-",
                 reason_code="RUN_LOCK_CONFLICT",
                 alert_kind="run_lock_conflict",
+                lock_path=str(run_lock_status.lock_path),
+                lock_owner_pid=run_lock_status.owner_pid if run_lock_status.owner_pid is not None else "-",
+                lock_owner_hostname=run_lock_status.owner_hostname or "-",
+                lock_created_at=run_lock_status.created_at or "-",
+                lock_age_seconds=run_lock_status.age_seconds if run_lock_status.age_seconds is not None else "-",
+                lock_owner_state=run_lock_status.owner_state_text,
+                lock_stale_candidate=1 if run_lock_status.is_stale_candidate else 0,
+                lock_owner_text=run_lock_status.owner_text or "-",
+                lock_human_text=run_lock_status.to_human_text(),
                 reason=str(e),
             )
         )
@@ -867,10 +893,14 @@ def cmd_health() -> None:
         print(f"  {key}={rendered}")
     print(f"  dust_qty_below_min={dust_context.qty_below_min_summary}")
     print(f"  dust_notional_below_min={dust_context.notional_below_min_summary}")
+    print(f"  recovery_required_present={1 if health['recovery_required_count'] else 0}")
+    print(f"  last_reconcile_epoch_sec={health['last_reconcile_epoch_sec']}")
+    print(f"  last_reconcile_status={health['last_reconcile_status']}")
     print(f"  last_disable_reason={health['last_disable_reason']}")
     print(f"  halt_new_orders_blocked={health['halt_new_orders_blocked']}")
     print(f"  halt_reason_code={health['halt_reason_code']}")
     print(f"  halt_state_unresolved={health['halt_state_unresolved']}")
+    print(f"  run_lock={read_run_lock_status(Path(settings.RUN_LOCK_PATH)).to_human_text()}")
     print(f"  last_cancel_open_orders_epoch_sec={health['last_cancel_open_orders_epoch_sec']}")
     print(f"  last_cancel_open_orders_trigger={health['last_cancel_open_orders_trigger']}")
     print(f"  last_cancel_open_orders_status={health['last_cancel_open_orders_status']}")
@@ -2285,6 +2315,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    unresolved_count={report['unresolved_count']}")
     print(f"    recovery_required_count={report['recovery_required_count']}")
     print(f"    submit_unknown_count={report['submit_unknown_count']}")
+    print("  [RUN-LOCK]")
+    run_lock = report.get("run_lock") or {}
+    print(f"    {run_lock.get('human_text') or '-'}")
     print("  [P2] resume_eligibility")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    can_resume={'true' if bool(report['can_resume']) else 'false'}")
@@ -2703,6 +2736,7 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
         reason_code="KILL_SWITCH",
         halt_new_orders_blocked=True,
         unresolved=True,
+        attempt_flatten=bool(flatten),
     )
 
     from .broker.bithumb import BithumbBroker
@@ -2725,6 +2759,7 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
             reason_code="KILL_SWITCH",
             halt_new_orders_blocked=True,
             unresolved=True,
+            attempt_flatten=bool(flatten),
         )
         notify(
             safety_event(
@@ -2744,6 +2779,7 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
         reason_code=halt_reason.code,
         halt_new_orders_blocked=True,
         unresolved=unresolved,
+        attempt_flatten=bool(flatten),
     )
     resume_allowed, resume_blocks = evaluate_resume_eligibility()
     resume_blocker_codes = ", ".join(blocker.code for blocker in resume_blocks) if resume_blocks else "none"
@@ -2753,6 +2789,7 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
         else "none"
     )
     resume_precondition = "clear" if resume_allowed else "blocked"
+    state = runtime_state.snapshot()
     notify(
         safety_event(
             "panic_stop_completed",
@@ -2764,18 +2801,19 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
             resume_allowed=1 if resume_allowed else 0,
             resume_blockers=resume_blocker_codes,
             resume_blocker_reason_codes=resume_blocker_reason_codes,
-            cancel_status=runtime_state.snapshot().last_cancel_open_orders_status or "unknown",
-            flatten_status=runtime_state.snapshot().last_flatten_position_status or "skipped",
+            cancel_status=state.last_cancel_open_orders_status or "unknown",
+            flatten_status=state.last_flatten_position_status or "skipped",
+            auto_liquidate_requested=1 if state.halt_policy_auto_liquidate_positions else 0,
             resume_precondition=resume_precondition,
             reason=halt_reason.detail,
         )
     )
 
-    state = runtime_state.snapshot()
     print("[PANIC-STOP]")
     print(f"  flatten_requested={1 if flatten else 0}")
     print(f"  trading_enabled={state.trading_enabled}")
     print(f"  halt_new_orders_blocked={state.halt_new_orders_blocked}")
+    print(f"  halt_policy_auto_liquidate_positions={1 if state.halt_policy_auto_liquidate_positions else 0}")
     print(f"  halt_reason_code={state.halt_reason_code}")
     print(f"  last_disable_reason={state.last_disable_reason}")
     print(f"  last_cancel_open_orders_status={state.last_cancel_open_orders_status}")
@@ -3399,13 +3437,13 @@ def main(argv: list[str] | None = None) -> int:
         "--observation-window-bars",
         type=int,
         default=5,
-        help="blocked-entry 관측 구간(봉 개수), 기본 5",
+        help="blocked-entry ?????????몃뱥??????????????????????????, ????????5",
     )
     strategy_report.add_argument(
         "--min-observation-sample",
         type=int,
         default=10,
-        help="blocked-entry 관측 최소 표본 수(미만이면 insufficient sample 표시)",
+        help="blocked-entry ?????????몃뱥?????????됰Ŧ?????????????????븐뼐?????????????????⑥レ뿥?????棺堉?뤃??믠뫖夷???????????insufficient sample ??????",
     )
     strategy_report.add_argument("--json", action="store_true")
 
@@ -3595,3 +3633,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

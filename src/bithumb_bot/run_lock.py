@@ -57,6 +57,7 @@ class RunLockStatus:
     owner_hostname: str | None
     created_at: str | None
     age_seconds: float | None
+    owner_text: str | None
     is_stale_candidate: bool
 
     @property
@@ -73,11 +74,25 @@ class RunLockStatus:
         created_text = self.created_at or "unknown"
         age_text = f"{self.age_seconds:.1f}s" if self.age_seconds is not None else "unknown"
         stale_text = "yes" if self.is_stale_candidate else "no"
+        raw_owner_text = self.owner_text or "unknown"
         return (
             f"path={self.lock_path} owner_pid={owner_text} host={host_text} "
             f"created_at={created_text} age={age_text} "
-            f"stale_candidate={stale_text} ({self.owner_state_text})"
+            f"stale_candidate={stale_text} status={self.owner_state_text} owner_text={raw_owner_text}"
         )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "lock_path": str(self.lock_path),
+            "owner_pid": self.owner_pid,
+            "owner_hostname": self.owner_hostname,
+            "created_at": self.created_at,
+            "age_seconds": self.age_seconds,
+            "owner_text": self.owner_text,
+            "owner_state_text": self.owner_state_text,
+            "is_stale_candidate": self.is_stale_candidate,
+            "human_text": self.to_human_text(),
+        }
 
 
 def _default_lock_path() -> Path:
@@ -238,6 +253,7 @@ def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
             owner_hostname=None,
             created_at=None,
             age_seconds=None,
+            owner_text=None,
             is_stale_candidate=False,
         )
 
@@ -253,6 +269,7 @@ def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
         owner_hostname=state.hostname,
         created_at=state.created_at,
         age_seconds=state.age_seconds,
+        owner_text=state.owner_text,
         is_stale_candidate=state.is_stale_candidate,
     )
 
@@ -288,13 +305,14 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
 
         if previous_state.is_stale_candidate:
             LOGGER.warning(
-                "reclaimed stale run lock file at %s (previous_pid=%s previous_host=%s previous_created_at=%s age=%.0fs); "
+                "reclaimed stale run lock file at %s (previous_pid=%s previous_host=%s previous_created_at=%s age=%.0fs owner_text=%s); "
                 "prior owner appears inactive and file lock was free",
                 path,
                 previous_state.pid,
                 previous_state.hostname,
                 previous_state.created_at,
                 previous_state.age_seconds,
+                previous_state.owner_text or "-",
             )
 
         os.ftruncate(fd, 0)

@@ -167,6 +167,9 @@ def test_safety_event_keeps_common_operator_fields_in_payload():
         reason_code="SUBMIT_TIMEOUT",
         state_from="PENDING_SUBMIT",
         state_to="SUBMIT_UNKNOWN",
+        signal_ts=1710000000000,
+        decision_ts=1710000000100,
+        decision_id="dec-1",
     )
 
     assert "event=order_submit_unknown" in message
@@ -179,6 +182,9 @@ def test_safety_event_keeps_common_operator_fields_in_payload():
     assert "reason_code=SUBMIT_TIMEOUT" in message
     assert "state_from=PENDING_SUBMIT" in message
     assert "state_to=SUBMIT_UNKNOWN" in message
+    assert "signal_ts=1710000000000" in message
+    assert "decision_ts=1710000000100" in message
+    assert "decision_id=dec-1" in message
 
 
 def test_safety_event_infers_critical_severity_for_major_safety_states():

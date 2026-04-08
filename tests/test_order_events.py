@@ -123,6 +123,62 @@ def test_intent_event_persists_submit_intent_metadata(tmp_path):
     assert row["payload_fingerprint"] is None
 
 
+def test_submit_started_event_persists_submit_attempt_metadata(tmp_path):
+    db_path = tmp_path / "order_events_submit_started.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_submit_started",
+            submit_attempt_id="attempt_started",
+            side="SELL",
+            qty_req=0.25,
+            price=123456.0,
+            status="PENDING_SUBMIT",
+            ts_ms=1234567890,
+            conn=conn,
+        )
+        record_submit_started(
+            "o_submit_started",
+            conn=conn,
+            submit_attempt_id="attempt_started",
+            symbol="ETH_KRW",
+            side="SELL",
+            qty=0.25,
+            mode="live",
+        )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                client_order_id,
+                submit_attempt_id,
+                symbol,
+                side,
+                qty,
+                mode,
+                order_status,
+                message
+            FROM order_events
+            WHERE client_order_id='o_submit_started' AND event_type='submit_started'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["client_order_id"] == "o_submit_started"
+    assert row["submit_attempt_id"] == "attempt_started"
+    assert row["symbol"] == "ETH_KRW"
+    assert row["side"] == "SELL"
+    assert float(row["qty"]) == 0.25
+    assert row["mode"] == "live"
+    assert row["order_status"] == "PENDING_SUBMIT"
+    assert "submit intent staged before broker dispatch" in str(row["message"])
+
+
 def test_order_lifecycle_reconstructable_in_timestamp_order(tmp_path):
     db_path = tmp_path / "order_events_timeline.sqlite"
     conn = ensure_db(str(db_path))

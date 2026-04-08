@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -822,6 +822,7 @@ def disable_trading_until(
     reason_code: str | None = None,
     halt_new_orders_blocked: bool = False,
     unresolved: bool = False,
+    attempt_flatten: bool = False,
 ) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -834,7 +835,7 @@ def disable_trading_until(
         _STATE.halt_policy_stage = HALT_POLICY_STAGE
         _STATE.halt_policy_block_new_orders = True
         _STATE.halt_policy_attempt_cancel_open_orders = True
-        _STATE.halt_policy_auto_liquidate_positions = False
+        _STATE.halt_policy_auto_liquidate_positions = bool(attempt_flatten)
         _STATE.halt_position_present = False
         _STATE.halt_open_orders_present = False
         _STATE.halt_operator_action_required = bool(unresolved)
@@ -863,6 +864,7 @@ def enter_halt(
     reason_code: str,
     reason: str,
     unresolved: bool,
+    attempt_flatten: bool = False,
 ) -> None:
     disable_trading_until(
         float("inf"),
@@ -870,6 +872,7 @@ def enter_halt(
         reason_code=reason_code,
         halt_new_orders_blocked=True,
         unresolved=unresolved,
+        attempt_flatten=attempt_flatten,
     )
     _LOG.error(
         safety_event(
@@ -898,3 +901,4 @@ def enable_trading() -> None:
         _STATE.resume_gate_blocked = False
         _STATE.resume_gate_reason = None
         _persist_state(_STATE)
+

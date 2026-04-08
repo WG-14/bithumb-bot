@@ -354,6 +354,10 @@ def test_read_run_lock_status_reports_live_owner(tmp_path: Path) -> None:
     assert status.owner_hostname is not None
     assert status.created_at is not None
     assert status.age_seconds is not None
+    assert status.owner_text is not None
+    status_dict = status.as_dict()
+    assert status_dict["owner_text"] == status.owner_text
+    assert "owner_text=" in status_dict["human_text"]
     assert status.is_stale_candidate is False
     assert "live owner" in status.to_human_text()
     assert "host=" in status.to_human_text()
@@ -373,7 +377,12 @@ def test_read_run_lock_status_reports_stale_candidate(tmp_path: Path) -> None:
     assert status.owner_hostname is None
     assert status.created_at is None
     assert status.age_seconds is not None
+    assert status.owner_text is not None
+    status_dict = status.as_dict()
+    assert status_dict["owner_text"] == status.owner_text
+    assert "owner_text=" in status_dict["human_text"]
     assert status.is_stale_candidate is True
+    assert status.owner_text == "999999"
     assert "stale candidate" in status.to_human_text()
 
 

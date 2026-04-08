@@ -96,13 +96,19 @@ def test_compute_signal_through_ts_excludes_newer_candles() -> None:
     assert bounded["last_close"] == 14.0
 
 
-def test_compute_signal_ignores_open_candle_tail_when_bounded() -> None:
+def test_compute_signal_ignores_open_candle_tail_when_bounded(monkeypatch) -> None:
     base_ts = 1_700_000_000_000
     # The last candle is intentionally "open" and would flip the moving-average
     # signal if the strategy were allowed to see it.
     closes = [100.0, 100.0, 100.0, 100.0, 100.0, 200.0]
     for idx, close in enumerate(closes):
         _insert_candle(base_ts + idx * 60_000, close)
+
+    # Force the strategy's default closed-only cutoff to land before the open tail.
+    monkeypatch.setattr(
+        "bithumb_bot.strategy.sma.time.time",
+        lambda: (base_ts + 5 * 60_000 + 3_100) / 1000,
+    )
 
     conn = ensure_db()
     try:
@@ -113,9 +119,9 @@ def test_compute_signal_ignores_open_candle_tail_when_bounded() -> None:
 
     assert unbounded is not None
     assert bounded is not None
-    assert unbounded["ts"] == base_ts + 5 * 60_000
+    assert unbounded["ts"] == base_ts + 4 * 60_000
     assert bounded["ts"] == base_ts + 4 * 60_000
-    assert unbounded["signal"] == "BUY"
+    assert unbounded["signal"] == "HOLD"
     assert bounded["signal"] == "HOLD"
 
 

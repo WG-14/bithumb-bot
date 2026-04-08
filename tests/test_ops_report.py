@@ -230,6 +230,8 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert "balance_source=accounts_v1_rest_snapshot" in out
     assert "category=none stale=False execution_mode=- quote_currency=- base_currency=-" in out
     assert "unresolved_open_order_count=0 recovery_required_count=0 dust_state=blocking_dust" in out
+    assert "runtime_state_snapshot=recovery_required_present=0" in out
+    assert "run_lock=path=" in out
     assert "dust_action=manual_review_before_resume" in out
     assert "dust_new_orders_allowed=0 dust_resume_allowed=0 dust_treat_as_flat=0" in out
     assert "dust_broker_qty=0.00009000 dust_local_qty=0.00009000 dust_delta_qty=0.00000000" in out

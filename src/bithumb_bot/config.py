@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import os
@@ -186,13 +186,13 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         detail = str(exc)
         if code in {"AUTH_SIGN", "PERMISSION"}:
             raise AccountsPreflightValidationError(
-                "/v1/accounts REST snapshot preflight 인증 실패: "
+                "/v1/accounts REST snapshot preflight ?몄쬆 ?ㅽ뙣: "
                 f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} "
                 f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
                 f"base_currency_missing_policy={base_missing_policy} detail={detail}"
             ) from exc
         raise AccountsPreflightValidationError(
-            "/v1/accounts REST snapshot preflight transport 실패: "
+            "/v1/accounts REST snapshot preflight transport ?ㅽ뙣: "
             f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} "
             f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
             f"base_currency_missing_policy={base_missing_policy} detail={detail}"
@@ -417,14 +417,14 @@ class Settings:
     EVERY: int = int(os.getenv("EVERY", "60"))  # seconds
 
     # strategy
-    # 운영 기본 전략은 필터 포함 sma_with_filter를 권장.
-    # STRATEGY_NAME 환경변수로 전략 이름을 명시적으로 선택한다.
+    # ?댁쁺 湲곕낯 ?꾨왂? ?꾪꽣 ?ы븿 sma_with_filter瑜?沅뚯옣.
+    # STRATEGY_NAME ?섍꼍蹂?섎줈 ?꾨왂 ?대쫫??紐낆떆?곸쑝濡??좏깮?쒕떎.
     STRATEGY_NAME: str = resolve_strategy_name_from_env()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
-    # 실거래 수수료/슬리피지 환경에서 과도한 잔진입을 줄이기 위한 보수적 기본 임계값.
+    # ?ㅺ굅???섏닔猷??щ━?쇱? ?섍꼍?먯꽌 怨쇰룄???붿쭊?낆쓣 以꾩씠湲??꾪븳 蹂댁닔??湲곕낯 ?꾧퀎媛?
     SMA_FILTER_GAP_MIN_RATIO: float = float(os.getenv("SMA_FILTER_GAP_MIN_RATIO", "0.0012"))
     SMA_FILTER_VOL_WINDOW: int = int(os.getenv("SMA_FILTER_VOL_WINDOW", "10"))
     SMA_FILTER_VOL_MIN_RANGE_RATIO: float = float(
@@ -468,15 +468,15 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
-    # 공통 기본 수수료율. 운영에서는 LIVE/PAPER 수수료율을 각각 명시한다.
+    # 怨듯넻 湲곕낯 ?섏닔猷뚯쑉. ?댁쁺?먯꽌??LIVE/PAPER ?섏닔猷뚯쑉??媛곴컖 紐낆떆?쒕떎.
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
-    # live pretrade 잔고/현금 검증 전용 보수적 추정 수수료율.
-    # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE > 0.0025(default)
+    # live pretrade ?붽퀬/?꾧툑 寃利??꾩슜 蹂댁닔??異붿젙 ?섏닔猷뚯쑉.
+    # ?곗꽑?쒖쐞: LIVE_FEE_RATE_ESTIMATE > FEE_RATE > 0.0025(default)
     LIVE_FEE_RATE_ESTIMATE: float = parse_float_env(
         "LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025")
     )
-    # paper 체결/손익 시뮬레이션 전용 수수료율.
-    # 우선순위:
+    # paper 泥닿껐/?먯씡 ?쒕??덉씠???꾩슜 ?섏닔猷뚯쑉.
+    # ?곗꽑?쒖쐞:
     #   PAPER_FEE_RATE > PAPER_FEE_RATE_ESTIMATE > FEE_RATE > LIVE_FEE_RATE_ESTIMATE > 0.0025
     PAPER_FEE_RATE: float = float(
         os.getenv(
@@ -487,11 +487,11 @@ class Settings:
             ),
         )
     )
-    # PAPER_FEE_RATE와 동일 값(기존 키 호환용).
+    # PAPER_FEE_RATE? ?숈씪 媛?湲곗〈 ???명솚??.
     PAPER_FEE_RATE_ESTIMATE: float = PAPER_FEE_RATE
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
-    # 전략 진입 비용 필터에서 기대 슬리피지를 추정할 때 사용하는 bps.
-    # 우선순위:
+    # ?꾨왂 吏꾩엯 鍮꾩슜 ?꾪꽣?먯꽌 湲곕? ?щ━?쇱?瑜?異붿젙?????ъ슜?섎뒗 bps.
+    # ?곗꽑?쒖쐞:
     #   STRATEGY_ENTRY_SLIPPAGE_BPS > MAX_MARKET_SLIPPAGE_BPS > SLIPPAGE_BPS > 0
     STRATEGY_ENTRY_SLIPPAGE_BPS: float = float(
         os.getenv(
@@ -850,16 +850,17 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 f"(got {strict_min_notional_raw!r})"
             )
 
+    if not cfg.BITHUMB_API_KEY.strip():
+        issues.append("BITHUMB_API_KEY is required when MODE=live")
+    if not cfg.BITHUMB_API_SECRET.strip():
+        issues.append("BITHUMB_API_SECRET is required when MODE=live")
+
     if not cfg.LIVE_DRY_RUN:
         if not cfg.LIVE_REAL_ORDER_ARMED:
             issues.append(
                 "LIVE_REAL_ORDER_ARMED=true is required to place real live orders "
                 "(MODE=live and LIVE_DRY_RUN=false)"
             )
-        if not cfg.BITHUMB_API_KEY.strip():
-            issues.append("BITHUMB_API_KEY is required when LIVE_DRY_RUN=false")
-        if not cfg.BITHUMB_API_SECRET.strip():
-            issues.append("BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false")
 
     if not notifier_is_configured():
         issues.append(
@@ -923,3 +924,5 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live mode preflight validation failed: " + "; ".join(issues)
         )
+
+
