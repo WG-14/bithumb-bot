@@ -9,6 +9,7 @@ from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..marketdata import fetch_orderbook_top, validated_best_quote_prices
 from ..notifier import notify
 from ..observability import format_log_kv
+from ..decision_context import load_recorded_strategy_decision_context
 from .. import runtime_state
 from ..dust import build_normalized_exposure
 from ..oms import (
@@ -75,16 +76,35 @@ def paper_execute(
             raw_qty_open=float(qty),
             dust_context=runtime_state.snapshot().last_reconcile_metadata,
         )
+        decision_context, decision_loaded = load_recorded_strategy_decision_context(
+            conn,
+            decision_id=decision_id,
+        )
+        if decision_loaded:
+            effective_flat = bool(decision_context.get("effective_flat"))
+            entry_allowed = bool(decision_context.get("entry_allowed"))
+            normalized_exposure_active = bool(decision_context.get("normalized_exposure_active"))
+            open_exposure_qty = float(decision_context.get("open_exposure_qty", qty))
+        else:
+            effective_flat = bool(normalized_exposure.effective_flat)
+            entry_allowed = bool(normalized_exposure.entry_allowed)
+            normalized_exposure_active = bool(normalized_exposure.normalized_exposure_active)
+            open_exposure_qty = float(normalized_exposure.open_exposure_qty)
 
         fee = 0.0
         trade_qty = 0.0
 
-        if signal == "BUY" and normalized_exposure.effective_flat:
+        if signal == "BUY" and effective_flat:
+            # Harmless dust is operationally flat for re-entry. Do not let the
+            # residual dust quantity re-trigger the duplicate-entry guardrail.
+            guardrail_qty = 0.0 if entry_allowed else float(
+                open_exposure_qty if normalized_exposure_active else qty
+            )
             blocked, _ = evaluate_buy_guardrails(
                 conn=conn,
                 ts_ms=int(ts),
                 cash=cash,
-                qty=float(normalized_exposure.normalized_exposure_qty if normalized_exposure.entry_allowed else qty),
+                qty=float(guardrail_qty),
                 price=float(fill_price),
             )
             if blocked:

@@ -232,6 +232,55 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is True
 
 
+def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-position-state-top-level.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=2,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=2,
+            market_price=1.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "position_state": {
+                    "raw_qty_open": 0.0,
+                    "raw_total_asset_qty": 0.0,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "position_state_source": "position_state.raw_qty_open",
+                    "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["raw_total_asset_qty"] == 0.0
+    assert ctx["open_exposure_qty"] == 0.0
+    assert ctx["dust_tracking_qty"] == 0.0
+    assert ctx["raw_total_asset_qty_truth_source"] == "position_state.raw_total_asset_qty"
+    assert ctx["open_exposure_qty_truth_source"] == "position_state.open_exposure_qty"
+    assert ctx["dust_tracking_qty_truth_source"] == "position_state.dust_tracking_qty"
+    assert ctx["position_state_source"] == "position_state.raw_qty_open"
+    assert ctx["position_state_source_truth_source"] == "context.position_state_source"
+    assert ctx["position_state"]["normalized_exposure"]["raw_total_asset_qty"] == 0.0
+    assert ctx["position_state"]["normalized_exposure"]["open_exposure_qty"] == 0.0
+    assert ctx["position_state"]["normalized_exposure"]["dust_tracking_qty"] == 0.0
+
+
 def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "decision-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

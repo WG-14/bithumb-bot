@@ -7,7 +7,7 @@ import pytest
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.lifecycle import mark_harmless_dust_positions
+from bithumb_bot.lifecycle import apply_fill_lifecycle, mark_harmless_dust_positions
 
 
 def _record_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_ms: int) -> None:
@@ -256,6 +256,90 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
     assert rows[2]["entry_client_order_id"] == "exact_min"
     assert rows[2]["position_state"] == OPEN_EXPOSURE_LOT_STATE
     assert float(rows[2]["qty_open"]) == pytest.approx(0.0001)
+
+
+def test_lifecycle_helpers_work_with_raw_tuple_rows(tmp_path):
+    db_path = tmp_path / "tuple_rows.sqlite"
+    ensure_db(str(db_path)).close()
+    conn = sqlite3.connect(db_path)
+    try:
+        fill_ts = 1_700_002_000_000
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+            VALUES (?, ?, 'BUY', 'entry', ?)
+            """,
+            (fill_ts - 1_000, "sma_with_filter", '{"pair":"BTC_KRW"}'),
+        )
+
+        apply_fill_lifecycle(
+            conn,
+            side="BUY",
+            pair="BTC_KRW",
+            trade_id=1,
+            client_order_id="tuple_buy",
+            fill_id="fill_tuple_buy",
+            fill_ts=fill_ts,
+            price=100.0,
+            qty=0.5,
+            fee=0.1,
+            strategy_name=None,
+            entry_decision_id=1,
+        )
+
+        buy_row = conn.execute(
+            """
+            SELECT strategy_name, entry_decision_id, entry_decision_linkage
+            FROM open_position_lots
+            WHERE entry_client_order_id='tuple_buy'
+            """
+        ).fetchone()
+
+        dust = classify_dust_residual(
+            broker_qty=0.00009999,
+            local_qty=0.00009999,
+            min_qty=0.0001,
+            min_notional_krw=5000.0,
+            latest_price=40_000_000.0,
+            partial_flatten_recent=False,
+            partial_flatten_reason="not_recent",
+            qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+            matched_harmless_resume_allowed=True,
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("BTC_KRW", 2, "raw_dust", fill_ts + 1_000, 40_000_000.0, 0.00009999, OPEN_EXPOSURE_LOT_STATE),
+        )
+        conn.commit()
+
+        updated = mark_harmless_dust_positions(
+            conn,
+            pair="BTC_KRW",
+            dust_metadata=build_dust_display_context(dust),
+        )
+        state_row = conn.execute(
+            "SELECT position_state FROM open_position_lots WHERE entry_client_order_id='raw_dust'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert buy_row is not None
+    assert buy_row[0] == "sma_with_filter"
+    assert int(buy_row[1]) == 1
+    assert buy_row[2] == "direct"
+    assert updated == 1
+    assert state_row is not None
+    assert state_row[0] == DUST_TRACKING_LOT_STATE
 
 
 def test_schema_bootstrap_backfills_open_position_lot_state_for_legacy_rows(tmp_path):

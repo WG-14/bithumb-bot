@@ -684,6 +684,47 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
 
 
+def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-position-state-top-level.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=4,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=4,
+            market_price=102_500_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "position_state": {
+                    "raw_qty_open": 0.0,
+                    "raw_total_asset_qty": 0.0,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "raw_qty_open_truth_source=position_state.raw_qty_open" in out
+    assert "raw_total_asset_qty_truth_source=position_state.raw_total_asset_qty" in out
+    assert "open_exposure_qty_truth_source=position_state.open_exposure_qty" in out
+    assert "dust_tracking_qty_truth_source=position_state.dust_tracking_qty" in out
+    assert "position_state_source_truth_source=context.position_state_source" in out
+
+
 
 
 def test_sell_failure_category_from_observability_flags_boundary_below_min_from_message():
@@ -766,6 +807,14 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
             context={
                 "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
                 "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source_truth_source": "context.submit_qty_source",
+                "position_state_source_truth_source": "context.position_state_source",
+                "raw_qty_open_truth_source": "position_state.raw_qty_open",
+                "raw_total_asset_qty_truth_source": "position_state.raw_total_asset_qty",
+                "open_exposure_qty_truth_source": "position_state.open_exposure_qty",
+                "dust_tracking_qty_truth_source": "position_state.dust_tracking_qty",
+                "entry_allowed_truth_source": "position_gate.entry_allowed",
+                "effective_flat_truth_source": "position_gate.effective_flat_due_to_harmless_dust",
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
                 "sell_open_exposure_qty": 0.00009629,
@@ -793,7 +842,12 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "sell_failure_category=dust_suppression" in out
     assert "sell_failure_detail=dust_suppression" in out
     assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "submit_qty_source_truth_source=context.submit_qty_source" in out
     assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "open_exposure_qty=0.00009629" in out
+    assert "open_exposure_qty_truth_source=position_state.open_exposure_qty" in out
     assert "dust_tracking_qty=0.00009563" in out
+    assert "dust_tracking_qty_truth_source=position_state.dust_tracking_qty" in out
     assert "harmless_dust_tracked_resume_allowed" in out
+    assert "entry_allowed_truth_source=position_gate.entry_allowed" in out
+    assert "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out

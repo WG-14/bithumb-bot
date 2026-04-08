@@ -2482,12 +2482,12 @@ def test_live_execute_signal_sell_blocks_when_qty_step_floor_would_leave_unsella
 
     assert len(dust_rows) == 1
     assert latest_order is not None
-    assert float(latest_order["qty_req"]) == pytest.approx(0.0001)
+    assert float(latest_order["qty_req"]) == pytest.approx(0.00019192)
     assert float(latest_order["qty_filled"]) == pytest.approx(0.0)
     assert latest_order["status"] == "FAILED"
     assert event_row is not None
     assert event_row["event_type"] == "submit_attempt_recorded"
-    assert float(event_row["qty"]) == pytest.approx(0.0001)
+    assert float(event_row["qty"]) == pytest.approx(0.00019192)
     assert event_row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
     assert '"requested_qty":0.00019192' in str(event_row["submit_evidence"])
     assert '"normalized_qty":0.0001' in str(event_row["submit_evidence"])
@@ -3139,11 +3139,47 @@ def test_live_execute_signal_sell_blocks_when_only_dust_tracking_remains(monkeyp
 
     conn = ensure_db(str(tmp_path / "sell_dust_tracking_only.sqlite"))
     order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
-    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    order_row = conn.execute(
+        """
+        SELECT client_order_id, status, side, qty_req
+        FROM orders
+        WHERE side='SELL'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    submit_row = conn.execute(
+        """
+        SELECT submission_reason_code, submit_evidence, message
+        FROM order_events
+        WHERE submission_reason_code=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchone()
+    dust_event_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE submission_reason_code=?
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchone()["n"]
     conn.close()
 
-    assert order_count == 0
-    assert event_count == 0
+    assert order_count == 1
+    assert order_row is not None
+    assert order_row["status"] == "FAILED"
+    assert order_row["side"] == "SELL"
+    assert float(order_row["qty_req"]) == pytest.approx(0.00009193)
+    assert submit_row is not None
+    assert dust_event_count == 1
+    assert submit_row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    submit_evidence = json.loads(str(submit_row["submit_evidence"]))
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.raw_total_asset_qty"
+    assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00009193)
+    assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0)
 
 
 @pytest.mark.fast_regression
@@ -3203,6 +3239,8 @@ def test_live_execute_signal_sell_blocks_when_broker_precision_still_leaves_unse
     submit_evidence = json.loads(str(row["submit_evidence"]))
     assert submit_evidence["sell_failure_category"] == "remainder_dust_guard"
     assert submit_evidence["dust_scope"] == "remainder_after_sell"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.raw_total_asset_qty"
+    assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.000191939)
     assert "dust_scope=remainder_after_sell" in str(row["message"])
     assert "guard_action=block_sell_remainder_dust" in str(row["message"])
     assert '"dust_scope":"remainder_after_sell"' in str(row["submit_evidence"])
@@ -3292,6 +3330,11 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert "position_qty=0.000090000000" in str(event_rows[0]["message"])
     assert "normalized_qty=0.000000000000" in str(event_rows[0]["message"])
     assert "detail=boundary_below_min" in str(event_rows[0]["message"])
+    assert '"raw_total_asset_qty":0.00009' in str(event_rows[0]["submit_evidence"]) or '"raw_total_asset_qty":9e-05' in str(event_rows[0]["submit_evidence"])
+    assert '"sell_submit_qty_source":"position_state.raw_total_asset_qty"' in str(event_rows[0]["submit_evidence"])
+    assert '"decision_truth_sources"' in str(event_rows[0]["submit_evidence"])
+    assert '"entry_allowed_truth_source":"-"' in str(event_rows[0]["submit_evidence"])
+    assert '"effective_flat_truth_source":"-"' in str(event_rows[0]["submit_evidence"])
     assert '"position_qty":0.00009' in str(event_rows[0]["submit_evidence"]) or '"position_qty":9e-05' in str(event_rows[0]["submit_evidence"])
     assert '"submit_payload_qty":0' in str(event_rows[0]["submit_evidence"]) or '"submit_payload_qty":0.0' in str(event_rows[0]["submit_evidence"])
     assert '"normalized_qty":0' in str(event_rows[0]["submit_evidence"]) or '"normalized_qty":0.0' in str(event_rows[0]["submit_evidence"])
@@ -3401,7 +3444,7 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
     event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
     suppression_row = conn.execute(
         """
-        SELECT reason_code, seen_count, dust_state, dust_action
+        SELECT reason_code, seen_count, dust_state, dust_action, context_json
         FROM order_suppressions
         WHERE strategy_name='dust_exit_test' AND signal='SELL'
         ORDER BY updated_ts DESC
@@ -3417,6 +3460,10 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
     assert int(suppression_row["seen_count"]) == 2
     assert suppression_row["dust_state"] == "harmless_dust"
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
+    context = json.loads(str(suppression_row["context_json"]))
+    assert context["entry_allowed_truth_source"] == "-"
+    assert context["effective_flat_truth_source"] == "-"
+    assert context["submit_qty_source_truth_source"] == "context.submit_qty_source"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 
@@ -3532,7 +3579,7 @@ def test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_s
     ).fetchone()["n"]
     suppression_row = conn.execute(
         """
-        SELECT reason_code, seen_count, dust_state, dust_action
+        SELECT reason_code, seen_count, dust_state, dust_action, context_json
         FROM order_suppressions
         WHERE strategy_name='dust_exit_test' AND signal='SELL'
         ORDER BY updated_ts DESC
@@ -3549,6 +3596,9 @@ def test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_s
     assert int(suppression_row["seen_count"]) == 2
     assert suppression_row["dust_state"] == "harmless_dust"
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
+    context = json.loads(str(suppression_row["context_json"]))
+    assert context["entry_allowed_truth_source"] == "-"
+    assert context["effective_flat_truth_source"] == "-"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 

@@ -361,10 +361,15 @@ P2:
 `open_position_lots.position_state` is part of the storage contract and must keep the
 following meaning stable:
 
-- `open_exposure`: the real strategy-visible position and the default SELL submission base.
-  SELL submission logic should read `open_exposure_qty` and exclude `dust_tracking_qty`.
-- `dust_tracking`: operator-only residual tracking. It records harmless dust evidence and is
-  excluded from normal SELL submission by default.
+- `raw_total_asset_qty`: the broker-visible total remainder for the asset. It is a
+  reconciliation and reporting value, not a SELL submission base.
+- `open_exposure_qty`: the real strategy-visible position and the default SELL submission
+  base. Normal SELL logic must read this quantity and exclude `dust_tracking_qty`.
+- `dust_tracking_qty`: operator-only residual tracking. It records harmless dust evidence,
+  represents unsellable dust for normal execution, and must stay out of normal SELL
+  submission.
+- `open_exposure`: real strategy exposure that may be sold normally.
+- `dust_tracking`: operator-only residual tracking for harmless dust evidence.
 
 Practical routing rules:
 
@@ -374,6 +379,10 @@ Practical routing rules:
   basis for a normal SELL order.
 - harmless dust suppression is defined around the `dust_tracking` path, not the
   `open_exposure` path.
+- suppression behavior must avoid creating a normal SELL order, SELL event, or fresh
+  client order id for dust-only exits unless an operator explicitly clears the dust state.
+- reporting behavior must surface all three quantities so operators can explain the gap
+  between broker-visible holdings and the sellable position base.
 - boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty`
   stays `open_exposure`.
 - if a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as

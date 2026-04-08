@@ -19,6 +19,27 @@ DUST_TRACKING_STATE = DUST_TRACKING_LOT_STATE
 _ENTRY_DECISION_FALLBACK_LOOKBACK_MS = 15 * 60 * 1000
 
 
+def _row_value(row: object, key: str, index: int) -> object | None:
+    """Read a SQLite result row by key when available, otherwise by position.
+
+    Lifecycle paths can be called with either ``sqlite3.Row`` or plain tuples
+    depending on how the connection was created. Keep those callers working
+    without forcing a global row-factory policy here.
+    """
+
+    if row is None:
+        return None
+    if hasattr(row, "keys"):
+        try:
+            return row[key]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError):
+            pass
+    try:
+        return row[index]  # type: ignore[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int) -> str | None:
     row = conn.execute(
         """
@@ -29,9 +50,10 @@ def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int
         """,
         (int(decision_id),),
     ).fetchone()
-    if row is None or row["strategy_name"] is None:
+    strategy_name = _row_value(row, "strategy_name", 0)
+    if strategy_name is None:
         return None
-    return str(row["strategy_name"])
+    return str(strategy_name)
 
 
 def _find_entry_decision(
@@ -65,7 +87,7 @@ def _find_entry_decision(
         return None, str(strategy_name), "ambiguous_multi_candidate"
 
     row = rows[0]
-    return int(row["id"]), str(row["strategy_name"]), "fallback_strict_match"
+    return int(_row_value(row, "id", 0) or 0), str(_row_value(row, "strategy_name", 1) or ""), "fallback_strict_match"
 
 
 def apply_fill_lifecycle(
@@ -159,19 +181,19 @@ def apply_fill_lifecycle(
             break
 
         lot = row
-        lot_qty = float(lot["qty_open"])
+        lot_qty = float(_row_value(lot, "qty_open", 6) or 0.0)
         matched_qty = min(lot_qty, remaining)
         if matched_qty <= eps:
             continue
 
-        entry_fee_total = float(lot["entry_fee_total"])
+        entry_fee_total = float(_row_value(lot, "entry_fee_total", 8) or 0.0)
         entry_fee_alloc = (entry_fee_total * (matched_qty / lot_qty)) if lot_qty > eps else 0.0
         exit_fee_alloc = float(fee) * (matched_qty / total_exit_qty)
 
-        gross_pnl = (float(price) - float(lot["entry_price"])) * matched_qty
+        gross_pnl = (float(price) - float(_row_value(lot, "entry_price", 5) or 0.0)) * matched_qty
         fee_total = entry_fee_alloc + exit_fee_alloc
         net_pnl = gross_pnl - fee_total
-        holding_time_seconds = max(0.0, (int(fill_ts) - int(lot["entry_ts"])) / 1000.0)
+        holding_time_seconds = max(0.0, (int(fill_ts) - int(_row_value(lot, "entry_ts", 4) or 0)) / 1000.0)
 
         conn.execute(
             """
@@ -202,24 +224,24 @@ def apply_fill_lifecycle(
             """,
             (
                 str(pair),
-                int(lot["entry_trade_id"]),
+                int(_row_value(lot, "entry_trade_id", 1) or 0),
                 int(trade_id),
-                str(lot["entry_client_order_id"]),
+                str(_row_value(lot, "entry_client_order_id", 2) or ""),
                 str(client_order_id),
-                lot["entry_fill_id"],
+                _row_value(lot, "entry_fill_id", 3),
                 fill_id,
-                int(lot["entry_ts"]),
+                int(_row_value(lot, "entry_ts", 4) or 0),
                 int(fill_ts),
                 float(matched_qty),
-                float(lot["entry_price"]),
+                float(_row_value(lot, "entry_price", 5) or 0.0),
                 float(price),
                 float(gross_pnl),
                 float(fee_total),
                 float(net_pnl),
                 float(holding_time_seconds),
-                strategy_name or lot["strategy_name"],
-                entry_decision_id if entry_decision_id is not None else lot["entry_decision_id"],
-                ("direct" if entry_decision_id is not None else lot["entry_decision_linkage"]),
+                strategy_name or _row_value(lot, "strategy_name", 9),
+                entry_decision_id if entry_decision_id is not None else _row_value(lot, "entry_decision_id", 10),
+                ("direct" if entry_decision_id is not None else str(_row_value(lot, "entry_decision_linkage", 11) or "")),
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name,
@@ -234,7 +256,7 @@ def apply_fill_lifecycle(
             SET qty_open=?, entry_fee_total=?
             WHERE id=?
             """,
-            (qty_open_after, fee_remaining, int(lot["id"])),
+            (qty_open_after, fee_remaining, int(_row_value(lot, "id", 0) or 0)),
         )
 
         remaining -= matched_qty
@@ -340,7 +362,7 @@ def mark_harmless_dust_positions(
 
     updated_count = 0
     for row in candidate_rows:
-        if not is_strictly_below_min_qty(qty_open=float(row["qty_open"]), min_qty=min_qty):
+        if not is_strictly_below_min_qty(qty_open=float(_row_value(row, "qty_open", 1) or 0.0), min_qty=min_qty):
             continue
         conn.execute(
             """
@@ -350,7 +372,7 @@ def mark_harmless_dust_positions(
             """,
             (
                 DUST_TRACKING_LOT_STATE,
-                int(row["id"]),
+                int(_row_value(row, "id", 0) or 0),
             ),
         )
         updated_count += 1
