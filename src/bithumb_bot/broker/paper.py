@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 from typing import Any
 
 from ..config import settings
@@ -133,7 +134,11 @@ def paper_execute(
 
             fee = spend * fee_rate
             spend_net = max(0.0, spend - fee)
-            trade_qty = spend_net / float(fill_price)
+            # Order sizing owns the rounding rule: round down one
+            # representable float so the simulated BUY never exceeds the cash
+            # budget. Fill application must only absorb the tiny residue this
+            # leaves behind; it must not perform another quantity round-down.
+            trade_qty = max(0.0, math.nextafter(spend_net / float(fill_price), 0.0))
             side = "BUY"
 
         elif signal == "SELL" and qty > POSITION_EPSILON:

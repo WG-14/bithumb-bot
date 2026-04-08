@@ -58,6 +58,50 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
         _set("PAPER_FEE_RATE", old_paper_fee)
 
 
+def test_paper_execute_buy_with_full_cash_budget_survives_float_dust(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_full_cash_dust.sqlite"))
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0025)
+    old_buy_fraction = _set("BUY_FRACTION", 1.0)
+    try:
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
+        conn.close()
+
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=1.69, ask_price=1.7),
+        )
+
+        trade = paper.paper_execute("BUY", ts=1, price=999.0)
+        assert trade is not None
+        assert trade["price"] == 1.7
+
+        # Order sizing owns the down-rounding contract. Fill application should
+        # only absorb the tiny residue this leaves behind.
+        unrounded_qty = (1_000_000 * (1.0 - 0.0025)) / 1.7
+        assert trade["qty"] < unrounded_qty
+
+        conn = ensure_db()
+        cash_krw, asset_qty = get_portfolio(conn)
+        row = conn.execute("SELECT cash_after FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+
+        assert asset_qty > 0.0
+        assert cash_krw >= 0.0
+        assert cash_krw < 1e-6
+        assert row is not None
+        assert float(row["cash_after"]) >= 0.0
+    finally:
+        _set("DB_PATH", old_db)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+        _set("BUY_FRACTION", old_buy_fraction)
+
+
 def test_paper_execute_canonicalizes_legacy_pair_once_for_orderbook_and_ledger(tmp_path: Path, monkeypatch):
     old_db = _set("DB_PATH", str(tmp_path / "paper_legacy_pair.sqlite"))
     old_pair = _set("PAIR", "BTC_KRW")

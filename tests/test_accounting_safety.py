@@ -105,6 +105,106 @@ def test_partial_fill_sequence_preserves_locked_aware_accounting(tmp_path):
     assert qty_filled == pytest.approx(1.0)
 
 
+def test_apply_fill_and_trade_tolerates_tiny_negative_cash_available_dust(tmp_path):
+    db_path = tmp_path / "tiny_negative_cash_dust.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="buy1",
+            side="BUY",
+            qty_req=1.0,
+            price=1000.0,
+            ts_ms=1,
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=-1.1641532182693481e-10,
+            cash_locked=1_000_000.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+
+        apply_fill_and_trade(
+            conn,
+            client_order_id="buy1",
+            side="BUY",
+            fill_id="f1",
+            fill_ts=10,
+            price=1_000_000.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        conn.commit()
+
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        qty_filled = float(
+            conn.execute("SELECT qty_filled FROM orders WHERE client_order_id='buy1'").fetchone()["qty_filled"]
+        )
+    finally:
+        conn.close()
+
+    assert cash_available == pytest.approx(0.0)
+    assert cash_locked == pytest.approx(0.0)
+    assert asset_available == pytest.approx(1.0)
+    assert asset_locked == pytest.approx(0.0)
+    assert qty_filled == pytest.approx(1.0)
+
+
+def test_apply_fill_and_trade_tolerates_tiny_negative_asset_available_dust(tmp_path):
+    db_path = tmp_path / "tiny_negative_asset_dust.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="sell1",
+            side="SELL",
+            qty_req=1.0,
+            price=1_000_000.0,
+            ts_ms=1,
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=0.0,
+            cash_locked=1_000_000.0,
+            asset_available=-1.1641532182693481e-10,
+            asset_locked=1_000_000.0,
+        )
+
+        # Matching owns qty rounding; ledger application only clamps the
+        # representational dust that remains after the subtraction.
+        apply_fill_and_trade(
+            conn,
+            client_order_id="sell1",
+            side="SELL",
+            fill_id="f1",
+            fill_ts=10,
+            price=1_000_000.0,
+            qty=1.0,
+            fee=0.0,
+        )
+        conn.commit()
+
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        qty_filled = float(
+            conn.execute("SELECT qty_filled FROM orders WHERE client_order_id='sell1'").fetchone()["qty_filled"]
+        )
+    finally:
+        conn.close()
+
+    assert cash_available == pytest.approx(1_000_000.0)
+    assert cash_locked == pytest.approx(1_000_000.0)
+    assert asset_available == pytest.approx(0.0)
+    assert asset_locked == pytest.approx(999_999.0)
+    assert qty_filled == pytest.approx(1.0)
+
+
 def test_overfill_raises_and_leaves_ledger_consistent(tmp_path):
     db_path = tmp_path / "overfill.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))

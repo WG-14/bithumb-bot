@@ -16,6 +16,12 @@ _LOG = logging.getLogger(__name__)
 
 
 def order_fill_tolerance(qty_req: float | None = None) -> float:
+    """Return the fill matching tolerance used by ledger-side overfill checks.
+
+    This tolerance is for fill dedupe / overfill detection only. It should not
+    be used to round order quantities; order sizing belongs to the submitter
+    (for example, paper execution rounds down before the fill is applied).
+    """
     base = max(1e-12, abs(float(settings.LIVE_ORDER_QTY_STEP or 0.0)) * 0.51)
     if qty_req is None:
         return base
@@ -149,6 +155,19 @@ def apply_fill_and_trade(
     allow_entry_decision_fallback: bool = True,
 ) -> dict[str, Any] | None:
     eps = 1e-12
+
+    def _float_tolerance(*values: float) -> float:
+        # Ledger tolerance is only for representational dust. Real shortages
+        # must still fail fast.
+        finite_values = [abs(float(v)) for v in values if math.isfinite(float(v))]
+        scale = max(finite_values) if finite_values else 0.0
+        scale = max(scale, 1.0)
+        return max(eps, math.ulp(scale) * 4)
+
+    def _normalize_tiny_negative(value: float, *, tolerance: float) -> float:
+        if -tolerance < value < 0.0:
+            return 0.0
+        return value
 
     if qty <= 0:
         raise RuntimeError(f"invalid fill qty for {client_order_id}: {qty}")
@@ -285,6 +304,10 @@ def apply_fill_and_trade(
         remaining = float(amount)
         locked_after = float(locked)
         available_after = float(available)
+        tolerance = _float_tolerance(locked_after, available_after, remaining, locked, available)
+
+        locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+        available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
 
         from_locked = min(locked_after, remaining)
         locked_after -= from_locked
@@ -293,9 +316,11 @@ def apply_fill_and_trade(
         if remaining > eps:
             available_after -= remaining
 
-        if locked_after < -eps or available_after < -eps:
+        locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+        available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
+        if locked_after < -tolerance or available_after < -tolerance:
             raise RuntimeError(
-                f"negative {field} after fill for {client_order_id}: available={available_after}, locked={locked_after}, needed={amount}"
+                f"negative {field} after fill for {client_order_id}: available={available_after}, locked={locked_after}, needed={amount}, tolerance={tolerance}"
             )
         return max(locked_after, 0.0), max(available_after, 0.0)
 
