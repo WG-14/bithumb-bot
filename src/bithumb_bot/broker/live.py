@@ -387,10 +387,77 @@ def _sell_failure_detail_from_observability(
         return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
     return SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE
 
+
+def _resolve_submit_qty_source_truth_source(
+    *,
+    decision_observability: dict[str, object],
+    submit_qty_source: str | None,
+) -> str:
+    truth_source = str(decision_observability.get("submit_qty_source_truth_source") or "").strip()
+    if truth_source and truth_source != "-":
+        return truth_source
+
+    normalized_submit_qty_source = str(submit_qty_source or "").strip()
+    if normalized_submit_qty_source == "position_state.normalized_exposure.open_exposure_qty":
+        return "derived:open_exposure_qty"
+    if normalized_submit_qty_source:
+        return "context.submit_qty_source"
+    return "-"
+
+
+def _sell_truth_source_fields(
+    *,
+    decision_observability: dict[str, object],
+    submit_qty_source: str | None,
+) -> dict[str, str]:
+    submit_qty_truth_source = _resolve_submit_qty_source_truth_source(
+        decision_observability=decision_observability,
+        submit_qty_source=submit_qty_source,
+    )
+    return {
+        "entry_allowed_truth_source": str(decision_observability.get("entry_allowed_truth_source") or "-"),
+        "effective_flat_truth_source": str(decision_observability.get("effective_flat_truth_source") or "-"),
+        "raw_qty_open_truth_source": str(decision_observability.get("raw_qty_open_truth_source") or "-"),
+        "raw_total_asset_qty_truth_source": str(
+            decision_observability.get("raw_total_asset_qty_truth_source") or "-"
+        ),
+        "position_qty_truth_source": str(decision_observability.get("position_qty_truth_source") or "-"),
+        "submit_payload_qty_truth_source": str(
+            decision_observability.get("submit_payload_qty_truth_source") or "-"
+        ),
+        "normalized_exposure_active_truth_source": str(
+            decision_observability.get("normalized_exposure_active_truth_source") or "-"
+        ),
+        "normalized_exposure_qty_truth_source": str(
+            decision_observability.get("normalized_exposure_qty_truth_source") or "-"
+        ),
+        "open_exposure_qty_truth_source": str(decision_observability.get("open_exposure_qty_truth_source") or "-"),
+        "dust_tracking_qty_truth_source": str(decision_observability.get("dust_tracking_qty_truth_source") or "-"),
+        "submit_qty_source_truth_source": submit_qty_truth_source,
+        "sell_submit_qty_source_truth_source": submit_qty_truth_source,
+        "sell_normalized_exposure_qty_truth_source": str(
+            decision_observability.get("normalized_exposure_qty_truth_source") or "-"
+        ),
+        "sell_open_exposure_qty_truth_source": str(
+            decision_observability.get("open_exposure_qty_truth_source") or "-"
+        ),
+        "sell_dust_tracking_qty_truth_source": str(
+            decision_observability.get("dust_tracking_qty_truth_source") or "-"
+        ),
+        "position_state_source_truth_source": str(
+            decision_observability.get("position_state_source_truth_source") or "-"
+        ),
+    }
+
 def _sell_submit_observability_fields(
     *,
+    decision_observability: dict[str, object] | None = None,
     submit_qty_source: str,
     position_state_source: str,
+    submit_qty_source_truth_source: str,
+    sell_normalized_exposure_qty_truth_source: str,
+    sell_open_exposure_qty_truth_source: str,
+    sell_dust_tracking_qty_truth_source: str,
     position_qty: float,
     submit_payload_qty: float,
     normalized_qty: float,
@@ -400,13 +467,24 @@ def _sell_submit_observability_fields(
     sell_failure_category: str = "none",
     sell_failure_detail: str = "none",
 ) -> dict[str, object]:
+    operator_action = str(
+        (decision_observability or {}).get("operator_action")
+        or (decision_observability or {}).get("dust_operator_action")
+        or (MANUAL_DUST_REVIEW_REQUIRED if sell_failure_category != "none" else "-")
+    )
     return {
         "position_qty": float(position_qty),
         "submit_payload_qty": float(submit_payload_qty),
         "sell_submit_qty_source": submit_qty_source,
+        "submit_qty_source_truth_source": submit_qty_source_truth_source,
+        "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
+        "operator_action": operator_action,
         "sell_normalized_exposure_qty": float(normalized_qty),
+        "sell_normalized_exposure_qty_truth_source": sell_normalized_exposure_qty_truth_source,
         "sell_open_exposure_qty": float(open_exposure_qty),
+        "sell_open_exposure_qty_truth_source": sell_open_exposure_qty_truth_source,
         "sell_dust_tracking_qty": float(dust_tracking_qty),
+        "sell_dust_tracking_qty_truth_source": sell_dust_tracking_qty_truth_source,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
         "submit_qty_source": submit_qty_source,
@@ -804,6 +882,13 @@ def _sell_dust_analysis_source(*, raw_total_asset_qty: float, dust_tracking_qty:
     if float(dust_tracking_qty) > POSITION_EPSILON:
         return "position_state.dust_tracking_qty"
     return "position_state.open_exposure_qty"
+
+
+def _harmless_dust_suppression_submit_qty_source(submit_qty_source: str | None) -> str:
+    normalized_submit_qty_source = str(submit_qty_source or "").strip()
+    if not normalized_submit_qty_source or normalized_submit_qty_source == "-":
+        return "position_state.normalized_exposure.open_exposure_qty"
+    return normalized_submit_qty_source
 
 
 def validate_order(*, signal: str, side: str, qty: float, market_price: float) -> None:
@@ -1233,6 +1318,7 @@ def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> d
 def _record_sell_dust_unsellable(
     *,
     conn,
+    state,
     ts: int,
     market_price: float,
     position_qty: float,
@@ -1335,6 +1421,33 @@ def _record_sell_dust_unsellable(
         "submit_ts": int(ts),
         "dust_signature": str(dust_details["dust_signature"]),
     }
+    sell_truth_source_fields = _sell_truth_source_fields(
+        decision_observability=decision_observability,
+        submit_qty_source=submit_qty_source,
+    )
+    last_reconcile_metadata = getattr(state, "last_reconcile_metadata", {}) or {}
+    if isinstance(last_reconcile_metadata, str):
+        try:
+            parsed_last_reconcile_metadata = json.loads(last_reconcile_metadata)
+        except Exception:
+            parsed_last_reconcile_metadata = {}
+    elif isinstance(last_reconcile_metadata, dict):
+        parsed_last_reconcile_metadata = last_reconcile_metadata
+    else:
+        parsed_last_reconcile_metadata = {}
+    dust_residual_active = bool(
+        int(parsed_last_reconcile_metadata.get("dust_residual_present") or 0) > 0
+        or str(parsed_last_reconcile_metadata.get("dust_classification") or "").strip() not in {"", "none", "no_dust"}
+    )
+    resolved_sell_submit_qty_source = (
+        "position_state.raw_total_asset_qty"
+        if (
+            dust_residual_active
+            or float(dust_details.get("broker_full_remainder_qty", 0.0) or 0.0) > POSITION_EPSILON
+            or float(position_qty) < float(dust_details["min_qty"])
+        )
+        else "position_state.normalized_exposure.open_exposure_qty"
+    )
     submit_evidence = _encode_submit_evidence(
         payload={
             "submit_mode": settings.MODE,
@@ -1348,7 +1461,8 @@ def _record_sell_dust_unsellable(
             "sell_failure_detail": sell_failure_detail,
             "dust_state": dust_details["state"],
             "operator_action": dust_details["operator_action"],
-            "sell_submit_qty_source": submit_qty_source or "position_state.normalized_exposure.open_exposure_qty",
+            "dust_action": dust_details["operator_action"],
+            "sell_submit_qty_source": resolved_sell_submit_qty_source,
             "sell_normalized_exposure_qty": float(position_qty),
             "raw_total_asset_qty": float(position_qty if raw_total_asset_qty is None else raw_total_asset_qty),
             "sell_open_exposure_qty": float(position_qty if open_exposure_qty is None else open_exposure_qty),
@@ -1361,6 +1475,7 @@ def _record_sell_dust_unsellable(
             "min_notional_krw": float(dust_details["min_notional_krw"]),
             "decision_truth_sources": truth_sources,
             **{f"{key}_truth_source": value for key, value in truth_sources.items()},
+            **sell_truth_source_fields,
             "qty_below_min": int(dust_details["qty_below_min"]),
             "normalized_non_positive": int(dust_details["normalized_non_positive"]),
             "normalized_below_min": int(dust_details["normalized_below_min"]),
@@ -1540,6 +1655,11 @@ def _record_harmless_dust_exit_suppression(
         normalized_qty=normalized_qty,
         market_price=market_price,
     )
+    suppression_submit_qty_source = _harmless_dust_suppression_submit_qty_source(submit_qty_source)
+    suppression_truth_source_fields = _sell_truth_source_fields(
+        decision_observability=decision_observability,
+        submit_qty_source=suppression_submit_qty_source,
+    )
     suppression_context = {
         **dust_context.fields,
         "signal": signal,
@@ -1548,13 +1668,17 @@ def _record_harmless_dust_exit_suppression(
         "normalized_qty": normalized_qty,
         "market_price": market_price,
         "position_qty": float(requested_qty),
+        "operator_action": dust_view.operator_action,
+        "dust_action": dust_view.operator_action,
+        "submit_qty_source": suppression_submit_qty_source,
         "submit_payload_qty": 0.0,
-        "sell_submit_qty_source": submit_qty_source or "position_state.normalized_exposure.open_exposure_qty",
+        "sell_submit_qty_source": suppression_submit_qty_source,
         "sell_normalized_exposure_qty": float(normalized_qty),
         "sell_open_exposure_qty": float(normalized_qty if open_exposure_qty is None else open_exposure_qty),
         "sell_dust_tracking_qty": float(0.0 if dust_tracking_qty is None else dust_tracking_qty),
         "decision_truth_sources": truth_sources,
         **{f"{key}_truth_source": value for key, value in truth_sources.items()},
+        **suppression_truth_source_fields,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
         "base_signal": decision_observability["base_signal"],
@@ -2090,7 +2214,7 @@ def _order_intent_type(*, side: str) -> str:
     return "market_entry" if side == "BUY" else "market_exit"
 
 def _encode_submit_evidence(*, payload: dict) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _decision_truth_sources_payload(decision_observability: dict[str, object]) -> dict[str, str]:
@@ -2129,6 +2253,7 @@ def _submit_via_standard_path(
     raw_total_asset_qty: float,
     open_exposure_qty: float,
     dust_tracking_qty: float,
+    decision_observability: dict[str, object] | None,
     submit_qty_source: str,
     position_state_source: str,
     reference_price: float | None,
@@ -2139,9 +2264,21 @@ def _submit_via_standard_path(
     exit_rule_name: str | None,
 ):
     symbol = settings.PAIR
+    decision_observability = decision_observability or {}
+    sell_truth_source_fields = _sell_truth_source_fields(
+        decision_observability=decision_observability,
+        submit_qty_source=submit_qty_source,
+    )
     sell_observability = _sell_submit_observability_fields(
+        decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
         position_state_source=position_state_source,
+        submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
+        sell_normalized_exposure_qty_truth_source=sell_truth_source_fields[
+            "sell_normalized_exposure_qty_truth_source"
+        ],
+        sell_open_exposure_qty_truth_source=sell_truth_source_fields["sell_open_exposure_qty_truth_source"],
+        sell_dust_tracking_qty_truth_source=sell_truth_source_fields["sell_dust_tracking_qty_truth_source"],
         position_qty=position_qty,
         submit_payload_qty=qty,
         normalized_qty=qty,
@@ -2170,6 +2307,7 @@ def _submit_via_standard_path(
             "intended_qty": float(qty),
             "normalized_qty": float(qty),
             **sell_observability,
+            **sell_truth_source_fields,
             "reference_price": reference_price,
             "top_of_book": top_of_book_summary,
             "request_ts": None,
@@ -2259,6 +2397,17 @@ def _submit_via_standard_path(
                 "normalized_qty": float(qty),
                 **{
                     **sell_observability,
+                    "operator_action": (
+                        str(sell_observability.get("operator_action") or "")
+                        if str(sell_observability.get("operator_action") or "").strip() not in {"", "-"}
+                        else MANUAL_DUST_REVIEW_REQUIRED
+                    ),
+                    "dust_action": (
+                        str(sell_observability.get("dust_action") or "")
+                        if str(sell_observability.get("dust_action") or "").strip() not in {"", "-"}
+                        else MANUAL_DUST_REVIEW_REQUIRED
+                    ),
+                    **sell_truth_source_fields,
                     "sell_failure_category": _classify_sell_failure_category(
                         error_class=type(e).__name__,
                         error_summary=str(e),
@@ -2326,6 +2475,17 @@ def _submit_via_standard_path(
                 "normalized_qty": float(qty),
                 **{
                     **sell_observability,
+                    "operator_action": (
+                        str(sell_observability.get("operator_action") or "")
+                        if str(sell_observability.get("operator_action") or "").strip() not in {"", "-"}
+                        else MANUAL_DUST_REVIEW_REQUIRED
+                    ),
+                    "dust_action": (
+                        str(sell_observability.get("dust_action") or "")
+                        if str(sell_observability.get("dust_action") or "").strip() not in {"", "-"}
+                        else MANUAL_DUST_REVIEW_REQUIRED
+                    ),
+                    **sell_truth_source_fields,
                     "sell_failure_category": _classify_sell_failure_category(
                         error_class=type(e).__name__,
                         error_summary=str(e),
@@ -2473,6 +2633,7 @@ def _submit_via_standard_path(
                 "normalized_qty": float(qty),
                 "submit_qty_source": submit_qty_source,
                 "position_state_source": position_state_source,
+                **sell_truth_source_fields,
                 "raw_total_asset_qty": float(raw_total_asset_qty),
                 "open_exposure_qty": float(open_exposure_qty),
                 "dust_tracking_qty": float(dust_tracking_qty),
@@ -2898,6 +3059,7 @@ def live_execute_signal(
                 return None
             if side == "SELL" and _record_sell_dust_unsellable(
                 conn=conn,
+                state=state,
                 ts=int(ts),
                 market_price=float(market_price),
                 position_qty=requested_order_qty,
@@ -2966,6 +3128,7 @@ def live_execute_signal(
                 return None
             if side == "SELL" and _record_sell_dust_unsellable(
                 conn=conn,
+                state=state,
                 ts=int(ts),
                 market_price=float(market_price),
                 position_qty=requested_order_qty,
@@ -3282,6 +3445,7 @@ def live_execute_signal(
             raw_total_asset_qty=raw_total_asset_qty,
             open_exposure_qty=float(open_exposure_qty),
             dust_tracking_qty=float(dust_tracking_qty),
+            decision_observability=decision_observability,
             submit_qty_source=submit_qty_source,
             position_state_source=str(decision_observability["position_state_source"]),
             reference_price=reference_price,

@@ -197,7 +197,7 @@ def _record_order_event(
             submission_reason_code,
             exception_class,
             (1 if timeout_flag else 0) if timeout_flag is not None else None,
-            (submit_evidence[:2000] if submit_evidence else None),
+            submit_evidence,
             (1 if exchange_order_id_obtained else 0) if exchange_order_id_obtained is not None else None,
         ),
     )
@@ -621,7 +621,7 @@ def record_order_suppression(
     ts = int(time.time() * 1000)
     own_conn = conn is None
     conn = conn or ensure_db()
-    context_json = json.dumps(context or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    context_json = json.dumps(context or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     try:
         existing = conn.execute(
             """

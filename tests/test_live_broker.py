@@ -2489,8 +2489,10 @@ def test_live_execute_signal_sell_blocks_when_qty_step_floor_would_leave_unsella
     assert event_row["event_type"] == "submit_attempt_recorded"
     assert float(event_row["qty"]) == pytest.approx(0.00019192)
     assert event_row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
-    assert '"requested_qty":0.00019192' in str(event_row["submit_evidence"])
-    assert '"normalized_qty":0.0001' in str(event_row["submit_evidence"])
+    submit_evidence = json.loads(str(event_row["submit_evidence"]))
+    assert submit_evidence["requested_qty"] == pytest.approx(0.00019192)
+    assert submit_evidence["normalized_qty"] == pytest.approx(0.0001)
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
 
 
 @pytest.mark.fast_regression
@@ -2627,6 +2629,8 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
     assert submit_evidence["order_qty"] == pytest.approx(0.0001)
     assert submit_evidence["normalized_qty"] == pytest.approx(0.0001)
     assert submit_evidence["submit_qty_source"] == "open_position_lots.open_exposure_qty"
+    assert submit_evidence["submit_qty_source_truth_source"] == "derived:open_exposure_qty"
+    assert submit_evidence["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
     assert submit_evidence["position_state_source"] == "position_state.normalized_exposure.raw_qty_open"
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00019192)
     assert submit_evidence["open_exposure_qty"] == pytest.approx(0.00009999)
@@ -3035,9 +3039,13 @@ def test_live_execute_signal_sell_classifies_qty_step_mismatch_broker_reject(mon
     submit_evidence = json.loads(str(submit_row["submit_evidence"]))
     assert submit_evidence["sell_failure_category"] == "qty_step_mismatch"
     assert submit_evidence["sell_failure_detail"] == "qty_step_mismatch"
+    assert submit_evidence["operator_action"] == "MANUAL_DUST_REVIEW_REQUIRED"
+    assert submit_evidence["dust_action"] == "MANUAL_DUST_REVIEW_REQUIRED"
     assert submit_evidence["position_qty"] == pytest.approx(0.0002)
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0002)
     assert submit_evidence["sell_submit_qty_source"] == "open_position_lots.open_exposure_qty"
+    assert submit_evidence["submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert submit_evidence["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
     assert submit_evidence["sell_normalized_exposure_qty"] == pytest.approx(0.0002)
 
 
@@ -3461,9 +3469,12 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
     assert suppression_row["dust_state"] == "harmless_dust"
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
     context = json.loads(str(suppression_row["context_json"]))
+    assert context["operator_action"] == "harmless_dust_tracked_resume_allowed"
+    assert context["dust_action"] == "harmless_dust_tracked_resume_allowed"
     assert context["entry_allowed_truth_source"] == "-"
     assert context["effective_flat_truth_source"] == "-"
     assert context["submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert context["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 
@@ -3597,8 +3608,11 @@ def test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_s
     assert suppression_row["dust_state"] == "harmless_dust"
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
     context = json.loads(str(suppression_row["context_json"]))
+    assert context["operator_action"] == "harmless_dust_tracked_resume_allowed"
     assert context["entry_allowed_truth_source"] == "-"
     assert context["effective_flat_truth_source"] == "-"
+    assert context["submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert context["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 
@@ -3666,7 +3680,7 @@ def test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qt
         order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
         suppression_row = conn.execute(
             """
-            SELECT reason_code, dust_state, dust_action, summary
+            SELECT reason_code, dust_state, dust_action, summary, context_json
             FROM order_suppressions
             WHERE strategy_name='dust_exit_test' AND signal='SELL'
             """
@@ -3682,6 +3696,12 @@ def test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qt
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
     assert "suppression_scope=harmless_dust_effective_flat" in suppression_row["summary"]
     assert "effective_flat_due_to_harmless_dust=1" in suppression_row["summary"]
+    context = json.loads(str(suppression_row["context_json"]))
+    assert context["operator_action"] == "harmless_dust_tracked_resume_allowed"
+    assert context["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert context["submit_qty_source_truth_source"] == "derived:open_exposure_qty"
+    assert context["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert context["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
     assert len(notifications) == 1
     assert "reason_code=DUST_RESIDUAL_SUPPRESSED" in notifications[0]
 

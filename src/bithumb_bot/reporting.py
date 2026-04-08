@@ -215,8 +215,13 @@ class SellSuppressionSummary:
     raw_total_asset_qty_truth_source: str | None
     open_exposure_qty_truth_source: str | None
     dust_tracking_qty_truth_source: str | None
+    sell_submit_qty_source_truth_source: str | None
+    sell_normalized_exposure_qty_truth_source: str | None
+    sell_open_exposure_qty_truth_source: str | None
+    sell_dust_tracking_qty_truth_source: str | None
     dust_state: str | None
     dust_action: str | None
+    operator_action: str | None
     summary: str | None
 
 
@@ -724,6 +729,30 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 '-'
             ) AS submit_qty_source_truth_source,
             COALESCE(
+                json_extract(context_json, '$.sell_submit_qty_source_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_submit_qty_source'),
+                json_extract(context_json, '$.submit_qty_source_truth_source'),
+                '-'
+            ) AS sell_submit_qty_source_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_normalized_exposure_qty_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty_truth_source'),
+                '-'
+            ) AS sell_normalized_exposure_qty_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_open_exposure_qty_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty_truth_source'),
+                '-'
+            ) AS sell_open_exposure_qty_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_dust_tracking_qty_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty_truth_source'),
+                '-'
+            ) AS sell_dust_tracking_qty_truth_source,
+            COALESCE(
                 json_extract(context_json, '$.sell_submit_qty_source'),
                 json_extract(context_json, '$.submit_qty_source'),
                 'position_state.normalized_exposure.open_exposure_qty'
@@ -772,6 +801,12 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 reason
             ) AS sell_failure_detail,
             COALESCE(
+                json_extract(context_json, '$.operator_action'),
+                json_extract(context_json, '$.dust_action'),
+                json_extract(context_json, '$.dust_operator_action'),
+                '-'
+            ) AS operator_action,
+            COALESCE(
                 json_extract(context_json, '$.entry_allowed_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.entry_allowed'),
                 '-'
@@ -813,9 +848,14 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 open_exposure_qty=(float(row["open_exposure_qty"]) if row["open_exposure_qty"] is not None else None),
                 dust_tracking_qty=(float(row["dust_tracking_qty"]) if row["dust_tracking_qty"] is not None else None),
                 sell_failure_detail=str(row["sell_failure_detail"] or "-"),
+                operator_action=(str(row["operator_action"]) if row["operator_action"] is not None else None),
                 entry_allowed_truth_source=(str(row["entry_allowed_truth_source"]) if row["entry_allowed_truth_source"] is not None else None),
                 effective_flat_truth_source=(str(row["effective_flat_truth_source"]) if row["effective_flat_truth_source"] is not None else None),
                 submit_qty_source_truth_source=(str(row["submit_qty_source_truth_source"]) if row["submit_qty_source_truth_source"] is not None else None),
+                sell_submit_qty_source_truth_source=(str(row["sell_submit_qty_source_truth_source"]) if row["sell_submit_qty_source_truth_source"] is not None else None),
+                sell_normalized_exposure_qty_truth_source=(str(row["sell_normalized_exposure_qty_truth_source"]) if row["sell_normalized_exposure_qty_truth_source"] is not None else None),
+                sell_open_exposure_qty_truth_source=(str(row["sell_open_exposure_qty_truth_source"]) if row["sell_open_exposure_qty_truth_source"] is not None else None),
+                sell_dust_tracking_qty_truth_source=(str(row["sell_dust_tracking_qty_truth_source"]) if row["sell_dust_tracking_qty_truth_source"] is not None else None),
                 position_state_source_truth_source=(str(row["position_state_source_truth_source"]) if row["position_state_source_truth_source"] is not None else None),
                 raw_qty_open_truth_source=(str(row["raw_qty_open_truth_source"]) if row["raw_qty_open_truth_source"] is not None else None),
                 raw_total_asset_qty_truth_source=(str(row["raw_total_asset_qty_truth_source"]) if row["raw_total_asset_qty_truth_source"] is not None else None),
@@ -3391,6 +3431,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "entry_allowed_truth_source": row.entry_allowed_truth_source,
                 "effective_flat_truth_source": row.effective_flat_truth_source,
                 "submit_qty_source_truth_source": row.submit_qty_source_truth_source,
+                "sell_submit_qty_source_truth_source": row.sell_submit_qty_source_truth_source,
+                "sell_normalized_exposure_qty_truth_source": row.sell_normalized_exposure_qty_truth_source,
+                "sell_open_exposure_qty_truth_source": row.sell_open_exposure_qty_truth_source,
+                "sell_dust_tracking_qty_truth_source": row.sell_dust_tracking_qty_truth_source,
                 "position_state_source_truth_source": row.position_state_source_truth_source,
                 "raw_qty_open_truth_source": row.raw_qty_open_truth_source,
                 "raw_total_asset_qty_truth_source": row.raw_total_asset_qty_truth_source,
@@ -3398,6 +3442,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "dust_tracking_qty_truth_source": row.dust_tracking_qty_truth_source,
                 "dust_state": row.dust_state,
                 "dust_action": row.dust_action,
+                "operator_action": row.operator_action,
                 "summary": row.summary,
             }
             for row in recent_sell_suppressions
@@ -3625,6 +3670,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 or row["submit_qty_source"]
                 or "-"
             )
+            operator_action = str(
+                evidence_payload.get("operator_action")
+                or evidence_payload.get("dust_action")
+                or evidence_payload.get("dust_operator_action")
+                or "-"
+            )
             sell_normalized_exposure_qty = float(
                 evidence_payload.get("sell_normalized_exposure_qty")
                 or evidence_payload.get("normalized_qty")
@@ -3643,6 +3694,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
                 f"submit_qty_source={row['submit_qty_source'] or '-'} "
                 f"sell_submit_qty_source={sell_submit_qty_source} "
+                f"operator_action={operator_action} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(sell_normalized_exposure_qty), 8)} "
                 f"sell_failure_category={sell_failure_category} "
                 f"sell_failure_detail={row['sell_failure_detail'] or '-'} "
@@ -3674,6 +3726,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_qty_source={row.submit_qty_source} "
                 f"submit_qty_source_truth_source={row.submit_qty_source_truth_source or '-'} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
+                f"sell_submit_qty_source_truth_source={row.sell_submit_qty_source_truth_source or '-'} "
+                f"sell_normalized_exposure_qty_truth_source={row.sell_normalized_exposure_qty_truth_source or '-'} "
+                f"sell_open_exposure_qty_truth_source={row.sell_open_exposure_qty_truth_source or '-'} "
+                f"sell_dust_tracking_qty_truth_source={row.sell_dust_tracking_qty_truth_source or '-'} "
                 f"requested_qty={_fmt_float(float(row.requested_qty or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row.normalized_qty or 0.0), 8)} "
                 f"position_state_source_truth_source={row.position_state_source_truth_source or '-'} "
@@ -3685,6 +3741,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"dust_tracking_qty_truth_source={row.dust_tracking_qty_truth_source or '-'} "
                 f"market_price={_fmt_float(float(row.market_price or 0.0), 0)} "
                 f"dust_state={row.dust_state or '-'} dust_action={row.dust_action or '-'} "
+                f"operator_action={row.operator_action or '-'} "
                 f"entry_allowed_truth_source={row.entry_allowed_truth_source or '-'} "
                 f"effective_flat_truth_source={row.effective_flat_truth_source or '-'} "
                 f"summary={row.summary or '-'}"

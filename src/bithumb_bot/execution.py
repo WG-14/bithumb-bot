@@ -30,6 +30,7 @@ def record_order_if_missing(
     qty_req: float,
     submit_attempt_id: str | None = None,
     price: float | None,
+    symbol: str | None = None,
     strategy_name: str | None = None,
     entry_decision_id: int | None = None,
     exit_decision_id: int | None = None,
@@ -50,6 +51,7 @@ def record_order_if_missing(
         qty_req=qty_req,
         submit_attempt_id=submit_attempt_id,
         price=price,
+        symbol=symbol,
         strategy_name=strategy_name,
         entry_decision_id=entry_decision_id,
         exit_decision_id=exit_decision_id,
@@ -143,6 +145,7 @@ def apply_fill_and_trade(
     exit_reason: str | None = None,
     exit_rule_name: str | None = None,
     note: str | None = None,
+    pair: str | None = None,
     allow_entry_decision_fallback: bool = True,
 ) -> dict[str, Any] | None:
     eps = 1e-12
@@ -347,6 +350,7 @@ def apply_fill_and_trade(
     effective_exit_reason = exit_reason or order_decision_reason
     effective_exit_rule_name = exit_rule_name or order_exit_rule_name
 
+    trade_pair = pair or settings.PAIR
     trade_row = conn.execute(
         """
         INSERT INTO trades(
@@ -357,7 +361,7 @@ def apply_fill_and_trade(
         """,
         (
             int(fill_ts),
-            settings.PAIR,
+            trade_pair,
             settings.INTERVAL,
             side,
             float(price),
@@ -378,7 +382,7 @@ def apply_fill_and_trade(
     apply_fill_lifecycle(
         conn,
         side=side,
-        pair=settings.PAIR,
+        pair=trade_pair,
         trade_id=trade_id,
         client_order_id=client_order_id,
         fill_id=fill_id,
@@ -396,7 +400,7 @@ def apply_fill_and_trade(
     notify(
         format_event(
             "fill_applied",
-            pair=settings.PAIR,
+            pair=trade_pair,
             side=side,
             qty=float(qty),
             price=float(price),

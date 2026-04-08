@@ -4,10 +4,19 @@ import sqlite3
 
 import pytest
 
+from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.lifecycle import apply_fill_lifecycle, mark_harmless_dust_positions
+from bithumb_bot.lifecycle import (
+    ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE,
+    ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
+    ENTRY_DECISION_LINKAGE_DIRECT,
+    ENTRY_DECISION_LINKAGE_STRICT_SINGLE_FALLBACK,
+    ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH,
+    apply_fill_lifecycle,
+    mark_harmless_dust_positions,
+)
 
 
 def _record_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_ms: int) -> None:
@@ -119,7 +128,7 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert rows[0]["exit_fill_id"] == "fill_exit_1"
     assert rows[0]["strategy_name"] == "sma_with_filter"
     assert int(rows[0]["entry_decision_id"]) == 101
-    assert rows[0]["entry_decision_linkage"] == "direct"
+    assert rows[0]["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_DIRECT
     assert int(rows[0]["exit_decision_id"]) == 202
     assert rows[0]["exit_reason"] == "opposite signal"
     assert rows[0]["exit_rule_name"] == "opposite_cross"
@@ -135,7 +144,7 @@ def test_trade_lifecycle_tracks_realized_pnl_fee_and_holding_time(tmp_path):
     assert rows[1]["exit_fill_id"] == "fill_exit_2"
     assert rows[1]["strategy_name"] == "sma_with_filter"
     assert int(rows[1]["entry_decision_id"]) == 101
-    assert rows[1]["entry_decision_linkage"] == "direct"
+    assert rows[1]["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_DIRECT
     assert int(rows[1]["exit_decision_id"]) == 203
     assert rows[1]["exit_reason"] == "max holding reached"
     assert rows[1]["exit_rule_name"] == "max_holding_time"
@@ -430,39 +439,45 @@ def test_sell_without_known_entry_writes_unknown_lifecycle_row(tmp_path):
     assert float(row["net_pnl"]) == pytest.approx(-0.1)
 
 
-def test_buy_without_direct_decision_uses_strict_single_fallback_match(tmp_path):
+def test_buy_strict_single_fallback_links_unique_strict_match(tmp_path):
     conn = ensure_db(str(tmp_path / "strict_match.sqlite"))
     fill_ts = 1_700_000_100_000
-    conn.execute(
-        """
-        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
-        VALUES (?, ?, 'BUY', 'entry', ?)
-        """,
-        (fill_ts - 5_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
-    )
-    _record_order(conn, client_order_id="entry_strict", side="BUY", qty_req=1.0, ts_ms=fill_ts)
-    apply_fill_and_trade(
-        conn,
-        client_order_id="entry_strict",
-        side="BUY",
-        fill_id="fill_entry_strict",
-        fill_ts=fill_ts,
-        price=100.0,
-        qty=1.0,
-        fee=0.1,
-        strategy_name="sma_with_filter",
-    )
-    row = conn.execute(
-        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_strict'"
-    ).fetchone()
-    conn.close()
+    original_pair = settings.PAIR
+    row = None
+    object.__setattr__(settings, "PAIR", "BTC_KRW")
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+            VALUES (?, ?, 'BUY', 'entry', ?)
+            """,
+            (fill_ts - 5_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+        )
+        _record_order(conn, client_order_id="entry_strict", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="entry_strict",
+            side="BUY",
+            fill_id="fill_entry_strict",
+            fill_ts=fill_ts,
+            price=100.0,
+            qty=1.0,
+            fee=0.1,
+            strategy_name="sma_with_filter",
+        )
+        row = conn.execute(
+            "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_strict'"
+        ).fetchone()
+    finally:
+        conn.close()
+        object.__setattr__(settings, "PAIR", original_pair)
 
     assert row is not None
     assert int(row["entry_decision_id"]) == 1
-    assert row["entry_decision_linkage"] == "fallback_strict_match"
+    assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_STRICT_SINGLE_FALLBACK
 
 
-def test_buy_fallback_does_not_misattributed_other_strategy_or_pair(tmp_path):
+def test_buy_unattributed_no_strict_match_does_not_misattribute_other_strategy_or_pair(tmp_path):
     conn = ensure_db(str(tmp_path / "no_misattribution.sqlite"))
     fill_ts = 1_700_000_200_000
     conn.execute(
@@ -498,46 +513,52 @@ def test_buy_fallback_does_not_misattributed_other_strategy_or_pair(tmp_path):
 
     assert row is not None
     assert row["entry_decision_id"] is None
-    assert row["entry_decision_linkage"] == "unattributed_no_strict_match"
+    assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH
 
 
-def test_buy_fallback_marks_ambiguous_when_multiple_strict_candidates(tmp_path):
+def test_buy_ambiguous_multi_candidate_when_multiple_strict_pair_matches_exist(tmp_path):
     conn = ensure_db(str(tmp_path / "ambiguous_fallback.sqlite"))
     fill_ts = 1_700_000_300_000
-    conn.execute(
-        """
-        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
-        VALUES (?, ?, 'BUY', 'entry', ?)
-        """,
-        (fill_ts - 2_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
-    )
-    conn.execute(
-        """
-        INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
-        VALUES (?, ?, 'BUY', 'entry', ?)
-        """,
-        (fill_ts - 1_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
-    )
-    _record_order(conn, client_order_id="entry_ambiguous", side="BUY", qty_req=1.0, ts_ms=fill_ts)
-    apply_fill_and_trade(
-        conn,
-        client_order_id="entry_ambiguous",
-        side="BUY",
-        fill_id="fill_entry_ambiguous",
-        fill_ts=fill_ts,
-        price=100.0,
-        qty=1.0,
-        fee=0.1,
-        strategy_name="sma_with_filter",
-    )
-    row = conn.execute(
-        "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_ambiguous'"
-    ).fetchone()
-    conn.close()
+    original_pair = settings.PAIR
+    row = None
+    object.__setattr__(settings, "PAIR", "BTC_KRW")
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+            VALUES (?, ?, 'BUY', 'entry', ?)
+            """,
+            (fill_ts - 2_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+        )
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+            VALUES (?, ?, 'BUY', 'entry', ?)
+            """,
+            (fill_ts - 1_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+        )
+        _record_order(conn, client_order_id="entry_ambiguous", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="entry_ambiguous",
+            side="BUY",
+            fill_id="fill_entry_ambiguous",
+            fill_ts=fill_ts,
+            price=100.0,
+            qty=1.0,
+            fee=0.1,
+            strategy_name="sma_with_filter",
+        )
+        row = conn.execute(
+            "SELECT entry_decision_id, entry_decision_linkage FROM open_position_lots WHERE entry_client_order_id='entry_ambiguous'"
+        ).fetchone()
+    finally:
+        conn.close()
+        object.__setattr__(settings, "PAIR", original_pair)
 
     assert row is not None
     assert row["entry_decision_id"] is None
-    assert row["entry_decision_linkage"] == "ambiguous_multi_candidate"
+    assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE
 
 
 def test_buy_recovery_mode_keeps_degraded_unattributed_without_fallback(tmp_path):
@@ -570,7 +591,51 @@ def test_buy_recovery_mode_keeps_degraded_unattributed_without_fallback(tmp_path
 
     assert row is not None
     assert row["entry_decision_id"] is None
-    assert row["entry_decision_linkage"] == "degraded_recovery_unattributed"
+    assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED
+
+
+def test_buy_direct_linked_decision_preempts_strict_fallback_candidates(tmp_path):
+    conn = ensure_db(str(tmp_path / "direct_preempts_fallback.sqlite"))
+    fill_ts = 1_700_000_450_000
+    original_pair = settings.PAIR
+    row = None
+    object.__setattr__(settings, "PAIR", "BTC_KRW")
+    try:
+        # Fallback would have been valid here, but an explicit decision id must win.
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(decision_ts, strategy_name, signal, reason, context_json)
+            VALUES (?, ?, 'BUY', 'entry', ?)
+            """,
+            (fill_ts - 1_000, "sma_with_filter", '{"pair":"KRW-BTC"}'),
+        )
+        _record_order(conn, client_order_id="entry_direct", side="BUY", qty_req=1.0, ts_ms=fill_ts)
+        apply_fill_and_trade(
+            conn,
+            client_order_id="entry_direct",
+            side="BUY",
+            fill_id="fill_entry_direct",
+            fill_ts=fill_ts,
+            price=100.0,
+            qty=1.0,
+            fee=0.1,
+            strategy_name="sma_with_filter",
+            entry_decision_id=77,
+        )
+        row = conn.execute(
+            """
+            SELECT entry_decision_id, entry_decision_linkage
+            FROM open_position_lots
+            WHERE entry_client_order_id='entry_direct'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+        object.__setattr__(settings, "PAIR", original_pair)
+
+    assert row is not None
+    assert int(row["entry_decision_id"]) == 77
+    assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_DIRECT
 
 
 def test_sell_lifecycle_uses_open_exposure_lots_and_keeps_dust_tracking_operator_only(tmp_path):

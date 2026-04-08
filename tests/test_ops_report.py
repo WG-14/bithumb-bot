@@ -808,6 +808,7 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
                 "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
                 "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
                 "submit_qty_source_truth_source": "context.submit_qty_source",
+                "sell_submit_qty_source_truth_source": "context.submit_qty_source",
                 "position_state_source_truth_source": "context.position_state_source",
                 "raw_qty_open_truth_source": "position_state.raw_qty_open",
                 "raw_total_asset_qty_truth_source": "position_state.raw_total_asset_qty",
@@ -821,6 +822,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
                 "sell_dust_tracking_qty": 0.00009563,
                 "sell_failure_category": "dust_suppression",
                 "sell_failure_detail": "dust_suppression",
+                "operator_action": "harmless_dust_tracked_resume_allowed",
+                "dust_action": "harmless_dust_tracked_resume_allowed",
             },
             dust_present=True,
             dust_allow_resume=True,
@@ -844,6 +847,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "submit_qty_source_truth_source=context.submit_qty_source" in out
     assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_submit_qty_source_truth_source=context.submit_qty_source" in out
+    assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=0.00009629" in out
     assert "open_exposure_qty_truth_source=position_state.open_exposure_qty" in out
     assert "dust_tracking_qty=0.00009563" in out
@@ -851,3 +856,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "harmless_dust_tracked_resume_allowed" in out
     assert "entry_allowed_truth_source=position_gate.entry_allowed" in out
     assert "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    sell_suppression = payload["recent_sell_suppressions"][0]
+    assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
+    assert sell_suppression["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"

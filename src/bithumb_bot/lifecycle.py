@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from .dust import (
@@ -11,12 +12,23 @@ from .dust import (
     build_dust_display_context,
     is_strictly_below_min_qty,
 )
+from .markets import parse_user_market_input
 
 OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
 DUST_TRACKING_STATE = DUST_TRACKING_LOT_STATE
 
 
 _ENTRY_DECISION_FALLBACK_LOOKBACK_MS = 15 * 60 * 1000
+# BUY fill attribution states are persisted in entry_decision_linkage.
+# The order below matters: direct linked decision takes precedence over
+# fallback classification, and fallback classification must stay specific
+# enough to explain why the BUY fill was or was not linked.
+ENTRY_DECISION_LINKAGE_DIRECT = "direct"
+ENTRY_DECISION_LINKAGE_STRICT_SINGLE_FALLBACK = "fallback_strict_match"
+ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE = "ambiguous_multi_candidate"
+ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH = "unattributed_no_strict_match"
+ENTRY_DECISION_LINKAGE_UNATTRIBUTED_MISSING_STRATEGY = "unattributed_missing_strategy"
+ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED = "degraded_recovery_unattributed"
 
 
 def _row_value(row: object, key: str, index: int) -> object | None:
@@ -56,6 +68,41 @@ def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int
     return str(strategy_name)
 
 
+def _extract_pair_from_context(context: object) -> str | None:
+    if not isinstance(context, dict):
+        return None
+
+    candidate_paths = (
+        ("pair",),
+        ("market",),
+        ("position_state", "normalized_exposure", "pair"),
+        ("position_state", "pair"),
+    )
+    for path in candidate_paths:
+        current: object = context
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current is None:
+            continue
+        text = str(current).strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_pair_for_match(pair: object) -> str | None:
+    text = str(pair or "").strip()
+    if not text:
+        return None
+    try:
+        return parse_user_market_input(text)
+    except Exception:
+        return text.upper()
+
+
 def _find_entry_decision(
     conn: sqlite3.Connection,
     *,
@@ -63,31 +110,69 @@ def _find_entry_decision(
     pair: str,
     strategy_name: str | None,
 ) -> tuple[int | None, str | None, str]:
+    """Resolve the BUY decision that should be attributed to a fill.
+
+    Precedence is intentionally narrow and stable:
+
+    1. direct linked decision: an explicit ``entry_decision_id`` always wins.
+    2. strict single fallback: when no direct link exists, filter by
+       ``strategy_name`` + ``signal='BUY'`` + ``decision_ts <= fill_ts`` within
+       the fallback window, then require a strict pair match in the decision
+       context.
+    3. ambiguous multi candidate: more than one strict pair match in the window.
+    4. unattributed no strict match: no strict pair match in the window.
+
+    The pair is the final strict gate. ``strategy_name``/``signal``/``decision_ts``
+    form the coarse candidate pool, and ``fill_ts`` is the upper bound so a BUY
+    fill never attaches to a later decision.
+    """
     if strategy_name is None or not str(strategy_name).strip():
-        return None, None, "unattributed_missing_strategy"
+        return None, None, ENTRY_DECISION_LINKAGE_UNATTRIBUTED_MISSING_STRATEGY
 
     lower_ts = max(0, int(fill_ts) - _ENTRY_DECISION_FALLBACK_LOOKBACK_MS)
     rows = conn.execute(
         """
-        SELECT id, strategy_name
+        SELECT id, strategy_name, context_json
         FROM strategy_decisions
         WHERE signal='BUY'
           AND strategy_name=?
           AND decision_ts BETWEEN ? AND ?
-          AND json_extract(context_json, '$.pair')=?
         ORDER BY decision_ts DESC, id DESC
-        LIMIT 2
         """,
-        (str(strategy_name), lower_ts, int(fill_ts), str(pair)),
+        (str(strategy_name), lower_ts, int(fill_ts)),
     ).fetchall()
 
     if not rows:
-        return None, str(strategy_name), "unattributed_no_strict_match"
-    if len(rows) > 1:
-        return None, str(strategy_name), "ambiguous_multi_candidate"
+        return None, str(strategy_name), ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH
 
-    row = rows[0]
-    return int(_row_value(row, "id", 0) or 0), str(_row_value(row, "strategy_name", 1) or ""), "fallback_strict_match"
+    normalized_pair = _normalize_pair_for_match(pair)
+    strict_rows: list[sqlite3.Row] = []
+    for row in rows:
+        try:
+            context = json.loads(str(_row_value(row, "context_json", 2) or "{}"))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(context, dict):
+            continue
+        candidate_pair = _normalize_pair_for_match(_extract_pair_from_context(context))
+        if candidate_pair is None or normalized_pair is None:
+            continue
+        if candidate_pair == normalized_pair:
+            strict_rows.append(row)
+            if len(strict_rows) > 1:
+                break
+
+    if not strict_rows:
+        return None, str(strategy_name), ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH
+    if len(strict_rows) > 1:
+        return None, str(strategy_name), ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE
+
+    row = strict_rows[0]
+    return (
+        int(_row_value(row, "id", 0) or 0),
+        str(_row_value(row, "strategy_name", 1) or ""),
+        ENTRY_DECISION_LINKAGE_STRICT_SINGLE_FALLBACK,
+    )
 
 
 def apply_fill_lifecycle(
@@ -115,7 +200,11 @@ def apply_fill_lifecycle(
         # reclassified.
         resolved_entry_decision_id = entry_decision_id
         resolved_strategy_name = strategy_name
-        resolved_entry_decision_linkage = "direct" if resolved_entry_decision_id is not None else "unattributed"
+        resolved_entry_decision_linkage = (
+            ENTRY_DECISION_LINKAGE_DIRECT
+            if resolved_entry_decision_id is not None
+            else ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH
+        )
         if resolved_entry_decision_id is not None and resolved_strategy_name is None:
             resolved_strategy_name = _load_strategy_for_decision_id(conn, decision_id=int(resolved_entry_decision_id))
         if resolved_entry_decision_id is None and allow_entry_decision_fallback:
@@ -130,7 +219,7 @@ def apply_fill_lifecycle(
                 resolved_strategy_name = lookup_strategy_name
             resolved_entry_decision_linkage = lookup_linkage
         elif resolved_entry_decision_id is None and not allow_entry_decision_fallback:
-            resolved_entry_decision_linkage = "degraded_recovery_unattributed"
+            resolved_entry_decision_linkage = ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED
         conn.execute(
             """
             INSERT INTO open_position_lots(
@@ -241,7 +330,11 @@ def apply_fill_lifecycle(
                 float(holding_time_seconds),
                 strategy_name or _row_value(lot, "strategy_name", 9),
                 entry_decision_id if entry_decision_id is not None else _row_value(lot, "entry_decision_id", 10),
-                ("direct" if entry_decision_id is not None else str(_row_value(lot, "entry_decision_linkage", 11) or "")),
+                (
+                    ENTRY_DECISION_LINKAGE_DIRECT
+                    if entry_decision_id is not None
+                    else str(_row_value(lot, "entry_decision_linkage", 11) or "")
+                ),
                 exit_decision_id,
                 exit_reason,
                 exit_rule_name,

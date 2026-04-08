@@ -58,6 +58,62 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
         _set("PAPER_FEE_RATE", old_paper_fee)
 
 
+def test_paper_execute_canonicalizes_legacy_pair_once_for_orderbook_and_ledger(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_legacy_pair.sqlite"))
+    old_pair = _set("PAIR", "BTC_KRW")
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
+    try:
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0)
+        conn.close()
+
+        seen_markets: list[str] = []
+        canonical_calls = {"count": 0}
+
+        def _fake_fetch_orderbook_top(market: str):
+            seen_markets.append(market)
+            return BestQuote(market="KRW-BTC", bid_price=104.0, ask_price=105.0)
+
+        real_canonical_market_with_raw = paper.canonical_market_with_raw
+
+        def _spy_canonical_market_with_raw(market: str):
+            canonical_calls["count"] += 1
+            return real_canonical_market_with_raw(market)
+
+        monkeypatch.setattr(paper, "fetch_orderbook_top", _fake_fetch_orderbook_top)
+        monkeypatch.setattr(paper, "canonical_market_with_raw", _spy_canonical_market_with_raw)
+        trade = paper.paper_execute("BUY", ts=1, price=999.0)
+
+        assert trade is not None
+        assert canonical_calls["count"] == 1
+        assert seen_markets == ["KRW-BTC"]
+
+        conn = ensure_db()
+        trade_row = conn.execute("SELECT pair FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+        event_row = conn.execute(
+            "SELECT symbol FROM order_events WHERE event_type='intent_created' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        dedup_row = conn.execute(
+            "SELECT symbol FROM order_intent_dedup ORDER BY updated_ts DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+        assert trade_row is not None
+        assert trade_row["pair"] == "KRW-BTC"
+        assert event_row is not None
+        assert event_row["symbol"] == "KRW-BTC"
+        assert dedup_row is not None
+        assert dedup_row["symbol"] == "KRW-BTC"
+    finally:
+        _set("DB_PATH", old_db)
+        _set("PAIR", old_pair)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+
+
 def test_paper_execute_buy_allows_harmless_dust_effective_flat(tmp_path: Path, monkeypatch):
     old_db = _set("DB_PATH", str(tmp_path / "paper_harmless_dust.sqlite"))
     old_slip = _set("SLIPPAGE_BPS", 0.0)
