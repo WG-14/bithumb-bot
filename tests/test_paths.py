@@ -34,6 +34,8 @@ def test_path_manager_separates_paper_and_live(monkeypatch: pytest.MonkeyPatch, 
     live = PathManager.from_env(project_root=tmp_path / "repo")
 
     assert paper.run_lock_path() != live.run_lock_path()
+    assert paper.primary_db_path() != live.primary_db_path()
+    assert paper.data_dir_for_mode("paper") != live.data_dir_for_mode("live")
     assert "/paper/" in str(paper.run_lock_path()).replace("\\", "/")
     assert "/live/" in str(live.run_lock_path()).replace("\\", "/")
     assert "/dryrun/" in str(paper.run_lock_path_for_mode("dryrun")).replace("\\", "/")
@@ -177,3 +179,28 @@ def test_live_rejects_paper_scoped_log_and_backup_segments(
         PathManager.from_env(project_root=repo_root)
 
     assert f"{env_key} must not contain a paper-scoped path segment when MODE=live" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("mode", "env_key", "segment"),
+    [
+        ("paper", "DATA_ROOT", "live"),
+        ("paper", "RUN_ROOT", "dryrun"),
+    ],
+)
+def test_path_manager_rejects_mode_scoped_root_segments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    env_key: str,
+    segment: str,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    _set_roots(monkeypatch, tmp_path, mode)
+    monkeypatch.setenv(env_key, str((tmp_path / "runtime" / segment / env_key.lower()).resolve()))
+
+    with pytest.raises(PathPolicyError) as exc:
+        PathManager.from_env(project_root=repo_root)
+
+    assert "must not contain mode-scoped path segment(s)" in str(exc.value)

@@ -320,7 +320,9 @@ def test_ops_report_shows_recent_external_cash_adjustment_summary(tmp_path, monk
 
     expected_last_event = kst_str(1710000000000)
     assert "recent_external_cash_adjustment=count=1 total=123.000" in out
+    assert "last_delta=123.000" in out
     assert f"last_event={expected_last_event}" in out
+    assert "present=1" in out
     assert "source=legacy_balance_api" in out
     assert "reason=reconcile_cash_drift" in out
 

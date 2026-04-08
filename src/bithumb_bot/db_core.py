@@ -5,7 +5,8 @@ import math
 import json
 import sqlite3
 from decimal import Decimal, ROUND_HALF_EVEN
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, Callable
 
 from .config import prepare_db_path_for_connection, settings
 from .dust import OPEN_EXPOSURE_LOT_STATE, lot_state_quantity_contract
@@ -69,6 +70,7 @@ def _consume_locked_then_available(
     amount: float,
     *,
     field: str,
+    normalize_amount: Callable[[float | int | str], float],
 ) -> tuple[float, float]:
     eps = 1e-12
 
@@ -83,20 +85,20 @@ def _consume_locked_then_available(
         scale = max(scale, 1.0)
         return max(eps, math.ulp(scale) * 4)
 
-    remaining = normalize_cash_amount(amount)
-    locked_after = normalize_cash_amount(locked)
-    available_after = normalize_cash_amount(available)
+    remaining = normalize_amount(amount)
+    locked_after = normalize_amount(locked)
+    available_after = normalize_amount(available)
     tolerance = _float_tolerance(locked_after, available_after, remaining, locked, available)
 
     locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
     available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
 
     from_locked = min(locked_after, remaining)
-    locked_after = normalize_cash_amount(locked_after - from_locked)
-    remaining = normalize_cash_amount(remaining - from_locked)
+    locked_after = normalize_amount(locked_after - from_locked)
+    remaining = normalize_amount(remaining - from_locked)
 
     if remaining > eps:
-        available_after = normalize_cash_amount(available_after - remaining)
+        available_after = normalize_amount(available_after - remaining)
 
     locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
     available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
@@ -135,6 +137,7 @@ def calculate_fill_portfolio_snapshot(
             cash_available_n,
             spend,
             field="cash",
+            normalize_amount=normalize_cash_amount,
         )
         asset_available_after = normalize_asset_qty(asset_available_n + qty_n)
         asset_locked_after = asset_locked_n
@@ -146,6 +149,7 @@ def calculate_fill_portfolio_snapshot(
             asset_available_n,
             qty_n,
             field="asset",
+            normalize_amount=normalize_asset_qty,
         )
     else:
         raise RuntimeError(f"invalid fill side: {side}")
@@ -157,6 +161,52 @@ def calculate_fill_portfolio_snapshot(
         cash_locked_after,
         asset_available_after,
         asset_locked_after,
+        cash_after,
+        asset_after,
+    )
+
+
+def replay_fill_portfolio_snapshot(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+    rows: Iterable[tuple[str, float, float, float | None]],
+) -> tuple[float, float, float, float, float, float]:
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    cash_after = portfolio_cash_total(cash_available=cash_available_n, cash_locked=cash_locked_n)
+    asset_after = portfolio_asset_total(asset_available=asset_available_n, asset_locked=asset_locked_n)
+
+    for side, price, qty, fee in rows:
+        (
+            cash_available_n,
+            cash_locked_n,
+            asset_available_n,
+            asset_locked_n,
+            cash_after,
+            asset_after,
+        ) = calculate_fill_portfolio_snapshot(
+            cash_available=cash_available_n,
+            cash_locked=cash_locked_n,
+            asset_available=asset_available_n,
+            asset_locked=asset_locked_n,
+            side=side,
+            price=price,
+            qty=qty,
+            fee=fee,
+        )
+
+    return (
+        cash_available_n,
+        cash_locked_n,
+        asset_available_n,
+        asset_locked_n,
         cash_after,
         asset_after,
     )
@@ -1270,7 +1320,7 @@ def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, 
     ).fetchone()
     last = conn.execute(
         """
-        SELECT event_ts, currency, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
+        SELECT adjustment_key, event_ts, currency, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
         FROM external_cash_adjustments
         ORDER BY event_ts DESC, id DESC
         LIMIT 1
@@ -1280,6 +1330,7 @@ def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, 
         "adjustment_count": int(row["adjustment_count"] if row else 0),
         "adjustment_total": float(row["adjustment_total"] if row else 0.0),
         "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_adjustment_key": str(last["adjustment_key"]) if last is not None else None,
         "last_currency": str(last["currency"]) if last is not None else None,
         "last_delta_amount": float(last["delta_amount"]) if last is not None else None,
         "last_source": str(last["source"]) if last is not None else None,

@@ -169,10 +169,17 @@ def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) 
         return "none"
     last_event_ts = summary.get("last_event_ts")
     last_event = kst_str(int(last_event_ts)) if last_event_ts is not None else "none"
+    last_delta = summary.get("last_delta_amount")
+    last_delta_text = (
+        f"{float(last_delta):.3f}" if isinstance(last_delta, (int, float)) else "-"
+    )
     return (
         f"count={int(summary.get('adjustment_count') or 0)} "
         f"total={float(summary.get('adjustment_total') or 0.0):.3f} "
+        f"last_delta={last_delta_text} "
         f"last_event={last_event} "
+        f"present=1 "
+        f"key={summary.get('last_adjustment_key') or '-'} "
         f"source={summary.get('last_source') or '-'} "
         f"reason={summary.get('last_reason') or '-'}"
     )
@@ -230,7 +237,7 @@ def _fetch_recent_external_cash_adjustments(
 ) -> list[dict[str, object]]:
     rows = conn.execute(
         """
-        SELECT adjustment_key, event_ts, delta_amount, source, reason, note
+        SELECT adjustment_key, event_ts, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
         FROM external_cash_adjustments
         ORDER BY event_ts DESC, id DESC
         LIMIT ?
@@ -244,6 +251,10 @@ def _fetch_recent_external_cash_adjustments(
             "delta_amount": float(row["delta_amount"]),
             "source": str(row["source"]),
             "reason": str(row["reason"]),
+            "broker_snapshot_basis": str(row["broker_snapshot_basis"]),
+            "correlation_metadata": (
+                str(row["correlation_metadata"]) if row["correlation_metadata"] is not None else None
+            ),
             "note": str(row["note"]) if row["note"] is not None else None,
         }
         for row in rows
@@ -433,10 +444,13 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
             event_ts = item.get("event_ts")
             event_label = kst_str(int(event_ts)) if event_ts is not None else "none"
             note = item.get("note") or "-"
+            correlation_metadata = item.get("correlation_metadata") or "-"
             print(
                 "    "
-                f"event_ts={event_label} delta={float(item.get('delta_amount') or 0.0):,.3f} "
+                f"event_ts={event_label} adjustment_key={item.get('adjustment_key') or '-'} "
+                f"delta={float(item.get('delta_amount') or 0.0):,.3f} "
                 f"source={item.get('source') or '-'} reason={item.get('reason') or '-'} note={note}"
+                f" correlation_metadata={correlation_metadata}"
             )
     raw_qty_open: float
     raw_total_asset_qty: float

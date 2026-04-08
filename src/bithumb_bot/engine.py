@@ -22,7 +22,7 @@ from .broker.paper import paper_execute
 from .broker.live import live_execute_signal, record_harmless_dust_exit_suppression
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
-from .db_core import ensure_db
+from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
 from .dust import (
     DustClassification,
@@ -187,6 +187,19 @@ def _extract_balance_split_delta_krw(summary: str) -> float | None:
     return value
 
 
+def _ledger_external_cash_adjustment_summary() -> dict[str, object] | None:
+    try:
+        conn = ensure_db()
+    except Exception:
+        return None
+    try:
+        return get_external_cash_adjustment_summary(conn)
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def _classify_balance_split_blocker(metadata: dict[str, object]) -> ResumeBlocker | None:
     mismatch_count_raw = metadata.get("balance_split_mismatch_count", 0)
     try:
@@ -227,6 +240,11 @@ def _classify_balance_split_blocker(metadata: dict[str, object]) -> ResumeBlocke
             recent_external_cash_adjustment_count=external_cash_adjustment_count,
         )
 
+    if cash_only_mismatch and recent_external_cash_adjustment_present:
+        blocker_summary = "cash split mismatch persists after external cash adjustment was recorded"
+    else:
+        blocker_summary = "portfolio cash split does not match broker snapshot"
+
     return _resume_blocker(
         code="BALANCE_SPLIT_MISMATCH",
         detail=(
@@ -236,7 +254,7 @@ def _classify_balance_split_blocker(metadata: dict[str, object]) -> ResumeBlocke
             f"delta_krw={delta_krw if delta_krw is not None else '-'}"
         ),
         reason_code=BLOCKER_PORTFOLIO_BROKER_CASH_MISMATCH,
-        summary="portfolio cash split does not match broker snapshot",
+        summary=blocker_summary,
         overridable=False,
         balance_delta_krw=delta_krw,
         recent_external_cash_adjustment_present=recent_external_cash_adjustment_present,
@@ -792,12 +810,35 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 )
             )
 
+    ledger_adjustment_summary = _ledger_external_cash_adjustment_summary() if settings.MODE == "live" else None
     if settings.MODE == "live" and state.last_reconcile_metadata:
         mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
         try:
             reconcile_meta = json.loads(str(state.last_reconcile_metadata))
         except json.JSONDecodeError:
             reconcile_meta = {}
+        ledger_adjustment_count = 0
+        ledger_adjustment_total = 0.0
+        if ledger_adjustment_summary is not None:
+            try:
+                ledger_adjustment_count = max(0, int(ledger_adjustment_summary.get("adjustment_count", 0) or 0))
+            except (TypeError, ValueError):
+                ledger_adjustment_count = 0
+            try:
+                ledger_adjustment_total = float(ledger_adjustment_summary.get("adjustment_total", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                ledger_adjustment_total = 0.0
+        if ledger_adjustment_count > 0:
+            reconcile_meta = dict(reconcile_meta)
+            reconcile_meta["external_cash_adjustment_count"] = max(
+                ledger_adjustment_count,
+                int(reconcile_meta.get("external_cash_adjustment_count", 0) or 0),
+            )
+            reconcile_meta["external_cash_adjustment_total_krw"] = (
+                float(reconcile_meta.get("external_cash_adjustment_total_krw", 0.0) or 0.0)
+                if float(reconcile_meta.get("external_cash_adjustment_total_krw", 0.0) or 0.0) != 0.0
+                else ledger_adjustment_total
+            )
         if mismatch_count > 0:
             blocker_reason = _classify_balance_split_blocker(reconcile_meta)
             if blocker_reason is None:
@@ -1188,6 +1229,19 @@ def _attempt_cleanup_with_optional_flatten(
         flatten_status = "skipped_cancel_failed"
     else:
         flatten_status = "skipped"
+
+    if flatten_status in {"skipped", "skipped_cancel_failed"}:
+        runtime_state.record_flatten_position_result(
+            status=flatten_status,
+            summary={
+                "status": flatten_status,
+                "attempted": int(bool(attempt_flatten)),
+                "cancel_ok": int(bool(canceled_ok)),
+                "reason_code": reason_code,
+                "reason_detail": reason_detail,
+                "trigger": flatten_trigger,
+            },
+        )
 
     detail_parts = [
         reason_detail,

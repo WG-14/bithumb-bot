@@ -15,6 +15,7 @@ from bithumb_bot.db_core import (
     record_external_cash_adjustment,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.engine import evaluate_startup_safety_gate, _classify_balance_split_blocker
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot import runtime_state
 from bithumb_bot.reporting import cmd_cash_drift_report, fetch_cash_drift_report
@@ -259,6 +260,53 @@ def test_reconcile_records_external_cash_adjustment_for_cash_only_drift(tmp_path
     assert metadata["external_cash_adjustment_count"] == 1
     assert metadata["external_cash_adjustment_delta_krw"] == pytest.approx(50.0)
     assert metadata["external_cash_adjustment_total_krw"] == pytest.approx(50.0)
+    assert metadata["external_cash_adjustment_residual_krw"] == pytest.approx(0.0)
+    assert evaluate_startup_safety_gate() is None
+
+
+def test_reconcile_cash_adjustment_clears_prior_cash_mismatch_blocker(tmp_path):
+    db_path = tmp_path / "reconcile_cash_adjustment_blocker.sqlite"
+    original_db_path = settings.DB_PATH
+    original_start_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000.0)
+    try:
+        ensure_db(str(db_path)).close()
+        blocked_metadata = {
+            "balance_split_mismatch_count": 1,
+            "balance_split_mismatch_summary": "cash_available(local=1000,broker=1050,delta=50)",
+            "external_cash_adjustment_count": 0,
+            "external_cash_adjustment_total_krw": 0.0,
+        }
+        assert _classify_balance_split_blocker(blocked_metadata) is not None
+
+        reconcile_with_broker(_CashOnlyDriftBroker())
+
+        conn = ensure_db(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT cash_krw, cash_available, cash_locked FROM portfolio WHERE id=1"
+            ).fetchone()
+            summary = get_external_cash_adjustment_summary(conn)
+            metadata_raw = conn.execute(
+                "SELECT last_reconcile_metadata FROM bot_health WHERE id=1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+
+    metadata = json.loads(str(metadata_raw))
+    assert float(row["cash_krw"]) == pytest.approx(1_050.0)
+    assert float(row["cash_available"]) == pytest.approx(1_050.0)
+    assert float(row["cash_locked"]) == pytest.approx(0.0)
+    assert summary["adjustment_count"] == 1
+    assert summary["adjustment_total"] == pytest.approx(50.0)
+    assert metadata["external_cash_adjustment_count"] == 1
+    assert metadata["external_cash_adjustment_total_krw"] == pytest.approx(50.0)
+    assert metadata["external_cash_adjustment_residual_krw"] == pytest.approx(0.0)
+    assert _classify_balance_split_blocker(metadata) is None
 
 
 def test_reconcile_does_not_duplicate_external_cash_adjustment_for_same_snapshot(tmp_path):

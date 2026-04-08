@@ -9,10 +9,9 @@ from .config import resolve_db_path, settings
 from .db_core import (
     ensure_db,
     init_portfolio,
-    normalize_asset_qty,
-    normalize_cash_amount,
     portfolio_asset_total,
     portfolio_cash_total,
+    replay_fill_portfolio_snapshot,
     set_portfolio_breakdown,
 )
 
@@ -159,8 +158,6 @@ def _validate_targets(conn: sqlite3.Connection) -> list[str]:
 
 
 def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
-    cash = normalize_cash_amount(settings.START_CASH_KRW)
-    qty = normalize_asset_qty(0.0)
     rows = conn.execute(
         """
         SELECT o.side, f.price, f.qty, f.fee
@@ -169,25 +166,24 @@ def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
         ORDER BY f.fill_ts ASC, f.id ASC
         """
     ).fetchall()
-    for row in rows:
-        side = str(row["side"])
-        price = float(row["price"])
-        fill_qty = float(row["qty"])
-        fee = float(row["fee"])
-        if side == "BUY":
-            cash = normalize_cash_amount(cash - ((price * fill_qty) + fee))
-            qty = normalize_asset_qty(qty + fill_qty)
-        elif side == "SELL":
-            cash = normalize_cash_amount(cash + ((price * fill_qty) - fee))
-            qty = normalize_asset_qty(qty - fill_qty)
-        else:
-            raise RepairValidationError(f"invalid side in fills replay: {side}")
+    (
+        _cash_available,
+        _cash_locked,
+        _asset_available,
+        _asset_locked,
+        cash,
+        qty,
+    ) = replay_fill_portfolio_snapshot(
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=((str(row["side"]), float(row["price"]), float(row["qty"]), float(row["fee"]) if row["fee"] is not None else None) for row in rows),
+    )
     return cash, qty
 
 
 def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str, float | int]], float, float]:
-    cash = normalize_cash_amount(settings.START_CASH_KRW)
-    qty = normalize_asset_qty(0.0)
     diffs: list[dict[str, float | int]] = []
 
     rows = conn.execute(
@@ -198,26 +194,36 @@ def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str,
         """
     ).fetchall()
 
+    replay_rows: list[tuple[str, float, float, float | None]] = []
     for row in rows:
         trade_id = int(row["id"])
         side = str(row["side"])
         price = float(row["price"])
         trade_qty = float(row["qty"])
-        fee = float(row["fee"])
+        fee = float(row["fee"]) if row["fee"] is not None else None
 
-        if side == "BUY":
-            cash = normalize_cash_amount(cash - ((price * trade_qty) + fee))
-            qty = normalize_asset_qty(qty + trade_qty)
-        elif side == "SELL":
-            cash = normalize_cash_amount(cash + ((price * trade_qty) - fee))
-            qty = normalize_asset_qty(qty - trade_qty)
-        else:
+        if side not in ("BUY", "SELL"):
             raise RepairValidationError(f"invalid trade side for id={trade_id}: {side}")
+        replay_rows.append((side, price, trade_qty, fee))
 
-        if cash < -1e-6:
-            raise RepairValidationError(f"negative cash produced while replaying trades at id={trade_id}: {cash}")
-        if qty < -1e-10:
-            raise RepairValidationError(f"negative asset produced while replaying trades at id={trade_id}: {qty}")
+    cash = settings.START_CASH_KRW
+    qty = 0.0
+    for idx, row in enumerate(rows):
+        trade_id = int(row["id"])
+        (
+            _cash_available,
+            _cash_locked,
+            _asset_available,
+            _asset_locked,
+            cash,
+            qty,
+        ) = replay_fill_portfolio_snapshot(
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+            rows=replay_rows[: idx + 1],
+        )
 
         old_cash_after = float(row["cash_after"])
         old_asset_after = float(row["asset_after"])

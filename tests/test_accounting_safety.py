@@ -8,6 +8,7 @@ from bithumb_bot.db_core import (
     ensure_db,
     get_external_cash_adjustment_summary,
     get_portfolio_breakdown,
+    replay_fill_portfolio_snapshot,
     record_external_cash_adjustment,
     set_portfolio_breakdown,
 )
@@ -427,7 +428,8 @@ def test_buy_fill_cash_after_matches_portfolio_available_for_canonical_snapshot(
     assert float(portfolio["cash_locked"]) == pytest.approx(0.0)
 
 
-def test_sell_fill_cash_after_matches_portfolio_available_for_canonical_snapshot(tmp_path):
+@pytest.mark.parametrize("fee", [0.0, None])
+def test_sell_fill_cash_after_matches_portfolio_available_for_canonical_snapshot(tmp_path, fee):
     db_path = tmp_path / "sell_snapshot.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -457,7 +459,7 @@ def test_sell_fill_cash_after_matches_portfolio_available_for_canonical_snapshot
             fill_ts=10,
             price=100_000_000.0,
             qty=0.01,
-            fee=0.0,
+            fee=fee,
         )
         portfolio = conn.execute(
             "SELECT cash_krw, cash_available, cash_locked FROM portfolio WHERE id=1"
@@ -469,6 +471,31 @@ def test_sell_fill_cash_after_matches_portfolio_available_for_canonical_snapshot
     assert float(trade["cash"]) == pytest.approx(float(portfolio["cash_available"]))
     assert float(trade["cash"]) == pytest.approx(float(portfolio["cash_krw"]))
     assert float(portfolio["cash_locked"]) == pytest.approx(0.0)
+
+
+def test_replay_fill_portfolio_snapshot_is_fee_and_quantization_stable(tmp_path):
+    db_path = tmp_path / "replay_snapshot.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    snapshot = replay_fill_portfolio_snapshot(
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=(
+            ("BUY", 100_000_000.0, 0.0000000000015, None),
+            ("SELL", 100_000_000.0, 0.0000000000015, 0.0),
+        ),
+    )
+
+    cash_available_after, cash_locked_after, asset_available_after, asset_locked_after, cash_after, asset_after = snapshot
+    assert cash_available_after == pytest.approx(1_000_000.0)
+    assert cash_locked_after == pytest.approx(0.0)
+    assert asset_available_after == pytest.approx(0.0)
+    assert asset_locked_after == pytest.approx(0.0)
+    assert cash_after == pytest.approx(1_000_000.0)
+    assert asset_after == pytest.approx(0.0)
 
 
 def test_fractional_qty_roundtrip_does_not_accumulate_cash_drift(tmp_path):

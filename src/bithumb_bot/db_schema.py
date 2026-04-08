@@ -51,6 +51,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS external_cash_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'external_cash_adjustment'
+                CHECK (event_type = 'external_cash_adjustment'),
+            event_ts INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            delta_amount REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            broker_snapshot_basis TEXT NOT NULL,
+            correlation_metadata TEXT,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+
     # risk
     conn.execute(
         """

@@ -22,10 +22,11 @@ from .db_core import (
     get_external_cash_adjustment_summary,
     get_portfolio_breakdown,
     init_portfolio,
-    normalize_asset_qty,
     normalize_cash_amount,
     portfolio_asset_total,
     portfolio_cash_total,
+    replay_fill_portfolio_snapshot,
+    record_external_cash_adjustment,
 )
 from .utils_time import kst_str, parse_interval_sec
 from .engine import (
@@ -449,6 +450,24 @@ def cmd_run(short_n: int, long_n: int):
     from .run_lock import RunLockError, acquire_run_lock
 
     try:
+        validate_live_mode_preflight(settings)
+    except LiveModeValidationError as e:
+        notify(
+            safety_event(
+                "startup_gate_blocked",
+                client_order_id="-",
+                submit_attempt_id="-",
+                exchange_order_id="-",
+                reason_code="LIVE_STARTUP_GUARD",
+                alert_kind="startup_gate",
+                reason=str(e),
+                state_to="HALTED",
+            )
+        )
+        print(f"[RUN] {e}")
+        raise SystemExit(1) from e
+
+    try:
         with acquire_run_lock(Path(settings.RUN_LOCK_PATH)):
             run_loop(short_n, long_n)
     except RunLockError as e:
@@ -473,6 +492,7 @@ def cmd_health() -> None:
     submit_unknown_count = 0
     attribution_quality = None
     recovery_attribution_signals = None
+    external_cash_adjustment_summary = None
     conn = ensure_db()
     try:
         row = conn.execute(
@@ -487,6 +507,7 @@ def cmd_health() -> None:
                 else None
             ),
         )
+        external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
     finally:
         conn.close()
     if row is not None:
@@ -729,6 +750,10 @@ def cmd_health() -> None:
             f"auth_query_hash_preview={chance_auth.get('query_hash_preview') or '-'} "
             f"auth_fallback_branch_used={1 if chance_auth.get('fallback_branch_used') else 0}"
         )
+    print(
+        "    "
+        f"recent_external_cash_adjustment={_format_external_cash_adjustment_summary(external_cash_adjustment_summary)}"
+    )
 
     print("  [RISK-SNAPSHOT]")
     print(
@@ -887,8 +912,6 @@ def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
 
 def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
     init_portfolio(conn)
-    cash = normalize_cash_amount(settings.START_CASH_KRW)
-    qty = normalize_asset_qty(0.0)
     total_fee = 0.0
     external_cash_adjustment_total = 0.0
     external_cash_adjustment_count = 0
@@ -904,6 +927,7 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         """
     ).fetchall()
 
+    fill_rows: list[tuple[str, float, float, float | None]] = []
     for row in fills:
         key = (
             str(row["client_order_id"]),
@@ -917,16 +941,18 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
 
         fill_price = float(row["price"])
         fill_qty = float(row["qty"])
-        fee = float(row["fee"])
+        fee = float(row["fee"]) if row["fee"] is not None else None
         side = str(row["side"])
-        total_fee += fee
+        total_fee += float(fee or 0.0)
+        fill_rows.append((side, fill_price, fill_qty, fee))
 
-        if side == "BUY":
-            cash = normalize_cash_amount(cash - ((fill_price * fill_qty) + fee))
-            qty = normalize_asset_qty(qty + fill_qty)
-        elif side == "SELL":
-            cash = normalize_cash_amount(cash + ((fill_price * fill_qty) - fee))
-            qty = normalize_asset_qty(qty - fill_qty)
+    cash_available, cash_locked, asset_available, asset_locked, cash, qty = replay_fill_portfolio_snapshot(
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=fill_rows,
+    )
 
     adjustments = conn.execute(
         """
@@ -945,6 +971,7 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         external_cash_adjustment_total += delta_amount
         external_cash_adjustment_count += 1
         cash = normalize_cash_amount(cash + delta_amount)
+        cash_available = normalize_cash_amount(cash_available + delta_amount)
 
     p = conn.execute(
         "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
@@ -957,6 +984,7 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         if p
         else 0.0
     )
+    portfolio_cash_available = float(p["cash_available"]) if p else 0.0
     portfolio_qty = (
         portfolio_asset_total(
             asset_available=float(p["asset_available"]),
@@ -965,12 +993,18 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         if p
         else 0.0
     )
-    consistent = math.isclose(cash, portfolio_cash, abs_tol=1e-6) and math.isclose(qty, portfolio_qty, abs_tol=1e-10)
+    consistent = (
+        math.isclose(cash, portfolio_cash, abs_tol=1e-6)
+        and math.isclose(cash_available, portfolio_cash_available, abs_tol=1e-6)
+        and math.isclose(cash_locked, float(p["cash_locked"]) if p else 0.0, abs_tol=1e-6)
+        and math.isclose(qty, portfolio_qty, abs_tol=1e-10)
+    )
 
     return {
         "replay_cash": cash,
         "replay_qty": qty,
         "portfolio_cash": portfolio_cash,
+        "portfolio_cash_available": portfolio_cash_available,
         "portfolio_qty": portfolio_qty,
         "fee_total": total_fee,
         "external_cash_adjustment_count": external_cash_adjustment_count,
@@ -1171,6 +1205,16 @@ def _print_operator_command_contract(
         print(f"[{command}] postcondition={postcondition}")
 
 
+def _resume_blocker_summary(blockers) -> tuple[str, str]:
+    blocker_codes = ", ".join(str(blocker.code) for blocker in blockers) if blockers else "none"
+    blocker_reason_codes = (
+        ", ".join(str(getattr(blocker, "reason_code", blocker.code)) for blocker in blockers)
+        if blockers
+        else "none"
+    )
+    return blocker_codes, blocker_reason_codes
+
+
 def cmd_cancel_open_orders() -> None:
     if settings.MODE != "live":
         print(f"[CANCEL-OPEN-ORDERS] skipped: MODE={settings.MODE} (live only)")
@@ -1190,8 +1234,14 @@ def cmd_cancel_open_orders() -> None:
 
     _print_operator_command_contract(
         "CANCEL-OPEN-ORDERS",
-        precondition="MODE=live; LIVE_DRY_RUN=false; live preflight passed; operator warning acknowledged",
-        warning="live write command: every broker-matched open order for unresolved local ids will be canceled",
+        precondition=(
+            "MODE=live; LIVE_DRY_RUN=false; live preflight passed; "
+            "only broker-matched unresolved orders are eligible"
+        ),
+        warning=(
+            "live write command: every broker-matched open order for unresolved local ids will be canceled; "
+            "stray remote orders are skipped and reported"
+        ),
     )
 
     from .broker.bithumb import BithumbBroker
@@ -1204,6 +1254,8 @@ def cmd_cancel_open_orders() -> None:
         status=status,
         summary=summary,
     )
+    resume_allowed, resume_blocks = evaluate_resume_eligibility()
+    resume_blockers, resume_blocker_reason_codes = _resume_blocker_summary(resume_blocks)
 
     print("[CANCEL-OPEN-ORDERS]")
     print(f"  remote_open_count={summary['remote_open_count']}")
@@ -1217,6 +1269,11 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
     for msg in summary["error_messages"]:
         print(f"  - {msg}")
+    if int(summary["failed_count"]) > 0 or int(summary["remote_open_count"]) > int(summary["canceled_count"]):
+        print(
+            "[CANCEL-OPEN-ORDERS] warning="
+            "some remote open orders remain or require manual review; run reconcile and recovery-report next"
+        )
     state = runtime_state.snapshot()
     _print_operator_command_contract(
         "CANCEL-OPEN-ORDERS",
@@ -1225,6 +1282,10 @@ def cmd_cancel_open_orders() -> None:
             f"remote_open_count={int(summary['remote_open_count'])}; "
             f"canceled_count={int(summary['canceled_count'])}; "
             f"failed_count={int(summary['failed_count'])}; "
+            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
+            f"resume_allowed={1 if resume_allowed else 0}; "
+            f"resume_blockers={resume_blockers}; "
+            f"resume_blocker_reason_codes={resume_blocker_reason_codes}; "
             f"local_state_trigger={state.last_cancel_open_orders_trigger or '-'}"
         ),
     )
@@ -1934,6 +1995,26 @@ def _load_recovery_report(
             "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
         )
         resume_blocked_reason = "resume blocked by blocking dust manual review"
+    elif "EXTERNAL_CASH_ADJUSTMENT_REQUIRED" in blocker_codes:
+        operator_next_action = "record_external_cash_adjustment"
+        recommended_command = "uv run python bot.py record-external-cash-adjustment --help"
+        recommended_next_action = (
+            "Record the missing external cash adjustment evidence, then rerun reconcile before resuming."
+        )
+        resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
+    elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
+        if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+            operator_next_action = "reconcile_after_external_adjustment"
+            recommended_command = "uv run python bot.py reconcile"
+            recommended_next_action = (
+                "An external cash adjustment is already recorded. Verify the broker snapshot, then rerun reconcile."
+            )
+            resume_blocked_reason = "resume blocked by remaining balance split mismatch after external adjustment"
+        else:
+            operator_next_action = "investigate_blockers"
+            recommended_command = "uv run python bot.py recovery-report --json"
+            recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+            resume_blocked_reason = "resume blocked by non-overridable safety blockers"
     else:
         operator_next_action = "investigate_blockers"
         recommended_command = "uv run python bot.py recovery-report --json"
@@ -1964,6 +2045,12 @@ def _load_recovery_report(
             return "uv run python bot.py recovery-report"
         if code == "LAST_RECONCILE_FAILED":
             return "uv run python bot.py reconcile"
+        if code == "EXTERNAL_CASH_ADJUSTMENT_REQUIRED":
+            return "uv run python bot.py record-external-cash-adjustment --help"
+        if code == "BALANCE_SPLIT_MISMATCH":
+            if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report --json"
         if code == "HALT_RISK_OPEN_POSITION":
             return "uv run python bot.py flatten-position"
         if code in {"HARMLESS_DUST_POLICY_REVIEW_REQUIRED", "BLOCKING_DUST_REVIEW_REQUIRED"}:
@@ -2173,7 +2260,10 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("[RECOVERY-REPORT]")
     _print_operator_command_contract(
         "RECOVERY-REPORT",
-        precondition="DB snapshot readable; recovery summary can be derived from current runtime state",
+        precondition=(
+            "DB snapshot readable; recovery summary can be derived from current runtime state; "
+            "report output is snapshot-only and does not mutate trading state"
+        ),
         postcondition=f"recovery_report snapshot written to {PATH_MANAGER.recovery_report_path()}",
     )
     print("  [P0] blocker_summary_view")
@@ -2384,6 +2474,87 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         print(f"      next_action={item['next_action_hint']}")
 
 
+def _load_json_object_arg(value: str | None, *, field_name: str, allow_none: bool = False) -> dict[str, object] | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} is required")
+    text = str(value).strip()
+    if not text:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} is required")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return parsed
+
+
+def cmd_record_external_cash_adjustment(
+    *,
+    event_ts: int,
+    delta_amount: float,
+    source: str,
+    reason: str,
+    broker_snapshot_basis: str,
+    currency: str = "KRW",
+    correlation_metadata: str | None = None,
+    note: str | None = None,
+    adjustment_key: str | None = None,
+    yes: bool = False,
+) -> None:
+    if not yes:
+        print("[EXTERNAL-CASH-ADJUSTMENT] confirmation required: re-run with --yes to apply")
+        raise SystemExit(1)
+
+    conn = ensure_db()
+    try:
+        basis = _load_json_object_arg(broker_snapshot_basis, field_name="broker_snapshot_basis")
+        correlation = _load_json_object_arg(
+            correlation_metadata,
+            field_name="correlation_metadata",
+            allow_none=True,
+        )
+        adjustment = record_external_cash_adjustment(
+            conn,
+            event_ts=int(event_ts),
+            currency=str(currency),
+            delta_amount=float(delta_amount),
+            source=str(source),
+            reason=str(reason),
+            broker_snapshot_basis=basis,
+            correlation_metadata=correlation,
+            note=note,
+            adjustment_key=adjustment_key,
+        )
+        summary = get_external_cash_adjustment_summary(conn)
+    finally:
+        conn.close()
+
+    print("[EXTERNAL-CASH-ADJUSTMENT]")
+    print(
+        "  "
+        f"created={1 if bool(adjustment and adjustment.get('created')) else 0} "
+        f"adjustment_key={adjustment['adjustment_key']} "
+        f"event_ts={kst_str(int(adjustment['event_ts']))} "
+        f"delta={float(adjustment['delta_amount']):,.3f} "
+        f"currency={adjustment['currency']} "
+        f"source={adjustment['source']} "
+        f"reason={adjustment['reason']}"
+    )
+    print(
+        "  "
+        f"adjustment_count={int(summary.get('adjustment_count') or 0)} "
+        f"adjustment_total={float(summary.get('adjustment_total') or 0.0):,.3f} "
+        f"last_event={kst_str(int(summary['last_event_ts'])) if summary.get('last_event_ts') is not None else 'none'}"
+    )
+    if adjustment.get("note"):
+        print(f"  note={adjustment['note']}")
+
+
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
     maybe_clear_stale_initial_reconcile_halt()
     report = _load_recovery_report()
@@ -2475,12 +2646,18 @@ def cmd_pause() -> None:
     _print_operator_command_contract(
         "PAUSE",
         precondition="operator requested persistent halt; trading may already be paused",
+        warning=(
+            "live pause stops new orders only; open orders are not canceled and should be handled with "
+            "cancel-open-orders or panic-stop if needed"
+        ) if settings.MODE == "live" else None,
     )
     runtime_state.enter_halt(
         reason_code="MANUAL_PAUSE",
         reason="manual operator pause",
         unresolved=False,
     )
+    resume_allowed, resume_blocks = evaluate_resume_eligibility()
+    resume_blockers, resume_blocker_reason_codes = _resume_blocker_summary(resume_blocks)
     state = runtime_state.snapshot()
     print("[PAUSE] trading disabled via persistent runtime state")
     _print_operator_command_contract(
@@ -2489,6 +2666,9 @@ def cmd_pause() -> None:
             f"trading_enabled={1 if state.trading_enabled else 0}; "
             f"halt_new_orders_blocked={1 if state.halt_new_orders_blocked else 0}; "
             f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
+            f"resume_allowed={1 if resume_allowed else 0}; "
+            f"resume_blockers={resume_blockers}; "
+            f"resume_blocker_reason_codes={resume_blocker_reason_codes}; "
             f"halt_reason_code={state.halt_reason_code or '-'}"
         ),
     )
@@ -2498,6 +2678,18 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
     if settings.MODE != "live":
         print(f"[PANIC-STOP] skipped: MODE={settings.MODE} (live only)")
         raise SystemExit(1)
+
+    _print_operator_command_contract(
+        "PANIC-STOP",
+        precondition=(
+            f"MODE={settings.MODE}; LIVE_DRY_RUN={1 if settings.LIVE_DRY_RUN else 0}; "
+            f"flatten={1 if flatten else 0}; live preflight required"
+        ),
+        warning=(
+            "new orders are blocked immediately, open orders are canceled, "
+            "and flatten is optional but conservative default remains no-flatten"
+        ),
+    )
 
     try:
         validate_live_mode_preflight(settings)
@@ -2553,6 +2745,14 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
         halt_new_orders_blocked=True,
         unresolved=unresolved,
     )
+    resume_allowed, resume_blocks = evaluate_resume_eligibility()
+    resume_blocker_codes = ", ".join(blocker.code for blocker in resume_blocks) if resume_blocks else "none"
+    resume_blocker_reason_codes = (
+        ", ".join(str(getattr(blocker, "reason_code", blocker.code)) for blocker in resume_blocks)
+        if resume_blocks
+        else "none"
+    )
+    resume_precondition = "clear" if resume_allowed else "blocked"
     notify(
         safety_event(
             "panic_stop_completed",
@@ -2561,8 +2761,12 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
             flatten_requested=1 if flatten else 0,
             cancel_accepted=1 if canceled_ok else 0,
             unresolved=1 if unresolved else 0,
+            resume_allowed=1 if resume_allowed else 0,
+            resume_blockers=resume_blocker_codes,
+            resume_blocker_reason_codes=resume_blocker_reason_codes,
             cancel_status=runtime_state.snapshot().last_cancel_open_orders_status or "unknown",
             flatten_status=runtime_state.snapshot().last_flatten_position_status or "skipped",
+            resume_precondition=resume_precondition,
             reason=halt_reason.detail,
         )
     )
@@ -2579,6 +2783,10 @@ def cmd_panic_stop(*, flatten: bool = False) -> None:
     print(f"  unresolved_open_order_count={state.unresolved_open_order_count}")
     print(f"  halt_open_orders_present={state.halt_open_orders_present}")
     print(f"  halt_position_present={state.halt_position_present}")
+    print(f"  resume_allowed={1 if resume_allowed else 0}")
+    print(f"  resume_blockers={resume_blocker_codes}")
+    print(f"  resume_blocker_reason_codes={resume_blocker_reason_codes}")
+    print(f"  resume_precondition={resume_precondition}")
 
 
 def _build_live_broker():
@@ -2676,13 +2884,13 @@ def cmd_resume(
     _print_operator_command_contract(
         "RESUME",
         precondition=(
-            f"trading paused; force={1 if force else 0}; "
+            f"trading paused or halted; force={1 if force else 0}; "
             f"MODE={settings.MODE}; live_reconcile={'yes' if settings.MODE == 'live' else 'no'}"
         ),
         warning=(
-            "force resume bypasses overridable blockers only; "
-            "non-overridable safety blockers still refuse"
-        ) if force else None,
+            "live resume runs reconciliation before the gate check; "
+            "force resume bypasses overridable blockers only and non-overridable safety blockers still refuse"
+        ) if settings.MODE == "live" else None,
     )
     if settings.MODE == "live":
         _run_live_reconcile(
@@ -2732,12 +2940,16 @@ def cmd_resume(
     else:
         print("[RESUME] trading enabled")
     state = runtime_state.snapshot()
+    resume_blockers, resume_blocker_reason_codes = _resume_blocker_summary(resume_blocks)
     _print_operator_command_contract(
         "RESUME",
         postcondition=(
             f"trading_enabled={1 if state.trading_enabled else 0}; "
             f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
-            f"resume_gate_reason={state.resume_gate_reason or 'none'}"
+            f"resume_gate_reason={state.resume_gate_reason or 'none'}; "
+            f"resume_blockers={resume_blockers}; "
+            f"resume_blocker_reason_codes={resume_blocker_reason_codes}; "
+            f"force_override={1 if force and bool(resume_blocks) else 0}"
         ),
     )
 
@@ -2750,19 +2962,30 @@ def cmd_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
     _print_operator_command_contract(
         "RECONCILE",
         precondition="MODE=live; broker snapshot refresh will replay recent exchange state into the local ledger",
+        warning=(
+            "live recovery command: recent remote orders and fills will be replayed into the local ledger; "
+            "run when operator intends a recovery pass"
+        ),
     )
     _run_live_reconcile(
         broker_factory=broker_factory,
         reconcile_fn=reconcile_fn,
     )
     print("[RECONCILE] completed one live reconciliation pass")
+    resume_allowed, resume_blocks = evaluate_resume_eligibility()
+    resume_blockers, resume_blocker_reason_codes = _resume_blocker_summary(resume_blocks)
     state = runtime_state.snapshot()
     _print_operator_command_contract(
         "RECONCILE",
         postcondition=(
             f"last_reconcile_status={state.last_reconcile_status or 'none'}; "
             f"last_reconcile_reason_code={state.last_reconcile_reason_code or 'none'}; "
-            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}"
+            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
+            f"resume_allowed={1 if resume_allowed else 0}; "
+            f"resume_blockers={resume_blockers}; "
+            f"resume_blocker_reason_codes={resume_blocker_reason_codes}; "
+            f"unresolved_open_order_count={state.unresolved_open_order_count}; "
+            f"recovery_required_count={state.recovery_required_count}"
         ),
     )
 
@@ -3210,6 +3433,22 @@ def main(argv: list[str] | None = None) -> int:
     cash_drift_report.add_argument("--recent-limit", type=int, default=5)
     cash_drift_report.add_argument("--json", action="store_true")
 
+    external_cash_adjustment = sub.add_parser(
+        "record-external-cash-adjustment",
+        help="record an external cash adjustment event",
+        description="Store a manual or broker-driven cash adjustment as a separate accounting event.",
+    )
+    external_cash_adjustment.add_argument("--event-ts", type=int, required=True)
+    external_cash_adjustment.add_argument("--delta-amount", type=float, required=True)
+    external_cash_adjustment.add_argument("--source", required=True)
+    external_cash_adjustment.add_argument("--reason", required=True)
+    external_cash_adjustment.add_argument("--broker-snapshot-basis", required=True)
+    external_cash_adjustment.add_argument("--currency", default="KRW")
+    external_cash_adjustment.add_argument("--correlation-metadata")
+    external_cash_adjustment.add_argument("--note")
+    external_cash_adjustment.add_argument("--adjustment-key")
+    external_cash_adjustment.add_argument("--yes", action="store_true")
+
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
     r.add_argument("--long", type=int, default=SMA_LONG)
@@ -3303,6 +3542,19 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.cmd == "cash-drift-report":
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
+    elif args.cmd == "record-external-cash-adjustment":
+        cmd_record_external_cash_adjustment(
+            event_ts=int(args.event_ts),
+            delta_amount=float(args.delta_amount),
+            source=str(args.source),
+            reason=str(args.reason),
+            broker_snapshot_basis=str(args.broker_snapshot_basis),
+            currency=str(args.currency),
+            correlation_metadata=str(args.correlation_metadata) if args.correlation_metadata is not None else None,
+            note=str(args.note) if args.note is not None else None,
+            adjustment_key=str(args.adjustment_key) if args.adjustment_key is not None else None,
+            yes=bool(args.yes),
+        )
     elif args.cmd == "report":
         cmd_report(max(1, int(args.days)))
     elif args.cmd == "audit-ledger":
