@@ -19,7 +19,14 @@ from .broker.base import (
 from .broker.balance_source import fetch_balance_snapshot
 from .broker.order_rules import get_effective_order_rules
 from .config import settings
-from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
+from .db_core import (
+    ensure_db,
+    get_portfolio_breakdown,
+    init_portfolio,
+    portfolio_cash_total,
+    record_external_cash_adjustment,
+    set_portfolio_breakdown,
+)
 from .dust import classify_dust_residual, dust_qty_gap_tolerance
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .lifecycle import mark_harmless_dust_positions
@@ -49,6 +56,8 @@ NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_SOURCE_CONFLICT_HALT,
     REASON_STARTUP_GATE_BLOCKED,
     REASON_SUBMIT_UNKNOWN_UNRESOLVED,
+    REASON_RECENT_FILL_INVALID_PRICE,
+    REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY,
 }
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
 
@@ -1487,17 +1496,89 @@ def reconcile_with_broker(broker: Broker) -> None:
         local_cash_available, local_cash_locked, local_asset_available, local_asset_locked = get_portfolio_breakdown(conn)
         has_open_orders = bool(local_open) or bool(remote_open)
 
-        cash_locked = float(bal.cash_locked)
+        broker_cash_available = float(bal.cash_available)
+        broker_cash_locked = float(bal.cash_locked)
         asset_locked = float(bal.asset_locked)
+        local_cash_total = portfolio_cash_total(
+            cash_available=local_cash_available,
+            cash_locked=local_cash_locked,
+        )
+        broker_cash_total = portfolio_cash_total(
+            cash_available=broker_cash_available,
+            cash_locked=broker_cash_locked,
+        )
+        cash_delta = broker_cash_total - local_cash_total
+        cash_locked = broker_cash_locked
         # Accounts snapshot source can briefly report locked=0 around in-flight open orders.
         # Keep local locked split as conservative floor when remote split is zero during open-order windows.
         if has_open_orders and cash_locked <= 1e-12 and local_cash_locked > 1e-12:
             cash_locked = local_cash_locked
+
+        pre_adjustment_mismatch_count, pre_adjustment_mismatch_summary = _balance_split_mismatch_summary(
+            broker_cash_available=broker_cash_available,
+            broker_cash_locked=broker_cash_locked,
+            broker_asset_available=float(bal.asset_available),
+            broker_asset_locked=asset_locked,
+            local_cash_available=local_cash_available,
+            local_cash_locked=local_cash_locked,
+            local_asset_available=local_asset_available,
+            local_asset_locked=local_asset_locked,
+        )
+        external_cash_adjustment = None
+        should_record_external_cash_adjustment = (
+            abs(cash_delta) > CASH_SPLIT_ABS_TOL
+            and reason_code not in NON_CLEARING_RECONCILE_REASON_CODES
+            and not conflicts
+            and pre_adjustment_mismatch_count == 1
+            and "cash_available" in pre_adjustment_mismatch_summary
+            and "cash_locked" not in pre_adjustment_mismatch_summary
+            and "asset_available" not in pre_adjustment_mismatch_summary
+            and "asset_locked" not in pre_adjustment_mismatch_summary
+        )
+        if should_record_external_cash_adjustment:
+            external_cash_adjustment = record_external_cash_adjustment(
+                conn,
+                event_ts=int(balance_snapshot.observed_ts_ms or (time.time() * 1000)),
+                currency="KRW",
+                delta_amount=cash_delta,
+                source=str(balance_snapshot.source_id or "reconcile"),
+                reason="reconcile_cash_drift",
+                broker_snapshot_basis={
+                    "balance_source": str(balance_snapshot.source_id or "-"),
+                    "observed_ts_ms": int(balance_snapshot.observed_ts_ms),
+                    "asset_ts_ms": int(balance_snapshot.asset_ts_ms),
+                    "broker_cash_available": broker_cash_available,
+                    "broker_cash_locked": broker_cash_locked,
+                    "broker_cash_total": broker_cash_total,
+                    "local_cash_available": float(local_cash_available),
+                    "local_cash_locked": float(local_cash_locked),
+                    "local_cash_total": local_cash_total,
+                    "reconcile_reason_code": reason_code,
+                },
+                correlation_metadata={
+                    "remote_open_order_found": int(metadata["remote_open_order_found"]),
+                    "recent_fill_applied": int(metadata["recent_fill_applied"]),
+                    "invalid_fill_price_blocked": int(metadata["invalid_fill_price_blocked"]),
+                },
+                note="cash drift inferred from reconcile balance snapshot",
+            )
+            metadata["external_cash_adjustment_count"] = 1
+            metadata["external_cash_adjustment_delta_krw"] = cash_delta
+            metadata["external_cash_adjustment_total_krw"] = cash_delta
+            metadata["external_cash_adjustment_event_ts"] = int(balance_snapshot.observed_ts_ms or 0)
+            metadata["external_cash_adjustment_created"] = 1 if external_cash_adjustment and external_cash_adjustment.get("created") else 0
+            metadata["external_cash_adjustment_key"] = str(external_cash_adjustment["adjustment_key"]) if external_cash_adjustment else "-"
+            metadata["external_cash_adjustment_reason"] = str(external_cash_adjustment["reason"]) if external_cash_adjustment else "-"
+            local_cash_available = float(broker_cash_available)
+            local_cash_total = portfolio_cash_total(
+                cash_available=local_cash_available,
+                cash_locked=local_cash_locked,
+            )
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
             asset_locked = local_asset_locked
 
         mismatch_count, mismatch_summary = _balance_split_mismatch_summary(
-            broker_cash_available=float(bal.cash_available),
+            broker_cash_available=broker_cash_available,
             broker_cash_locked=cash_locked,
             broker_asset_available=float(bal.asset_available),
             broker_asset_locked=asset_locked,

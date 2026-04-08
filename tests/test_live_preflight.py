@@ -268,7 +268,41 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     config.validate_live_mode_preflight(settings)
 
 
+def test_live_preflight_requires_notifier_delivery_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.delenv("NOTIFIER_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
 
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "notifier must be enabled and configured with at least one delivery target" in str(exc.value)
+
+
+def test_live_preflight_rejects_shared_runtime_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    shared_root = Path(os.environ["DATA_ROOT"]).resolve()
+    monkeypatch.setenv("BACKUP_ROOT", str(shared_root))
+    object.__setattr__(settings, "BACKUP_ROOT", str(shared_root))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "runtime roots must not overlap or share parent/child paths when MODE=live" in str(exc.value)
+
+
+def test_live_preflight_accepts_valid_live_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    config.validate_live_mode_preflight(settings)
 
 
 def test_live_preflight_requires_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,6 +319,7 @@ def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: py
     _set_valid_live_defaults(monkeypatch)
 
     config.validate_live_mode_preflight(settings)
+
 
 def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)

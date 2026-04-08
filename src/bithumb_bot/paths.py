@@ -128,6 +128,10 @@ class PathManager:
     def run_dir(self) -> Path:
         return self.config.run_root / self.config.mode
 
+    def run_dir_for_mode(self, mode: str | None = None) -> Path:
+        normalized_mode = str(mode or self.config.mode or "paper").strip().lower() or "paper"
+        return self.config.run_root / normalized_mode
+
     def data_dir(self) -> Path:
         return self.config.data_root / self.config.mode
 
@@ -135,7 +139,10 @@ class PathManager:
         return self.config.log_root / self.config.mode
 
     def run_lock_path(self) -> Path:
-        return self.run_dir() / "bithumb-bot.lock"
+        return self.run_lock_path_for_mode(self.config.mode)
+
+    def run_lock_path_for_mode(self, mode: str | None = None) -> Path:
+        return self.run_dir_for_mode(mode) / "bithumb-bot.lock"
 
     def pid_path(self) -> Path:
         return self.run_dir() / "bithumb-bot.pid"
@@ -227,6 +234,27 @@ class PathManager:
 
     def ensure_parent_dir(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def validate_runtime_root_separation(config: PathConfig) -> None:
+    roots: list[tuple[str, Path]] = [
+        ("ENV_ROOT", config.env_root),
+        ("RUN_ROOT", config.run_root),
+        ("DATA_ROOT", config.data_root),
+        ("LOG_ROOT", config.log_root),
+        ("BACKUP_ROOT", config.backup_root),
+    ]
+    if config.archive_root is not None:
+        roots.append(("ARCHIVE_ROOT", config.archive_root))
+
+    resolved_roots = [(name, path.resolve()) for name, path in roots]
+    for index, (left_name, left_path) in enumerate(resolved_roots):
+        for right_name, right_path in resolved_roots[index + 1 :]:
+            if left_path == right_path or PathManager._is_within(left_path, right_path) or PathManager._is_within(right_path, left_path):
+                raise PathPolicyError(
+                    "runtime roots must not overlap or share parent/child paths when MODE=live; "
+                    f"{left_name}={left_path} {right_name}={right_path}"
+                )
 
 
 def resolve_managed_path(kind: str, manager: PathManager) -> Path:

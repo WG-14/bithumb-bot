@@ -2377,12 +2377,15 @@ def _submit_via_standard_path(
             format_log_kv(
                 "[ORDER_DECISION] broker.place_order dispatch",
                 signal=signal,
+                signal_ts=int(ts),
+                candle_ts=int(ts),
                 side=side,
                 market_price=market_price,
                 position_qty=float(position_qty),
                 order_qty=order_qty,
                 normalized_qty=qty,
                 submit_payload_qty=float(qty),
+                submit_qty=float(qty),
                 submit_qty_source=submit_qty_source,
                 position_state_source=position_state_source,
                 raw_total_asset_qty=float(raw_total_asset_qty),
@@ -3534,6 +3537,7 @@ def live_execute_signal(
                 exit_reason=(decision_reason if side == "SELL" else None),
                 exit_rule_name=(exit_rule_name if side == "SELL" else None),
                 note=f"live exchange_order_id={order.exchange_order_id}",
+                signal_ts=int(ts),
             ) or trade
 
         refreshed = broker.get_order(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)

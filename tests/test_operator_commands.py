@@ -8,11 +8,14 @@ import pytest
 
 import bithumb_bot.app as app_module
 from bithumb_bot import runtime_state
+from bithumb_bot.app import main as app_main
 from bithumb_bot.app import (
     _load_recovery_report,
+    cmd_cash_drift_report,
     cmd_broker_diagnose,
     cmd_health,
     cmd_pause,
+    cmd_panic_stop,
     cmd_flatten_position,
     cmd_reconcile,
     cmd_recover_order,
@@ -21,15 +24,17 @@ from bithumb_bot.app import (
     cmd_resume,
 )
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
+from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown, init_portfolio, record_external_cash_adjustment
 from bithumb_bot.engine import evaluate_resume_eligibility
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot.utils_time import kst_str
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +73,95 @@ def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
         os.environ["RUN_LOCK_PATH"] = run_lock_path
     object.__setattr__(settings, "DB_PATH", db_path)
     object.__setattr__(app_module.settings, "DB_PATH", db_path)
+
+
+def _patch_cash_drift_broker(monkeypatch: pytest.MonkeyPatch, *, cash_available: float, cash_locked: float = 0.0):
+    class _CashDriftBroker:
+        def get_balance_snapshot(self):
+            return BalanceSnapshot(
+                source_id="accounts_v1_rest_snapshot",
+                observed_ts_ms=1710000000000,
+                asset_ts_ms=1710000000000,
+                balance=BrokerBalance(
+                    cash_available=cash_available,
+                    cash_locked=cash_locked,
+                    asset_available=0.0,
+                    asset_locked=0.0,
+                ),
+            )
+
+    monkeypatch.setattr("bithumb_bot.reporting.BithumbBroker", lambda: _CashDriftBroker())
+
+
+def test_cash_drift_report_shows_explained_delta_from_external_adjustments(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    _patch_cash_drift_broker(monkeypatch, cash_available=settings.START_CASH_KRW + 120.0)
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_external_cash_adjustment(
+            conn,
+            event_ts=1710000000000,
+            currency="KRW",
+            delta_amount=120.0,
+            source="legacy_balance_api",
+            reason="reconcile_cash_drift",
+            broker_snapshot_basis={"cash_available": settings.START_CASH_KRW},
+            note="cash drift audit",
+            adjustment_key="cash-drift-explained-1",
+        )
+    finally:
+        conn.close()
+
+    cmd_cash_drift_report(recent_limit=5)
+    out = capsys.readouterr().out
+
+    assert "[CASH-DRIFT-REPORT]" in out
+    assert f"broker_cash={settings.START_CASH_KRW + 120.0:,.3f}" in out
+    assert f"local_cash={settings.START_CASH_KRW + 120.0:,.3f}" in out
+    assert f"ledger_cash_without_adjustments={settings.START_CASH_KRW:,.3f}" in out
+    assert "external_cash_adjustment_total=120.000" in out
+    assert "explained_delta=120.000" in out
+    assert "unexplained_residual_delta=0.000" in out
+    assert "recent_adjustments:" in out
+    assert "reason=reconcile_cash_drift" in out
+
+
+def test_cash_drift_report_shows_unexplained_residual_delta(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    _patch_cash_drift_broker(monkeypatch, cash_available=settings.START_CASH_KRW + 75.0)
+
+    conn = ensure_db()
+    conn.close()
+
+    app_main(["cash-drift-report", "--recent-limit", "5"])
+    out = capsys.readouterr().out
+
+    assert "[CASH-DRIFT-REPORT]" in out
+    assert f"broker_cash={settings.START_CASH_KRW + 75.0:,.3f}" in out
+    assert f"local_cash={settings.START_CASH_KRW:,.3f}" in out
+    assert f"ledger_cash_without_adjustments={settings.START_CASH_KRW:,.3f}" in out
+    assert "external_cash_adjustment_total=0.000" in out
+    assert "explained_delta=0.000" in out
+    assert "unexplained_residual_delta=75.000" in out
+    assert "recent_adjustments=none" in out
+
+
+def test_cash_drift_report_handles_no_adjustment_edge_case(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    _patch_cash_drift_broker(monkeypatch, cash_available=settings.START_CASH_KRW)
+
+    conn = ensure_db()
+    conn.close()
+
+    cmd_cash_drift_report(recent_limit=5)
+    out = capsys.readouterr().out
+
+    assert "[CASH-DRIFT-REPORT]" in out
+    assert "recent_adjustments=none" in out
+    assert "external_cash_adjustment_total=0.000" in out
+    assert "unexplained_residual_delta=0.000" in out
 
 
 def _insert_order(
@@ -425,6 +519,25 @@ def test_manual_pause_then_resume_success_path(tmp_path):
     assert state.resume_gate_reason is None
 
 
+def test_pause_resume_state_transition_contract(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+
+    cmd_pause()
+    pause_out = capsys.readouterr().out
+
+    cmd_resume(force=False)
+    resume_out = capsys.readouterr().out
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert state.resume_gate_blocked is False
+    assert state.resume_gate_reason is None
+    assert "[PAUSE] precondition=" in pause_out
+    assert "postcondition=trading_enabled=0" in pause_out
+    assert "[RESUME] precondition=" in resume_out
+    assert "postcondition=trading_enabled=1" in resume_out
+
+
 def test_resume_live_recent_fill_replay_does_not_fail_with_filled_to_partial(tmp_path):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
@@ -693,8 +806,10 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
         metadata={
             "balance_split_mismatch_count": 2,
             "balance_split_mismatch_summary": (
-                "cash_available(local=1000000,broker=900000,delta=-100000)"
+                "cash_available(local=1000000,broker=900000,delta=-100000) "
+                "asset_available(local=0.500000000000,broker=0.450000000000,delta=-0.050000000000)"
             ),
+            "external_cash_adjustment_count": 1,
         },
     )
 
@@ -711,6 +826,90 @@ def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
     assert "code=BALANCE_SPLIT_MISMATCH" in out
     assert "balance split mismatch detected after reconcile" in out
     assert exc.value.code == 1
+
+
+def test_recovery_report_classifies_general_balance_split_mismatch_blocker(tmp_path):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 2,
+            "balance_split_mismatch_summary": (
+                "cash_available(local=1000000,broker=900000,delta=-100000) "
+                "asset_available(local=0.500000000000,broker=0.450000000000,delta=-0.050000000000)"
+            ),
+            "external_cash_adjustment_count": 1,
+            "external_cash_adjustment_delta_krw": -100000.0,
+            "external_cash_adjustment_total_krw": -100000.0,
+        },
+    )
+    try:
+        report = _load_recovery_report()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert report["can_resume"] is False
+    assert report["resume_blockers"] == ["BALANCE_SPLIT_MISMATCH"]
+    assert report["resume_blocker_reason_codes"] == ["PORTFOLIO_BROKER_CASH_MISMATCH"]
+    assert report["blocker_summary_view"][0]["reason_code"] == "PORTFOLIO_BROKER_CASH_MISMATCH"
+    assert report["blocker_summary_view"][0]["summary"] == "portfolio cash split does not match broker snapshot"
+
+
+def test_recovery_report_classifies_external_cash_adjustment_missing_blocker(
+    monkeypatch, tmp_path
+):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr(
+        "bithumb_bot.app._safe_recent_broker_orders_snapshot",
+        lambda *, limit=100: ([], "stubbed broker snapshot"),
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 1,
+            "balance_split_mismatch_summary": (
+                "cash_available(local=1000000,broker=999950,delta=-50)"
+            ),
+            "external_cash_adjustment_count": 0,
+            "external_cash_adjustment_delta_krw": 0.0,
+            "external_cash_adjustment_total_krw": 0.0,
+        },
+    )
+
+    try:
+        report = _load_recovery_report()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    assert report["can_resume"] is False
+    assert report["resume_blockers"] == ["EXTERNAL_CASH_ADJUSTMENT_REQUIRED"]
+    assert report["resume_blocker_reason_codes"] == ["BROKER_CASH_DELTA_UNEXPLAINED"]
+    assert report["blocker_summary_view"][0]["reason_code"] == "BROKER_CASH_DELTA_UNEXPLAINED"
+    assert report["blocker_summary_view"][0]["summary"] == "cash mismatch requires external cash adjustment evidence"
+    assert report["blocker_summary_view"][0]["delta_krw"] == pytest.approx(-50.0)
+    assert report["blocker_summary_view"][0]["recent_external_cash_adjustment_present"] is False
+    assert "delta_krw=-50.000" in report["blocker_summary_view"][0]["evidence"]
+    assert "recent_external_cash_adjustment_present=0" in report["blocker_summary_view"][0]["evidence"]
+
+
+def test_recovery_report_classifies_trade_fill_unresolved_blocker(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="trade_fill_unresolved", created_ts=now_ms - 5_000)
+
+    report = _load_recovery_report()
+
+    assert report["can_resume"] is False
+    assert report["resume_blockers"][0] == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert report["resume_blocker_reason_codes"][0] == "TRADE_FILL_UNRESOLVED"
+    assert report["blocker_summary_view"][0]["reason_code"] == "TRADE_FILL_UNRESOLVED"
+    assert report["blocker_summary_view"][0]["summary"] == "trade/fill state remains unresolved"
 
 
 
@@ -1166,11 +1365,12 @@ def test_resume_force_enables_for_safe_manual_pause(tmp_path):
     assert state.halt_state_unresolved is False
 
 
-def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
+def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     original_mode = settings.MODE
     object.__setattr__(settings, "MODE", "live")
 
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: object())
     monkeypatch.setattr(
         "bithumb_bot.app.cancel_open_orders_with_broker",
@@ -1194,12 +1394,253 @@ def test_cancel_open_orders_persists_runtime_state(monkeypatch, tmp_path):
     finally:
         object.__setattr__(settings, "MODE", original_mode)
 
+    out = capsys.readouterr().out
     state = runtime_state.snapshot()
     assert state.last_cancel_open_orders_trigger == "operator-command"
     assert state.last_cancel_open_orders_status == "partial"
     assert state.last_cancel_open_orders_epoch_sec is not None
     assert state.last_cancel_open_orders_summary is not None
     assert '"failed_count": 1' in state.last_cancel_open_orders_summary
+    assert "[CANCEL-OPEN-ORDERS] precondition=" in out
+    assert "[CANCEL-OPEN-ORDERS] warning=" in out
+    assert "postcondition=status=partial" in out
+
+
+def test_cancel_open_orders_refuses_in_live_dry_run(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+    broker_created = {"called": False}
+
+    def _broker_factory():
+        broker_created["called"] = True
+        raise AssertionError("broker should not be created in LIVE_DRY_RUN mode")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", _broker_factory)
+
+    try:
+        with pytest.raises(SystemExit) as exc:
+            app_module.cmd_cancel_open_orders()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "LIVE_DRY_RUN=true would only simulate cancel" in out
+    assert broker_created["called"] is False
+
+
+class _PanicStopBroker:
+    def __init__(self, *, open_orders: list[BrokerOrder], balance: BrokerBalance) -> None:
+        self._open_orders = list(open_orders)
+        self._balance = balance
+        self.cancel_calls: list[dict[str, str | None]] = []
+        self.place_order_calls: list[dict[str, str | float | None]] = []
+
+    def get_open_orders(
+        self,
+        *,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return list(self._open_orders)
+
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None):
+        self.cancel_calls.append(
+            {"client_order_id": client_order_id, "exchange_order_id": exchange_order_id}
+        )
+
+        class _CancelResult:
+            def __init__(self, *, exchange_order_id: str | None) -> None:
+                self.status = "CANCELED"
+                self.exchange_order_id = exchange_order_id
+
+        return _CancelResult(exchange_order_id=exchange_order_id)
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None):
+        class _Order:
+            def __init__(self, *, exchange_order_id: str | None) -> None:
+                self.status = "CANCELED"
+                self.exchange_order_id = exchange_order_id
+
+        return _Order(exchange_order_id=exchange_order_id)
+
+    def get_recent_orders(
+        self,
+        *,
+        limit: int = 100,
+        exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+        client_order_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> list[BrokerOrder]:
+        return list(self._open_orders)[:limit]
+
+    def get_balance(self) -> BrokerBalance:
+        return self._balance
+
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        self.place_order_calls.append(
+            {
+                "client_order_id": client_order_id,
+                "side": side,
+                "qty": qty,
+                "price": price,
+            }
+        )
+
+        class _Order:
+            exchange_order_id = "ex-panic-stop"
+            status = "NEW"
+
+        return _Order()
+
+
+def test_panic_stop_blocks_new_orders_and_cancels_open_orders_without_flatten(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path, monkeypatch)
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="panic_open_1", created_ts=now_ms - 5_000, side="BUY", price=100.0)
+    set_exchange_order_id("panic_open_1", "ex-panic-1")
+    runtime_state.record_flatten_position_result(status="no_position", summary={"status": "no_position"})
+
+    broker = _PanicStopBroker(
+        open_orders=[
+            BrokerOrder(
+                client_order_id="panic_open_1",
+                exchange_order_id="ex-panic-1",
+                side="BUY",
+                status="NEW",
+                price=100.0,
+                qty_req=0.01,
+                qty_filled=0.0,
+                created_ts=now_ms - 5_000,
+                updated_ts=now_ms - 5_000,
+            )
+        ],
+        balance=BrokerBalance(cash_available=100_000.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0),
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+
+    try:
+        cmd_panic_stop(flatten=False)
+        from bithumb_bot.broker.live import live_execute_signal
+
+        result = live_execute_signal(broker, "BUY", now_ms, 100.0)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+
+    assert result is None
+    assert len(broker.cancel_calls) == 1
+    assert len(broker.place_order_calls) == 0
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.last_cancel_open_orders_status == "ok"
+    assert state.last_flatten_position_status == "no_position"
+    assert "flatten_status=skipped" in str(state.last_disable_reason)
+
+
+def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monkeypatch, tmp_path):
+    _set_tmp_db(tmp_path, monkeypatch)
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_step = settings.LIVE_ORDER_QTY_STEP
+    original_max_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.000001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
+
+    now_ms = int(time.time() * 1000)
+    _insert_order(status="NEW", client_order_id="panic_flatten_1", created_ts=now_ms - 5_000, side="BUY", price=100.0)
+    set_exchange_order_id("panic_flatten_1", "ex-panic-flat-1")
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.05, 1000000.0, 0.0, 0.05, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_flatten_position_result(status="no_position", summary={"status": "no_position"})
+
+    broker = _PanicStopBroker(
+        open_orders=[
+            BrokerOrder(
+                client_order_id="panic_flatten_1",
+                exchange_order_id="ex-panic-flat-1",
+                side="BUY",
+                status="NEW",
+                price=100.0,
+                qty_req=0.01,
+                qty_filled=0.0,
+                created_ts=now_ms - 5_000,
+                updated_ts=now_ms - 5_000,
+            )
+        ],
+        balance=BrokerBalance(cash_available=100_000.0, cash_locked=0.0, asset_available=1.0, asset_locked=0.0),
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+
+    try:
+        cmd_panic_stop(flatten=True)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_step)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_max_decimals)
+
+    assert len(broker.cancel_calls) == 1
+    assert len(broker.place_order_calls) == 1
+    assert broker.place_order_calls[0]["side"] == "SELL"
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is False
+    assert state.halt_new_orders_blocked is True
+    assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.last_flatten_position_status == "submitted"
+    assert state.last_cancel_open_orders_status == "ok"
+    assert "flatten_status=submitted" in str(state.last_disable_reason)
+    assert state.halt_state_unresolved is True
+
+
+def test_panic_stop_cli_dispatches_to_command(monkeypatch):
+    called = {"flatten": None}
+
+    monkeypatch.setattr("bithumb_bot.app.validate_mode_or_raise", lambda _mode: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.cmd_panic_stop",
+        lambda *, flatten=False: called.__setitem__("flatten", flatten),
+    )
+
+    rc = app_module.main(["panic-stop", "--flatten"])
+
+    assert rc == 0
+    assert called["flatten"] is True
 
 
 def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
@@ -1977,6 +2418,7 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
     assert "blocker_summary=total=" in out
     assert "code=STARTUP_SAFETY_GATE_BLOCKED" in out
     assert "overridable=0" in out
+    assert "recent_external_cash_adjustment=none" in out
     assert "oldest_unresolved_orders(top 5):" in out
     assert "recovery_required_orders(top 3):" in out
     assert "client_order_id=open_0" in out
@@ -1986,6 +2428,36 @@ def test_recovery_report_shows_concise_oldest_order_list(tmp_path, capsys):
         "last_error=timeout while polling exchange status endpoint due to transi..."
         in out
     )
+
+
+def test_recovery_report_shows_recent_external_cash_adjustment_summary(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_external_cash_adjustment(
+            conn,
+            event_ts=1710000000000,
+            currency="KRW",
+            delta_amount=250.0,
+            source="legacy_balance_api",
+            reason="reconcile_cash_drift",
+            broker_snapshot_basis={"cash_available": 1000000.0},
+            note="recovery test adjustment",
+            adjustment_key="recovery-report-adjustment-1",
+        )
+    finally:
+        conn.close()
+
+    cmd_recovery_report()
+    out = capsys.readouterr().out
+
+    expected_last_event = kst_str(1710000000000)
+    assert "[RECOVERY-REPORT]" in out
+    assert "recent_external_cash_adjustment=count=1 total=250.000" in out
+    assert f"last_event={expected_last_event}" in out
+    assert "source=legacy_balance_api" in out
+    assert "reason=reconcile_cash_drift" in out
 
 
 def test_recovery_report_includes_recent_order_lifecycle_block(tmp_path, capsys):
@@ -2495,6 +2967,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "dust_local_notional_below_min",
         "effective_flat_due_to_harmless_dust",
         "recent_dust_unsellable_event",
+        "recent_external_cash_adjustment",
         "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",
@@ -2509,6 +2982,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "recommended_next_action",
         "non_overridable_blockers",
         "primary_blocker_code",
+        "primary_blocker_reason_code",
         "recent_halt_reason",
         "recommended_command",
         "recent_order_lifecycle",
@@ -2516,6 +2990,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "recovery_required_summary",
         "submit_unknown_count",
         "resume_blocked_reason",
+        "resume_blocker_reason_codes",
         "resume_allowed",
         "risk_level",
         "trading_enabled",
@@ -2605,6 +3080,7 @@ def test_recovery_report_blocker_summary_view_for_submit_unknown(tmp_path):
     view = report["blocker_summary_view"]
     assert view
     assert view[0]["blocker"] == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert view[0]["reason_code"] == "SUBMIT_UNKNOWN_RECOVERY_REQUIRED"
     assert "submit_unknown=1" in view[0]["evidence"]
     assert view[0]["recommended_next_action"] == "uv run python bot.py reconcile"
 
@@ -2619,6 +3095,7 @@ def test_recovery_report_blocker_summary_view_for_recovery_required(tmp_path):
     view = report["blocker_summary_view"]
     assert view
     assert view[0]["blocker"] == "STARTUP_SAFETY_GATE_BLOCKED"
+    assert view[0]["reason_code"] == "SUBMIT_UNKNOWN_RECOVERY_REQUIRED"
     assert "recovery_required=1" in view[0]["evidence"]
     assert (
         view[0]["recommended_next_action"]
@@ -2868,6 +3345,7 @@ def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tm
     assert report["resume_allowed"] is False
     assert report["can_resume"] is False
     assert "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert "DUST_RESIDUAL_BLOCK" in report["resume_blocker_reason_codes"]
     assert report["operator_next_action"] != "resume_now"
     assert report["operator_next_action"] == "review_harmless_dust_policy"
     assert report["dust_state"] == "harmless_dust"
@@ -2946,6 +3424,7 @@ def test_recovery_report_prioritizes_dangerous_dust_when_unresolved_order_also_b
     assert report["can_resume"] is False
     assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
     assert "BLOCKING_DUST_REVIEW_REQUIRED" in report["resume_blockers"]
+    assert "DUST_RESIDUAL_BLOCK" in report["resume_blocker_reason_codes"]
     assert report["operator_next_action"] == "manual_dust_review_required"
 
 
@@ -3050,6 +3529,47 @@ def test_reconcile_live_accepts_injected_dependencies(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[RECONCILE] completed one live reconciliation pass" in out
     assert calls == ["factory", ("reconcile", broker)]
+
+
+def test_reconcile_live_updates_state_and_reports_contract(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path)
+    original_mode = settings.MODE
+    object.__setattr__(settings, "MODE", "live")
+
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    broker = object()
+    calls: list[object] = []
+
+    def _broker_factory():
+        calls.append("factory")
+        return broker
+
+    def _reconcile(candidate):
+        calls.append(("reconcile", candidate))
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "remote_open_order_found": 0,
+                "balance_split_mismatch_count": 0,
+            },
+        )
+
+    try:
+        cmd_reconcile(broker_factory=_broker_factory, reconcile_fn=_reconcile)
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+
+    out = capsys.readouterr().out
+    state = runtime_state.snapshot()
+
+    assert "[RECONCILE] precondition=" in out
+    assert "[RECONCILE] completed one live reconciliation pass" in out
+    assert "postcondition=last_reconcile_status=ok" in out
+    assert calls == ["factory", ("reconcile", broker)]
+    assert state.last_reconcile_status == "ok"
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
 
 
 def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path):
@@ -3932,6 +4452,8 @@ def test_health_and_recovery_report_expose_emergency_flatten_blocker(tmp_path, c
     assert "emergency_flatten_blocked=True" in health_out
     assert "emergency_flatten_block_reason=emergency flatten unresolved" in health_out
     assert "blockers=STARTUP_SAFETY_GATE_BLOCKED, EMERGENCY_FLATTEN_UNRESOLVED" in health_out
+    assert "blocker_reason_codes=" in health_out
+    assert "EMERGENCY_FLATTEN_UNRESOLVED" in health_out
 
     cmd_recovery_report(as_json=False)
     report_out = capsys.readouterr().out

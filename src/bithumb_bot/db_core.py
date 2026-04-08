@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import math
 import json
 import sqlite3
+from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Any
 
 from .config import prepare_db_path_for_connection, settings
@@ -14,6 +17,149 @@ from .decision_context import normalize_strategy_decision_context
 # open_exposure is the sellable inventory base, while dust_tracking is
 # operator evidence only. Keep the schema aligned with that routing contract.
 _OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
+EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
+_CASH_QUANTUM = Decimal("0.00000001")
+_ASSET_QUANTUM = Decimal("0.000000000001")
+
+
+def _as_finite_decimal(value: float | int | str, *, field: str) -> Decimal:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid accounting value for {field}: {value}") from exc
+    if not math.isfinite(numeric):
+        raise RuntimeError(f"invalid non-finite accounting value for {field}: {value}")
+    return Decimal(str(numeric))
+
+
+def normalize_cash_amount(value: float | int | str) -> float:
+    return float(_as_finite_decimal(value, field="cash").quantize(_CASH_QUANTUM, rounding=ROUND_HALF_EVEN))
+
+
+def normalize_asset_qty(value: float | int | str) -> float:
+    return float(_as_finite_decimal(value, field="asset").quantize(_ASSET_QUANTUM, rounding=ROUND_HALF_EVEN))
+
+
+def normalize_portfolio_breakdown(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+) -> tuple[float, float, float, float]:
+    return (
+        normalize_cash_amount(cash_available),
+        normalize_cash_amount(cash_locked),
+        normalize_asset_qty(asset_available),
+        normalize_asset_qty(asset_locked),
+    )
+
+
+def portfolio_cash_total(*, cash_available: float, cash_locked: float) -> float:
+    return normalize_cash_amount(normalize_cash_amount(cash_available) + normalize_cash_amount(cash_locked))
+
+
+def portfolio_asset_total(*, asset_available: float, asset_locked: float) -> float:
+    return normalize_asset_qty(normalize_asset_qty(asset_available) + normalize_asset_qty(asset_locked))
+
+
+def _consume_locked_then_available(
+    locked: float,
+    available: float,
+    amount: float,
+    *,
+    field: str,
+) -> tuple[float, float]:
+    eps = 1e-12
+
+    def _normalize_tiny_negative(value: float, *, tolerance: float) -> float:
+        if -tolerance < value < 0.0:
+            return 0.0
+        return value
+
+    def _float_tolerance(*values: float) -> float:
+        finite_values = [abs(float(v)) for v in values if math.isfinite(float(v))]
+        scale = max(finite_values) if finite_values else 0.0
+        scale = max(scale, 1.0)
+        return max(eps, math.ulp(scale) * 4)
+
+    remaining = normalize_cash_amount(amount)
+    locked_after = normalize_cash_amount(locked)
+    available_after = normalize_cash_amount(available)
+    tolerance = _float_tolerance(locked_after, available_after, remaining, locked, available)
+
+    locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+    available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
+
+    from_locked = min(locked_after, remaining)
+    locked_after = normalize_cash_amount(locked_after - from_locked)
+    remaining = normalize_cash_amount(remaining - from_locked)
+
+    if remaining > eps:
+        available_after = normalize_cash_amount(available_after - remaining)
+
+    locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+    available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
+    if locked_after < -tolerance or available_after < -tolerance:
+        raise RuntimeError(
+            f"negative {field} after fill: available={available_after}, locked={locked_after}, needed={amount}, tolerance={tolerance}"
+        )
+    return max(locked_after, 0.0), max(available_after, 0.0)
+
+
+def calculate_fill_portfolio_snapshot(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+    side: str,
+    price: float,
+    qty: float,
+    fee: float | None,
+) -> tuple[float, float, float, float, float, float]:
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    price_n = normalize_cash_amount(price)
+    qty_n = normalize_asset_qty(qty)
+    fee_n = normalize_cash_amount(0.0 if fee is None else fee)
+
+    if side == "BUY":
+        spend = normalize_cash_amount(price_n * qty_n + fee_n)
+        cash_locked_after, cash_available_after = _consume_locked_then_available(
+            cash_locked_n,
+            cash_available_n,
+            spend,
+            field="cash",
+        )
+        asset_available_after = normalize_asset_qty(asset_available_n + qty_n)
+        asset_locked_after = asset_locked_n
+    elif side == "SELL":
+        cash_available_after = normalize_cash_amount(cash_available_n + (price_n * qty_n) - fee_n)
+        cash_locked_after = cash_locked_n
+        asset_locked_after, asset_available_after = _consume_locked_then_available(
+            asset_locked_n,
+            asset_available_n,
+            qty_n,
+            field="asset",
+        )
+    else:
+        raise RuntimeError(f"invalid fill side: {side}")
+
+    cash_after = normalize_cash_amount(cash_available_after + cash_locked_after)
+    asset_after = normalize_asset_qty(asset_available_after + asset_locked_after)
+    return (
+        cash_available_after,
+        cash_locked_after,
+        asset_available_after,
+        asset_locked_after,
+        cash_after,
+        asset_after,
+    )
 
 
 def ensure_db(db_path: str | None = None, *, ensure_schema_ready: bool = True) -> sqlite3.Connection:
@@ -116,12 +262,71 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS external_cash_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'external_cash_adjustment'
+                CHECK (event_type = 'external_cash_adjustment'),
+            event_ts INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            delta_amount REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            broker_snapshot_basis TEXT NOT NULL,
+            correlation_metadata TEXT,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
     _ensure_column(conn, "trades", "client_order_id", "client_order_id TEXT")
     _ensure_column(conn, "trades", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trades", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "trades", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "trades", "exit_reason", "exit_reason TEXT")
     _ensure_column(conn, "trades", "exit_rule_name", "exit_rule_name TEXT")
+
+    _ensure_column(conn, "external_cash_adjustments", "adjustment_key", "adjustment_key TEXT")
+    _ensure_column(
+        conn,
+        "external_cash_adjustments",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'external_cash_adjustment'",
+    )
+    _ensure_column(conn, "external_cash_adjustments", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "external_cash_adjustments", "currency", "currency TEXT NOT NULL DEFAULT 'KRW'")
+    _ensure_column(conn, "external_cash_adjustments", "delta_amount", "delta_amount REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "external_cash_adjustments", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "external_cash_adjustments", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "external_cash_adjustments",
+        "broker_snapshot_basis",
+        "broker_snapshot_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "external_cash_adjustments", "correlation_metadata", "correlation_metadata TEXT")
+    _ensure_column(conn, "external_cash_adjustments", "note", "note TEXT")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_cash_adjustments_event_ts
+        ON external_cash_adjustments(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_external_cash_adjustments_key
+        ON external_cash_adjustments(adjustment_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_cash_adjustments_currency_ts
+        ON external_cash_adjustments(currency, event_ts, id)
+        """
+    )
 
     conn.execute(
         """
@@ -809,17 +1014,20 @@ def get_portfolio_breakdown(conn: sqlite3.Connection) -> tuple[float, float, flo
     row = conn.execute(
         "SELECT cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
     ).fetchone()
-    return (
-        float(row["cash_available"]),
-        float(row["cash_locked"]),
-        float(row["asset_available"]),
-        float(row["asset_locked"]),
+    return normalize_portfolio_breakdown(
+        cash_available=float(row["cash_available"]),
+        cash_locked=float(row["cash_locked"]),
+        asset_available=float(row["asset_available"]),
+        asset_locked=float(row["asset_locked"]),
     )
 
 
 def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
     cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
-    return cash_available + cash_locked, asset_available + asset_locked
+    return portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked), portfolio_asset_total(
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
 
 
 def set_portfolio(
@@ -848,8 +1056,14 @@ def set_portfolio_breakdown(
     asset_locked: float,
 ) -> None:
     init_portfolio(conn)
-    cash_total = float(cash_available) + float(cash_locked)
-    asset_total = float(asset_available) + float(asset_locked)
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    cash_total = portfolio_cash_total(cash_available=cash_available_n, cash_locked=cash_locked_n)
+    asset_total = portfolio_asset_total(asset_available=asset_available_n, asset_locked=asset_locked_n)
     had_tx = conn.in_transaction
     conn.execute(
         """
@@ -866,11 +1080,213 @@ def set_portfolio_breakdown(
         (
             cash_total,
             asset_total,
-            float(cash_available),
-            float(cash_locked),
-            float(asset_available),
-            float(asset_locked),
+            cash_available_n,
+            cash_locked_n,
+            asset_available_n,
+            asset_locked_n,
         ),
     )
     if not had_tx:
         conn.commit()
+
+
+def _external_cash_adjustment_key(
+    *,
+    currency: str,
+    delta_amount: float,
+    source: str,
+    reason: str,
+    broker_snapshot_basis: str,
+    correlation_metadata: str | None,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE,
+        "currency": str(currency).strip().upper(),
+        "delta_amount": f"{float(delta_amount):.12g}",
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "broker_snapshot_basis": str(broker_snapshot_basis).strip(),
+        "correlation_metadata": str(correlation_metadata or "").strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def record_external_cash_adjustment(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    currency: str,
+    delta_amount: float,
+    source: str,
+    reason: str,
+    broker_snapshot_basis: dict[str, Any] | str,
+    correlation_metadata: dict[str, Any] | str | None = None,
+    note: str | None = None,
+    adjustment_key: str | None = None,
+) -> dict[str, Any] | None:
+    currency_value = str(currency).strip().upper()
+    if currency_value != "KRW":
+        raise RuntimeError(f"unsupported external cash adjustment currency: {currency_value}")
+
+    basis_text = (
+        json.dumps(broker_snapshot_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(broker_snapshot_basis, dict)
+        else str(broker_snapshot_basis)
+    )
+    correlation_text = (
+        json.dumps(correlation_metadata, ensure_ascii=False, sort_keys=True)
+        if isinstance(correlation_metadata, dict)
+        else (str(correlation_metadata) if correlation_metadata is not None else None)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    if not source_text:
+        raise RuntimeError("external cash adjustment source is required")
+    if not reason_text:
+        raise RuntimeError("external cash adjustment reason is required")
+    if not basis_text.strip():
+        raise RuntimeError("external cash adjustment basis is required")
+
+    init_portfolio(conn)
+    had_tx = conn.in_transaction
+    key = adjustment_key or _external_cash_adjustment_key(
+        currency=currency_value,
+        delta_amount=float(delta_amount),
+        source=source_text,
+        reason=reason_text,
+        broker_snapshot_basis=basis_text,
+        correlation_metadata=correlation_text,
+        note=note,
+    )
+
+    existing = conn.execute(
+        """
+        SELECT id, adjustment_key, event_ts, currency, delta_amount, source, reason,
+               broker_snapshot_basis, correlation_metadata, note
+        FROM external_cash_adjustments
+        WHERE adjustment_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "adjustment_key": str(existing["adjustment_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "currency": str(existing["currency"]),
+            "delta_amount": float(existing["delta_amount"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "broker_snapshot_basis": str(existing["broker_snapshot_basis"]),
+            "correlation_metadata": (
+                str(existing["correlation_metadata"])
+                if existing["correlation_metadata"] is not None
+                else None
+            ),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    portfolio_row = conn.execute(
+        """
+        SELECT cash_krw, cash_available, cash_locked
+        FROM portfolio
+        WHERE id=1
+        """
+    ).fetchone()
+    if portfolio_row is None:
+        raise RuntimeError("portfolio row missing while recording external cash adjustment")
+
+    cash_available = normalize_cash_amount(portfolio_row["cash_available"])
+    cash_locked = normalize_cash_amount(portfolio_row["cash_locked"])
+    delta_amount_value = normalize_cash_amount(delta_amount)
+    new_cash_available = normalize_cash_amount(cash_available + delta_amount_value)
+    new_cash_total = portfolio_cash_total(cash_available=new_cash_available, cash_locked=cash_locked)
+    if new_cash_total < -1e-8:
+        raise RuntimeError(
+            "external cash adjustment would make cash negative: "
+            f"cash_before={float(portfolio_row['cash_krw']):.12g} delta={float(delta_amount):.12g} "
+            f"cash_after={new_cash_total:.12g}"
+        )
+
+    cursor = conn.execute(
+        """
+        INSERT INTO external_cash_adjustments(
+            adjustment_key, event_type, event_ts, currency, delta_amount, source, reason,
+            broker_snapshot_basis, correlation_metadata, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE,
+            int(event_ts),
+            currency_value,
+            delta_amount_value,
+            source_text,
+            reason_text,
+            basis_text,
+            correlation_text,
+            note,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE portfolio
+        SET cash_krw=?, cash_available=?
+        WHERE id=1
+        """,
+        (
+            new_cash_total,
+            new_cash_available,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "adjustment_key": key,
+        "event_ts": int(event_ts),
+        "currency": currency_value,
+        "delta_amount": delta_amount_value,
+        "source": source_text,
+        "reason": reason_text,
+        "broker_snapshot_basis": basis_text,
+        "correlation_metadata": correlation_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS adjustment_count, COALESCE(SUM(delta_amount), 0.0) AS adjustment_total
+        FROM external_cash_adjustments
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT event_ts, currency, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
+        FROM external_cash_adjustments
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "adjustment_count": int(row["adjustment_count"] if row else 0),
+        "adjustment_total": float(row["adjustment_total"] if row else 0.0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_currency": str(last["currency"]) if last is not None else None,
+        "last_delta_amount": float(last["delta_amount"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_broker_snapshot_basis": str(last["broker_snapshot_basis"]) if last is not None else None,
+        "last_correlation_metadata": (
+            str(last["correlation_metadata"]) if last is not None and last["correlation_metadata"] is not None else None
+        ),
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }

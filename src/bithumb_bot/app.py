@@ -17,9 +17,24 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
-from .db_core import ensure_db, init_portfolio, get_portfolio_breakdown
+from .db_core import (
+    ensure_db,
+    get_external_cash_adjustment_summary,
+    get_portfolio_breakdown,
+    init_portfolio,
+    normalize_asset_qty,
+    normalize_cash_amount,
+    portfolio_asset_total,
+    portfolio_cash_total,
+)
 from .utils_time import kst_str, parse_interval_sec
-from .engine import compute_signal, evaluate_resume_eligibility, get_health_status, maybe_clear_stale_initial_reconcile_halt
+from .engine import (
+    compute_signal,
+    evaluate_resume_eligibility,
+    get_health_status,
+    maybe_clear_stale_initial_reconcile_halt,
+    perform_panic_stop_cleanup,
+)
 from .recovery import (
     cancel_open_orders_with_broker,
     load_recent_order_lifecycle,
@@ -41,8 +56,10 @@ from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .reporting import (
     cmd_experiment_report,
+    cmd_cash_drift_report,
     cmd_decision_telemetry,
     cmd_fee_diagnostics,
+    _format_external_cash_adjustment_summary,
     cmd_ops_report,
     cmd_strategy_report,
     fetch_attribution_quality_summary,
@@ -330,13 +347,15 @@ def cmd_audit():
             errors.append(f"portfolio.asset_available is negative: {asset_available}")
         if asset_locked < 0:
             errors.append(f"portfolio.asset_locked is negative: {asset_locked}")
-        if abs((cash_available + cash_locked) - cash_krw) > 1e-8:
+        if abs(portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked) - cash_krw) > 1e-8:
             errors.append(
-                f"portfolio cash split mismatch: available+locked={cash_available + cash_locked} != cash_krw={cash_krw}"
+                "portfolio cash split mismatch: "
+                f"available+locked={portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)} != cash_krw={cash_krw}"
             )
-        if abs((asset_available + asset_locked) - asset_qty) > 1e-12:
+        if abs(portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked) - asset_qty) > 1e-12:
             errors.append(
-                f"portfolio asset split mismatch: available+locked={asset_available + asset_locked} != asset_qty={asset_qty}"
+                "portfolio asset split mismatch: "
+                f"available+locked={portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)} != asset_qty={asset_qty}"
             )
 
     filled_without_qty = conn.execute(
@@ -401,13 +420,17 @@ def cmd_audit():
         "SELECT cash_after, asset_after FROM trades ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if last_trade is not None and portfolio is not None:
-        if abs(float(last_trade["cash_after"]) - float(portfolio["cash_krw"])) > 1e-8:
+        if abs(float(last_trade["cash_after"]) - portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)) > 1e-8:
             errors.append(
-                f"latest trade cash_after={float(last_trade['cash_after'])} != portfolio.cash_krw={float(portfolio['cash_krw'])}"
+                "latest trade cash_after="
+                f"{float(last_trade['cash_after'])} != portfolio.cash_total="
+                f"{portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)}"
             )
-        if abs(float(last_trade["asset_after"]) - float(portfolio["asset_qty"])) > 1e-12:
+        if abs(float(last_trade["asset_after"]) - portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)) > 1e-12:
             errors.append(
-                f"latest trade asset_after={float(last_trade['asset_after'])} != portfolio.asset_qty={float(portfolio['asset_qty'])}"
+                "latest trade asset_after="
+                f"{float(last_trade['asset_after'])} != portfolio.asset_total="
+                f"{portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)}"
             )
 
     conn.close()
@@ -529,8 +552,10 @@ def cmd_health() -> None:
     dust_view = position_state.operator_diagnostics
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
+    resume_blocker_reason_codes = [str(getattr(blocker, "reason_code", blocker.code)) for blocker in resume_blockers]
     can_resume_label = "true" if bool(resume_allowed) else "false"
     blockers_label = ", ".join(resume_blocker_codes) if resume_blocker_codes else "none"
+    blocker_reason_codes_label = ", ".join(resume_blocker_reason_codes) if resume_blocker_reason_codes else "none"
     unsafe_reasons: list[str] = []
     if not bool(resume_allowed):
         for blocker in resume_blockers[:3]:
@@ -640,6 +665,7 @@ def cmd_health() -> None:
     )
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
+    print(f"    blocker_reason_codes={blocker_reason_codes_label}")
     print(f"    resume_safety={resume_safety}")
     print(
         "    "
@@ -861,9 +887,11 @@ def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
 
 def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
     init_portfolio(conn)
-    cash = float(settings.START_CASH_KRW)
-    qty = 0.0
+    cash = normalize_cash_amount(settings.START_CASH_KRW)
+    qty = normalize_asset_qty(0.0)
     total_fee = 0.0
+    external_cash_adjustment_total = 0.0
+    external_cash_adjustment_count = 0
     dup_fill_count = 0
 
     seen_fill_keys: set[tuple[str, int, float, float]] = set()
@@ -894,17 +922,49 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         total_fee += fee
 
         if side == "BUY":
-            cash -= (fill_price * fill_qty) + fee
-            qty += fill_qty
+            cash = normalize_cash_amount(cash - ((fill_price * fill_qty) + fee))
+            qty = normalize_asset_qty(qty + fill_qty)
         elif side == "SELL":
-            cash += (fill_price * fill_qty) - fee
-            qty -= fill_qty
+            cash = normalize_cash_amount(cash + ((fill_price * fill_qty) - fee))
+            qty = normalize_asset_qty(qty - fill_qty)
+
+    adjustments = conn.execute(
+        """
+        SELECT adjustment_key, event_ts, delta_amount
+        FROM external_cash_adjustments
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_adjustment_keys: set[str] = set()
+    for row in adjustments:
+        key = str(row["adjustment_key"])
+        if key in seen_adjustment_keys:
+            continue
+        seen_adjustment_keys.add(key)
+        delta_amount = float(row["delta_amount"])
+        external_cash_adjustment_total += delta_amount
+        external_cash_adjustment_count += 1
+        cash = normalize_cash_amount(cash + delta_amount)
 
     p = conn.execute(
         "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
     ).fetchone()
-    portfolio_cash = float(p["cash_available"]) + float(p["cash_locked"]) if p else 0.0
-    portfolio_qty = float(p["asset_available"]) + float(p["asset_locked"]) if p else 0.0
+    portfolio_cash = (
+        portfolio_cash_total(
+            cash_available=float(p["cash_available"]),
+            cash_locked=float(p["cash_locked"]),
+        )
+        if p
+        else 0.0
+    )
+    portfolio_qty = (
+        portfolio_asset_total(
+            asset_available=float(p["asset_available"]),
+            asset_locked=float(p["asset_locked"]),
+        )
+        if p
+        else 0.0
+    )
     consistent = math.isclose(cash, portfolio_cash, abs_tol=1e-6) and math.isclose(qty, portfolio_qty, abs_tol=1e-10)
 
     return {
@@ -913,6 +973,8 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         "portfolio_cash": portfolio_cash,
         "portfolio_qty": portfolio_qty,
         "fee_total": total_fee,
+        "external_cash_adjustment_count": external_cash_adjustment_count,
+        "external_cash_adjustment_total": external_cash_adjustment_total,
         "dup_fill_count": dup_fill_count,
         "consistent": consistent,
     }
@@ -931,6 +993,8 @@ def cmd_audit_ledger() -> None:
     print(f"  portfolio_cash={float(replay['portfolio_cash']):,.3f}")
     print(f"  portfolio_qty={float(replay['portfolio_qty']):.10f}")
     print(f"  fee_total={float(replay['fee_total']):,.3f}")
+    print(f"  external_cash_adjustment_count={int(replay['external_cash_adjustment_count'])}")
+    print(f"  external_cash_adjustment_total={float(replay['external_cash_adjustment_total']):,.3f}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
 
     if not bool(replay["consistent"]):
@@ -1092,12 +1156,45 @@ def cmd_report(days: int) -> None:
     print(f"  => {'PASS' if gate_pass else 'FAIL'}")
 
 
+def _print_operator_command_contract(
+    command: str,
+    *,
+    precondition: str | None = None,
+    warning: str | None = None,
+    postcondition: str | None = None,
+) -> None:
+    if precondition is not None:
+        print(f"[{command}] precondition={precondition}")
+    if warning is not None:
+        print(f"[{command}] warning={warning}")
+    if postcondition is not None:
+        print(f"[{command}] postcondition={postcondition}")
+
+
 def cmd_cancel_open_orders() -> None:
     if settings.MODE != "live":
         print(f"[CANCEL-OPEN-ORDERS] skipped: MODE={settings.MODE} (live only)")
         return
 
-    from .broker.bithumb import BithumbBroker, classify_private_api_error
+    if settings.LIVE_DRY_RUN:
+        print(
+            "[CANCEL-OPEN-ORDERS] refused: LIVE_DRY_RUN=true would only simulate cancel and can corrupt local state"
+        )
+        raise SystemExit(1)
+
+    try:
+        validate_live_mode_preflight(settings)
+    except LiveModeValidationError as e:
+        print(f"[CANCEL-OPEN-ORDERS] failed preflight: {e}")
+        raise SystemExit(1)
+
+    _print_operator_command_contract(
+        "CANCEL-OPEN-ORDERS",
+        precondition="MODE=live; LIVE_DRY_RUN=false; live preflight passed; operator warning acknowledged",
+        warning="live write command: every broker-matched open order for unresolved local ids will be canceled",
+    )
+
+    from .broker.bithumb import BithumbBroker
 
     broker = BithumbBroker()
     summary = cancel_open_orders_with_broker(broker)
@@ -1120,6 +1217,17 @@ def cmd_cancel_open_orders() -> None:
         print(f"  - {msg}")
     for msg in summary["error_messages"]:
         print(f"  - {msg}")
+    state = runtime_state.snapshot()
+    _print_operator_command_contract(
+        "CANCEL-OPEN-ORDERS",
+        postcondition=(
+            f"status={status}; "
+            f"remote_open_count={int(summary['remote_open_count'])}; "
+            f"canceled_count={int(summary['canceled_count'])}; "
+            f"failed_count={int(summary['failed_count'])}; "
+            f"local_state_trigger={state.last_cancel_open_orders_trigger or '-'}"
+        ),
+    )
 
 
 def cmd_broker_diagnose() -> None:
@@ -1642,6 +1750,7 @@ def _load_recovery_report(
             WHERE id=1
             """
         ).fetchone()
+        recent_external_cash_adjustment = get_external_cash_adjustment_summary(conn)
         recent_order_lifecycle = load_recent_order_lifecycle(conn, limit=oldest_limit)
         submission_evidence_by_order_id: dict[str, dict[str, str | int | bool | None]] = {}
         for row in oldest_rows:
@@ -1771,14 +1880,25 @@ def _load_recovery_report(
         )
 
     resume_allowed, blockers = evaluate_resume_eligibility()
-    blocker_list: list[dict[str, str | bool]] = [
-        {"code": b.code, "detail": b.detail, "overridable": bool(b.overridable)}
+    blocker_list: list[dict[str, str | bool | float | int | None]] = [
+        {
+            "code": b.code,
+            "reason_code": str(getattr(b, "reason_code", b.code)),
+            "summary": str(getattr(b, "summary", b.detail)),
+            "detail": b.detail,
+            "overridable": bool(b.overridable),
+            "balance_delta_krw": getattr(b, "balance_delta_krw", None),
+            "recent_external_cash_adjustment_present": getattr(b, "recent_external_cash_adjustment_present", None),
+            "recent_external_cash_adjustment_count": getattr(b, "recent_external_cash_adjustment_count", None),
+        }
         for b in blockers
     ]
     can_resume = bool(resume_allowed)
     blocker_codes = [str(b["code"]) for b in blocker_list]
+    blocker_reason_codes = [str(b["reason_code"]) for b in blocker_list]
     non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
     primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
+    primary_blocker_reason_code = str(blocker_list[0]["reason_code"]) if blocker_list else "-"
     blocker_summary = (
         f"total={len(blocker_list)} "
         f"non_overridable={len(non_overridable_blockers)} "
@@ -1852,9 +1972,11 @@ def _load_recovery_report(
             return "uv run python bot.py restart-checklist"
         return recommended_command
 
-    blocker_summary_view: list[dict[str, str]] = []
+    blocker_summary_view: list[dict[str, object]] = []
     for blocker in blocker_list[:3]:
         code = str(blocker["code"])
+        reason_code = str(blocker["reason_code"])
+        summary = str(blocker["summary"])
         evidence = str(blocker["detail"])
         if code == "STARTUP_SAFETY_GATE_BLOCKED":
             evidence = (
@@ -1863,11 +1985,31 @@ def _load_recovery_report(
                 f"recovery_required={recovery_required_count}; "
                 f"{evidence}"
             )
+        balance_delta_krw = blocker.get("balance_delta_krw")
+        recent_adjustment_present = blocker.get("recent_external_cash_adjustment_present")
+        recent_adjustment_count = blocker.get("recent_external_cash_adjustment_count")
+        if balance_delta_krw is not None or recent_adjustment_present is not None:
+            delta_text = (
+                f"{float(balance_delta_krw):.3f}"
+                if isinstance(balance_delta_krw, (int, float))
+                else str(balance_delta_krw)
+            )
+            evidence = (
+                f"{evidence} "
+                f"delta_krw={delta_text} "
+                f"recent_external_cash_adjustment_present={1 if bool(recent_adjustment_present) else 0} "
+                f"recent_external_cash_adjustment_count={int(recent_adjustment_count or 0)}"
+            )
         blocker_summary_view.append(
             {
                 "blocker": code,
+                "reason_code": reason_code,
+                "summary": summary,
                 "evidence": evidence,
                 "recommended_next_action": _next_action_for_blocker(code),
+                "delta_krw": balance_delta_krw,
+                "recent_external_cash_adjustment_present": recent_adjustment_present,
+                "recent_external_cash_adjustment_count": recent_adjustment_count,
             }
         )
 
@@ -1882,6 +2024,18 @@ def _load_recovery_report(
 
     recent_orders_snapshot, broker_snapshot_error = _safe_recent_broker_orders_snapshot(limit=100)
     recent_dust_unsellable_event = None
+    external_cash_adjustment_summary = {
+        "adjustment_count": 0,
+        "adjustment_total": 0.0,
+        "last_event_ts": None,
+        "last_currency": None,
+        "last_delta_amount": None,
+        "last_source": None,
+        "last_reason": None,
+        "last_broker_snapshot_basis": None,
+        "last_correlation_metadata": None,
+        "last_note": None,
+    }
     conn = ensure_db()
     try:
         recent_dust_unsellable_event = conn.execute(
@@ -1903,6 +2057,7 @@ def _load_recovery_report(
             """,
             (DUST_RESIDUAL_UNSELLABLE,),
         ).fetchone()
+        external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
     finally:
         conn.close()
     candidate_report: list[dict[str, object]] = []
@@ -1977,12 +2132,14 @@ def _load_recovery_report(
             if recent_dust_unsellable_event is not None
             else None
         ),
+        "recent_external_cash_adjustment": external_cash_adjustment_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
         "resume_allowed": bool(resume_allowed),
         "can_resume": can_resume,
         "resume_blockers": blocker_codes,
+        "resume_blocker_reason_codes": blocker_reason_codes,
         "force_resume_allowed": all(bool(b.overridable) for b in blockers),
         "blockers": blocker_list,
         "blocker_summary": blocker_summary,
@@ -1990,6 +2147,7 @@ def _load_recovery_report(
         "blocker_summary_view": blocker_summary_view,
         "risk_level": risk_level,
         "primary_blocker_code": primary_blocker_code,
+        "primary_blocker_reason_code": primary_blocker_reason_code,
         "non_overridable_blockers": non_overridable_blockers,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
@@ -2000,6 +2158,7 @@ def _load_recovery_report(
         "recent_order_lifecycle": recent_order_lifecycle,
         "recovery_candidates": candidate_report,
         "broker_recent_orders_snapshot_error": broker_snapshot_error,
+        "recent_external_cash_adjustment": recent_external_cash_adjustment,
     }
 
 
@@ -2012,6 +2171,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     dust_context = build_dust_display_context(report)
 
     print("[RECOVERY-REPORT]")
+    _print_operator_command_contract(
+        "RECOVERY-REPORT",
+        precondition="DB snapshot readable; recovery summary can be derived from current runtime state",
+        postcondition=f"recovery_report snapshot written to {PATH_MANAGER.recovery_report_path()}",
+    )
     print("  [P0] blocker_summary_view")
     for item in report.get("blocker_summary_view") or []:
         print(
@@ -2020,6 +2184,13 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
             f"evidence={item['evidence']} "
             f"recommended_next_action={item['recommended_next_action']}"
         )
+        if item.get("delta_krw") is not None or item.get("recent_external_cash_adjustment_present") is not None:
+            print(
+                "      "
+                f"delta_krw={item.get('delta_krw') if item.get('delta_krw') is not None else 'none'} "
+                f"recent_external_cash_adjustment_present={1 if bool(item.get('recent_external_cash_adjustment_present')) else 0} "
+                f"recent_external_cash_adjustment_count={int(item.get('recent_external_cash_adjustment_count') or 0)}"
+            )
     print("  [P1] order_recovery_status")
     print(f"    unresolved_count={report['unresolved_count']}")
     print(f"    recovery_required_count={report['recovery_required_count']}")
@@ -2029,18 +2200,26 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    can_resume={'true' if bool(report['can_resume']) else 'false'}")
     resume_blockers = report.get("resume_blockers") or []
     print(f"    blockers={', '.join(str(b) for b in resume_blockers) if resume_blockers else 'none'}")
+    resume_blocker_reason_codes = report.get("resume_blocker_reason_codes") or []
+    print(
+        "    blocker_reason_codes="
+        f"{', '.join(str(b) for b in resume_blocker_reason_codes) if resume_blocker_reason_codes else 'none'}"
+    )
     print(f"    force_resume_allowed={1 if bool(report['force_resume_allowed']) else 0}")
     blockers = report.get("blockers") or []
     print(f"    blocker_summary={report['blocker_summary']}")
     print(f"    active_blocker_summary={report['active_blocker_summary']}")
     print(f"    risk_level={report['risk_level']}")
     print(f"    primary_blocker_code={report['primary_blocker_code']}")
+    print(f"    primary_blocker_reason_code={report['primary_blocker_reason_code']}")
     print(f"    emergency_flatten_blocked={1 if bool(report.get('emergency_flatten_blocked')) else 0}")
     print(f"    emergency_flatten_block_reason={report.get('emergency_flatten_block_reason') or 'none'}")
     for blocker in blockers:
         print(
             "    - "
             f"code={blocker['code']} "
+            f"reason_code={blocker['reason_code']} "
+            f"summary={blocker['summary']} "
             f"overridable={1 if bool(blocker['overridable']) else 0} "
             f"detail={blocker['detail']}"
         )
@@ -2093,6 +2272,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         print(f"    summary={recent_dust_unsellable_event.get('summary') or 'none'}")
     else:
         print("    none")
+    recent_external_cash_adjustment = report.get("recent_external_cash_adjustment") or {}
+    print(
+        "  [P3.0b] recent_external_cash_adjustment="
+        f"{_format_external_cash_adjustment_summary(recent_external_cash_adjustment)}"
+    )
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")
@@ -2288,12 +2472,113 @@ def _last_reconcile_failed(state) -> bool:
     return status in {"FAILED", "ERROR"}
 
 def cmd_pause() -> None:
+    _print_operator_command_contract(
+        "PAUSE",
+        precondition="operator requested persistent halt; trading may already be paused",
+    )
     runtime_state.enter_halt(
         reason_code="MANUAL_PAUSE",
         reason="manual operator pause",
         unresolved=False,
     )
+    state = runtime_state.snapshot()
     print("[PAUSE] trading disabled via persistent runtime state")
+    _print_operator_command_contract(
+        "PAUSE",
+        postcondition=(
+            f"trading_enabled={1 if state.trading_enabled else 0}; "
+            f"halt_new_orders_blocked={1 if state.halt_new_orders_blocked else 0}; "
+            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
+            f"halt_reason_code={state.halt_reason_code or '-'}"
+        ),
+    )
+
+
+def cmd_panic_stop(*, flatten: bool = False) -> None:
+    if settings.MODE != "live":
+        print(f"[PANIC-STOP] skipped: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    try:
+        validate_live_mode_preflight(settings)
+    except LiveModeValidationError as e:
+        print(f"[PANIC-STOP] failed: {e}")
+        raise SystemExit(1)
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="panic stop requested by operator; cleanup pending",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    from .broker.bithumb import BithumbBroker
+
+    try:
+        broker = BithumbBroker()
+        halt_reason, canceled_ok, unresolved = perform_panic_stop_cleanup(
+            broker,
+            reason_code="KILL_SWITCH",
+            reason_detail="panic stop requested by operator",
+            cancel_trigger="panic-stop",
+            flatten_trigger="panic-stop",
+            attempt_flatten=bool(flatten),
+        )
+    except Exception as exc:
+        reason_detail = f"panic stop cleanup failed ({type(exc).__name__}): {exc}"
+        runtime_state.disable_trading_until(
+            float("inf"),
+            reason=reason_detail,
+            reason_code="KILL_SWITCH",
+            halt_new_orders_blocked=True,
+            unresolved=True,
+        )
+        notify(
+            safety_event(
+                "panic_stop_failed",
+                reason_code="KILL_SWITCH",
+                state_to="HALTED",
+                flatten_requested=1 if flatten else 0,
+                reason=reason_detail,
+            )
+        )
+        print(f"[PANIC-STOP] failed: {reason_detail}")
+        raise SystemExit(1)
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=halt_reason.detail,
+        reason_code=halt_reason.code,
+        halt_new_orders_blocked=True,
+        unresolved=unresolved,
+    )
+    notify(
+        safety_event(
+            "panic_stop_completed",
+            reason_code=halt_reason.code,
+            state_to="HALTED",
+            flatten_requested=1 if flatten else 0,
+            cancel_accepted=1 if canceled_ok else 0,
+            unresolved=1 if unresolved else 0,
+            cancel_status=runtime_state.snapshot().last_cancel_open_orders_status or "unknown",
+            flatten_status=runtime_state.snapshot().last_flatten_position_status or "skipped",
+            reason=halt_reason.detail,
+        )
+    )
+
+    state = runtime_state.snapshot()
+    print("[PANIC-STOP]")
+    print(f"  flatten_requested={1 if flatten else 0}")
+    print(f"  trading_enabled={state.trading_enabled}")
+    print(f"  halt_new_orders_blocked={state.halt_new_orders_blocked}")
+    print(f"  halt_reason_code={state.halt_reason_code}")
+    print(f"  last_disable_reason={state.last_disable_reason}")
+    print(f"  last_cancel_open_orders_status={state.last_cancel_open_orders_status}")
+    print(f"  last_flatten_position_status={state.last_flatten_position_status}")
+    print(f"  unresolved_open_order_count={state.unresolved_open_order_count}")
+    print(f"  halt_open_orders_present={state.halt_open_orders_present}")
+    print(f"  halt_position_present={state.halt_position_present}")
 
 
 def _build_live_broker():
@@ -2388,6 +2673,17 @@ def cmd_resume(
     broker_factory=None,
     reconcile_fn=None,
 ) -> None:
+    _print_operator_command_contract(
+        "RESUME",
+        precondition=(
+            f"trading paused; force={1 if force else 0}; "
+            f"MODE={settings.MODE}; live_reconcile={'yes' if settings.MODE == 'live' else 'no'}"
+        ),
+        warning=(
+            "force resume bypasses overridable blockers only; "
+            "non-overridable safety blockers still refuse"
+        ) if force else None,
+    )
     if settings.MODE == "live":
         _run_live_reconcile(
             broker_factory=broker_factory,
@@ -2435,6 +2731,15 @@ def cmd_resume(
         print("[RESUME] override_applied=1 override_reason=operator_force_resume")
     else:
         print("[RESUME] trading enabled")
+    state = runtime_state.snapshot()
+    _print_operator_command_contract(
+        "RESUME",
+        postcondition=(
+            f"trading_enabled={1 if state.trading_enabled else 0}; "
+            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}; "
+            f"resume_gate_reason={state.resume_gate_reason or 'none'}"
+        ),
+    )
 
 
 def cmd_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
@@ -2442,11 +2747,24 @@ def cmd_reconcile(*, broker_factory=None, reconcile_fn=None) -> None:
         print(f"[RECONCILE] skipped: MODE={settings.MODE} (live only)")
         return
 
+    _print_operator_command_contract(
+        "RECONCILE",
+        precondition="MODE=live; broker snapshot refresh will replay recent exchange state into the local ledger",
+    )
     _run_live_reconcile(
         broker_factory=broker_factory,
         reconcile_fn=reconcile_fn,
     )
     print("[RECONCILE] completed one live reconciliation pass")
+    state = runtime_state.snapshot()
+    _print_operator_command_contract(
+        "RECONCILE",
+        postcondition=(
+            f"last_reconcile_status={state.last_reconcile_status or 'none'}; "
+            f"last_reconcile_reason_code={state.last_reconcile_reason_code or 'none'}; "
+            f"resume_gate_blocked={1 if state.resume_gate_blocked else 0}"
+        ),
+    )
 
 
 def cmd_flatten_position(*, dry_run: bool = False) -> None:
@@ -2795,6 +3113,15 @@ def main(argv: list[str] | None = None) -> int:
         help="print restart safety checklist before resume",
         description="Print restart safety checklist for operator restart verification.",
     )
+    panic_stop = sub.add_parser(
+        "panic-stop",
+        help="halt trading, cancel open orders, and optionally flatten the position",
+    )
+    panic_stop.add_argument(
+        "--flatten",
+        action="store_true",
+        help="attempt an explicit flatten after open-order cancellation",
+    )
     recover_order = sub.add_parser("recover-order")
     recover_order.add_argument("--client-order-id", required=True)
     recover_order.add_argument("--exchange-order-id", required=True)
@@ -2874,6 +3201,14 @@ def main(argv: list[str] | None = None) -> int:
     experiment_report.add_argument("--regime-skew-threshold", type=float, default=0.7)
     experiment_report.add_argument("--regime-pnl-skew-threshold", type=float, default=0.7)
     experiment_report.add_argument("--json", action="store_true")
+
+    cash_drift_report = sub.add_parser(
+        "cash-drift-report",
+        help="audit broker cash versus local ledger and recent external cash adjustments",
+        description="Read-only cash drift diagnostic for broker/local comparison and adjustment review.",
+    )
+    cash_drift_report.add_argument("--recent-limit", type=int, default=5)
+    cash_drift_report.add_argument("--json", action="store_true")
 
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
@@ -2966,6 +3301,8 @@ def main(argv: list[str] | None = None) -> int:
             regime_pnl_skew_warn_threshold=max(0.0, float(args.regime_pnl_skew_threshold)),
             as_json=bool(args.json),
         )
+    elif args.cmd == "cash-drift-report":
+        cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
     elif args.cmd == "report":
         cmd_report(max(1, int(args.days)))
     elif args.cmd == "audit-ledger":
@@ -2980,6 +3317,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_resume(force=bool(args.force))
     elif args.cmd == "flatten-position":
         cmd_flatten_position(dry_run=bool(args.dry_run))
+    elif args.cmd == "panic-stop":
+        cmd_panic_stop(flatten=bool(args.flatten))
     elif args.cmd == "reconcile":
         cmd_reconcile()
     elif args.cmd == "recovery-report":

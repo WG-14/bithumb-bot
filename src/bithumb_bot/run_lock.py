@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
 from pathlib import Path
 import logging
 import os
@@ -17,6 +18,11 @@ try:
 except ModuleNotFoundError:
     fcntl = None
 
+try:
+    import msvcrt  # type: ignore[attr-defined]
+except ModuleNotFoundError:
+    msvcrt = None
+
 
 class RunLockError(RuntimeError):
     pass
@@ -24,6 +30,7 @@ class RunLockError(RuntimeError):
 
 LOGGER = logging.getLogger(__name__)
 STALE_LOCK_MAX_AGE_SECONDS = 60 * 10
+_LOCK_BYTES = 1
 
 
 @dataclass
@@ -89,9 +96,60 @@ def _pid_is_running(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except OSError:
+        return False
     except PermissionError:
         return True
     return True
+
+
+def _read_fd_text(fd: int, size: int = 256) -> str:
+    try:
+        current_offset = os.lseek(fd, 0, os.SEEK_CUR)
+    except OSError:
+        current_offset = None
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, size)
+        return raw.decode("utf-8", errors="ignore").strip()
+    finally:
+        if current_offset is not None:
+            try:
+                os.lseek(fd, current_offset, os.SEEK_SET)
+            except OSError:
+                pass
+
+
+def _is_lock_conflict_error(exc: OSError) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {32, 33, 36, 158}:
+        return True
+    return exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+
+
+def _lock_fd_exclusive(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    if msvcrt is not None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, _LOCK_BYTES)
+        return
+    raise RunLockError("run lock is not supported on this platform; use WSL or Linux")
+
+
+def _unlock_fd_exclusive(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    if msvcrt is not None:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, _LOCK_BYTES)
+        except OSError:
+            pass
+        return
+    raise RunLockError("run lock is not supported on this platform; use WSL or Linux")
 
 
 def _parse_lock_owner_text(raw: str) -> tuple[int | None, str | None, str | None]:
@@ -131,7 +189,7 @@ def _read_lock_file_state(path: Path, fd: int) -> _LockFileState:
     owner_text: str | None = None
 
     try:
-        raw = os.pread(fd, 256, 0).decode("utf-8", errors="ignore").strip()
+        raw = _read_fd_text(fd, 256)
         if raw:
             owner_text = raw
             pid, hostname, created_at = _parse_lock_owner_text(raw)
@@ -201,9 +259,6 @@ def read_run_lock_status(lock_path: Path | None = None) -> RunLockStatus:
 
 @contextmanager
 def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
-    if fcntl is None:
-        raise RunLockError("run lock is not supported on this platform; use WSL or Linux")
-
     path = lock_path or _default_lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -211,11 +266,22 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
     try:
         previous_state = _read_lock_file_state(path, fd)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_fd_exclusive(fd)
         except BlockingIOError as exc:
             state = _read_lock_file_state(path, fd)
             raise RunLockError(
-                "another bot run loop is already running; lock acquisition failed. "
+                "another bot run loop is already running for this runtime storage; "
+                "single-instance lock acquisition failed. "
+                "Current lock context: "
+                f"{_format_lock_conflict_details(path, state)}"
+            ) from exc
+        except OSError as exc:
+            if not _is_lock_conflict_error(exc):
+                raise
+            state = _read_lock_file_state(path, fd)
+            raise RunLockError(
+                "another bot run loop is already running for this runtime storage; "
+                "single-instance lock acquisition failed. "
                 "Current lock context: "
                 f"{_format_lock_conflict_details(path, state)}"
             ) from exc
@@ -232,6 +298,7 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
             )
 
         os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
         owner_record = (
             f"pid={os.getpid()} host={socket.gethostname()} "
             f"created_at={datetime.now(timezone.utc).isoformat()}"
@@ -241,6 +308,6 @@ def acquire_run_lock(lock_path: Path | None = None) -> Iterator[None]:
         yield
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            _unlock_fd_exclusive(fd)
         finally:
             os.close(fd)

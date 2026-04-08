@@ -8,11 +8,17 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.broker import order_rules
-from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision
+from bithumb_bot.db_core import (
+    ensure_db,
+    init_portfolio,
+    record_external_cash_adjustment,
+    record_strategy_decision,
+)
 from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.reporting import _sell_failure_category_from_observability, cmd_ops_report
 from bithumb_bot.oms import record_order_suppression
+from bithumb_bot.utils_time import kst_str
 from bithumb_bot.reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
     DUST_RESIDUAL_UNSELLABLE,
@@ -241,6 +247,82 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert payload["operator_recovery_summary"]["raw_holdings"]["classification"] == "blocking_dust"
     assert payload["operator_recovery_summary"]["normalized_exposure"]["normalized_exposure_active"] is False
     assert payload["operator_recovery_summary"]["operator_diagnostics"]["state"] == "blocking_dust"
+    assert "recent_external_cash_adjustment=none" in out
+
+
+def test_ops_report_shows_recent_external_cash_adjustment_summary(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-adjustment.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "ok",
+                    "failure_category": "none",
+                    "stale": False,
+                    "last_success_ts_ms": 1710000000000,
+                    "last_asset_ts_ms": 1710000000000,
+                },
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_external_cash_adjustment(
+            conn,
+            event_ts=1710000000000,
+            currency="KRW",
+            delta_amount=123.0,
+            source="legacy_balance_api",
+            reason="reconcile_cash_drift",
+            broker_snapshot_basis={"cash_available": 1000000.0},
+            note="ops test adjustment",
+            adjustment_key="ops-report-adjustment-1",
+        )
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=1)
+    out = capsys.readouterr().out
+
+    expected_last_event = kst_str(1710000000000)
+    assert "recent_external_cash_adjustment=count=1 total=123.000" in out
+    assert f"last_event={expected_last_event}" in out
+    assert "source=legacy_balance_api" in out
+    assert "reason=reconcile_cash_drift" in out
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):

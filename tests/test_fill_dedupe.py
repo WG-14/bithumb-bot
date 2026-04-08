@@ -7,6 +7,7 @@ from bithumb_bot.db_core import ensure_db
 from bithumb_bot.execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 import bithumb_bot.execution as execution_module
 import bithumb_bot.observability as observability_module
+from bithumb_bot.oms import set_exchange_order_id
 
 
 def test_apply_fill_dedupes_by_fill_id_and_notifies_once(tmp_path, monkeypatch):
@@ -327,6 +328,73 @@ def test_apply_fill_does_not_warn_for_paper_zero_fee(tmp_path, caplog):
         object.__setattr__(settings, "MODE", original_mode)
 
     assert "live_fill_fee_anomaly" not in caplog.text
+
+
+def test_apply_fill_and_trade_logs_correlation_fields(tmp_path, caplog, monkeypatch):
+    db_path = tmp_path / "fill_trade_correlation.sqlite"
+    old_db_path = settings.DB_PATH
+    old_mode = settings.MODE
+    old_start_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+
+    notifications: list[str] = []
+    monkeypatch.setattr(execution_module, "notify", lambda msg: notifications.append(msg))
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-log",
+            submit_attempt_id="attempt-log",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+        set_exchange_order_id("o-log", "ex-log", conn=conn)
+
+        with caplog.at_level("INFO", logger="bithumb_bot.execution"):
+            trade = apply_fill_and_trade(
+                conn,
+                client_order_id="o-log",
+                side="BUY",
+                fill_id="fill-log",
+                fill_ts=1000,
+                price=100000000.0,
+                qty=0.02,
+                fee=20.0,
+                signal_ts=1000,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+        object.__setattr__(settings, "DB_PATH", old_db_path)
+        object.__setattr__(settings, "MODE", old_mode)
+        object.__setattr__(settings, "START_CASH_KRW", old_start_cash)
+
+    assert trade is not None
+    assert "[ACCOUNTING] trade_applied" in caplog.text
+    assert "client_order_id=o-log" in caplog.text
+    assert "exchange_order_id=ex-log" in caplog.text
+    assert "signal_ts=1000" in caplog.text
+    assert "candle_ts=1000" in caplog.text
+    assert "side=BUY" in caplog.text
+    assert "submit_qty=0.020" in caplog.text
+    assert "filled_qty=0.020" in caplog.text
+    assert "post_trade_cash=" in caplog.text
+    assert "post_trade_asset=" in caplog.text
+    assert len(notifications) == 1
+    assert "event=fill_applied" in notifications[0]
+    assert "client_order_id=o-log" in notifications[0]
+    assert "exchange_order_id=ex-log" in notifications[0]
+    assert "signal_ts=1000" in notifications[0]
+    assert "side=BUY" in notifications[0]
+    assert "submit_qty=" in notifications[0]
+    assert "filled_qty=" in notifications[0]
+    assert "post_trade_cash=" in notifications[0]
+    assert "post_trade_asset=" in notifications[0]
 
 
 def test_apply_fill_warns_for_live_fee_ratio_outlier(tmp_path, caplog):

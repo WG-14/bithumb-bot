@@ -46,6 +46,7 @@ uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
+uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
 uv run bithumb-bot run --short 7 --long 30
 ```

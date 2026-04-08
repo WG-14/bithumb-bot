@@ -18,7 +18,7 @@ from .markets import (
 )
 from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
-from .paths import PathManager, PathPolicyError
+from .paths import PathManager, PathPolicyError, validate_runtime_root_separation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -386,7 +386,7 @@ def resolve_market_from_env() -> str:
 
 def default_run_lock_path(mode: str) -> str:
     normalized_mode = (mode or "paper").strip().lower() or "paper"
-    return str(PATH_MANAGER.config.run_root / normalized_mode / "bithumb-bot.lock")
+    return str(PATH_MANAGER.run_lock_path_for_mode(normalized_mode))
 
 
 def resolve_run_lock_path(path: str, *, mode: str | None = None) -> str:
@@ -747,6 +747,11 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         return
 
     issues: list[str] = []
+    try:
+        live_path_manager = PathManager.from_env(PROJECT_ROOT)
+        validate_runtime_root_separation(live_path_manager.config)
+    except PathPolicyError as exc:
+        issues.append(str(exc))
     for root_key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT"):
         root_raw = os.getenv(root_key)
         if root_raw is None or not root_raw.strip():
@@ -797,9 +802,9 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             "unset paper-only env keys: " + ", ".join(explicitly_set_paper_keys)
         )
 
-    if cfg.MAX_ORDER_KRW <= 0:
+    if cfg.MAX_ORDER_KRW <= 0 or not math.isfinite(float(cfg.MAX_ORDER_KRW)):
         issues.append("MAX_ORDER_KRW must be > 0")
-    if cfg.MAX_DAILY_LOSS_KRW <= 0:
+    if cfg.MAX_DAILY_LOSS_KRW <= 0 or not math.isfinite(float(cfg.MAX_DAILY_LOSS_KRW)):
         issues.append("MAX_DAILY_LOSS_KRW must be > 0")
     if cfg.MAX_DAILY_ORDER_COUNT <= 0:
         issues.append("MAX_DAILY_ORDER_COUNT must be > 0")

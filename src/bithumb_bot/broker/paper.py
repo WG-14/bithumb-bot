@@ -215,10 +215,14 @@ def paper_execute(
                 "[RUN] submit order intent",
                 mode=settings.MODE,
                 symbol=market,
+                signal_ts=int(ts),
+                candle_ts=int(ts),
                 side=side,
                 qty=f"{float(trade_qty):.12f}",
+                submit_qty=f"{float(trade_qty):.12f}",
                 intent_ts=int(ts),
                 intent_key=intent_key,
+                client_order_id=client_order_id,
                 reason=f"client_order_id={client_order_id}",
             )
         )
@@ -255,6 +259,7 @@ def paper_execute(
             exit_rule_name=(exit_rule_name if side == "SELL" else None),
             note=note,
             pair=market,
+            signal_ts=int(ts),
         )
 
         set_status(client_order_id, "FILLED", conn=conn)

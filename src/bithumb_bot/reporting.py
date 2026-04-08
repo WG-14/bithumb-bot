@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -30,7 +31,15 @@ from .reason_codes import (
     SELL_FAILURE_CATEGORY_UNKNOWN,
     sell_failure_detail_from_category,
 )
-from .db_core import ensure_db
+from .db_core import (
+    ensure_db,
+    get_external_cash_adjustment_summary,
+    init_portfolio,
+    normalize_asset_qty,
+    normalize_cash_amount,
+    portfolio_asset_total,
+    portfolio_cash_total,
+)
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
@@ -118,6 +127,282 @@ class DecisionTelemetrySummary:
     block_reason: str
     dust_classification: str
     effective_flat: bool
+
+
+def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) -> str:
+    if not summary or int(summary.get("adjustment_count") or 0) <= 0:
+        return "none"
+    last_event_ts = summary.get("last_event_ts")
+    last_event = kst_str(int(last_event_ts)) if last_event_ts is not None else "none"
+    return (
+        f"count={int(summary.get('adjustment_count') or 0)} "
+        f"total={float(summary.get('adjustment_total') or 0.0):.3f} "
+        f"last_event={last_event} "
+        f"source={summary.get('last_source') or '-'} "
+        f"reason={summary.get('last_reason') or '-'}"
+    )
+
+
+def _replay_trade_only_cash(conn: sqlite3.Connection) -> dict[str, float | int]:
+    init_portfolio(conn)
+    cash = normalize_cash_amount(settings.START_CASH_KRW)
+    qty = normalize_asset_qty(0.0)
+    dup_fill_count = 0
+    seen_fill_keys: set[tuple[str, int, float, float]] = set()
+
+    fills = conn.execute(
+        """
+        SELECT f.client_order_id, f.fill_ts, f.price, f.qty, f.fee, o.side
+        FROM fills f
+        JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.fill_ts ASC, f.id ASC
+        """
+    ).fetchall()
+
+    for row in fills:
+        key = (
+            str(row["client_order_id"]),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(row["qty"]),
+        )
+        if key in seen_fill_keys:
+            dup_fill_count += 1
+        seen_fill_keys.add(key)
+
+        fill_price = normalize_cash_amount(row["price"])
+        fill_qty = normalize_asset_qty(row["qty"])
+        fee = normalize_cash_amount(row["fee"])
+        side = str(row["side"])
+        if side == "BUY":
+            cash = normalize_cash_amount(cash - ((fill_price * fill_qty) + fee))
+            qty = normalize_asset_qty(qty + fill_qty)
+        elif side == "SELL":
+            cash = normalize_cash_amount(cash + ((fill_price * fill_qty) - fee))
+            qty = normalize_asset_qty(qty - fill_qty)
+
+    return {
+        "trade_cash_krw": cash,
+        "trade_asset_qty": qty,
+        "dup_fill_count": dup_fill_count,
+    }
+
+
+def _fetch_recent_external_cash_adjustments(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT adjustment_key, event_ts, delta_amount, source, reason, note
+        FROM external_cash_adjustments
+        ORDER BY event_ts DESC, id DESC
+        LIMIT ?
+        """,
+        (max(0, int(limit)),),
+    ).fetchall()
+    return [
+        {
+            "adjustment_key": str(row["adjustment_key"]),
+            "event_ts": int(row["event_ts"]),
+            "delta_amount": float(row["delta_amount"]),
+            "source": str(row["source"]),
+            "reason": str(row["reason"]),
+            "note": str(row["note"]) if row["note"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
+def _broker_cash_snapshot() -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "source": None,
+        "observed_ts_ms": None,
+        "asset_ts_ms": None,
+        "cash_available": None,
+        "cash_locked": None,
+        "cash_krw": None,
+        "error": None,
+    }
+    try:
+        broker = BithumbBroker()
+        get_snapshot = getattr(broker, "get_balance_snapshot", None)
+        if callable(get_snapshot):
+            balance_snapshot = get_snapshot()
+            balance = balance_snapshot.balance
+            snapshot.update(
+                {
+                    "source": str(getattr(balance_snapshot, "source_id", None) or "-"),
+                    "observed_ts_ms": int(getattr(balance_snapshot, "observed_ts_ms", 0) or 0),
+                    "asset_ts_ms": int(getattr(balance_snapshot, "asset_ts_ms", 0) or 0),
+                    "cash_available": float(balance.cash_available),
+                    "cash_locked": float(balance.cash_locked),
+                    "cash_krw": portfolio_cash_total(
+                        cash_available=float(balance.cash_available),
+                        cash_locked=float(balance.cash_locked),
+                    ),
+                }
+            )
+            return snapshot
+
+        get_balance = getattr(broker, "get_balance", None)
+        if callable(get_balance):
+            balance = get_balance()
+            snapshot.update(
+                {
+                    "source": "legacy_balance_api",
+                    "observed_ts_ms": 0,
+                    "asset_ts_ms": 0,
+                    "cash_available": float(balance.cash_available),
+                    "cash_locked": float(balance.cash_locked),
+                    "cash_krw": portfolio_cash_total(
+                        cash_available=float(balance.cash_available),
+                        cash_locked=float(balance.cash_locked),
+                    ),
+                }
+            )
+            return snapshot
+
+        raise AttributeError("broker does not provide get_balance/get_balance_snapshot")
+    except Exception as exc:
+        snapshot["error"] = f"{type(exc).__name__}: {exc}"
+        return snapshot
+
+
+def fetch_cash_drift_report(
+    conn: sqlite3.Connection,
+    *,
+    recent_limit: int = 5,
+) -> dict[str, object]:
+    trade_replay = _replay_trade_only_cash(conn)
+    portfolio_row = conn.execute(
+        """
+        SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+        FROM portfolio
+        WHERE id=1
+        """
+    ).fetchone()
+    if portfolio_row is None:
+        raise RuntimeError("portfolio row missing while building cash drift report")
+
+    local_cash_krw = portfolio_cash_total(
+        cash_available=float(portfolio_row["cash_available"]),
+        cash_locked=float(portfolio_row["cash_locked"]),
+    )
+    local_asset_qty = portfolio_asset_total(
+        asset_available=float(portfolio_row["asset_available"]),
+        asset_locked=float(portfolio_row["asset_locked"]),
+    )
+    trade_cash_krw = float(trade_replay["trade_cash_krw"])
+    adjustment_summary = get_external_cash_adjustment_summary(conn)
+    recent_adjustments = _fetch_recent_external_cash_adjustments(conn, limit=recent_limit)
+    explained_delta_krw = normalize_cash_amount(local_cash_krw - trade_cash_krw)
+    expected_local_cash_krw = normalize_cash_amount(trade_cash_krw + float(adjustment_summary["adjustment_total"]))
+    local_ledger_consistent = math.isclose(local_cash_krw, expected_local_cash_krw, abs_tol=1e-6)
+    local_asset_consistent = math.isclose(
+        local_asset_qty,
+        float(trade_replay["trade_asset_qty"]),
+        abs_tol=1e-12,
+    )
+    broker = _broker_cash_snapshot()
+    broker_cash_krw = broker.get("cash_krw")
+    broker_local_delta_krw = (
+        normalize_cash_amount(float(broker_cash_krw) - local_cash_krw)
+        if broker_cash_krw is not None
+        else None
+    )
+
+    return {
+        "mode": settings.MODE,
+        "db_path": settings.DB_PATH,
+        "broker": broker,
+        "local": {
+            "cash_krw": local_cash_krw,
+            "asset_qty": local_asset_qty,
+            "cash_without_external_adjustments_krw": trade_cash_krw,
+            "asset_without_external_adjustments_qty": float(trade_replay["trade_asset_qty"]),
+            "consistent": bool(local_ledger_consistent and local_asset_consistent),
+            "dup_fill_count": int(trade_replay["dup_fill_count"]),
+        },
+        "cash_drift": {
+            "explained_delta_krw": explained_delta_krw,
+            "external_cash_adjustment_total_krw": float(adjustment_summary["adjustment_total"]),
+            "external_cash_adjustment_count": int(adjustment_summary["adjustment_count"]),
+            "broker_local_delta_krw": broker_local_delta_krw,
+            "unexplained_residual_delta_krw": broker_local_delta_krw,
+        },
+        "recent_adjustments": recent_adjustments,
+    }
+
+
+def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> None:
+    conn = ensure_db()
+    try:
+        report = fetch_cash_drift_report(conn, recent_limit=max(1, int(recent_limit)))
+    finally:
+        conn.close()
+
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
+
+    broker = report.get("broker") or {}
+    local = report.get("local") or {}
+    cash_drift = report.get("cash_drift") or {}
+    recent_adjustments = report.get("recent_adjustments") or []
+    broker_error = broker.get("error")
+    broker_cash = broker.get("cash_krw")
+    broker_local_delta = cash_drift.get("broker_local_delta_krw")
+    unexplained_residual_delta = cash_drift.get("unexplained_residual_delta_krw")
+
+    print("[CASH-DRIFT-REPORT]")
+    broker_cash_line = (
+        f"  broker_cash={float(broker_cash):,.3f}"
+        if broker_cash is not None
+        else "  broker_cash=none"
+    )
+    local_cash_line = (
+        f"  local_cash={float(local.get('cash_krw') or 0.0):,.3f} "
+        f"ledger_cash_without_adjustments={float(local.get('cash_without_external_adjustments_krw') or 0.0):,.3f}"
+    )
+    print(f"{broker_cash_line} {local_cash_line}")
+    if broker_error:
+        print(f"  broker_error={broker_error}")
+    broker_local_delta_text = (
+        f"{float(broker_local_delta):,.3f}" if broker_local_delta is not None else "none"
+    )
+    unexplained_residual_delta_text = (
+        f"{float(unexplained_residual_delta):,.3f}"
+        if unexplained_residual_delta is not None
+        else "none"
+    )
+    print(
+        "  "
+        f"external_cash_adjustment_total={float(cash_drift.get('external_cash_adjustment_total_krw') or 0.0):,.3f} "
+        f"explained_delta={float(cash_drift.get('explained_delta_krw') or 0.0):,.3f} "
+        f"broker_local_delta={broker_local_delta_text} "
+        f"unexplained_residual_delta={unexplained_residual_delta_text}"
+    )
+    print(
+        "  "
+        f"local_ledger_consistent={1 if bool(local.get('consistent')) else 0} "
+        f"dup_fill_count={int(local.get('dup_fill_count') or 0)} "
+        f"recent_adjustment_count={int(cash_drift.get('external_cash_adjustment_count') or 0)}"
+    )
+    if not recent_adjustments:
+        print("  recent_adjustments=none")
+    else:
+        print("  recent_adjustments:")
+        for item in recent_adjustments:
+            event_ts = item.get("event_ts")
+            event_label = kst_str(int(event_ts)) if event_ts is not None else "none"
+            note = item.get("note") or "-"
+            print(
+                "    "
+                f"event_ts={event_label} delta={float(item.get('delta_amount') or 0.0):,.3f} "
+                f"source={item.get('source') or '-'} reason={item.get('reason') or '-'} note={note}"
+            )
     raw_qty_open: float
     raw_total_asset_qty: float
     position_qty: float
@@ -3587,6 +3872,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             estimated_fee_rate=float(settings.FEE_RATE),
         )
         recovery_attribution_signals = fetch_recovery_attribution_signal_summary(conn)
+        recent_external_cash_adjustment = get_external_cash_adjustment_summary(conn)
         health_row = conn.execute(
             """
             SELECT
@@ -3761,6 +4047,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             ),
             "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
         },
+        "recent_external_cash_adjustment": recent_external_cash_adjustment,
     }
     position_state = build_position_state_model(
         raw_qty_open=float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0,
@@ -3862,6 +4149,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"preflight_outcome={balance_source_diag.get('preflight_outcome') or '-'} "
         f"accounts_flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
         f"accounts_flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
+    )
+    print(
+        "  recent_external_cash_adjustment="
+        f"{_format_external_cash_adjustment_summary(recent_external_cash_adjustment)}"
     )
     print(
         "  "

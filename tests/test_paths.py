@@ -36,6 +36,7 @@ def test_path_manager_separates_paper_and_live(monkeypatch: pytest.MonkeyPatch, 
     assert paper.run_lock_path() != live.run_lock_path()
     assert "/paper/" in str(paper.run_lock_path()).replace("\\", "/")
     assert "/live/" in str(live.run_lock_path()).replace("\\", "/")
+    assert "/dryrun/" in str(paper.run_lock_path_for_mode("dryrun")).replace("\\", "/")
 
 
 def test_path_manager_uses_topic_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

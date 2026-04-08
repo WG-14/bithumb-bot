@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import resolve_db_path, settings
-from .db_core import ensure_db, init_portfolio, set_portfolio_breakdown
+from .db_core import (
+    ensure_db,
+    init_portfolio,
+    normalize_asset_qty,
+    normalize_cash_amount,
+    portfolio_asset_total,
+    portfolio_cash_total,
+    set_portfolio_breakdown,
+)
 
 EPS = 1e-10
 
@@ -151,8 +159,8 @@ def _validate_targets(conn: sqlite3.Connection) -> list[str]:
 
 
 def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
-    cash = float(settings.START_CASH_KRW)
-    qty = 0.0
+    cash = normalize_cash_amount(settings.START_CASH_KRW)
+    qty = normalize_asset_qty(0.0)
     rows = conn.execute(
         """
         SELECT o.side, f.price, f.qty, f.fee
@@ -167,19 +175,19 @@ def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
         fill_qty = float(row["qty"])
         fee = float(row["fee"])
         if side == "BUY":
-            cash -= (price * fill_qty) + fee
-            qty += fill_qty
+            cash = normalize_cash_amount(cash - ((price * fill_qty) + fee))
+            qty = normalize_asset_qty(qty + fill_qty)
         elif side == "SELL":
-            cash += (price * fill_qty) - fee
-            qty -= fill_qty
+            cash = normalize_cash_amount(cash + ((price * fill_qty) - fee))
+            qty = normalize_asset_qty(qty - fill_qty)
         else:
             raise RepairValidationError(f"invalid side in fills replay: {side}")
     return cash, qty
 
 
 def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str, float | int]], float, float]:
-    cash = float(settings.START_CASH_KRW)
-    qty = 0.0
+    cash = normalize_cash_amount(settings.START_CASH_KRW)
+    qty = normalize_asset_qty(0.0)
     diffs: list[dict[str, float | int]] = []
 
     rows = conn.execute(
@@ -198,11 +206,11 @@ def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str,
         fee = float(row["fee"])
 
         if side == "BUY":
-            cash -= (price * trade_qty) + fee
-            qty += trade_qty
+            cash = normalize_cash_amount(cash - ((price * trade_qty) + fee))
+            qty = normalize_asset_qty(qty + trade_qty)
         elif side == "SELL":
-            cash += (price * trade_qty) - fee
-            qty -= trade_qty
+            cash = normalize_cash_amount(cash + ((price * trade_qty) - fee))
+            qty = normalize_asset_qty(qty - trade_qty)
         else:
             raise RepairValidationError(f"invalid trade side for id={trade_id}: {side}")
 
@@ -248,8 +256,14 @@ def run_repair(*, db_path: str | None = None, apply: bool = False, backup_path: 
             "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
         ).fetchone()
         _require(portfolio_row is not None, "portfolio row(id=1) missing")
-        pre_portfolio_cash = float(portfolio_row["cash_available"]) + float(portfolio_row["cash_locked"])
-        pre_portfolio_qty = float(portfolio_row["asset_available"]) + float(portfolio_row["asset_locked"])
+        pre_portfolio_cash = portfolio_cash_total(
+            cash_available=float(portfolio_row["cash_available"]),
+            cash_locked=float(portfolio_row["cash_locked"]),
+        )
+        pre_portfolio_qty = portfolio_asset_total(
+            asset_available=float(portfolio_row["asset_available"]),
+            asset_locked=float(portfolio_row["asset_locked"]),
+        )
         print(
             "[REPAIR] precheck "
             f"replay_cash={pre_replay_cash:.8f} replay_qty={pre_replay_qty:.12f} "
@@ -294,8 +308,14 @@ def run_repair(*, db_path: str | None = None, apply: bool = False, backup_path: 
             "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
         ).fetchone()
         _require(post_portfolio is not None, "portfolio row missing after repair")
-        post_portfolio_cash = float(post_portfolio["cash_available"]) + float(post_portfolio["cash_locked"])
-        post_portfolio_qty = float(post_portfolio["asset_available"]) + float(post_portfolio["asset_locked"])
+        post_portfolio_cash = portfolio_cash_total(
+            cash_available=float(post_portfolio["cash_available"]),
+            cash_locked=float(post_portfolio["cash_locked"]),
+        )
+        post_portfolio_qty = portfolio_asset_total(
+            asset_available=float(post_portfolio["asset_available"]),
+            asset_locked=float(post_portfolio["asset_locked"]),
+        )
 
         cash_match = math.isclose(post_replay_cash, post_portfolio_cash, abs_tol=1e-6)
         qty_match = math.isclose(post_replay_qty, post_portfolio_qty, abs_tol=1e-10)

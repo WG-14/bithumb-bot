@@ -16,7 +16,7 @@ def _set(attr: str, value):
     return old
 
 
-def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch):
+def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch, caplog):
     old_db = _set("DB_PATH", str(tmp_path / "paper.sqlite"))
     old_slip = _set("SLIPPAGE_BPS", 10.0)
     old_max_order = _set("MAX_ORDER_KRW", 0.0)
@@ -31,13 +31,19 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch)
             "fetch_orderbook_top",
             lambda _pair: BestQuote(market="KRW-BTC", bid_price=104.0, ask_price=105.0),
         )
-        trade = paper.paper_execute("BUY", ts=1, price=999.0)
+        with caplog.at_level("INFO", logger="bithumb_bot.broker.paper"):
+            trade = paper.paper_execute("BUY", ts=1, price=999.0)
 
         assert trade is not None
         expected_fill = 105.0 * (1 + 10.0 / 10000.0)
         expected_fee = 1_000_000 * float(settings.BUY_FRACTION) * 0.0025
         assert trade["price"] == expected_fill
         assert trade["fee"] == expected_fee
+        assert "[RUN] submit order intent" in caplog.text
+        assert "client_order_id=paper_1_buy_" in caplog.text
+        assert "signal_ts=1" in caplog.text
+        assert "candle_ts=1" in caplog.text
+        assert "submit_qty=" in caplog.text
 
         conn = ensure_db()
         t = conn.execute("SELECT price, fee, note FROM trades ORDER BY id DESC LIMIT 1").fetchone()
