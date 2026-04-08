@@ -185,6 +185,64 @@ def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) 
     )
 
 
+def _summarize_external_cash_adjustment_json(raw: str | None, *, keys: list[str]) -> str:
+    if raw is None:
+        return "-"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return str(raw)
+    if not isinstance(parsed, dict):
+        return str(raw)
+    pieces: list[str] = []
+    for key in keys:
+        if key not in parsed:
+            continue
+        value = parsed.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            pieces.append(f"{key}={1 if value else 0}")
+        elif isinstance(value, (int, float)):
+            pieces.append(f"{key}={float(value):.3f}")
+        else:
+            pieces.append(f"{key}={value}")
+    return " ".join(pieces) if pieces else str(raw)
+
+
+def _summarize_external_cash_adjustment_basis(raw: str | None) -> str:
+    return _summarize_external_cash_adjustment_json(
+        raw,
+        keys=[
+            "balance_source",
+            "observed_ts_ms",
+            "asset_ts_ms",
+            "broker_cash_available",
+            "broker_cash_locked",
+            "broker_cash_total",
+            "local_cash_available",
+            "local_cash_locked",
+            "local_cash_total",
+            "cash_delta",
+            "reconcile_reason_code",
+        ],
+    )
+
+
+def _summarize_external_cash_adjustment_correlation(raw: str | None) -> str:
+    return _summarize_external_cash_adjustment_json(
+        raw,
+        keys=[
+            "remote_open_order_found",
+            "recent_fill_applied",
+            "invalid_fill_price_blocked",
+            "unresolved_open_order_count",
+            "submit_unknown_count",
+            "recovery_required_count",
+        ],
+    )
+
+
 def _replay_trade_only_cash(conn: sqlite3.Connection) -> dict[str, float | int]:
     init_portfolio(conn)
     cash = normalize_cash_amount(settings.START_CASH_KRW)
@@ -252,7 +310,13 @@ def _fetch_recent_external_cash_adjustments(
             "source": str(row["source"]),
             "reason": str(row["reason"]),
             "broker_snapshot_basis": str(row["broker_snapshot_basis"]),
+            "broker_snapshot_basis_summary": _summarize_external_cash_adjustment_basis(
+                str(row["broker_snapshot_basis"])
+            ),
             "correlation_metadata": (
+                str(row["correlation_metadata"]) if row["correlation_metadata"] is not None else None
+            ),
+            "correlation_metadata_summary": _summarize_external_cash_adjustment_correlation(
                 str(row["correlation_metadata"]) if row["correlation_metadata"] is not None else None
             ),
             "note": str(row["note"]) if row["note"] is not None else None,
@@ -321,6 +385,7 @@ def fetch_cash_drift_report(
     *,
     recent_limit: int = 5,
 ) -> dict[str, object]:
+    generated_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     trade_replay = _replay_trade_only_cash(conn)
     portfolio_row = conn.execute(
         """
@@ -343,9 +408,10 @@ def fetch_cash_drift_report(
     trade_cash_krw = float(trade_replay["trade_cash_krw"])
     adjustment_summary = get_external_cash_adjustment_summary(conn)
     recent_adjustments = _fetch_recent_external_cash_adjustments(conn, limit=recent_limit)
+    external_cash_adjustment_total_krw = float(adjustment_summary["adjustment_total"])
+    explained_local_cash_krw = normalize_cash_amount(trade_cash_krw + external_cash_adjustment_total_krw)
     explained_delta_krw = normalize_cash_amount(local_cash_krw - trade_cash_krw)
-    expected_local_cash_krw = normalize_cash_amount(trade_cash_krw + float(adjustment_summary["adjustment_total"]))
-    local_ledger_consistent = math.isclose(local_cash_krw, expected_local_cash_krw, abs_tol=1e-6)
+    local_ledger_consistent = math.isclose(local_cash_krw, explained_local_cash_krw, abs_tol=1e-6)
     local_asset_consistent = math.isclose(
         local_asset_qty,
         float(trade_replay["trade_asset_qty"]),
@@ -358,10 +424,18 @@ def fetch_cash_drift_report(
         if broker_cash_krw is not None
         else None
     )
+    broker_vs_explained_delta_krw = (
+        normalize_cash_amount(float(broker_cash_krw) - explained_local_cash_krw)
+        if broker_cash_krw is not None
+        else None
+    )
 
     return {
         "mode": settings.MODE,
         "db_path": settings.DB_PATH,
+        "generated_at_epoch_ms": generated_at_ms,
+        "generated_at_utc": datetime.fromtimestamp(generated_at_ms / 1000, tz=timezone.utc).isoformat(timespec="seconds"),
+        "report_path": str(PATH_MANAGER.cash_drift_report_path()),
         "broker": broker,
         "local": {
             "cash_krw": local_cash_krw,
@@ -373,10 +447,11 @@ def fetch_cash_drift_report(
         },
         "cash_drift": {
             "explained_delta_krw": explained_delta_krw,
-            "external_cash_adjustment_total_krw": float(adjustment_summary["adjustment_total"]),
+            "explained_local_cash_krw": explained_local_cash_krw,
+            "external_cash_adjustment_total_krw": external_cash_adjustment_total_krw,
             "external_cash_adjustment_count": int(adjustment_summary["adjustment_count"]),
             "broker_local_delta_krw": broker_local_delta_krw,
-            "unexplained_residual_delta_krw": broker_local_delta_krw,
+            "unexplained_residual_delta_krw": broker_vs_explained_delta_krw,
         },
         "recent_adjustments": recent_adjustments,
     }
@@ -388,6 +463,8 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
         report = fetch_cash_drift_report(conn, recent_limit=max(1, int(recent_limit)))
     finally:
         conn.close()
+
+    write_json_atomic(PATH_MANAGER.cash_drift_report_path(), report)
 
     if as_json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -444,13 +521,14 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
             event_ts = item.get("event_ts")
             event_label = kst_str(int(event_ts)) if event_ts is not None else "none"
             note = item.get("note") or "-"
-            correlation_metadata = item.get("correlation_metadata") or "-"
+            correlation_metadata = item.get("correlation_metadata_summary") or item.get("correlation_metadata") or "-"
+            basis_summary = item.get("broker_snapshot_basis_summary") or item.get("broker_snapshot_basis") or "-"
             print(
                 "    "
                 f"event_ts={event_label} adjustment_key={item.get('adjustment_key') or '-'} "
                 f"delta={float(item.get('delta_amount') or 0.0):,.3f} "
-                f"source={item.get('source') or '-'} reason={item.get('reason') or '-'} note={note}"
-                f" correlation_metadata={correlation_metadata}"
+                f"source={item.get('source') or '-'} reason={item.get('reason') or '-'} note={note} "
+                f"basis={basis_summary} correlation_metadata={correlation_metadata}"
             )
     raw_qty_open: float
     raw_total_asset_qty: float
@@ -3195,7 +3273,7 @@ def cmd_strategy_report(
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
             print(f"  schema_error={exc}")
-            print("  tip: 筌ㅼ뮇????쎄텕筌띾뜄以?筌띾뜆?졿뉩紐껋쟿??곷??띻탢??筌ㅼ뮇??DB???????뤾쉭??")
+            print("  tip: ?轅붽틓????彛??????ш낄援??臾낅돗?????ш낄?蹂μ땃??轅붽틓?????釉뚰??嶸←빊?彛??몄맠??????쇱졑???????異???轅붽틓????彛??DB???????癲ル슢?ｅ젆???")
             return
     finally:
         conn.close()
@@ -3330,7 +3408,7 @@ def cmd_strategy_report(
 
     if not stats:
         print("  no matched trade_lifecycles rows")
-        print("  tip: ??쎈뻬 ?닌덉퍢/?袁⑥셽筌?筌?沅?域뱀뮇???袁り숲???袁れ넅??띻탢??lifecycle ?怨쀬뵠????밴쉐 ??????類ㅼ뵥??뤾쉭??")
+        print("  tip: ??????딅? ????????????밸븶??獄?????????????????袁ｋ쨨???????袁ｋ쨨???????異??lifecycle ????????????袁⑸즴??????????꿔꺂??틝??????癲ル슢?ｅ젆???")
     else:
         print(
             "  "
@@ -3762,7 +3840,7 @@ def cmd_experiment_report(
             "top_n": summary.top_n,
         },
         "operational_stability_boundary": {
-            "note": "ops-report/health/recovery 筌왖??? ?브쑬?????쎈퓮??expectancy 野꺜筌??귐뗫７?紐꾩뿯??덈뼄."
+            "note": "ops-report/health/recovery ?轅붽틓?????? ???怨쀫뮝力?????????놁벩??expectancy ??β뼯援???????숆강???κ뭬???꿔꺂????釉뚮뜦??????낆젵."
         },
         "experiment_expectancy_metrics": {
             "realized_net_pnl": summary.realized_net_pnl,
@@ -4237,7 +4315,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print("\n[STRATEGY-SUMMARY]")
     if not strategy_stats:
         print("  no strategy_context rows in order_intent_dedup")
-        print("  tip: strategy_context 疫꿸퀡而?筌욌쵌???雅뚯눖揆 intent dedup ?怨쀬뵠?怨? ??됰선???④쑴沅??몃빍??")
+        print("  tip: strategy_context ???????泳?뿀???轅붽틓???寃멸섶???????용츧?嶺뚮?援ο쭩?intent dedup ?????????? ?????Β?띾쭡????壤굿??????癲ル슢?????")
     else:
         print("  strategy_context,order_count,fill_count,buy_notional,sell_notional,fee_total,pnl_proxy_deprecated")
         for stat in strategy_stats:
@@ -4427,8 +4505,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         print(f"  fee_total(last {len(recent_trades)} trades)={_fmt_float(fee_total, 2)}")
 
     print("\n[KNOWN-LIMITATIONS/TODO]")
-    print("  - strategy-report??trade_lifecycles 疫꿸퀡而?realized gross/fee/net pnl 筌욌쵌?롧몴??怨쀪퐨 ?????뤾쉭??")
-    print("  - ops-report??strategy_summary??intent/fill 疫꿸퀡而?筌〓㈇???뱀뵠筌?pnl_proxy_deprecated????釉??몃빍??")
+    print("  - strategy-report??trade_lifecycles ???????泳?뿀??realized gross/fee/net pnl ?轅붽틓???寃멸섶??棺堉?뙴??????????? ?????癲ル슢?ｅ젆???")
+    print("  - ops-report??strategy_summary??intent/fill ???????泳?뿀???轅붽틓???곌램鍮?????????醫롮첂??pnl_proxy_deprecated???????癲ル슢?????")
     print("\n[FEE-DIAGNOSTICS-SNAPSHOT]")
     print(
         "  "

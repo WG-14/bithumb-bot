@@ -91,6 +91,7 @@ def test_trade_report_derived_entrypoints_match_storage_contract(
     assert pm.strategy_validation_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "strategy_validation" / "strategy_validation_2026-03-30.json"
     assert pm.fee_diagnostics_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "fee_diagnostics" / "fee_diagnostics_2026-03-30.json"
     assert pm.recovery_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "recovery_report" / "recovery_report_2026-03-30.json"
+    assert pm.cash_drift_report_path(day="2026-03-30") == tmp_path / "data" / "live" / "reports" / "cash_drift_report" / "cash_drift_report_2026-03-30.json"
     assert pm.feature_snapshot_path(day="2026-03-30") == tmp_path / "data" / "live" / "derived" / "feature_snapshot" / "feature_snapshot_2026-03-30.jsonl"
     assert pm.signal_trace_path(day="2026-03-30") == tmp_path / "data" / "live" / "derived" / "signal_trace" / "signal_trace_2026-03-30.jsonl"
 

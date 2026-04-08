@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
-from bithumb_bot.config import settings
+from bithumb_bot.config import PATH_MANAGER, settings
 from bithumb_bot.db_core import (
     ensure_db,
     get_external_cash_adjustment_summary,
@@ -415,6 +415,99 @@ def test_reconcile_records_cumulative_external_cash_adjustments_and_survives_res
     assert "external_cash_adjustment_total=-30.000" in out
     assert "recent_adjustment_count=2" in out
     assert "reason=reconcile_cash_drift" in out
+
+
+def test_cash_drift_report_tracks_manual_fee_trade_mix_duplicate_reconcile_and_restart(
+    mixed_trade_cash_ledger,
+    monkeypatch,
+    capsys,
+):
+    db_path = Path(mixed_trade_cash_ledger["db_path"])
+    original_db_path = settings.DB_PATH
+    original_start_cash = settings.START_CASH_KRW
+    trade_cash_after = mixed_trade_cash_ledger["trade_cash_after"]
+    first_broker_cash = trade_cash_after - 30.0
+    second_broker_cash = trade_cash_after - 50.0
+
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: _VariableCashDriftBroker(cash_available=second_broker_cash),
+    )
+
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    try:
+        conn = ensure_db(str(db_path))
+        try:
+            record_external_cash_adjustment(
+                conn,
+                event_ts=1_700_000_500_000,
+                currency="KRW",
+                delta_amount=-30.0,
+                source="bank_fee",
+                reason="deposit_fee",
+                broker_snapshot_basis={
+                    "balance_source": "manual_statement",
+                    "trade_cash_after": trade_cash_after,
+                    "cash_before_fee": trade_cash_after,
+                    "cash_after_fee": first_broker_cash,
+                },
+                correlation_metadata={"ticket": "fee-1"},
+                note="deposit fee on transfer",
+                adjustment_key="bank_fee:deposit_fee:1",
+            )
+        finally:
+            conn.close()
+
+        importlib.reload(runtime_state)
+        reconcile_with_broker(_VariableCashDriftBroker(cash_available=first_broker_cash))
+        importlib.reload(runtime_state)
+        reconcile_with_broker(_VariableCashDriftBroker(cash_available=first_broker_cash))
+
+        importlib.reload(runtime_state)
+        reconcile_with_broker(_VariableCashDriftBroker(cash_available=second_broker_cash))
+        importlib.reload(runtime_state)
+        reconcile_with_broker(_VariableCashDriftBroker(cash_available=second_broker_cash))
+
+        conn = ensure_db(str(db_path))
+        try:
+            adjustment_rows = conn.execute(
+                "SELECT event_ts, delta_amount, source, reason, adjustment_key FROM external_cash_adjustments ORDER BY id ASC"
+            ).fetchall()
+            report = fetch_cash_drift_report(conn, recent_limit=5)
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+
+    assert len(adjustment_rows) == 2
+    assert [float(row["delta_amount"]) for row in adjustment_rows] == pytest.approx([-30.0, -20.0])
+    assert [str(row["reason"]) for row in adjustment_rows] == ["deposit_fee", "reconcile_cash_drift"]
+    assert report["local"]["cash_without_external_adjustments_krw"] == pytest.approx(trade_cash_after)
+    assert report["local"]["cash_krw"] == pytest.approx(second_broker_cash)
+    assert report["cash_drift"]["external_cash_adjustment_count"] == 2
+    assert report["cash_drift"]["external_cash_adjustment_total_krw"] == pytest.approx(-50.0)
+    assert report["cash_drift"]["explained_delta_krw"] == pytest.approx(-50.0)
+    assert report["cash_drift"]["unexplained_residual_delta_krw"] == pytest.approx(0.0)
+    assert len(report["recent_adjustments"]) == 2
+    assert report["recent_adjustments"][0]["reason"] == "reconcile_cash_drift"
+    assert report["recent_adjustments"][1]["reason"] == "deposit_fee"
+
+    cmd_cash_drift_report(recent_limit=5)
+    out = capsys.readouterr().out
+    report_path = PATH_MANAGER.cash_drift_report_path()
+    assert report_path.exists()
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["cash_drift"]["external_cash_adjustment_count"] == 2
+    assert payload["cash_drift"]["external_cash_adjustment_total_krw"] == pytest.approx(-50.0)
+    assert payload["cash_drift"]["unexplained_residual_delta_krw"] == pytest.approx(0.0)
+    assert payload["recent_adjustments"][0]["broker_snapshot_basis_summary"] != "-"
+    assert "[CASH-DRIFT-REPORT]" in out
+    assert "broker_cash=" in out
+    assert "local_cash=" in out
+    assert "recent_adjustments:" in out
+    assert "reason=reconcile_cash_drift" in out
+    assert "reason=deposit_fee" in out
 
 
 def test_external_cash_adjustments_remain_db_scoped(tmp_path):
