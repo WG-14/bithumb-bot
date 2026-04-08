@@ -13,7 +13,14 @@ from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
 from bithumb_bot.reporting import _sell_failure_category_from_observability, cmd_ops_report
 from bithumb_bot.oms import record_order_suppression
-from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE, SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN, SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE, SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
+from bithumb_bot.reason_codes import (
+    DUST_RESIDUAL_SUPPRESSED,
+    DUST_RESIDUAL_UNSELLABLE,
+    SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+    SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE,
+    SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+    SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+)
 
 
 def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
@@ -747,6 +754,37 @@ def test_sell_failure_category_from_observability_flags_qty_step_mismatch_from_m
     assert category == "qty_step_mismatch"
 
 
+def test_sell_failure_category_from_observability_prefers_boundary_kind_over_unsafe_mismatch():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+        message="state=EXIT_PARTIAL_LEFT_DUST;operator_action=MANUAL_DUST_REVIEW_REQUIRED",
+        submit_evidence=None,
+        dust_details={
+            "sell_qty_boundary_kind": "min_qty",
+            "sell_failure_category": "unsafe_dust_mismatch_dust",
+            "qty_below_min": 1,
+            "dust_qty_gap_small": 1,
+            "summary": "sell_qty_boundary_kind=min_qty;qty_below_min=1;dust_qty_gap_small=1",
+        },
+    )
+
+    assert category == SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
+
+
+def test_sell_failure_category_from_observability_prefers_qty_step_boundary_kind():
+    category = _sell_failure_category_from_observability(
+        submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+        message="state=EXIT_PARTIAL_LEFT_DUST;operator_action=MANUAL_DUST_REVIEW_REQUIRED",
+        submit_evidence=None,
+        dust_details={
+            "sell_qty_boundary_kind": "qty_step",
+            "summary": "sell_qty_boundary_kind=qty_step;qty_step=0.0001",
+        },
+    )
+
+    assert category == SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH
+
+
 def test_sell_failure_category_from_observability_flags_unsafe_mismatch_from_evidence():
     category = _sell_failure_category_from_observability(
         submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
@@ -782,6 +820,64 @@ def test_sell_failure_category_from_observability_flags_unresolved_risk_gate_fro
     )
 
     assert category == "unresolved_risk_gate"
+
+
+def test_ops_report_classifies_unresolved_risk_gate_in_recent_flow(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "ops-report-unresolved-risk-gate.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            ("coid-risk-gate", "ex-risk-gate", "FAILED", "SELL", 100000000.0, 0.0002, 0.0, 10, 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO order_events(
+                client_order_id, event_type, event_ts, order_status, side, qty, price, submission_reason_code, message, submit_evidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "coid-risk-gate",
+                "submit_attempt_recorded",
+                11,
+                "FAILED",
+                "SELL",
+                0.0002,
+                100000000.0,
+                "RISKY_ORDER_BLOCK",
+                "category=unresolved_risk_gate;reason_detail_code=open_order_timeout;reason=unresolved order gate",
+                json.dumps(
+                    {
+                        "sell_failure_category": "none",
+                        "sell_failure_detail": "none",
+                        "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "sell_qty_boundary_kind": "none",
+                        "sell_qty_basis_qty": 0.0002,
+                        "sell_qty_basis_source": "position_state.normalized_exposure.open_exposure_qty",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "[RECENT-STRATEGY-ORDER-FILL-FLOW]" in out
+    assert "sell_failure_category=unresolved_risk_gate" in out
+    assert "sell_failure_detail=unresolved_risk_gate" in out
+    assert "reason=RISKY_ORDER_BLOCK" in out
+    assert "reason_detail_code=open_order_timeout" in out
 
 
 def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, capsys):
@@ -848,6 +944,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "submit_qty_source_truth_source=context.submit_qty_source" in out
     assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "sell_submit_qty_source_truth_source=context.submit_qty_source" in out
+    assert "sell_qty_basis_qty=0.00009629" in out
+    assert "sell_qty_basis_source=position_state.normalized_exposure.open_exposure_qty" in out
     assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=0.00009629" in out
     assert "open_exposure_qty_truth_source=position_state.open_exposure_qty" in out
@@ -861,3 +959,64 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     sell_suppression = payload["recent_sell_suppressions"][0]
     assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
     assert sell_suppression["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert sell_suppression["sell_qty_basis_qty"] == pytest.approx(0.00009629)
+    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
+
+
+def test_ops_report_prefers_boundary_below_min_over_unsafe_dust_mismatch_in_recent_flow(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    db_path = str(tmp_path / "ops-report-boundary-precedence.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            ("coid-boundary", "ex-boundary", "FAILED", "SELL", 100000000.0, 0.00009999, 0.0, 10, 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO order_events(
+                client_order_id, event_type, event_ts, order_status, side, qty, price, submission_reason_code, message, submit_evidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "coid-boundary",
+                "submit_attempt_recorded",
+                11,
+                "FAILED",
+                "SELL",
+                0.00009999,
+                100000000.0,
+                DUST_RESIDUAL_UNSELLABLE,
+                "category=unsafe_dust_mismatch_dust;detail=unsafe_dust_mismatch_dust;qty_below_min=1",
+                json.dumps(
+                    {
+                        "sell_failure_category": "unsafe_dust_mismatch_dust",
+                        "sell_failure_detail": "unsafe_dust_mismatch_dust",
+                        "sell_qty_boundary_kind": "min_qty",
+                        "qty_below_min": 1,
+                        "normalized_below_min": 0,
+                        "notional_below_min": 0,
+                        "summary": "sell_qty_boundary_kind=min_qty qty_below_min=1 dust_qty_gap_small=1",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_ops_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "sell_failure_category=boundary_below_min" in out
+    assert "sell_failure_detail=unsafe_dust_mismatch_dust" in out

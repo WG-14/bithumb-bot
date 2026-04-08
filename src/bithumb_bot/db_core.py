@@ -10,6 +10,9 @@ from .sqlite_resilience import configure_connection
 from .decision_context import normalize_strategy_decision_context
 
 
+# The lot-state contract is intentionally tiny and safety-critical:
+# open_exposure is the sellable inventory base, while dust_tracking is
+# operator evidence only. Keep the schema aligned with that routing contract.
 _OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
 
 

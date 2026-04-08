@@ -106,6 +106,57 @@ def test_record_strategy_decision_normalizes_hold_context_without_filter_block(t
     assert ctx["signal_strength_label"] == "neutral"
 
 
+def test_decision_telemetry_cli_exposes_sell_failure_category_fields(tmp_path, monkeypatch, capsys):
+    db_path = str(tmp_path / "decision-sell-failure-cli.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1_710_000_120_000,
+            strategy_name="sma_with_filter",
+            signal="SELL",
+            reason="sell blocked by qty step",
+            candle_ts=1_710_000_060_000,
+            market_price=102_300_000.0,
+            context={
+                "base_signal": "SELL",
+                "base_reason": "sma dead cross",
+                "entry_reason": "sma dead cross",
+                "final_signal": "SELL",
+                "sell_qty_boundary_kind": "qty_step",
+                "raw_qty_open": 0.0002,
+                "raw_total_asset_qty": 0.00029193,
+                "open_exposure_qty": 0.0002,
+                "dust_tracking_qty": 0.00009193,
+                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "position_state_source": "context.raw_qty_open",
+                "normalized_exposure_active": True,
+                "normalized_exposure_qty": 0.0002,
+                "effective_flat": False,
+                "dust_classification": "blocking_dust",
+                "position_gate": {
+                    "dust_state": "blocking_dust",
+                    "effective_flat_due_to_harmless_dust": False,
+                    "raw_qty_open": 0.0002,
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rc = main(["decision-telemetry", "--limit", "20"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "sell_failure_category,sell_failure_detail" in out
+    assert "qty_step_mismatch" in out
+    assert ",qty_step," in out
+
+
 def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "decision-buy-to-hold-cli.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
@@ -217,10 +268,13 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["dust_tracking_qty"] == 0.00009563
     assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
     assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009629)
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_qty_boundary_kind"] == "none"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
-    assert ctx["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert ctx["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
     assert ctx["sell_normalized_exposure_qty_truth_source"] == "fallback:raw_qty_open_or_zero"
     assert ctx["sell_open_exposure_qty_truth_source"] == "context.open_exposure_qty"
     assert ctx["sell_dust_tracking_qty_truth_source"] == "context.dust_tracking_qty"
@@ -230,6 +284,60 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:open_exposure_qty"
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is True
+
+
+def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-sell-basis-canonical.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="SELL",
+            reason="sma dead cross",
+            candle_ts=1,
+            market_price=1.0,
+            context={
+                "base_signal": "SELL",
+                "base_reason": "sma dead cross",
+                "entry_reason": "sma dead cross",
+                "raw_qty_open": 0.00009999,
+                "raw_total_asset_qty": 0.00019192,
+                "dust_tracking_qty": 0.00009193,
+                "submit_qty_source": "position_state.raw_total_asset_qty",
+                "position_state_source": "context.raw_qty_open",
+                "position_gate": {
+                    "dust_state": "harmless_dust",
+                    "effective_flat_due_to_harmless_dust": False,
+                    "raw_qty_open": 0.00009999,
+                },
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.00009999,
+                        "raw_total_asset_qty": 0.00019192,
+                        "open_exposure_qty": 0.00009999,
+                        "dust_tracking_qty": 0.00009193,
+                    }
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009999)
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
+    assert ctx["sell_qty_basis_qty_truth_source"] == "position_state.normalized_exposure.open_exposure_qty"
 
 
 def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_path, monkeypatch):

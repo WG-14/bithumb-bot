@@ -439,3 +439,9 @@ Practical routing rules:
 - if a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as
   operator evidence and remains excluded from normal SELL submission until an operator
   clears the inconsistency.
+- routing rule summary:
+  - BUY creates or refreshes `open_exposure` lots.
+  - SELL lifecycle and real-order submission read `open_exposure_qty` only, with
+    `position_state.normalized_exposure.open_exposure_qty` as the canonical submit source.
+  - `dust_tracking_qty` is operator-tracking evidence only and is excluded from normal SELL submission.
+  - harmless dust suppression is anchored to the `dust_tracking` path, not the `open_exposure` path.

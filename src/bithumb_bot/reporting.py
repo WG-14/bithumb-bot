@@ -18,6 +18,7 @@ from .reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
     DUST_RESIDUAL_UNSELLABLE,
     RISKY_ORDER_BLOCK,
+    classify_sell_failure_category,
     SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
     SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE,
     SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
@@ -27,6 +28,7 @@ from .reason_codes import (
     SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
     SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE,
     SELL_FAILURE_CATEGORY_UNKNOWN,
+    sell_failure_detail_from_category,
 )
 from .db_core import ensure_db
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
@@ -128,7 +130,12 @@ class DecisionTelemetrySummary:
     sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_qty_basis_qty: float
+    sell_qty_basis_source: str
+    sell_qty_boundary_kind: str
     sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
     position_state_source: str
     raw_qty_open_truth_source: str
     raw_total_asset_qty_truth_source: str
@@ -173,7 +180,12 @@ class RecentDecisionFlowSummary:
     sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_qty_basis_qty: float
+    sell_qty_basis_source: str
+    sell_qty_boundary_kind: str
     sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
     position_state_source: str
     raw_qty_open_truth_source: str
     raw_total_asset_qty_truth_source: str
@@ -201,6 +213,12 @@ class SellSuppressionSummary:
     suppression_category: str
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_qty_basis_qty: float | None
+    sell_qty_basis_source: str | None
+    sell_qty_boundary_kind: str | None
+    sell_qty_basis_qty_truth_source: str | None
+    sell_qty_basis_source_truth_source: str | None
+    sell_qty_boundary_kind_truth_source: str | None
     requested_qty: float | None
     normalized_qty: float | None
     market_price: float | None
@@ -671,6 +689,39 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS sell_dust_tracking_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_basis_qty'),
+                json_extract(oe.submit_evidence, '$.sell_open_exposure_qty'),
+                json_extract(oe.submit_evidence, '$.sell_normalized_exposure_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_basis_qty_truth_source'),
+                json_extract(oe.submit_evidence, '$.decision_truth_sources.sell_qty_basis_qty'),
+                json_extract(oe.submit_evidence, '$.decision_truth_sources.sell_open_exposure_qty'),
+                '-'
+            ) AS sell_qty_basis_qty_truth_source,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_basis_source'),
+                json_extract(oe.submit_evidence, '$.sell_submit_qty_source'),
+                json_extract(oe.submit_evidence, '$.submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS sell_qty_basis_source,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_basis_source_truth_source'),
+                json_extract(oe.submit_evidence, '$.decision_truth_sources.sell_qty_basis_source'),
+                json_extract(oe.submit_evidence, '$.submit_qty_source_truth_source'),
+                '-'
+            ) AS sell_qty_basis_source_truth_source,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_boundary_kind_truth_source'),
+                json_extract(oe.submit_evidence, '$.decision_truth_sources.sell_qty_boundary_kind'),
+                '-'
+            ) AS sell_qty_boundary_kind_truth_source,
+            COALESCE(
                 json_extract(oe.submit_evidence, '$.submit_qty_source_truth_source'),
                 json_extract(oe.submit_evidence, '$.decision_truth_sources.submit_qty_source'),
                 '-'
@@ -684,6 +735,11 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 json_extract(oe.submit_evidence, '$.sell_failure_detail'),
                 '-'
             ) AS sell_failure_detail,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_failure_category'),
+                json_extract(oe.submit_evidence, '$.decision_summary.sell_failure_category'),
+                '-'
+            ) AS sell_failure_category,
             oe.submission_reason_code,
             oe.message,
             oe.submit_evidence,
@@ -718,6 +774,11 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
             signal,
             side,
             reason_code,
+            COALESCE(
+                json_extract(context_json, '$.sell_failure_category'),
+                json_extract(context_json, '$.sell_failure_detail'),
+                '-'
+            ) AS sell_failure_category,
             COALESCE(
                 json_extract(context_json, '$.submit_qty_source'),
                 json_extract(context_json, '$.sell_submit_qty_source'),
@@ -757,6 +818,39 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 json_extract(context_json, '$.submit_qty_source'),
                 'position_state.normalized_exposure.open_exposure_qty'
             ) AS sell_submit_qty_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.sell_normalized_exposure_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_qty_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_qty_basis_qty'),
+                json_extract(context_json, '$.decision_truth_sources.sell_open_exposure_qty'),
+                '-'
+            ) AS sell_qty_basis_qty_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_source'),
+                json_extract(context_json, '$.sell_submit_qty_source'),
+                json_extract(context_json, '$.submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS sell_qty_basis_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_source_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_qty_basis_source'),
+                json_extract(context_json, '$.submit_qty_source_truth_source'),
+                '-'
+            ) AS sell_qty_basis_source_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_qty_boundary_kind'),
+                '-'
+            ) AS sell_qty_boundary_kind_truth_source,
             COALESCE(
                 json_extract(context_json, '$.position_state_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.position_state_source'),
@@ -839,9 +933,34 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                     submission_reason_code=str(row["reason_code"] or ""),
                     message=str(row["summary"] or ""),
                     submit_evidence=None,
+                    dust_details={
+                        "sell_failure_category": row["sell_failure_category"],
+                        "sell_qty_boundary_kind": str(row["sell_qty_boundary_kind"] or ""),
+                        "sell_qty_basis_qty": row["sell_qty_basis_qty"],
+                        "sell_qty_basis_source": row["sell_qty_basis_source"],
+                        "sell_failure_detail": row["sell_failure_detail"],
+                        "reason_code": row["reason_code"],
+                        "summary": row["summary"],
+                    },
                 ),
                 submit_qty_source=str(row["submit_qty_source"] or "-"),
                 sell_submit_qty_source=str(row["sell_submit_qty_source"] or "-"),
+                sell_qty_basis_qty=(float(row["sell_qty_basis_qty"]) if row["sell_qty_basis_qty"] is not None else None),
+                sell_qty_basis_source=(str(row["sell_qty_basis_source"]) if row["sell_qty_basis_source"] is not None else None),
+                sell_qty_boundary_kind=(str(row["sell_qty_boundary_kind"]) if row["sell_qty_boundary_kind"] is not None else None),
+                sell_qty_basis_qty_truth_source=(
+                    str(row["sell_qty_basis_qty_truth_source"]) if row["sell_qty_basis_qty_truth_source"] is not None else None
+                ),
+                sell_qty_basis_source_truth_source=(
+                    str(row["sell_qty_basis_source_truth_source"])
+                    if row["sell_qty_basis_source_truth_source"] is not None
+                    else None
+                ),
+                sell_qty_boundary_kind_truth_source=(
+                    str(row["sell_qty_boundary_kind_truth_source"])
+                    if row["sell_qty_boundary_kind_truth_source"] is not None
+                    else None
+                ),
                 requested_qty=(float(row["requested_qty"]) if row["requested_qty"] is not None else None),
                 normalized_qty=(float(row["normalized_qty"]) if row["normalized_qty"] is not None else None),
                 market_price=(float(row["market_price"]) if row["market_price"] is not None else None),
@@ -902,6 +1021,7 @@ def _sell_failure_category_from_observability(
     submission_reason_code: str | None,
     message: str | None,
     submit_evidence: str | None,
+    dust_details: dict[str, object] | None = None,
 ) -> str:
     evidence = _load_json_dict(submit_evidence)
     detail_text = " ".join(
@@ -909,71 +1029,27 @@ def _sell_failure_category_from_observability(
         for part in (
             str(submission_reason_code or "").strip(),
             str(message or "").strip(),
-            str(evidence.get("sell_failure_category") or "").strip(),
-            str(evidence.get("reason_code") or "").strip(),
-            str(evidence.get("error_summary") or "").strip(),
+            str(evidence.get("reason") or "").strip(),
             str(evidence.get("summary") or "").strip(),
+            str(evidence.get("sell_failure_category") or "").strip(),
+            str(evidence.get("sell_failure_detail") or "").strip(),
         )
         if part
     ).lower()
-
-    if str(evidence.get("sell_failure_category") or "").strip():
-        return str(evidence.get("sell_failure_category"))
-
-    if submission_reason_code == DUST_RESIDUAL_SUPPRESSED:
-        return SELL_FAILURE_CATEGORY_DUST_SUPPRESSION
-    if submission_reason_code == DUST_RESIDUAL_UNSELLABLE:
-        dust_scope = str(evidence.get("dust_scope") or "")
-        if dust_scope == "remainder_after_sell" or "guard_action=block_sell_remainder_dust" in detail_text:
-            return SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD
-        if any(
-            bool(evidence.get(key))
-            for key in (
-                "qty_below_min",
-                "normalized_non_positive",
-                "normalized_below_min",
-                "notional_below_min",
-            )
-        ) or any(
-            token in detail_text
-            for token in (
-                "qty_below_min",
-                "normalized_non_positive",
-                "normalized_below_min",
-                "notional_below_min",
-                "min_qty_or_notional_boundary",
-                "boundary_below_min",
-            )
-        ):
-            return SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
-        if any(
-            bool(evidence.get(key))
-            for key in (
-                "dust_broker_qty_is_dust",
-                "dust_local_qty_is_dust",
-                "dust_broker_notional_is_dust",
-                "dust_local_notional_is_dust",
-                "dust_qty_gap_small",
-            )
-        ) or any(token in detail_text for token in ("mismatch", "qty_gap_small", "dust_gap")):
-            return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
-        return SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE
-    if submission_reason_code == RISKY_ORDER_BLOCK:
-        if "runtime halted" in detail_text or "halt" in detail_text:
+    if str(submission_reason_code or "").strip() == RISKY_ORDER_BLOCK:
+        if "unresolved_risk_gate" in detail_text or "reason_detail_code=open_order_timeout" in detail_text:
+            return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
+        if "submission_halt" in detail_text or "runtime halted" in detail_text:
             return SELL_FAILURE_CATEGORY_SUBMISSION_HALT
-        return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
-    if (
-        "qty_step" in detail_text
-        or "requires explicit normalization" in detail_text
-        or "qty does not match qty_step" in detail_text
-        or "max decimals" in detail_text
-    ):
-        return SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH
-    if "runtime halted" in detail_text:
-        return SELL_FAILURE_CATEGORY_SUBMISSION_HALT
-    if "unresolved order gate" in detail_text or "reason_detail_code" in detail_text:
-        return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
-    return SELL_FAILURE_CATEGORY_UNKNOWN
+    return classify_sell_failure_category(
+        reason_code=submission_reason_code,
+        reason=message,
+        error_summary=str(evidence.get("error_summary") or None) if evidence else None,
+        dust_details={
+            **evidence,
+            **(dust_details or {}),
+        },
+    )
 
 def fetch_recent_decision_flow(
     conn: sqlite3.Connection,
@@ -1192,6 +1268,28 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS sell_dust_tracking_qty,
             COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.sell_normalized_exposure_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_source'),
+                json_extract(context_json, '$.position_state.sell_qty_basis_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_source'),
+                json_extract(context_json, '$.sell_submit_qty_source'),
+                json_extract(context_json, '$.submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS sell_qty_basis_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
                 json_extract(context_json, '$.submit_qty_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.submit_qty_source'),
                 'context.submit_qty_source'
@@ -1223,6 +1321,63 @@ def fetch_recent_decision_flow(
                 json_extract(context_json, '$.normalized_exposure_qty'),
                 0.0
             ) AS sell_normalized_exposure_qty,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_category,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_detail,
             COALESCE(
                 json_extract(context_json, '$.position_state_source'),
                 json_extract(context_json, '$.position_state.position_state_source'),
@@ -1282,9 +1437,14 @@ def fetch_recent_decision_flow(
             dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
             sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
             sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
+            sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
+            sell_qty_basis_source=str(row["sell_qty_basis_source"]),
+            sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
             submit_qty_source=str(row["submit_qty_source"]),
             sell_submit_qty_source=str(row["sell_submit_qty_source"]),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
+            sell_failure_category=str(row["sell_failure_category"]),
+            sell_failure_detail=str(row["sell_failure_detail"]),
             position_state_source=str(row["position_state_source"]),
             raw_qty_open_truth_source=str(row["raw_qty_open_truth_source"]),
             raw_total_asset_qty_truth_source=str(row["raw_total_asset_qty_truth_source"]),
@@ -1543,6 +1703,28 @@ def fetch_decision_telemetry_summary(
                 0.0
             ) AS sell_dust_tracking_qty,
             COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.sell_normalized_exposure_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_basis_source'),
+                json_extract(context_json, '$.position_state.sell_qty_basis_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_source'),
+                json_extract(context_json, '$.sell_submit_qty_source'),
+                json_extract(context_json, '$.submit_qty_source'),
+                'position_state.normalized_exposure.open_exposure_qty'
+            ) AS sell_qty_basis_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
                 json_extract(context_json, '$.submit_qty_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.submit_qty_source'),
                 'context.submit_qty_source'
@@ -1574,6 +1756,63 @@ def fetch_decision_telemetry_summary(
                 json_extract(context_json, '$.normalized_exposure_qty'),
                 0.0
             ) AS sell_normalized_exposure_qty,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_category,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_detail,
             COALESCE(
                 json_extract(context_json, '$.position_state_source'),
                 json_extract(context_json, '$.position_state.position_state_source'),
@@ -1634,6 +1873,9 @@ def fetch_decision_telemetry_summary(
             dust_tracking_qty_truth_source,
             sell_open_exposure_qty,
             sell_dust_tracking_qty,
+            sell_qty_basis_qty,
+            sell_qty_basis_source,
+            sell_qty_boundary_kind,
             submit_qty_source,
             submit_qty_source_truth_source,
             sell_submit_qty_source,
@@ -1680,10 +1922,15 @@ def fetch_decision_telemetry_summary(
             dust_tracking_qty_truth_source=str(row["dust_tracking_qty_truth_source"]),
             sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
             sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
+            sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
+            sell_qty_basis_source=str(row["sell_qty_basis_source"]),
+            sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
             submit_qty_source=str(row["submit_qty_source"]),
             submit_qty_source_truth_source=str(row["submit_qty_source_truth_source"]),
             sell_submit_qty_source=str(row["sell_submit_qty_source"]),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
+            sell_failure_category=str(row["sell_failure_category"]),
+            sell_failure_detail=str(row["sell_failure_detail"]),
             position_state_source=str(row["position_state_source"]),
             position_state_source_truth_source=str(row["position_state_source_truth_source"]),
             entry_allowed_truth_source=str(row["entry_allowed_truth_source"]),
@@ -3432,6 +3679,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "effective_flat_truth_source": row.effective_flat_truth_source,
                 "submit_qty_source_truth_source": row.submit_qty_source_truth_source,
                 "sell_submit_qty_source_truth_source": row.sell_submit_qty_source_truth_source,
+                "sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "sell_qty_basis_source": row.sell_qty_basis_source,
+                "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
+                "sell_qty_basis_qty_truth_source": row.sell_qty_basis_qty_truth_source,
+                "sell_qty_basis_source_truth_source": row.sell_qty_basis_source_truth_source,
+                "sell_qty_boundary_kind_truth_source": row.sell_qty_boundary_kind_truth_source,
                 "sell_normalized_exposure_qty_truth_source": row.sell_normalized_exposure_qty_truth_source,
                 "sell_open_exposure_qty_truth_source": row.sell_open_exposure_qty_truth_source,
                 "sell_dust_tracking_qty_truth_source": row.sell_dust_tracking_qty_truth_source,
@@ -3470,6 +3723,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "dust_tracking_qty": row.dust_tracking_qty,
                 "sell_open_exposure_qty": row.sell_open_exposure_qty,
                 "sell_dust_tracking_qty": row.sell_dust_tracking_qty,
+                "sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "sell_qty_basis_source": row.sell_qty_basis_source,
+                "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
                 "submit_qty_source": row.submit_qty_source,
                 "sell_submit_qty_source": row.sell_submit_qty_source,
                 "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
@@ -3658,18 +3914,38 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             strategy_context = str(row["strategy_context"] or "<unknown>")
             message = str(row["message"] or "")
             submit_evidence = str(row["submit_evidence"] or "")
+            evidence_payload = _load_json_dict(submit_evidence)
+            decision_summary_payload = (
+                evidence_payload.get("decision_summary")
+                if isinstance(evidence_payload.get("decision_summary"), dict)
+                else {}
+            )
             sell_failure_category = _sell_failure_category_from_observability(
                 submission_reason_code=str(row["submission_reason_code"] or ""),
                 message=message,
                 submit_evidence=submit_evidence,
             )
-            evidence_payload = _load_json_dict(submit_evidence)
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(evidence_payload.get("sell_failure_category") or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(decision_summary_payload.get("sell_failure_category") or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(row["sell_failure_category"] or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = "unknown"
             sell_submit_qty_source = str(
                 evidence_payload.get("sell_submit_qty_source")
                 or evidence_payload.get("submit_qty_source")
                 or row["submit_qty_source"]
                 or "-"
             )
+            sell_failure_detail = str(evidence_payload.get("sell_failure_detail") or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = str(decision_summary_payload.get("sell_failure_detail") or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = str(row["sell_failure_detail"] or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = sell_failure_category
             operator_action = str(
                 evidence_payload.get("operator_action")
                 or evidence_payload.get("dust_action")
@@ -3694,10 +3970,13 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
                 f"submit_qty_source={row['submit_qty_source'] or '-'} "
                 f"sell_submit_qty_source={sell_submit_qty_source} "
+                f"sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
+                f"sell_qty_basis_source={row['sell_qty_basis_source'] or '-'} "
+                f"sell_qty_boundary_kind={row['sell_qty_boundary_kind'] or '-'} "
+                f"sell_failure_category={sell_failure_category} "
+                f"sell_failure_detail={sell_failure_detail} "
                 f"operator_action={operator_action} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(sell_normalized_exposure_qty), 8)} "
-                f"sell_failure_category={sell_failure_category} "
-                f"sell_failure_detail={row['sell_failure_detail'] or '-'} "
                 f"position_state_source={row['position_state_source'] or '-'} "
                 f"position_state_source_truth_source={row['position_state_source_truth_source'] or '-'} "
                 f"raw_qty_open_truth_source={row['raw_qty_open_truth_source'] or '-'} "
@@ -3727,6 +4006,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_qty_source_truth_source={row.submit_qty_source_truth_source or '-'} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
                 f"sell_submit_qty_source_truth_source={row.sell_submit_qty_source_truth_source or '-'} "
+                f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
+                f"sell_qty_basis_source={row.sell_qty_basis_source or '-'} "
+                f"sell_qty_boundary_kind={row.sell_qty_boundary_kind or '-'} "
                 f"sell_normalized_exposure_qty_truth_source={row.sell_normalized_exposure_qty_truth_source or '-'} "
                 f"sell_open_exposure_qty_truth_source={row.sell_open_exposure_qty_truth_source or '-'} "
                 f"sell_dust_tracking_qty_truth_source={row.sell_dust_tracking_qty_truth_source or '-'} "
@@ -3763,7 +4045,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"submit_qty_source={row.submit_qty_source} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
+                f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
+                f"sell_qty_basis_source={row.sell_qty_basis_source} "
+                f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(row.sell_normalized_exposure_qty), 8)} "
+                f"sell_failure_category={row.sell_failure_category} "
+                f"sell_failure_detail={row.sell_failure_detail} "
                 f"position_state_source={row.position_state_source} "
                 f"position_state_source_truth_source={row.position_state_source_truth_source} "
                 f"normalized_exposure_qty={_fmt_float(float(row.normalized_exposure_qty), 8)} "
@@ -3839,8 +4126,9 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "submit_payload_qty,submit_payload_qty_truth_source,normalized_exposure_active,normalized_exposure_active_truth_source,"
         "normalized_exposure_qty,normalized_exposure_qty_truth_source,open_exposure_qty,open_exposure_qty_truth_source,"
         "dust_tracking_qty,dust_tracking_qty_truth_source,sell_open_exposure_qty,sell_dust_tracking_qty,"
+        "sell_qty_basis_qty,sell_qty_basis_source,sell_qty_boundary_kind,"
         "submit_qty_source,submit_qty_source_truth_source,sell_submit_qty_source,"
-        "sell_normalized_exposure_qty,position_state_source,position_state_source_truth_source,entry_allowed_truth_source,"
+        "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,position_state_source,position_state_source_truth_source,entry_allowed_truth_source,"
         "effective_flat_truth_source,strategy_name,pair,interval,count"
     )
     for row in rows:
@@ -3852,8 +4140,8 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.raw_total_asset_qty:.8f},{row.raw_total_asset_qty_truth_source},{row.position_qty:.8f},{row.position_qty_truth_source},"
             f"{row.submit_payload_qty:.8f},{row.submit_payload_qty_truth_source},{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_active_truth_source},"
             f"{row.normalized_exposure_qty:.8f},{row.normalized_exposure_qty_truth_source},{row.open_exposure_qty:.8f},{row.open_exposure_qty_truth_source},"
-            f"{row.dust_tracking_qty:.8f},{row.dust_tracking_qty_truth_source},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},{row.submit_qty_source},{row.submit_qty_source_truth_source},{row.sell_submit_qty_source},"
-            f"{row.sell_normalized_exposure_qty:.8f},{row.position_state_source},{row.position_state_source_truth_source},"
+            f"{row.dust_tracking_qty:.8f},{row.dust_tracking_qty_truth_source},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},{row.sell_qty_basis_qty:.8f},{row.sell_qty_basis_source},{row.sell_qty_boundary_kind},{row.submit_qty_source},{row.submit_qty_source_truth_source},{row.sell_submit_qty_source},"
+            f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},{row.position_state_source},{row.position_state_source_truth_source},"
             f"{row.entry_allowed_truth_source},{row.effective_flat_truth_source},"
             f"{row.strategy_name},{row.pair},{row.interval},{row.count}"
         )

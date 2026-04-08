@@ -257,6 +257,8 @@ def apply_fill_lifecycle(
     if side != "SELL":
         raise RuntimeError(f"unsupported lifecycle side: {side}")
 
+    # SELL lifecycle consumes only the sellable open_exposure path.
+    # dust_tracking lots remain operator evidence and are never matched here.
     rows = _fetch_sellable_open_exposure_lots(conn, pair=str(pair))
 
     remaining = float(qty)
@@ -455,6 +457,8 @@ def mark_harmless_dust_positions(
 
     updated_count = 0
     for row in candidate_rows:
+        # The boundary is strict: qty_open == min_qty stays open_exposure.
+        # Only strict sub-min residues are reclassified to dust_tracking.
         if not is_strictly_below_min_qty(qty_open=float(_row_value(row, "qty_open", 1) or 0.0), min_qty=min_qty):
             continue
         conn.execute(

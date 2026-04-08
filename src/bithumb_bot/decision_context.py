@@ -4,8 +4,16 @@ import json
 import sqlite3
 from typing import Any
 
+from .reason_codes import (
+    SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+    SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
+    SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+    SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD,
+    SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+)
 
-_CANONICAL_CONTEXT_VERSION = 6
+
+_CANONICAL_CONTEXT_VERSION = 7
 
 
 def load_recorded_strategy_decision_context(
@@ -111,6 +119,72 @@ def _resolve_with_source(
         resolved = _as_float_or_none(default_value)
         return (0.0 if resolved is None else float(resolved)), default_source
     return default_value, default_source
+
+
+def _resolve_canonical_sell_qty_basis(
+    *,
+    open_exposure_qty: float,
+    open_exposure_qty_truth_source: str,
+) -> tuple[float, str, str]:
+    return (
+        float(open_exposure_qty),
+        "position_state.normalized_exposure.open_exposure_qty",
+        open_exposure_qty_truth_source,
+    )
+
+
+def _derive_sell_failure_observability(
+    *,
+    final_signal: str,
+    sell_qty_boundary_kind: str,
+    dust_classification: str,
+    effective_flat: bool,
+    payload: dict[str, Any],
+) -> tuple[str, str, str]:
+    explicit_category = _as_text(payload.get("sell_failure_category"), default="").strip()
+    if explicit_category:
+        explicit_detail = _as_text(payload.get("sell_failure_detail"), default=explicit_category).strip()
+        if not explicit_detail:
+            explicit_detail = explicit_category
+        return explicit_category, explicit_detail, "context.sell_failure_category"
+
+    final = str(final_signal or "").strip().upper()
+    boundary_kind = str(sell_qty_boundary_kind or "").strip()
+    dust_state = str(dust_classification or "").strip()
+
+    if final == "SELL":
+        if boundary_kind == "qty_step":
+            return (
+                SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+                SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+                "derived:sell_qty_boundary_kind",
+            )
+        if boundary_kind == "min_qty":
+            return (
+                SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+                SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+                "derived:sell_qty_boundary_kind",
+            )
+        if boundary_kind == "dust_mismatch":
+            return (
+                SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+                SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+                "derived:sell_qty_boundary_kind",
+            )
+        if boundary_kind == "remainder_after_sell":
+            return (
+                SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD,
+                SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD,
+                "derived:sell_qty_boundary_kind",
+            )
+        if dust_state == "harmless_dust" and bool(effective_flat):
+            return (
+                SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
+                SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
+                "derived:dust_classification",
+            )
+
+    return "none", "none", "default:none"
 
 
 def _extract_market_observations(context: dict[str, Any]) -> dict[str, float | None]:
@@ -322,24 +396,36 @@ def normalize_strategy_decision_context(
     position_qty_truth_source = open_exposure_qty_truth_source
     submit_payload_qty = float(normalized_exposure_qty)
     submit_payload_qty_truth_source = normalized_exposure_qty_truth_source
-    submit_qty_source = _as_text(
-        payload.get(
-            "submit_qty_source",
-            position_state.get(
-                "submit_qty_source",
-                position_normalized.get("submit_qty_source", position_gate.get("submit_qty_source")),
-            ),
-        ),
-        default="",
-    )
-    submit_qty_source_truth_source = "context.submit_qty_source"
-    if not submit_qty_source:
-        submit_qty_source = "position_state.normalized_exposure.open_exposure_qty"
-        submit_qty_source_truth_source = "derived:open_exposure_qty"
+    submit_qty_source = "position_state.normalized_exposure.open_exposure_qty"
+    submit_qty_source_truth_source = "derived:open_exposure_qty"
     sell_submit_qty_source = submit_qty_source
+    sell_qty_basis_qty, sell_qty_basis_source, sell_qty_basis_qty_truth_source = _resolve_canonical_sell_qty_basis(
+        open_exposure_qty=open_exposure_qty,
+        open_exposure_qty_truth_source=open_exposure_qty_truth_source,
+    )
+    sell_qty_boundary_kind = _as_text(payload.get("sell_qty_boundary_kind"), default="")
+    sell_qty_boundary_kind_truth_source = "context.sell_qty_boundary_kind"
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = _as_text(position_state.get("sell_qty_boundary_kind"), default="")
+        if sell_qty_boundary_kind:
+            sell_qty_boundary_kind_truth_source = "position_state.sell_qty_boundary_kind"
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = _as_text(position_normalized.get("sell_qty_boundary_kind"), default="")
+        if sell_qty_boundary_kind:
+            sell_qty_boundary_kind_truth_source = "position_state.normalized_exposure.sell_qty_boundary_kind"
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = "none"
+        sell_qty_boundary_kind_truth_source = "default:none"
     sell_normalized_exposure_qty = float(normalized_exposure_qty)
     sell_open_exposure_qty = float(open_exposure_qty)
     sell_dust_tracking_qty = float(dust_tracking_qty)
+    sell_failure_category, sell_failure_detail, sell_failure_truth_source = _derive_sell_failure_observability(
+        final_signal=final_signal,
+        sell_qty_boundary_kind=sell_qty_boundary_kind,
+        dust_classification=dust_classification,
+        effective_flat=bool(effective_flat),
+        payload=payload,
+    )
     position_state_source = _as_text(
         payload.get(
             "position_state_source",
@@ -368,9 +454,14 @@ def normalize_strategy_decision_context(
         "dust_tracking_qty": dust_tracking_qty_truth_source,
         "submit_qty_source": submit_qty_source_truth_source,
         "sell_submit_qty_source": submit_qty_source_truth_source,
+        "sell_qty_basis_qty": sell_qty_basis_qty_truth_source,
+        "sell_qty_basis_source": submit_qty_source_truth_source,
+        "sell_qty_boundary_kind": sell_qty_boundary_kind_truth_source,
         "sell_normalized_exposure_qty": normalized_exposure_qty_truth_source,
         "sell_open_exposure_qty": open_exposure_qty_truth_source,
         "sell_dust_tracking_qty": dust_tracking_qty_truth_source,
+        "sell_failure_category": sell_failure_truth_source,
+        "sell_failure_detail": sell_failure_truth_source,
         "position_state_source": position_state_source_truth_source,
     }
 
@@ -392,13 +483,23 @@ def normalize_strategy_decision_context(
         "dust_tracking_qty": float(dust_tracking_qty),
         "submit_qty_source": submit_qty_source,
         "sell_submit_qty_source": sell_submit_qty_source,
+        "sell_qty_basis_qty": float(sell_qty_basis_qty),
+        "sell_qty_basis_source": sell_qty_basis_source,
+        "sell_qty_boundary_kind": sell_qty_boundary_kind,
         "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
         "sell_open_exposure_qty": float(sell_open_exposure_qty),
         "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
+        "sell_failure_category": sell_failure_category,
+        "sell_failure_detail": sell_failure_detail,
         "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
+        "sell_qty_basis_qty_truth_source": sell_qty_basis_qty_truth_source,
+        "sell_qty_basis_source_truth_source": submit_qty_source_truth_source,
+        "sell_qty_boundary_kind_truth_source": sell_qty_boundary_kind_truth_source,
         "sell_normalized_exposure_qty_truth_source": normalized_exposure_qty_truth_source,
         "sell_open_exposure_qty_truth_source": open_exposure_qty_truth_source,
         "sell_dust_tracking_qty_truth_source": dust_tracking_qty_truth_source,
+        "sell_failure_category_truth_source": sell_failure_truth_source,
+        "sell_failure_detail_truth_source": sell_failure_truth_source,
         "position_state_source": position_state_source,
         "decision_truth_sources": decision_truth_sources,
     }
@@ -428,9 +529,14 @@ def normalize_strategy_decision_context(
     payload["dust_tracking_qty"] = float(dust_tracking_qty)
     payload["submit_qty_source"] = submit_qty_source
     payload["sell_submit_qty_source"] = sell_submit_qty_source
+    payload["sell_qty_basis_qty"] = float(sell_qty_basis_qty)
+    payload["sell_qty_basis_source"] = sell_qty_basis_source
+    payload["sell_qty_boundary_kind"] = sell_qty_boundary_kind
     payload["sell_normalized_exposure_qty"] = float(sell_normalized_exposure_qty)
     payload["sell_open_exposure_qty"] = float(sell_open_exposure_qty)
     payload["sell_dust_tracking_qty"] = float(sell_dust_tracking_qty)
+    payload["sell_failure_category"] = sell_failure_category
+    payload["sell_failure_detail"] = sell_failure_detail
     payload["position_state_source"] = position_state_source
     payload["decision_truth_sources"] = decision_truth_sources
     payload["entry_allowed_truth_source"] = entry_allowed_truth_source
@@ -445,9 +551,14 @@ def normalize_strategy_decision_context(
     payload["dust_tracking_qty_truth_source"] = dust_tracking_qty_truth_source
     payload["submit_qty_source_truth_source"] = submit_qty_source_truth_source
     payload["sell_submit_qty_source_truth_source"] = submit_qty_source_truth_source
+    payload["sell_qty_basis_qty_truth_source"] = sell_qty_basis_qty_truth_source
+    payload["sell_qty_basis_source_truth_source"] = submit_qty_source_truth_source
+    payload["sell_qty_boundary_kind_truth_source"] = sell_qty_boundary_kind_truth_source
     payload["sell_normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
     payload["sell_open_exposure_qty_truth_source"] = open_exposure_qty_truth_source
     payload["sell_dust_tracking_qty_truth_source"] = dust_tracking_qty_truth_source
+    payload["sell_failure_category_truth_source"] = sell_failure_truth_source
+    payload["sell_failure_detail_truth_source"] = sell_failure_truth_source
     payload["position_state_source_truth_source"] = position_state_source_truth_source
     payload["decision_summary"] = decision_summary
 
@@ -509,9 +620,14 @@ def normalize_strategy_decision_context(
         "submit_payload_qty": float(submit_payload_qty),
         "submit_qty_source": submit_qty_source,
         "sell_submit_qty_source": sell_submit_qty_source,
+        "sell_qty_basis_qty": float(sell_qty_basis_qty),
+        "sell_qty_basis_source": sell_qty_basis_source,
+        "sell_qty_boundary_kind": sell_qty_boundary_kind,
         "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
         "sell_open_exposure_qty": float(sell_open_exposure_qty),
         "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
+        "sell_failure_category": sell_failure_category,
+        "sell_failure_detail": sell_failure_detail,
         "position_state_source": position_state_source,
         "decision_truth_sources": decision_truth_sources,
     }

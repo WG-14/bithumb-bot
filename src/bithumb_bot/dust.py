@@ -586,7 +586,7 @@ class NormalizedExposure:
 
     @property
     def sell_submit_qty_source(self) -> str:
-        return str(lot_state_quantity_rule(OPEN_EXPOSURE_LOT_STATE)["sell_submit_qty_source"])
+        return lot_state_sell_submit_qty_source(OPEN_EXPOSURE_LOT_STATE)
 
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
@@ -655,12 +655,32 @@ class PositionStateModel:
 def lot_state_quantity_contract() -> dict[str, dict[str, object]]:
     """Return the canonical quantity routing rules for lot states.
 
-    `open_exposure` is the quantity strategy and SELL submission logic should
-    use as the real position. `dust_tracking` is an operator-only residual and
-    is excluded from SELL submission by default.
+    `open_exposure` is the real strategy-visible position and the default SELL
+    submission base. `dust_tracking` is operator-only residual evidence and is
+    excluded from normal SELL submission by default.
     """
 
     return {state: dict(contract) for state, contract in LOT_STATE_QUANTITY_CONTRACT.items()}
+
+
+def lot_state_strategy_qty_source(position_state: str) -> str:
+    return str(lot_state_quantity_rule(position_state)["strategy_qty_source"])
+
+
+def lot_state_sell_submit_qty_source(position_state: str) -> str:
+    return str(lot_state_quantity_rule(position_state)["sell_submit_qty_source"])
+
+
+def lot_state_sell_submission_allowed(position_state: str) -> bool:
+    return bool(lot_state_quantity_rule(position_state)["sell_submission_allowed"])
+
+
+def lot_state_sell_submit_includes_dust_tracking(position_state: str) -> bool:
+    return bool(lot_state_quantity_rule(position_state)["sell_submit_includes_dust_tracking"])
+
+
+def lot_state_qty_boundary_rule(position_state: str) -> str:
+    return str(lot_state_quantity_rule(position_state)["qty_boundary_rule"])
 
 
 def lot_state_quantity_rule(position_state: str) -> dict[str, object]:

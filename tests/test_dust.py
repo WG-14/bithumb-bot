@@ -13,6 +13,11 @@ from bithumb_bot.dust import (
     dust_qty_gap_tolerance,
     is_strictly_below_min_qty,
     lot_state_quantity_contract,
+    lot_state_qty_boundary_rule,
+    lot_state_sell_submission_allowed,
+    lot_state_sell_submit_includes_dust_tracking,
+    lot_state_sell_submit_qty_source,
+    lot_state_strategy_qty_source,
     should_treat_as_flat_for_entry_gate,
 )
 
@@ -550,3 +555,22 @@ def test_lot_state_quantity_contract_routes_open_exposure_and_dust_tracking_sepa
         "qty_open < min_qty is tracked here; SELL submission excludes dust_tracking by default"
     )
     assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
+
+
+def test_lot_state_quantity_helpers_make_the_route_contract_explicit() -> None:
+    assert lot_state_strategy_qty_source(OPEN_EXPOSURE_LOT_STATE) == "open_exposure_qty"
+    assert lot_state_sell_submit_qty_source(OPEN_EXPOSURE_LOT_STATE) == (
+        "position_state.normalized_exposure.open_exposure_qty"
+    )
+    assert lot_state_sell_submission_allowed(OPEN_EXPOSURE_LOT_STATE) is True
+    assert lot_state_sell_submit_includes_dust_tracking(OPEN_EXPOSURE_LOT_STATE) is False
+    assert lot_state_strategy_qty_source(DUST_TRACKING_LOT_STATE) == "dust_tracking_qty"
+    assert lot_state_sell_submit_qty_source(DUST_TRACKING_LOT_STATE) == "excluded_from_sell_qty"
+    assert lot_state_sell_submission_allowed(DUST_TRACKING_LOT_STATE) is False
+    assert lot_state_sell_submit_includes_dust_tracking(DUST_TRACKING_LOT_STATE) is False
+    assert lot_state_qty_boundary_rule(OPEN_EXPOSURE_LOT_STATE) == (
+        "qty_open >= min_qty remains open_exposure; SELL uses open_exposure_qty only"
+    )
+    assert lot_state_qty_boundary_rule(DUST_TRACKING_LOT_STATE) == (
+        "qty_open < min_qty is tracked here; SELL submission excludes dust_tracking by default"
+    )
