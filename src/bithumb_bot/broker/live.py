@@ -2024,7 +2024,15 @@ def validate_pretrade(
     return reference_quote
 
 
-def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str) -> None:
+def _mark_submit_unknown(
+    *,
+    conn,
+    client_order_id: str,
+    submit_attempt_id: str,
+    side: str,
+    reason: str,
+    ts: int,
+) -> None:
     record_status_transition(
         client_order_id,
         from_status="PENDING_SUBMIT",
@@ -2052,7 +2060,15 @@ def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, 
     )
 
 
-def _mark_submit_failed(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str) -> None:
+def _mark_submit_failed(
+    *,
+    conn,
+    client_order_id: str,
+    submit_attempt_id: str,
+    side: str,
+    reason: str,
+    ts: int,
+) -> None:
     record_status_transition(
         client_order_id,
         from_status="PENDING_SUBMIT",
@@ -2136,11 +2152,11 @@ def _block_new_submission_for_unresolved_risk(
         safety_event(
             "order_submit_blocked",
             client_order_id=client_order_id,
-            submit_attempt_id=client_order_id.split("_")[-1],
+            submit_attempt_id=UNSET_EVENT_FIELD,
             reason_code=RISKY_ORDER_BLOCK,
             signal_ts=int(ts),
             decision_ts=int(ts),
-            decision_id=str(submit_attempt_id),
+            decision_id=UNSET_EVENT_FIELD,
             side=side,
             status="FAILED",
             reason_detail_code=reason_code,
@@ -2471,6 +2487,7 @@ def _submit_via_standard_path(
             submit_attempt_id=submit_attempt_id,
             side=side,
             reason=str(err),
+            ts=ts,
         )
         _record_submit_attempt_result(
             conn=conn,
@@ -2549,6 +2566,7 @@ def _submit_via_standard_path(
             submit_attempt_id=submit_attempt_id,
             side=side,
             reason=reason,
+            ts=ts,
         )
         _record_submit_attempt_result(
             conn=conn,
@@ -2616,6 +2634,7 @@ def _submit_via_standard_path(
             submit_attempt_id=submit_attempt_id,
             side=side,
             reason=reason,
+            ts=ts,
         )
         _record_submit_attempt_result(
             conn=conn,
@@ -2692,6 +2711,7 @@ def _submit_via_standard_path(
             submit_attempt_id=submit_attempt_id,
             side=side,
             reason=reason,
+            ts=ts,
         )
         _record_submit_attempt_result(
             conn=conn,

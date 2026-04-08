@@ -840,7 +840,8 @@ def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, 
 
     assert blocked is not None
     assert "code=SUBMIT_UNKNOWN_PRESENT" in str(blocked["message"])
-    assert any("event=order_submit_blocked" in msg and "reason_code=RISKY_ORDER_BLOCK" in msg and "submit_attempt_id=" in msg for msg in notifications)
+    assert any("event=order_submit_blocked" in msg and "reason_code=RISKY_ORDER_BLOCK" in msg and "submit_attempt_id=-" in msg for msg in notifications)
+    assert any("event=order_submit_blocked" in msg and "decision_id=-" in msg for msg in notifications)
     assert any("reason_detail_code=SUBMIT_UNKNOWN_PRESENT" in msg for msg in notifications)
 
 
