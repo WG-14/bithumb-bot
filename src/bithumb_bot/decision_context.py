@@ -415,6 +415,27 @@ def normalize_strategy_decision_context(
     if effective_flat_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
         effective_flat = True
         effective_flat_truth_source = "fallback:flat_zero_holdings"
+    normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
+        ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
+        (
+            "position_state.normalized_exposure.normalized_exposure_qty",
+            position_normalized.get("normalized_exposure_qty"),
+        ),
+        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
+        ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
+        default_value=None,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    if normalized_exposure_qty_truth_source == "default:0.0":
+        if open_exposure_qty_truth_source not in {"fallback:raw_qty_open", "default:0.0"}:
+            normalized_exposure_qty = float(open_exposure_qty)
+            normalized_exposure_qty_truth_source = "fallback:open_exposure_qty"
+        elif raw_qty_open_truth_source != "default:0.0":
+            normalized_exposure_qty = float(raw_qty_open)
+            normalized_exposure_qty_truth_source = "fallback:raw_qty_open"
+        else:
+            normalized_exposure_qty = 0.0
     normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
         (
             "position_state.normalized_exposure_active",
@@ -426,24 +447,12 @@ def normalize_strategy_decision_context(
         ),
         ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
         ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
-        default_value=raw_qty_open > 1e-12,
-        default_source="fallback:raw_qty_open",
+        default_value=bool(float(normalized_exposure_qty) > 1e-12),
+        default_source=normalized_exposure_qty_truth_source,
         value_kind="bool",
     )
-    normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
-        ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
-        (
-            "position_state.normalized_exposure.normalized_exposure_qty",
-            position_normalized.get("normalized_exposure_qty"),
-        ),
-        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
-        ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
-        default_value=open_exposure_qty if normalized_exposure_active else 0.0,
-        default_source="fallback:raw_qty_open_or_zero",
-        value_kind="float",
-    )
-    if normalized_exposure_qty is None:
-        normalized_exposure_qty = open_exposure_qty if normalized_exposure_active else 0.0
+    if normalized_exposure_active_truth_source == normalized_exposure_qty_truth_source:
+        normalized_exposure_active = bool(float(normalized_exposure_qty) > 1e-12)
     position_qty = float(open_exposure_qty)
     position_qty_truth_source = open_exposure_qty_truth_source
     submit_payload_qty = float(normalized_exposure_qty)

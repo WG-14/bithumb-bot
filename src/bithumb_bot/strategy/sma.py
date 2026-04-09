@@ -201,6 +201,10 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
     }
 
 
+def _has_tracked_open_exposure(exposure: NormalizedExposure) -> bool:
+    return bool(float(exposure.open_exposure_qty) > 1e-12)
+
+
 def _evaluate_entry_edge_filter(
     *,
     base_signal: str,
@@ -313,10 +317,11 @@ def _load_position_context(
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
         )
         exposure = position_state.normalized_exposure
+        tracked_open_qty = float(exposure.open_exposure_qty)
         return (
             PositionContext(
-                in_position=exposure.normalized_exposure_active,
-                qty_open=exposure.raw_qty_open,
+                in_position=_has_tracked_open_exposure(exposure),
+                qty_open=tracked_open_qty,
                 recent_signal_context=dict(signal_context),
             ),
             exposure,
@@ -365,16 +370,17 @@ def _load_position_context(
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
     exposure = position_state.normalized_exposure
+    tracked_open_qty = float(exposure.open_exposure_qty)
     holding_time_sec = max(0.0, (int(candle_ts) - entry_ts) / 1000.0)
-    unrealized_pnl = (float(market_price) - entry_price) * qty_open
+    unrealized_pnl = (float(market_price) - entry_price) * tracked_open_qty
     unrealized_pnl_ratio = _safe_ratio(float(market_price) - entry_price, entry_price)
 
     return (
         PositionContext(
-            in_position=exposure.normalized_exposure_active,
+            in_position=_has_tracked_open_exposure(exposure),
             entry_ts=entry_ts,
             entry_price=entry_price,
-            qty_open=qty_open,
+            qty_open=tracked_open_qty,
             holding_time_sec=holding_time_sec,
             unrealized_pnl=unrealized_pnl,
             unrealized_pnl_ratio=unrealized_pnl_ratio,

@@ -276,7 +276,7 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
     assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_normalized_exposure_qty_truth_source"] == "fallback:raw_qty_open_or_zero"
+    assert ctx["sell_normalized_exposure_qty_truth_source"] == "fallback:open_exposure_qty"
     assert ctx["sell_open_exposure_qty_truth_source"] == "context.open_exposure_qty"
     assert ctx["sell_dust_tracking_qty_truth_source"] == "context.dust_tracking_qty"
     assert ctx["position_state_source"] == "context.raw_qty_open"
