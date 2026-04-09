@@ -2937,14 +2937,38 @@ def live_execute_signal(
                 )
                 return None
 
-            order_qty = float(entry_sizing.executable_qty)
+            try:
+                order_qty = adjust_buy_order_qty_for_dust_safety(
+                    qty=float(entry_sizing.executable_qty),
+                    market_price=float(market_price),
+                )
+            except ValueError as e:
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SKIP] buy dust guard blocked",
+                        base_signal=decision_observability["base_signal"],
+                        final_signal=decision_observability["final_signal"],
+                        signal=signal,
+                        side="BUY",
+                        reason=str(e),
+                        entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
+                        effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
+                        normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
+                        normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        raw_qty_open=float(decision_observability["raw_qty_open"]),
+                        entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                    )
+                )
+                notify(f"live pretrade validation blocked (BUY): {e}")
+                return None
             side = "BUY"
             submit_qty_source = str(entry_sizing.qty_source)
 
         elif signal == "SELL":
             sellable_qty = float(normalized_exposure.sellable_executable_qty)
             side = "SELL"
-            if sellable_qty <= POSITION_EPSILON:
+            sellable_threshold = max(POSITION_EPSILON, float(effective_rules.min_qty))
+            if (not normalized_exposure.exit_allowed) or sellable_qty < sellable_threshold:
                 if str(normalized_exposure.exit_block_reason) == "reserved_for_open_sell_orders":
                     RUN_LOG.info(
                         format_log_kv(

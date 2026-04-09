@@ -1375,10 +1375,11 @@ def build_normalized_exposure(
         dust_tracking_qty=dust_tracking_qty,
         reserved_exit_qty=reserved_exit_qty,
     )
+    normalized_min_qty = 0.0 if min_qty is None else max(0.0, float(min_qty))
     executable_exposure = _derive_executable_open_exposure(
         inventory=inventory,
         market_price=market_price,
-        min_qty=0.0 if min_qty is None else float(min_qty),
+        min_qty=normalized_min_qty,
         qty_step=0.0 if qty_step is None else float(qty_step),
         min_notional_krw=0.0 if min_notional_krw is None else float(min_notional_krw),
         max_qty_decimals=max_qty_decimals,
@@ -1413,7 +1414,15 @@ def build_normalized_exposure(
         entry_block_reason = "position_has_executable_exposure"
     else:
         entry_block_reason = "none"
-    if sellable_executable_qty > DUST_POSITION_EPS:
+    executable_sell_qty = max(0.0, float(sellable_executable_qty))
+    executable_sell_ready = bool(
+        executable_sell_qty > DUST_POSITION_EPS
+        and (
+            normalized_min_qty <= DUST_POSITION_EPS
+            or executable_sell_qty >= normalized_min_qty
+        )
+    )
+    if executable_sell_ready:
         exit_allowed = True
         exit_block_reason = "none"
         terminal_state = "open_exposure"

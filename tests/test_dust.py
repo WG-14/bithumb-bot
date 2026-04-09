@@ -431,6 +431,29 @@ def test_normalized_exposure_reuses_shared_dust_truth_for_harmless_dust() -> Non
     assert exposure.as_dict()["normalized_exposure_active"] is True
 
 
+def test_normalized_exposure_routes_sub_min_residual_to_dust_only() -> None:
+    exposure = build_normalized_exposure(
+        raw_qty_open=0.00009997,
+        raw_total_asset_qty=0.00009997,
+        open_exposure_qty=0.00009997,
+        dust_tracking_qty=0.0,
+        market_price=100_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.00000001,
+        min_notional_krw=0.0,
+        max_qty_decimals=8,
+        dust_context=None,
+    )
+
+    assert exposure.open_exposure_qty == pytest.approx(0.0)
+    assert exposure.dust_tracking_qty == pytest.approx(0.00009997)
+    assert exposure.sellable_executable_qty == pytest.approx(0.0)
+    assert exposure.exit_allowed is False
+    assert exposure.exit_block_reason == "no_executable_exit_lot_exists"
+    assert exposure.terminal_state == "dust_only"
+    assert exposure.sell_submit_qty == pytest.approx(0.0)
+
+
 def test_normalized_exposure_keeps_blocking_dust_active_and_entry_blocked() -> None:
     exposure = build_normalized_exposure(
         raw_qty_open=0.000099,
