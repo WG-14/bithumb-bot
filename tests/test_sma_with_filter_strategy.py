@@ -406,7 +406,9 @@ def test_non_executable_exit_stops_at_state_layer_and_does_not_emit_sell() -> No
     assert state_row[0] == "dust_tracking"
 
 
-def test_exit_decision_uses_normalized_shared_state_without_last_buy_request_size() -> None:
+def test_exit_decision_uses_normalized_shared_state_without_last_buy_request_size(
+    relaxed_test_order_rules,
+) -> None:
     conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
     try:
         _seed_position_and_dust_state(conn, qty_open=0.0002, dust_metadata={})

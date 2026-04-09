@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from bithumb_bot.config import settings
 from bithumb_bot.paths import PathManager
 
 
@@ -104,3 +105,22 @@ def managed_runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict
         "runtime_root": str(runtime_root),
         "db_path": str(db_path),
     }
+
+
+@pytest.fixture
+def relaxed_test_order_rules() -> None:
+    original_rules = {
+        "MIN_ORDER_NOTIONAL_KRW": float(settings.MIN_ORDER_NOTIONAL_KRW),
+        "LIVE_MIN_ORDER_QTY": float(settings.LIVE_MIN_ORDER_QTY),
+        "LIVE_ORDER_QTY_STEP": float(settings.LIVE_ORDER_QTY_STEP),
+        "LIVE_ORDER_MAX_QTY_DECIMALS": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    }
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    try:
+        yield
+    finally:
+        for key, value in original_rules.items():
+            object.__setattr__(settings, key, value)

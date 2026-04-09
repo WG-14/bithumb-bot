@@ -47,7 +47,7 @@ def _insert_open_position_lot(conn, *, entry_ts: int, entry_price: float, qty_op
     conn.commit()
 
 
-def test_exit_rule_can_be_swapped_with_same_entry_signal(tmp_path) -> None:
+def test_exit_rule_can_be_swapped_with_same_entry_signal(tmp_path, relaxed_test_order_rules) -> None:
     old_db_path = settings.DB_PATH
     old_env_db_path = os.environ.get("DB_PATH")
     db_path = str(tmp_path / "exit_swap.sqlite")
@@ -86,7 +86,10 @@ def test_exit_rule_can_be_swapped_with_same_entry_signal(tmp_path) -> None:
     assert max_hold_only.context["exit"]["rule"] == "max_holding_time"
 
 
-def test_opposite_cross_exit_and_position_context_are_recorded(tmp_path) -> None:
+def test_opposite_cross_exit_and_position_context_are_recorded(
+    tmp_path,
+    relaxed_test_order_rules,
+) -> None:
     old_db_path = settings.DB_PATH
     old_env_db_path = os.environ.get("DB_PATH")
     db_path = str(tmp_path / "exit_opposite_cross.sqlite")
@@ -215,7 +218,10 @@ def test_opposite_cross_deferred_reason_marks_small_gain_zone() -> None:
     assert decision.context["filter_zone"] == "small_gain"
 
 
-def test_max_holding_exit_is_not_blocked_by_take_profit_floor_when_opposite_cross_deferred(tmp_path) -> None:
+def test_max_holding_exit_is_not_blocked_by_take_profit_floor_when_opposite_cross_deferred(
+    tmp_path,
+    relaxed_test_order_rules,
+) -> None:
     old_db_path = settings.DB_PATH
     old_env_db_path = os.environ.get("DB_PATH")
     db_path = str(tmp_path / "exit_take_profit_floor_max_holding.sqlite")
