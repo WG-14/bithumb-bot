@@ -426,8 +426,8 @@ def normalize_strategy_decision_context(
         ),
         ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
         ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
-        default_value=open_exposure_qty > 1e-12,
-        default_source="fallback:open_exposure_qty",
+        default_value=raw_qty_open > 1e-12,
+        default_source="fallback:raw_qty_open",
         value_kind="bool",
     )
     normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(

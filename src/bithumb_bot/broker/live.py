@@ -613,7 +613,7 @@ def _load_strategy_decision_observability(
             "normalized_exposure_active",
             context.get(
                 "normalized_exposure_active",
-                position_gate.get("normalized_exposure_active", open_exposure_qty > 1e-12),
+                position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12),
             ),
         )
     )

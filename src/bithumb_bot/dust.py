@@ -1396,10 +1396,17 @@ def build_normalized_exposure(
         or should_treat_as_flat_for_entry_gate(display_context)
     )
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
-    # `normalized_exposure_active` tracks whether strategy-visible open exposure exists.
-    # The entry gate is separate from the sellable exposure state.
-    normalized_active = bool(effective_open_exposure_qty > DUST_POSITION_EPS)
-    normalized_qty = float(effective_open_exposure_qty if normalized_active else 0.0)
+    # `normalized_exposure_active` tracks whether the shared state still has a
+    # position to manage, which is separate from entry-flat semantics and from
+    # the sellable executable quantity.
+    normalized_active = bool(raw_qty_open > DUST_POSITION_EPS or effective_open_exposure_qty > DUST_POSITION_EPS)
+    normalized_qty = float(
+        raw_qty_open
+        if raw_qty_open > DUST_POSITION_EPS
+        else effective_open_exposure_qty
+        if normalized_active
+        else 0.0
+    )
     if entry_allowed:
         entry_block_reason = "none"
     elif normalized_total_asset_qty > DUST_POSITION_EPS:

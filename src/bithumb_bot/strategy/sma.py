@@ -286,10 +286,20 @@ def _load_position_context(
 
     if row is None or row[0] is None or row[2] is None:
         lot_snapshot = summarize_position_lots(conn, pair=pair)
+        tracked_qty = float(lot_snapshot.raw_total_asset_qty)
+        raw_qty_open = (
+            tracked_qty
+            if (
+                tracked_qty > 1e-12
+                and dust_context.classification.classification == "harmless_dust"
+                and not dust_context.effective_flat_due_to_harmless_dust
+            )
+            else 0.0
+        )
         position_state = build_position_state_model(
-            raw_qty_open=0.0,
+            raw_qty_open=raw_qty_open,
             metadata_raw=dust_context.classification,
-            raw_total_asset_qty=lot_snapshot.raw_total_asset_qty,
+            raw_total_asset_qty=tracked_qty,
             open_exposure_qty=0.0,
             dust_tracking_qty=lot_snapshot.dust_tracking_qty,
             reserved_exit_qty=reserved_exit_qty,
@@ -385,6 +395,12 @@ def _apply_entry_exit_policy(
     position_state: PositionStateModel,
     exit_rules: list[ExitRule],
 ) -> StrategyDecision:
+    allow_harmless_dust_exit_evaluation = bool(
+        exposure.dust_classification == "harmless_dust"
+        and not exposure.harmless_dust_effective_flat
+        and position.in_position
+    )
+
     def _annotate_decision_context(
         context: dict[str, Any],
         *,
@@ -436,7 +452,7 @@ def _apply_entry_exit_policy(
             context=context,
         )
 
-    if base_signal == "SELL" and not exposure.exit_allowed:
+    if base_signal == "SELL" and not exposure.exit_allowed and not allow_harmless_dust_exit_evaluation:
         context = _annotate_decision_context(
             dict(base_context),
             raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
@@ -456,7 +472,7 @@ def _apply_entry_exit_policy(
             context=context,
         )
 
-    if position.in_position and not exposure.exit_allowed:
+    if position.in_position and not exposure.exit_allowed and not allow_harmless_dust_exit_evaluation:
         context = _annotate_decision_context(
             dict(base_context),
             raw_signal=str(base_context.get("entry", {}).get("base_signal", base_signal)),
