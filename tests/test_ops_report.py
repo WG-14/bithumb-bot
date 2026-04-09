@@ -650,7 +650,10 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert "dust_action=harmless_dust_tracked_resume_allowed" in out
     assert "dust_new_orders_allowed=1 dust_resume_allowed=1 dust_treat_as_flat=1" in out
     assert "raw_holdings_state=harmless_dust" in out
-    assert "entry_allowed=1 normalized_exposure_active=0" in out
+    assert "entry_allowed=1" in out
+    assert "normalized_exposure_active=0" in out
+    assert "sellable_executable_qty=0.00000000" in out
+    assert "state_outcome=tracked_unsellable_residual exit_submit_expected=0" in out
     assert (
         f"dust_broker_qty={expected_qty:.8f} dust_local_qty={expected_qty:.8f} "
         "dust_delta_qty=0.00000000 dust_min_qty=0.00010000 dust_min_notional_krw=5000.0"
@@ -672,6 +675,8 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
     assert summary["raw_holdings"]["classification"] == "harmless_dust"
     assert summary["normalized_exposure"]["normalized_exposure_active"] is False
     assert summary["operator_diagnostics"]["resume_allowed"] is True
+    assert summary["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
+    assert summary["state_interpretation"]["exit_submit_expected"] is False
     assert summary["dust_broker_qty"] == pytest.approx(expected_qty)
     assert summary["dust_local_qty"] == pytest.approx(expected_qty)
     assert summary["dust_broker_local_match"] is True
@@ -714,7 +719,7 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
                 "raw_total_asset_qty": 0.00019192,
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
-                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": False,
                 "normalized_exposure_qty": 0.0,
@@ -724,7 +729,7 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
                         "raw_total_asset_qty": 0.00019192,
                         "open_exposure_qty": 0.00009629,
                         "dust_tracking_qty": 0.00009563,
-                        "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                         "position_state_source": "context.raw_qty_open",
                         "entry_allowed": True,
                         "effective_flat": True,
@@ -764,8 +769,9 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "[RECENT-STRATEGY-DECISION-FLOW]" in out
     assert "flow=BUY_SUBMIT" in out
     assert "flow=BUY_BLOCKED" in out
-    assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
-    assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
+    assert "sell_submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
+    assert "sellable_executable_qty" in out
     assert "sell_normalized_exposure_qty=0.00009629" in out
     assert "position_qty=0.00009629" in out
     assert "submit_payload_qty=0.00000000" in out or "submit_payload_qty=0" in out
@@ -773,7 +779,7 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "raw_total_asset_qty=0.00019192" in out
     assert "open_exposure_qty=0.00009629" in out
     assert "dust_tracking_qty=0.00009563" in out
-    assert "entry_allowed_truth_source=context.entry_allowed" in out
+    assert "entry_allowed_truth_source=position_state.normalized_exposure.entry_allowed" in out
     assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
 
 
@@ -943,11 +949,11 @@ def test_ops_report_classifies_unresolved_risk_gate_in_recent_flow(tmp_path, mon
                     {
                         "sell_failure_category": "none",
                         "sell_failure_detail": "none",
-                        "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
-                        "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
+                        "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                         "sell_qty_boundary_kind": "none",
                         "sell_qty_basis_qty": 0.0002,
-                        "sell_qty_basis_source": "position_state.normalized_exposure.open_exposure_qty",
+                        "sell_qty_basis_source": "position_state.normalized_exposure.sellable_executable_qty",
                     }
                 ),
             ),
@@ -987,8 +993,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
             normalized_qty=0.00009629,
             market_price=102_500_000.0,
             context={
-                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
-                "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
+                "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "submit_qty_source_truth_source": "context.submit_qty_source",
                 "sell_submit_qty_source_truth_source": "context.submit_qty_source",
                 "position_state_source_truth_source": "context.position_state_source",
@@ -1026,12 +1032,12 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "reason=DUST_RESIDUAL_SUPPRESSED" in out
     assert "sell_failure_category=dust_suppression" in out
     assert "sell_failure_detail=dust_suppression" in out
-    assert "submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
     assert "submit_qty_source_truth_source=context.submit_qty_source" in out
-    assert "sell_submit_qty_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
     assert "sell_submit_qty_source_truth_source=context.submit_qty_source" in out
     assert "sell_qty_basis_qty=0.00009629" in out
-    assert "sell_qty_basis_source=position_state.normalized_exposure.open_exposure_qty" in out
+    assert "sell_qty_basis_source=position_state.normalized_exposure.sellable_executable_qty" in out
     assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=0.00009629" in out
     assert "open_exposure_qty_truth_source=position_state.open_exposure_qty" in out
@@ -1046,7 +1052,7 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
     assert sell_suppression["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
     assert sell_suppression["sell_qty_basis_qty"] == pytest.approx(0.00009629)
-    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
 
 
 def test_ops_report_prefers_boundary_below_min_over_unsafe_dust_mismatch_in_recent_flow(

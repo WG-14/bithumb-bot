@@ -482,8 +482,38 @@ def test_position_state_model_exposes_separate_raw_normalized_and_operator_layer
     assert model.fields["raw_holdings"]["broker_local_match"] is True
     assert model.fields["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.00009629)
     assert model.fields["normalized_exposure"]["sell_submit_qty"] == pytest.approx(0.00009629)
-    assert model.fields["normalized_exposure"]["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert model.fields["normalized_exposure"]["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert model.fields["operator_diagnostics"]["resume_allowed"] is True
+    assert model.fields["state_interpretation"]["operator_outcome"] == "executable_open_exposure"
+    assert model.fields["state_interpretation"]["exit_submit_expected"] is True
+
+
+def test_position_state_model_interprets_dust_only_as_state_layer_no_submit_outcome() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009629,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+
+    model = build_position_state_model(
+        raw_qty_open=0.00009629,
+        metadata_raw=dust,
+        raw_total_asset_qty=0.00009629,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00009629,
+        reserved_exit_qty=0.0,
+    )
+
+    assert model.normalized_exposure.terminal_state == "dust_only"
+    assert model.state_interpretation.operator_outcome == "tracked_unsellable_residual"
+    assert model.state_interpretation.exit_submit_expected is False
+    assert "HOLD/no-submit outcome" in model.state_interpretation.operator_message
 
 
 def test_lot_state_quantity_contract_exposes_boundary_and_sell_submission_rules() -> None:
@@ -491,7 +521,7 @@ def test_lot_state_quantity_contract_exposes_boundary_and_sell_submission_rules(
 
     assert contract[OPEN_EXPOSURE_LOT_STATE]["meaning"] == "real strategy-visible position"
     assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_qty_source"] == "open_exposure_qty"
-    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
     assert contract[DUST_TRACKING_LOT_STATE]["meaning"] == "operator tracking residual"
     assert contract[DUST_TRACKING_LOT_STATE]["strategy_qty_source"] == "dust_tracking_qty"
@@ -531,9 +561,9 @@ def test_normalized_exposure_sell_submit_qty_ignores_dust_tracking_qty() -> None
     assert exposure.open_exposure_qty == pytest.approx(0.0002)
     assert exposure.dust_tracking_qty == pytest.approx(0.0001)
     assert exposure.sell_submit_qty == pytest.approx(0.0002)
-    assert exposure.sell_submit_qty_source == "position_state.normalized_exposure.open_exposure_qty"
+    assert exposure.sell_submit_qty_source == "position_state.normalized_exposure.sellable_executable_qty"
     assert exposure.as_dict()["sell_submit_qty"] == pytest.approx(0.0002)
-    assert exposure.as_dict()["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert exposure.as_dict()["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
 
 
 def test_lot_state_quantity_contract_routes_open_exposure_and_dust_tracking_separately() -> None:
@@ -541,10 +571,10 @@ def test_lot_state_quantity_contract_routes_open_exposure_and_dust_tracking_sepa
 
     assert contract[OPEN_EXPOSURE_LOT_STATE]["meaning"] == "real strategy-visible position"
     assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_qty_source"] == "open_exposure_qty"
-    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submission_allowed"] is True
     assert contract[OPEN_EXPOSURE_LOT_STATE]["qty_boundary_rule"] == (
-        "qty_open >= min_qty remains open_exposure; SELL uses open_exposure_qty only"
+        "qty_open >= min_qty remains open_exposure; SELL sizing consumes sellable_executable_qty from normalized state"
     )
     assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
     assert contract[DUST_TRACKING_LOT_STATE]["meaning"] == "operator tracking residual"
@@ -560,7 +590,7 @@ def test_lot_state_quantity_contract_routes_open_exposure_and_dust_tracking_sepa
 def test_lot_state_quantity_helpers_make_the_route_contract_explicit() -> None:
     assert lot_state_strategy_qty_source(OPEN_EXPOSURE_LOT_STATE) == "open_exposure_qty"
     assert lot_state_sell_submit_qty_source(OPEN_EXPOSURE_LOT_STATE) == (
-        "position_state.normalized_exposure.open_exposure_qty"
+        "position_state.normalized_exposure.sellable_executable_qty"
     )
     assert lot_state_sell_submission_allowed(OPEN_EXPOSURE_LOT_STATE) is True
     assert lot_state_sell_submit_includes_dust_tracking(OPEN_EXPOSURE_LOT_STATE) is False
@@ -569,7 +599,7 @@ def test_lot_state_quantity_helpers_make_the_route_contract_explicit() -> None:
     assert lot_state_sell_submission_allowed(DUST_TRACKING_LOT_STATE) is False
     assert lot_state_sell_submit_includes_dust_tracking(DUST_TRACKING_LOT_STATE) is False
     assert lot_state_qty_boundary_rule(OPEN_EXPOSURE_LOT_STATE) == (
-        "qty_open >= min_qty remains open_exposure; SELL uses open_exposure_qty only"
+        "qty_open >= min_qty remains open_exposure; SELL sizing consumes sellable_executable_qty from normalized state"
     )
     assert lot_state_qty_boundary_rule(DUST_TRACKING_LOT_STATE) == (
         "qty_open < min_qty is tracked here; SELL submission excludes dust_tracking by default"

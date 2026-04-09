@@ -42,6 +42,7 @@ from .db_core import (
     portfolio_cash_total,
 )
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
+from .lifecycle import summarize_reserved_exit_qty
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
@@ -1497,10 +1498,10 @@ def fetch_recent_decision_flow(
                 0
             ) AS entry_allowed,
             COALESCE(
-                json_extract(context_json, '$.entry_block_reason'),
-                json_extract(context_json, '$.block_reason'),
-                json_extract(context_json, '$.entry_reason'),
-                json_extract(context_json, '$.reason'),
+                NULLIF(json_extract(context_json, '$.entry_block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.entry_reason'), ''),
+                NULLIF(json_extract(context_json, '$.reason'), ''),
                 reason
             ) AS block_reason,
             COALESCE(
@@ -1516,9 +1517,9 @@ def fetch_recent_decision_flow(
                 0
             ) AS effective_flat,
             COALESCE(
-                json_extract(context_json, '$.raw_qty_open'),
-                json_extract(context_json, '$.position_state.raw_qty_open'),
                 json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                json_extract(context_json, '$.position_state.raw_qty_open'),
+                json_extract(context_json, '$.raw_qty_open'),
                 json_extract(context_json, '$.position_gate.raw_qty_open'),
                 0.0
             ) AS raw_qty_open,
@@ -1528,10 +1529,11 @@ def fetch_recent_decision_flow(
                 'context.raw_qty_open'
             ) AS raw_qty_open_truth_source,
             COALESCE(
-                json_extract(context_json, '$.raw_total_asset_qty'),
-                json_extract(context_json, '$.position_state.raw_total_asset_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_state.raw_total_asset_qty'),
+                json_extract(context_json, '$.raw_total_asset_qty'),
                 json_extract(context_json, '$.position_gate.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                 json_extract(context_json, '$.raw_qty_open'),
                 0.0
             ) AS raw_total_asset_qty,
@@ -1541,9 +1543,9 @@ def fetch_recent_decision_flow(
                 'context.raw_total_asset_qty'
             ) AS raw_total_asset_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.position_state.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                 json_extract(context_json, '$.position_qty'),
@@ -1598,9 +1600,9 @@ def fetch_recent_decision_flow(
                 'context.normalized_exposure_active'
             ) AS normalized_exposure_active_truth_source,
             COALESCE(
-                json_extract(context_json, '$.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
                 CASE
@@ -1611,9 +1613,9 @@ def fetch_recent_decision_flow(
                         CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                         CASE
                             WHEN COALESCE(
-                                json_extract(context_json, '$.open_exposure_qty'),
-                                json_extract(context_json, '$.position_state.open_exposure_qty'),
                                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                                json_extract(context_json, '$.open_exposure_qty'),
                                 json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                                 0.0
@@ -1628,9 +1630,9 @@ def fetch_recent_decision_flow(
                         END
                     ) = 1
                     THEN COALESCE(
-                        json_extract(context_json, '$.open_exposure_qty'),
-                        json_extract(context_json, '$.position_state.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.open_exposure_qty'),
+                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                         json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
@@ -1644,9 +1646,9 @@ def fetch_recent_decision_flow(
                 'context.normalized_exposure_qty'
             ) AS normalized_exposure_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.position_state.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                 0.0
             ) AS open_exposure_qty,
@@ -1656,9 +1658,9 @@ def fetch_recent_decision_flow(
                 'context.open_exposure_qty'
             ) AS open_exposure_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.dust_tracking_qty'),
-                json_extract(context_json, '$.position_state.dust_tracking_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
                 json_extract(context_json, '$.position_gate.dust_tracking_qty'),
                 0.0
             ) AS dust_tracking_qty,
@@ -1942,10 +1944,10 @@ def fetch_decision_telemetry_summary(
             COALESCE(json_extract(context_json, '$.pair'), '<unknown>') AS pair,
             COALESCE(json_extract(context_json, '$.interval'), '<unknown>') AS interval,
             COALESCE(
-                json_extract(context_json, '$.entry_block_reason'),
-                json_extract(context_json, '$.block_reason'),
-                json_extract(context_json, '$.entry_reason'),
-                json_extract(context_json, '$.reason'),
+                NULLIF(json_extract(context_json, '$.entry_block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.entry_reason'), ''),
+                NULLIF(json_extract(context_json, '$.reason'), ''),
                 reason
             ) AS block_reason,
             COALESCE(
@@ -1961,8 +1963,8 @@ def fetch_decision_telemetry_summary(
                 0
             ) AS effective_flat,
             COALESCE(
-                json_extract(context_json, '$.raw_qty_open'),
                 json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                json_extract(context_json, '$.raw_qty_open'),
                 json_extract(context_json, '$.position_gate.raw_qty_open'),
                 0.0
             ) AS raw_qty_open,
@@ -1972,9 +1974,10 @@ def fetch_decision_telemetry_summary(
                 'context.raw_qty_open'
             ) AS raw_qty_open_truth_source,
             COALESCE(
-                json_extract(context_json, '$.raw_total_asset_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.raw_total_asset_qty'),
+                json_extract(context_json, '$.raw_total_asset_qty'),
                 json_extract(context_json, '$.position_gate.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
                 json_extract(context_json, '$.raw_qty_open'),
                 0.0
             ) AS raw_total_asset_qty,
@@ -1984,8 +1987,8 @@ def fetch_decision_telemetry_summary(
                 'context.raw_total_asset_qty'
             ) AS raw_total_asset_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                 json_extract(context_json, '$.position_qty'),
@@ -2016,8 +2019,8 @@ def fetch_decision_telemetry_summary(
                 CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                 CASE
                     WHEN COALESCE(
-                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                         json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
@@ -2037,8 +2040,8 @@ def fetch_decision_telemetry_summary(
                 'context.normalized_exposure_active'
             ) AS normalized_exposure_active_truth_source,
             COALESCE(
-                json_extract(context_json, '$.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
                 CASE
@@ -2048,8 +2051,8 @@ def fetch_decision_telemetry_summary(
                         CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
                         CASE
                             WHEN COALESCE(
-                                json_extract(context_json, '$.open_exposure_qty'),
                                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                                json_extract(context_json, '$.open_exposure_qty'),
                                 json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                                 0.0
@@ -2064,8 +2067,8 @@ def fetch_decision_telemetry_summary(
                         END
                     ) = 1
                     THEN COALESCE(
-                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.open_exposure_qty'),
                         json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
                         json_extract(context_json, '$.position_gate.open_exposure_qty'),
                         0.0
@@ -2079,9 +2082,9 @@ def fetch_decision_telemetry_summary(
                 'context.normalized_exposure_qty'
             ) AS normalized_exposure_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.position_state.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
                 json_extract(context_json, '$.position_gate.open_exposure_qty'),
                 0.0
             ) AS open_exposure_qty,
@@ -2091,9 +2094,9 @@ def fetch_decision_telemetry_summary(
                 'context.open_exposure_qty'
             ) AS open_exposure_qty_truth_source,
             COALESCE(
-                json_extract(context_json, '$.dust_tracking_qty'),
-                json_extract(context_json, '$.position_state.dust_tracking_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
                 json_extract(context_json, '$.position_gate.dust_tracking_qty'),
                 0.0
             ) AS dust_tracking_qty,
@@ -3989,6 +3992,7 @@ def cmd_experiment_report(
 
 def cmd_ops_report(*, limit: int = 20) -> None:
     market, raw_symbol = canonical_market_with_raw(settings.PAIR)
+    reserved_exit_qty = 0.0
     conn = ensure_db()
     try:
         strategy_stats = _fetch_strategy_stats(conn)
@@ -4024,6 +4028,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         portfolio_row = conn.execute(
             "SELECT asset_qty FROM portfolio WHERE id=1"
         ).fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
     finally:
         conn.close()
 
@@ -4205,11 +4210,15 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         },
         "run_lock": run_lock_status.as_dict(),
     }
-    position_state = build_position_state_model(
-        raw_qty_open=float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0,
-        metadata_raw=health_row["last_reconcile_metadata"] if health_row else None,
-    )
     dust_context = build_dust_display_context(health_row["last_reconcile_metadata"] if health_row else None)
+    portfolio_asset_qty = float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0
+    position_state = build_position_state_model(
+        raw_qty_open=portfolio_asset_qty,
+        metadata_raw=health_row["last_reconcile_metadata"] if health_row else None,
+        raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
+        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        reserved_exit_qty=reserved_exit_qty,
+    )
     dust_view = position_state.operator_diagnostics
     payload["operator_recovery_summary"] = {
         "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
@@ -4217,6 +4226,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         **dust_context.fields,
         "raw_holdings": position_state.raw_holdings.as_dict(),
         "normalized_exposure": position_state.normalized_exposure.as_dict(),
+        "state_interpretation": position_state.state_interpretation.as_dict(),
         "operator_diagnostics": {
             "state": position_state.operator_diagnostics.state,
             "state_label": position_state.operator_diagnostics.state_label,
@@ -4278,8 +4288,26 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"raw_holdings_state={position_state.raw_holdings.state} "
         f"raw_holdings_match={1 if position_state.raw_holdings.broker_local_match else 0} "
         f"entry_allowed={1 if position_state.normalized_exposure.entry_allowed else 0} "
+        f"entry_block_reason={position_state.normalized_exposure.entry_block_reason} "
+        f"exit_allowed={1 if position_state.normalized_exposure.exit_allowed else 0} "
+        f"exit_block_reason={position_state.normalized_exposure.exit_block_reason} "
         f"normalized_exposure_active={1 if position_state.normalized_exposure.normalized_exposure_active else 0} "
         f"normalized_exposure_qty={position_state.normalized_exposure.normalized_exposure_qty:.8f}"
+    )
+    print(
+        "  "
+        f"total_holdings_qty={float(position_state.normalized_exposure.raw_total_asset_qty):.8f} "
+        f"executable_exposure_qty={float(position_state.normalized_exposure.open_exposure_qty):.8f} "
+        f"tracked_dust_qty={float(position_state.normalized_exposure.dust_tracking_qty):.8f} "
+        f"reserved_exit_qty={float(position_state.normalized_exposure.reserved_exit_qty):.8f} "
+        f"sellable_executable_qty={float(position_state.normalized_exposure.sellable_executable_qty):.8f} "
+        f"terminal_state={position_state.normalized_exposure.terminal_state}"
+    )
+    print(
+        "  "
+        f"state_outcome={position_state.state_interpretation.operator_outcome} "
+        f"exit_submit_expected={1 if position_state.state_interpretation.exit_submit_expected else 0} "
+        f"state_message={position_state.state_interpretation.operator_message}"
     )
     print(
         "  "

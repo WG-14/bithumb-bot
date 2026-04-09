@@ -13,7 +13,7 @@ from .reason_codes import (
 )
 
 
-_CANONICAL_CONTEXT_VERSION = 7
+_CANONICAL_CONTEXT_VERSION = 10
 
 
 def load_recorded_strategy_decision_context(
@@ -123,13 +123,13 @@ def _resolve_with_source(
 
 def _resolve_canonical_sell_qty_basis(
     *,
-    open_exposure_qty: float,
-    open_exposure_qty_truth_source: str,
+    sellable_executable_qty: float,
+    sellable_executable_qty_truth_source: str,
 ) -> tuple[float, str, str]:
     return (
-        float(open_exposure_qty),
-        "position_state.normalized_exposure.open_exposure_qty",
-        open_exposure_qty_truth_source,
+        float(sellable_executable_qty),
+        "position_state.normalized_exposure.sellable_executable_qty",
+        sellable_executable_qty_truth_source,
     )
 
 
@@ -283,8 +283,8 @@ def normalize_strategy_decision_context(
         else {}
     )
     entry_allowed, entry_allowed_truth_source = _resolve_with_source(
-        ("context.entry_allowed", payload.get("entry_allowed")),
         ("position_state.normalized_exposure.entry_allowed", position_normalized.get("entry_allowed")),
+        ("context.entry_allowed", payload.get("entry_allowed")),
         ("position_gate.entry_allowed", position_gate.get("entry_allowed")),
         (
             "position_gate.effective_flat_due_to_harmless_dust",
@@ -296,8 +296,8 @@ def normalize_strategy_decision_context(
         value_kind="bool",
     )
     effective_flat, effective_flat_truth_source = _resolve_with_source(
-        ("context.effective_flat", payload.get("effective_flat")),
         ("position_state.normalized_exposure.effective_flat", position_normalized.get("effective_flat")),
+        ("context.effective_flat", payload.get("effective_flat")),
         (
             "position_gate.effective_flat_due_to_harmless_dust",
             position_gate.get("effective_flat_due_to_harmless_dust"),
@@ -319,12 +319,12 @@ def normalize_strategy_decision_context(
     if raw_qty_open is None:
         raw_qty_open = 0.0
     raw_total_asset_qty, raw_total_asset_qty_truth_source = _resolve_with_source(
-        ("context.raw_total_asset_qty", payload.get("raw_total_asset_qty")),
         ("position_state.raw_total_asset_qty", position_state.get("raw_total_asset_qty")),
         (
             "position_state.normalized_exposure.raw_total_asset_qty",
             position_normalized.get("raw_total_asset_qty"),
         ),
+        ("context.raw_total_asset_qty", payload.get("raw_total_asset_qty")),
         ("position_gate.raw_total_asset_qty", position_gate.get("raw_total_asset_qty")),
         ("context.raw_qty_open", payload.get("raw_qty_open")),
         (
@@ -339,10 +339,10 @@ def normalize_strategy_decision_context(
     if raw_total_asset_qty is None:
         raw_total_asset_qty = raw_qty_open
     open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
-        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
         ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
         ("position_state.position_qty", position_state.get("position_qty")),
         ("position_state.normalized_exposure.open_exposure_qty", position_normalized.get("open_exposure_qty")),
+        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
         ("position_gate.open_exposure_qty", position_gate.get("open_exposure_qty")),
         ("position_state.normalized_exposure.raw_qty_open", position_normalized.get("raw_qty_open")),
         ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
@@ -353,9 +353,9 @@ def normalize_strategy_decision_context(
     if open_exposure_qty is None:
         open_exposure_qty = raw_qty_open
     dust_tracking_qty, dust_tracking_qty_truth_source = _resolve_with_source(
-        ("context.dust_tracking_qty", payload.get("dust_tracking_qty")),
         ("position_state.dust_tracking_qty", position_state.get("dust_tracking_qty")),
         ("position_state.normalized_exposure.dust_tracking_qty", position_normalized.get("dust_tracking_qty")),
+        ("context.dust_tracking_qty", payload.get("dust_tracking_qty")),
         ("position_gate.dust_tracking_qty", position_gate.get("dust_tracking_qty")),
         default_value=0.0,
         default_source="default:0.0",
@@ -363,8 +363,59 @@ def normalize_strategy_decision_context(
     )
     if dust_tracking_qty is None:
         dust_tracking_qty = 0.0
+    reserved_exit_qty, reserved_exit_qty_truth_source = _resolve_with_source(
+        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
+        ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
+        ("context.reserved_exit_qty", payload.get("reserved_exit_qty")),
+        ("position_gate.reserved_exit_qty", position_gate.get("reserved_exit_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    if reserved_exit_qty is None:
+        reserved_exit_qty = 0.0
+    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
+        ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
+        (
+            "position_state.normalized_exposure.sellable_executable_qty",
+            position_normalized.get("sellable_executable_qty"),
+        ),
+        ("context.sellable_executable_qty", payload.get("sellable_executable_qty")),
+        default_value=max(0.0, float(open_exposure_qty) - float(reserved_exit_qty)),
+        default_source="position_state.normalized_exposure.sellable_executable_qty",
+        value_kind="float",
+    )
+    if sellable_executable_qty is None:
+        sellable_executable_qty = max(0.0, float(open_exposure_qty) - float(reserved_exit_qty))
+    entry_block_reason = _as_text(
+        payload.get(
+            "entry_block_reason",
+            position_normalized.get("entry_block_reason", position_state.get("entry_block_reason")),
+        ),
+        default="",
+    )
+    exit_allowed, exit_allowed_truth_source = _resolve_with_source(
+        ("context.exit_allowed", payload.get("exit_allowed")),
+        ("position_state.exit_allowed", position_state.get("exit_allowed")),
+        ("position_state.normalized_exposure.exit_allowed", position_normalized.get("exit_allowed")),
+        default_value=sellable_executable_qty > 1e-12,
+        default_source="fallback:sellable_executable_qty",
+        value_kind="bool",
+    )
+    exit_block_reason = _as_text(
+        payload.get(
+            "exit_block_reason",
+            position_normalized.get("exit_block_reason", position_state.get("exit_block_reason")),
+        ),
+        default="",
+    )
+    if entry_allowed_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
+        entry_allowed = True
+        entry_allowed_truth_source = "fallback:flat_zero_holdings"
+    if effective_flat_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
+        effective_flat = True
+        effective_flat_truth_source = "fallback:flat_zero_holdings"
     normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
-        ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
         (
             "position_state.normalized_exposure_active",
             position_state.get("normalized_exposure_active"),
@@ -373,18 +424,19 @@ def normalize_strategy_decision_context(
             "position_state.normalized_exposure.normalized_exposure_active",
             position_normalized.get("normalized_exposure_active"),
         ),
+        ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
         ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
         default_value=open_exposure_qty > 1e-12,
         default_source="fallback:open_exposure_qty",
         value_kind="bool",
     )
     normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
-        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
         ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
         (
             "position_state.normalized_exposure.normalized_exposure_qty",
             position_normalized.get("normalized_exposure_qty"),
         ),
+        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
         ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
         default_value=open_exposure_qty if normalized_exposure_active else 0.0,
         default_source="fallback:raw_qty_open_or_zero",
@@ -396,12 +448,12 @@ def normalize_strategy_decision_context(
     position_qty_truth_source = open_exposure_qty_truth_source
     submit_payload_qty = float(normalized_exposure_qty)
     submit_payload_qty_truth_source = normalized_exposure_qty_truth_source
-    submit_qty_source = "position_state.normalized_exposure.open_exposure_qty"
-    submit_qty_source_truth_source = "derived:open_exposure_qty"
+    submit_qty_source = "position_state.normalized_exposure.sellable_executable_qty"
+    submit_qty_source_truth_source = "derived:sellable_executable_qty"
     sell_submit_qty_source = submit_qty_source
     sell_qty_basis_qty, sell_qty_basis_source, sell_qty_basis_qty_truth_source = _resolve_canonical_sell_qty_basis(
-        open_exposure_qty=open_exposure_qty,
-        open_exposure_qty_truth_source=open_exposure_qty_truth_source,
+        sellable_executable_qty=sellable_executable_qty,
+        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
     )
     sell_qty_boundary_kind = _as_text(payload.get("sell_qty_boundary_kind"), default="")
     sell_qty_boundary_kind_truth_source = "context.sell_qty_boundary_kind"
@@ -431,7 +483,7 @@ def normalize_strategy_decision_context(
             "position_state_source",
             position_state.get(
                 "position_state_source",
-                position_normalized.get("position_state_source", raw_qty_open_truth_source),
+                position_normalized.get("position_state_source", payload.get("position_state_source")),
             ),
         ),
         default=raw_qty_open_truth_source,
@@ -452,6 +504,9 @@ def normalize_strategy_decision_context(
         "normalized_exposure_qty": normalized_exposure_qty_truth_source,
         "open_exposure_qty": open_exposure_qty_truth_source,
         "dust_tracking_qty": dust_tracking_qty_truth_source,
+        "reserved_exit_qty": reserved_exit_qty_truth_source,
+        "sellable_executable_qty": sellable_executable_qty_truth_source,
+        "exit_allowed": exit_allowed_truth_source,
         "submit_qty_source": submit_qty_source_truth_source,
         "sell_submit_qty_source": submit_qty_source_truth_source,
         "sell_qty_basis_qty": sell_qty_basis_qty_truth_source,
@@ -472,6 +527,7 @@ def normalize_strategy_decision_context(
         "entry_block_reason": entry_block_reason_text,
         "dust_classification": dust_classification,
         "entry_allowed": bool(entry_allowed),
+        "entry_block_reason": entry_block_reason,
         "effective_flat": bool(effective_flat),
         "raw_qty_open": float(raw_qty_open),
         "raw_total_asset_qty": float(raw_total_asset_qty),
@@ -481,6 +537,10 @@ def normalize_strategy_decision_context(
         "normalized_exposure_qty": float(normalized_exposure_qty),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
+        "reserved_exit_qty": float(reserved_exit_qty),
+        "sellable_executable_qty": float(sellable_executable_qty),
+        "exit_allowed": bool(exit_allowed),
+        "exit_block_reason": exit_block_reason,
         "submit_qty_source": submit_qty_source,
         "sell_submit_qty_source": sell_submit_qty_source,
         "sell_qty_basis_qty": float(sell_qty_basis_qty),
@@ -518,6 +578,7 @@ def normalize_strategy_decision_context(
     payload["market_observations"] = market_observations
     payload["dust_classification"] = dust_classification
     payload["entry_allowed"] = bool(entry_allowed)
+    payload["entry_block_reason"] = entry_block_reason_text or entry_block_reason
     payload["effective_flat"] = bool(effective_flat)
     payload["raw_qty_open"] = float(raw_qty_open)
     payload["raw_total_asset_qty"] = float(raw_total_asset_qty)
@@ -527,6 +588,10 @@ def normalize_strategy_decision_context(
     payload["normalized_exposure_qty"] = float(normalized_exposure_qty)
     payload["open_exposure_qty"] = float(open_exposure_qty)
     payload["dust_tracking_qty"] = float(dust_tracking_qty)
+    payload["reserved_exit_qty"] = float(reserved_exit_qty)
+    payload["sellable_executable_qty"] = float(sellable_executable_qty)
+    payload["exit_allowed"] = bool(exit_allowed)
+    payload["exit_block_reason"] = exit_block_reason
     payload["submit_qty_source"] = submit_qty_source
     payload["sell_submit_qty_source"] = sell_submit_qty_source
     payload["sell_qty_basis_qty"] = float(sell_qty_basis_qty)
@@ -549,6 +614,9 @@ def normalize_strategy_decision_context(
     payload["normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
     payload["open_exposure_qty_truth_source"] = open_exposure_qty_truth_source
     payload["dust_tracking_qty_truth_source"] = dust_tracking_qty_truth_source
+    payload["reserved_exit_qty_truth_source"] = reserved_exit_qty_truth_source
+    payload["sellable_executable_qty_truth_source"] = sellable_executable_qty_truth_source
+    payload["exit_allowed_truth_source"] = exit_allowed_truth_source
     payload["submit_qty_source_truth_source"] = submit_qty_source_truth_source
     payload["sell_submit_qty_source_truth_source"] = submit_qty_source_truth_source
     payload["sell_qty_basis_qty_truth_source"] = sell_qty_basis_qty_truth_source
@@ -599,11 +667,7 @@ def normalize_strategy_decision_context(
         "compact_summary": str(position_gate.get("dust_residual_summary") or "none"),
     }
     normalized_position_state["normalized_exposure"] = {
-        **(
-            dict(position_normalized)
-            if isinstance(position_normalized, dict)
-            else {}
-        ),
+        **(dict(position_normalized) if isinstance(position_normalized, dict) else {}),
         "raw_qty_open": float(raw_qty_open),
         "raw_total_asset_qty": float(raw_total_asset_qty),
         "dust_classification": dust_classification,
@@ -616,20 +680,12 @@ def normalize_strategy_decision_context(
         "normalized_exposure_qty": float(normalized_exposure_qty),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
-        "position_qty": float(position_qty),
-        "submit_payload_qty": float(submit_payload_qty),
-        "submit_qty_source": submit_qty_source,
-        "sell_submit_qty_source": sell_submit_qty_source,
-        "sell_qty_basis_qty": float(sell_qty_basis_qty),
-        "sell_qty_basis_source": sell_qty_basis_source,
-        "sell_qty_boundary_kind": sell_qty_boundary_kind,
-        "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
-        "sell_open_exposure_qty": float(sell_open_exposure_qty),
-        "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
-        "sell_failure_category": sell_failure_category,
-        "sell_failure_detail": sell_failure_detail,
+        "reserved_exit_qty": float(reserved_exit_qty),
+        "sellable_executable_qty": float(sellable_executable_qty),
+        "exit_allowed": bool(exit_allowed),
+        "exit_block_reason": exit_block_reason,
+        "entry_block_reason": entry_block_reason,
         "position_state_source": position_state_source,
-        "decision_truth_sources": decision_truth_sources,
     }
     normalized_position_state["operator_diagnostics"] = {
         **(

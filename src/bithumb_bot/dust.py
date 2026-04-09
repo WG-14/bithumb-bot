@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -16,10 +17,10 @@ LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
     OPEN_EXPOSURE_LOT_STATE: {
         "meaning": "real strategy-visible position",
         "strategy_qty_source": "open_exposure_qty",
-        "sell_submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+        "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
         "sell_submission_allowed": True,
         "sell_submit_includes_dust_tracking": False,
-        "qty_boundary_rule": "qty_open >= min_qty remains open_exposure; SELL uses open_exposure_qty only",
+        "qty_boundary_rule": "qty_open >= min_qty remains open_exposure; SELL sizing consumes sellable_executable_qty from normalized state",
         "operator_tracking_only": False,
     },
     DUST_TRACKING_LOT_STATE: {
@@ -38,6 +39,26 @@ class DustState(str, Enum):
     NO_DUST = "no_dust"
     HARMLESS_DUST = "harmless_dust"
     BLOCKING_DUST = "blocking_dust"
+
+
+@dataclass(frozen=True)
+class ExecutableLot:
+    raw_qty: float
+    executable_qty: float
+    dust_qty: float
+    effective_min_trade_qty: float
+    min_qty: float
+    qty_step: float
+    min_notional_krw: float
+    exit_price_floor: float | None
+    exit_fee_ratio: float
+    exit_slippage_ratio: float
+    exit_buffer_ratio: float
+    exit_non_executable_reason: str
+
+    @property
+    def exit_executable(self) -> bool:
+        return bool(self.executable_qty > DUST_POSITION_EPS)
 
 
 def _dust_state_from_legacy_value(raw: str | DustState | None) -> str:
@@ -526,14 +547,62 @@ class DustDisplayContext:
 
 
 @dataclass(frozen=True)
+class _NormalizedPositionInventory:
+    raw_qty_open: float
+    raw_total_asset_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    reserved_exit_qty: float
+
+
+@dataclass(frozen=True)
+class _ExecutableExposureDerivation:
+    executable_lot: ExecutableLot
+    effective_open_exposure_qty: float
+    effective_reserved_exit_qty: float
+    sellable_executable_qty: float
+    normalized_dust_tracking_qty: float
+
+
+@dataclass(frozen=True)
+class PositionStateInterpretation:
+    lifecycle_state: str
+    lifecycle_label: str
+    operator_outcome: str
+    operator_message: str
+    entry_status: str
+    exit_status: str
+    exit_submit_expected: bool
+
+    def as_dict(self) -> dict[str, bool | str]:
+        return {
+            "lifecycle_state": self.lifecycle_state,
+            "lifecycle_label": self.lifecycle_label,
+            "operator_outcome": self.operator_outcome,
+            "operator_message": self.operator_message,
+            "entry_status": self.entry_status,
+            "exit_status": self.exit_status,
+            "exit_submit_expected": bool(self.exit_submit_expected),
+        }
+
+
+@dataclass(frozen=True)
 class NormalizedExposure:
     raw_qty_open: float
     raw_total_asset_qty: float
     open_exposure_qty: float
     dust_tracking_qty: float
+    reserved_exit_qty: float
+    sellable_executable_qty: float
+    effective_min_trade_qty: float
+    exit_non_executable_reason: str
     dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None
     effective_flat: bool
     entry_allowed: bool
+    entry_block_reason: str
+    exit_allowed: bool
+    exit_block_reason: str
+    terminal_state: str
     normalized_exposure_active: bool
     normalized_exposure_qty: float
 
@@ -575,14 +644,9 @@ class NormalizedExposure:
 
     @property
     def sell_submit_qty(self) -> float:
-        """Return the canonical SELL submission quantity.
+        """Return the canonical SELL submission quantity basis from shared state."""
 
-        This intentionally follows `open_exposure_qty` and excludes
-        `dust_tracking_qty`, because dust tracking is operator evidence rather
-        than sellable exposure.
-        """
-
-        return float(self.open_exposure_qty)
+        return float(self.sellable_executable_qty)
 
     @property
     def sell_submit_qty_source(self) -> str:
@@ -592,16 +656,27 @@ class NormalizedExposure:
         return {
             "raw_qty_open": float(self.raw_qty_open),
             "raw_total_asset_qty": float(self.raw_total_asset_qty),
+            "total_holdings_qty": float(self.raw_total_asset_qty),
             "open_exposure_qty": float(self.open_exposure_qty),
+            "executable_exposure_qty": float(self.open_exposure_qty),
             "dust_tracking_qty": float(self.dust_tracking_qty),
+            "reserved_exit_qty": float(self.reserved_exit_qty),
+            "sellable_executable_qty": float(self.sellable_executable_qty),
+            "effective_min_trade_qty": float(self.effective_min_trade_qty),
+            "exit_non_executable_reason": self.exit_non_executable_reason,
             "dust_classification": self.dust_classification,
             "dust_state": self.dust_state,
             "effective_flat": bool(self.effective_flat),
             "entry_allowed": bool(self.entry_allowed),
+            "entry_block_reason": self.entry_block_reason,
+            "exit_allowed": bool(self.exit_allowed),
+            "exit_block_reason": self.exit_block_reason,
+            "terminal_state": self.terminal_state,
             "harmless_dust_effective_flat": bool(self.harmless_dust_effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.harmless_dust_effective_flat),
             "normalized_exposure_active": bool(self.normalized_exposure_active),
             "normalized_exposure_qty": float(self.normalized_exposure_qty),
+            "executable_exposure_qty": float(self.normalized_exposure_qty),
             "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),
             "dust_resume_allowed": bool(self.dust_operator_view.resume_allowed),
             "dust_treat_as_flat": bool(self.dust_operator_view.treat_as_flat),
@@ -615,6 +690,7 @@ class PositionStateModel:
     raw_holdings: RawHoldingsSnapshot
     normalized_exposure: NormalizedExposure
     operator_diagnostics: DustOperatorView
+    state_interpretation: PositionStateInterpretation
     fields: dict[str, object]
 
     @property
@@ -644,6 +720,7 @@ class PositionStateModel:
                 "treat_as_flat": bool(self.operator_diagnostics.treat_as_flat),
                 "compact_summary": self.operator_diagnostics.compact_summary,
             },
+            "state_interpretation": self.state_interpretation.as_dict(),
             "raw_qty_open": float(self.raw_qty_open),
             "raw_total_asset_qty": float(self.normalized_exposure.raw_total_asset_qty),
             "effective_flat": bool(self.effective_flat),
@@ -713,6 +790,129 @@ def is_strictly_below_min_qty(*, qty_open: float, min_qty: float) -> bool:
         normalized_qty > DUST_POSITION_EPS
         and normalized_min_qty > 0.0
         and normalized_qty < normalized_min_qty
+    )
+
+
+def _effective_qty_step(*, qty_step: float, min_qty: float, max_qty_decimals: int | None) -> float:
+    normalized_step = max(0.0, float(qty_step))
+    if normalized_step > 0.0:
+        return normalized_step
+    normalized_min_qty = max(0.0, float(min_qty))
+    if normalized_min_qty > 0.0:
+        return normalized_min_qty
+    decimals = max(0, int(max_qty_decimals or 0))
+    if decimals > 0:
+        return 1.0 / (10 ** decimals)
+    return 0.0
+
+
+def _floor_qty_to_step(*, qty: float, qty_step: float, max_qty_decimals: int | None) -> float:
+    normalized_qty = max(0.0, float(qty))
+    step = _effective_qty_step(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
+    if step > 0.0:
+        normalized_qty = math.floor((normalized_qty / step) + DUST_POSITION_EPS) * step
+    decimals = max(0, int(max_qty_decimals or 0))
+    if decimals > 0:
+        scale = 10 ** decimals
+        normalized_qty = math.floor((normalized_qty * scale) + DUST_POSITION_EPS) / scale
+    return max(0.0, normalized_qty)
+
+
+def _ceil_qty_to_step(*, qty: float, qty_step: float, max_qty_decimals: int | None) -> float:
+    normalized_qty = max(0.0, float(qty))
+    if normalized_qty <= 0.0:
+        return 0.0
+    step = _effective_qty_step(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
+    if step > 0.0:
+        normalized_qty = math.ceil((normalized_qty / step) - DUST_POSITION_EPS) * step
+    decimals = max(0, int(max_qty_decimals or 0))
+    if decimals > 0:
+        scale = 10 ** decimals
+        normalized_qty = math.ceil((normalized_qty * scale) - DUST_POSITION_EPS) / scale
+    return max(0.0, normalized_qty)
+
+
+def build_executable_lot(
+    *,
+    qty: float,
+    market_price: float | None,
+    min_qty: float,
+    qty_step: float,
+    min_notional_krw: float,
+    max_qty_decimals: int | None = None,
+    exit_fee_ratio: float = 0.0,
+    exit_slippage_bps: float = 0.0,
+    exit_buffer_ratio: float = 0.0,
+) -> ExecutableLot:
+    raw_qty = max(0.0, float(qty))
+    normalized_min_qty = max(0.0, float(min_qty))
+    normalized_min_notional = max(0.0, float(min_notional_krw))
+    normalized_exit_fee_ratio = max(0.0, float(exit_fee_ratio))
+    normalized_exit_slippage_ratio = max(0.0, float(exit_slippage_bps)) / 10_000.0
+    normalized_exit_buffer_ratio = max(0.0, float(exit_buffer_ratio))
+    step = _effective_qty_step(
+        qty_step=qty_step,
+        min_qty=normalized_min_qty,
+        max_qty_decimals=max_qty_decimals,
+    )
+    buffered_min_qty = normalized_min_qty
+    if buffered_min_qty > 0.0 and step > 0.0:
+        buffered_min_qty = _ceil_qty_to_step(
+            qty=(buffered_min_qty + step),
+            qty_step=step,
+            max_qty_decimals=max_qty_decimals,
+        )
+    exit_price_floor: float | None = None
+    if market_price is not None:
+        normalized_price = max(0.0, float(market_price))
+        if normalized_price > 0.0:
+            exit_price_floor = normalized_price * max(
+                0.0,
+                1.0
+                - normalized_exit_fee_ratio
+                - normalized_exit_slippage_ratio
+                - normalized_exit_buffer_ratio,
+            )
+    notional_min_qty = 0.0
+    if normalized_min_notional > 0.0 and exit_price_floor is not None and exit_price_floor > 0.0:
+        notional_min_qty = _ceil_qty_to_step(
+            qty=(normalized_min_notional / exit_price_floor),
+            qty_step=step,
+            max_qty_decimals=max_qty_decimals,
+        )
+    effective_min_trade_qty = max(buffered_min_qty, notional_min_qty)
+    executable_qty = _floor_qty_to_step(
+        qty=raw_qty,
+        qty_step=step,
+        max_qty_decimals=max_qty_decimals,
+    )
+    dust_qty = max(0.0, raw_qty - executable_qty)
+    exit_non_executable_reason = "executable"
+    if executable_qty <= DUST_POSITION_EPS:
+        dust_qty = raw_qty
+        if raw_qty <= DUST_POSITION_EPS:
+            exit_non_executable_reason = "no_position"
+        elif effective_min_trade_qty > 0.0 and raw_qty < effective_min_trade_qty:
+            exit_non_executable_reason = "no_executable_exit_lot"
+        else:
+            exit_non_executable_reason = "rounds_to_zero"
+    elif effective_min_trade_qty > 0.0 and executable_qty < effective_min_trade_qty:
+        executable_qty = 0.0
+        dust_qty = raw_qty
+        exit_non_executable_reason = "no_executable_exit_lot"
+    return ExecutableLot(
+        raw_qty=raw_qty,
+        executable_qty=max(0.0, executable_qty),
+        dust_qty=max(0.0, dust_qty),
+        effective_min_trade_qty=max(0.0, effective_min_trade_qty),
+        min_qty=normalized_min_qty,
+        qty_step=max(0.0, float(step)),
+        min_notional_krw=normalized_min_notional,
+        exit_price_floor=exit_price_floor,
+        exit_fee_ratio=normalized_exit_fee_ratio,
+        exit_slippage_ratio=normalized_exit_slippage_ratio,
+        exit_buffer_ratio=normalized_exit_buffer_ratio,
+        exit_non_executable_reason=exit_non_executable_reason,
     )
 
 
@@ -1026,45 +1226,124 @@ def build_position_state_model(
     raw_total_asset_qty: float | None = None,
     open_exposure_qty: float | None = None,
     dust_tracking_qty: float | None = None,
+    reserved_exit_qty: float | None = None,
+    market_price: float | None = None,
+    min_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    max_qty_decimals: int | None = None,
+    exit_fee_ratio: float = 0.0,
+    exit_slippage_bps: float = 0.0,
+    exit_buffer_ratio: float = 0.0,
 ) -> PositionStateModel:
+    display_context = _resolve_position_display_context(metadata_raw=metadata_raw)
+    normalized_exposure = _build_position_state_normalized_exposure(
+        raw_qty_open=raw_qty_open,
+        display_context=display_context,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
+        reserved_exit_qty=reserved_exit_qty,
+        market_price=market_price,
+        min_qty=min_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        max_qty_decimals=max_qty_decimals,
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
+    )
+    state_interpretation = build_position_state_interpretation(normalized_exposure=normalized_exposure)
+    return PositionStateModel(
+        raw_holdings=display_context.raw_holdings,
+        normalized_exposure=normalized_exposure,
+        operator_diagnostics=display_context.operator_view,
+        state_interpretation=state_interpretation,
+        fields=_build_position_state_fields(
+            display_context=display_context,
+            normalized_exposure=normalized_exposure,
+            state_interpretation=state_interpretation,
+        ),
+    )
+
+
+def _resolve_position_display_context(
+    *,
+    metadata_raw: str | dict[str, object] | DustClassification | None,
+) -> DustDisplayContext:
     dust = (
         metadata_raw
         if isinstance(metadata_raw, DustClassification)
         else DustClassification.from_metadata(metadata_raw)
     )
-    display_context = build_dust_display_context(dust)
-    normalized_exposure = build_normalized_exposure(
+    return build_dust_display_context(dust)
+
+
+def _build_position_state_normalized_exposure(
+    *,
+    raw_qty_open: float,
+    display_context: DustDisplayContext,
+    raw_total_asset_qty: float | None,
+    open_exposure_qty: float | None,
+    dust_tracking_qty: float | None,
+    reserved_exit_qty: float | None,
+    market_price: float | None,
+    min_qty: float | None,
+    qty_step: float | None,
+    min_notional_krw: float | None,
+    max_qty_decimals: int | None,
+    exit_fee_ratio: float,
+    exit_slippage_bps: float,
+    exit_buffer_ratio: float,
+) -> NormalizedExposure:
+    return build_normalized_exposure(
         raw_qty_open=raw_qty_open,
         dust_context=display_context,
         raw_total_asset_qty=raw_total_asset_qty,
         open_exposure_qty=open_exposure_qty,
         dust_tracking_qty=dust_tracking_qty,
+        reserved_exit_qty=reserved_exit_qty,
+        market_price=market_price,
+        min_qty=min_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        max_qty_decimals=max_qty_decimals,
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
     )
-    return PositionStateModel(
-        raw_holdings=display_context.raw_holdings,
-        normalized_exposure=normalized_exposure,
-        operator_diagnostics=display_context.operator_view,
-        fields={
-            **display_context.fields,
-            **normalized_exposure.as_dict(),
-            "raw_holdings": display_context.raw_holdings.as_dict(),
-            "normalized_exposure": normalized_exposure.as_dict(),
-            "operator_diagnostics": {
-                "state": display_context.operator_view.state,
-                "state_label": display_context.operator_view.state_label,
-                "operator_action": display_context.operator_view.operator_action,
-                "operator_message": display_context.operator_view.operator_message,
-                "broker_local_match": bool(display_context.operator_view.broker_local_match),
-                "new_orders_allowed": bool(display_context.operator_view.new_orders_allowed),
-                "resume_allowed": bool(display_context.operator_view.resume_allowed),
-                "treat_as_flat": bool(display_context.operator_view.treat_as_flat),
-            },
-            "raw_qty_open": float(normalized_exposure.raw_qty_open),
-            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
-            "open_exposure_qty": float(normalized_exposure.open_exposure_qty),
-            "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
+
+
+def _build_position_state_fields(
+    *,
+    display_context: DustDisplayContext,
+    normalized_exposure: NormalizedExposure,
+    state_interpretation: PositionStateInterpretation,
+) -> dict[str, object]:
+    return {
+        **display_context.fields,
+        **normalized_exposure.as_dict(),
+        "raw_holdings": display_context.raw_holdings.as_dict(),
+        "normalized_exposure": normalized_exposure.as_dict(),
+        "operator_diagnostics": {
+            "state": display_context.operator_view.state,
+            "state_label": display_context.operator_view.state_label,
+            "operator_action": display_context.operator_view.operator_action,
+            "operator_message": display_context.operator_view.operator_message,
+            "broker_local_match": bool(display_context.operator_view.broker_local_match),
+            "new_orders_allowed": bool(display_context.operator_view.new_orders_allowed),
+            "resume_allowed": bool(display_context.operator_view.resume_allowed),
+            "treat_as_flat": bool(display_context.operator_view.treat_as_flat),
         },
-    )
+        "state_interpretation": state_interpretation.as_dict(),
+        "raw_qty_open": float(normalized_exposure.raw_qty_open),
+        "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+        "total_holdings_qty": float(normalized_exposure.raw_total_asset_qty),
+        "open_exposure_qty": float(normalized_exposure.open_exposure_qty),
+        "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
+        "reserved_exit_qty": float(normalized_exposure.reserved_exit_qty),
+        "sellable_executable_qty": float(normalized_exposure.sellable_executable_qty),
+    }
 
 
 def build_normalized_exposure(
@@ -1074,44 +1353,233 @@ def build_normalized_exposure(
     raw_total_asset_qty: float | None = None,
     open_exposure_qty: float | None = None,
     dust_tracking_qty: float | None = None,
+    reserved_exit_qty: float | None = None,
+    market_price: float | None = None,
+    min_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    max_qty_decimals: int | None = None,
+    exit_fee_ratio: float = 0.0,
+    exit_slippage_bps: float = 0.0,
+    exit_buffer_ratio: float = 0.0,
 ) -> NormalizedExposure:
     display_context = (
         dust_context
         if isinstance(dust_context, DustDisplayContext)
         else build_dust_display_context(dust_context)
     )
-    normalized_raw_qty = max(0.0, float(raw_qty_open))
-    normalized_total_asset_qty = (
-        max(0.0, float(raw_total_asset_qty))
-        if raw_total_asset_qty is not None
-        else normalized_raw_qty
+    inventory = _normalize_position_inventory(
+        raw_qty_open=raw_qty_open,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
+        reserved_exit_qty=reserved_exit_qty,
     )
-    normalized_open_exposure_qty = (
-        max(0.0, float(open_exposure_qty))
-        if open_exposure_qty is not None
-        else normalized_raw_qty
+    executable_exposure = _derive_executable_open_exposure(
+        inventory=inventory,
+        market_price=market_price,
+        min_qty=0.0 if min_qty is None else float(min_qty),
+        qty_step=0.0 if qty_step is None else float(qty_step),
+        min_notional_krw=0.0 if min_notional_krw is None else float(min_notional_krw),
+        max_qty_decimals=max_qty_decimals,
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
     )
-    normalized_dust_tracking_qty = (
-        max(0.0, float(dust_tracking_qty))
-        if dust_tracking_qty is not None
-        else 0.0
+    normalized_total_asset_qty = inventory.raw_total_asset_qty
+    normalized_dust_tracking_qty = executable_exposure.normalized_dust_tracking_qty
+    effective_open_exposure_qty = executable_exposure.effective_open_exposure_qty
+    effective_reserved_exit_qty = executable_exposure.effective_reserved_exit_qty
+    sellable_executable_qty = executable_exposure.sellable_executable_qty
+    entry_allowed = bool(
+        normalized_total_asset_qty <= DUST_POSITION_EPS
+        or should_treat_as_flat_for_entry_gate(display_context)
     )
-    entry_allowed = should_treat_as_flat_for_entry_gate(display_context)
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
     # `normalized_exposure_active` tracks whether strategy-visible open exposure exists.
     # The entry gate is separate from the sellable exposure state.
-    normalized_active = bool(normalized_open_exposure_qty > DUST_POSITION_EPS)
-    normalized_qty = float(normalized_open_exposure_qty if normalized_active else 0.0)
+    normalized_active = bool(effective_open_exposure_qty > DUST_POSITION_EPS)
+    normalized_qty = float(effective_open_exposure_qty if normalized_active else 0.0)
+    if entry_allowed:
+        entry_block_reason = "none"
+    elif effective_open_exposure_qty > DUST_POSITION_EPS:
+        entry_block_reason = "position_has_executable_exposure"
+    elif normalized_dust_tracking_qty > DUST_POSITION_EPS:
+        entry_block_reason = "dust_residual_blocks_entry"
+    elif normalized_total_asset_qty > DUST_POSITION_EPS:
+        entry_block_reason = "position_not_flat"
+    else:
+        entry_block_reason = "none"
+    if sellable_executable_qty > DUST_POSITION_EPS:
+        exit_allowed = True
+        exit_block_reason = "none"
+        terminal_state = "open_exposure"
+    elif effective_open_exposure_qty > DUST_POSITION_EPS and effective_reserved_exit_qty > DUST_POSITION_EPS:
+        exit_allowed = False
+        exit_block_reason = "reserved_for_open_sell_orders"
+        terminal_state = "reserved_exit_pending"
+    elif normalized_dust_tracking_qty > DUST_POSITION_EPS:
+        exit_allowed = False
+        exit_block_reason = "no_executable_exit_lot_exists"
+        terminal_state = "dust_only"
+    elif normalized_total_asset_qty <= DUST_POSITION_EPS:
+        exit_allowed = False
+        exit_block_reason = "no_position"
+        terminal_state = "flat"
+    else:
+        exit_allowed = False
+        exit_block_reason = str(
+            executable_exposure.executable_lot.exit_non_executable_reason
+            or "no_executable_exit_lot"
+        )
+        terminal_state = "non_executable_position"
     return NormalizedExposure(
-        raw_qty_open=normalized_raw_qty,
+        raw_qty_open=inventory.raw_qty_open,
         raw_total_asset_qty=normalized_total_asset_qty,
-        open_exposure_qty=normalized_open_exposure_qty,
+        open_exposure_qty=effective_open_exposure_qty,
         dust_tracking_qty=normalized_dust_tracking_qty,
+        reserved_exit_qty=effective_reserved_exit_qty,
+        sellable_executable_qty=sellable_executable_qty,
+        effective_min_trade_qty=float(executable_exposure.executable_lot.effective_min_trade_qty),
+        exit_non_executable_reason=str(executable_exposure.executable_lot.exit_non_executable_reason),
         dust_context=display_context,
         effective_flat=effective_flat,
         entry_allowed=entry_allowed,
+        entry_block_reason=entry_block_reason,
+        exit_allowed=exit_allowed,
+        exit_block_reason=exit_block_reason,
+        terminal_state=terminal_state,
         normalized_exposure_active=normalized_active,
         normalized_exposure_qty=normalized_qty,
+    )
+
+
+def build_position_state_interpretation(
+    *,
+    normalized_exposure: NormalizedExposure,
+) -> PositionStateInterpretation:
+    terminal_state = str(normalized_exposure.terminal_state or "unknown")
+    lifecycle_label_map = {
+        "flat": "flat position",
+        "open_exposure": "open executable exposure",
+        "reserved_exit_pending": "exit inventory reserved by open sell orders",
+        "dust_only": "tracked unsellable residual",
+        "non_executable_position": "non-executable open exposure",
+    }
+    operator_outcome_map = {
+        "flat": "flat_no_position",
+        "open_exposure": "executable_open_exposure",
+        "reserved_exit_pending": "reserved_exit_pending",
+        "dust_only": "tracked_unsellable_residual",
+        "non_executable_position": "non_executable_open_exposure",
+    }
+    operator_message_map = {
+        "flat": "No position remains in the shared state model.",
+        "open_exposure": "Executable open exposure remains available for a normal SELL path.",
+        "reserved_exit_pending": "Executable exposure exists, but current sellable inventory is already reserved by open SELL orders.",
+        "dust_only": "Residual holdings are tracked as dust at the state layer, so exit is a HOLD/no-submit outcome rather than a submit failure.",
+        "non_executable_position": "Residual open exposure remains in state, but exchange constraints make it non-executable until operator review or state changes.",
+    }
+    entry_status = (
+        "allowed"
+        if normalized_exposure.entry_allowed
+        else f"blocked:{normalized_exposure.entry_block_reason}"
+    )
+    exit_status = (
+        "allowed"
+        if normalized_exposure.exit_allowed
+        else f"blocked:{normalized_exposure.exit_block_reason}"
+    )
+    return PositionStateInterpretation(
+        lifecycle_state=terminal_state,
+        lifecycle_label=lifecycle_label_map.get(terminal_state, terminal_state.replace("_", " ")),
+        operator_outcome=operator_outcome_map.get(terminal_state, terminal_state),
+        operator_message=operator_message_map.get(
+            terminal_state,
+            "Shared state requires operator review before execution can continue.",
+        ),
+        entry_status=entry_status,
+        exit_status=exit_status,
+        exit_submit_expected=bool(normalized_exposure.exit_allowed),
+    )
+
+
+def _normalize_position_inventory(
+    *,
+    raw_qty_open: float,
+    raw_total_asset_qty: float | None,
+    open_exposure_qty: float | None,
+    dust_tracking_qty: float | None,
+    reserved_exit_qty: float | None,
+) -> _NormalizedPositionInventory:
+    normalized_raw_qty = max(0.0, float(raw_qty_open))
+    return _NormalizedPositionInventory(
+        raw_qty_open=normalized_raw_qty,
+        raw_total_asset_qty=(
+            max(0.0, float(raw_total_asset_qty))
+            if raw_total_asset_qty is not None
+            else normalized_raw_qty
+        ),
+        open_exposure_qty=(
+            max(0.0, float(open_exposure_qty))
+            if open_exposure_qty is not None
+            else normalized_raw_qty
+        ),
+        dust_tracking_qty=(
+            max(0.0, float(dust_tracking_qty))
+            if dust_tracking_qty is not None
+            else 0.0
+        ),
+        reserved_exit_qty=(
+            max(0.0, float(reserved_exit_qty))
+            if reserved_exit_qty is not None
+            else 0.0
+        ),
+    )
+
+
+def _derive_executable_open_exposure(
+    *,
+    inventory: _NormalizedPositionInventory,
+    market_price: float | None,
+    min_qty: float,
+    qty_step: float,
+    min_notional_krw: float,
+    max_qty_decimals: int | None,
+    exit_fee_ratio: float,
+    exit_slippage_bps: float,
+    exit_buffer_ratio: float,
+) -> _ExecutableExposureDerivation:
+    executable_lot = build_executable_lot(
+        qty=inventory.open_exposure_qty,
+        market_price=market_price,
+        min_qty=min_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        max_qty_decimals=max_qty_decimals,
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
+    )
+    effective_open_exposure_qty = max(0.0, executable_lot.executable_qty)
+    effective_reserved_exit_qty = min(
+        effective_open_exposure_qty,
+        inventory.reserved_exit_qty,
+    )
+    sellable_executable_qty = max(
+        0.0,
+        effective_open_exposure_qty - effective_reserved_exit_qty,
+    )
+    normalized_dust_tracking_qty = max(
+        0.0,
+        inventory.dust_tracking_qty + executable_lot.dust_qty,
+    )
+    return _ExecutableExposureDerivation(
+        executable_lot=executable_lot,
+        effective_open_exposure_qty=effective_open_exposure_qty,
+        effective_reserved_exit_qty=effective_reserved_exit_qty,
+        sellable_executable_qty=sellable_executable_qty,
+        normalized_dust_tracking_qty=normalized_dust_tracking_qty,
     )
 
 

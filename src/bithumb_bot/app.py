@@ -53,6 +53,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
+from .lifecycle import summarize_reserved_exit_qty
 from .markets import canonical_market_with_raw
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
@@ -193,6 +194,7 @@ def cmd_status():
     cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
     cash = cash_available + cash_locked
     qty = asset_available + asset_locked
+    reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
 
     row = conn.execute(
         "SELECT close, ts FROM candles WHERE pair=? AND interval=? ORDER BY ts DESC LIMIT 1",
@@ -231,6 +233,7 @@ def cmd_status():
     position_state = build_position_state_model(
         raw_qty_open=qty,
         metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+        reserved_exit_qty=reserved_exit_qty,
     )
     dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
     dust = position_state.raw_holdings
@@ -551,6 +554,7 @@ def cmd_health() -> None:
     open_order_count = 0
     remote_open_order_count: int | None = None
     position_summary = "flat"
+    reserved_exit_qty = 0.0
     portfolio_conn = ensure_db()
     try:
         open_order_row = portfolio_conn.execute(
@@ -565,6 +569,7 @@ def cmd_health() -> None:
         portfolio_row = portfolio_conn.execute(
             "SELECT asset_qty FROM portfolio WHERE id=1"
         ).fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
         if portfolio_row is not None and abs(float(portfolio_row["asset_qty"] or 0.0)) > 1e-12:
             position_summary = f"long_qty={float(portfolio_row['asset_qty']):.8f}"
     finally:
@@ -590,11 +595,14 @@ def cmd_health() -> None:
         state_label = "paused"
 
     position_qty = float(portfolio_row["asset_qty"]) if portfolio_row is not None else 0.0
+    dust_context = build_dust_display_context(health.get("last_reconcile_metadata"))
     position_state = build_position_state_model(
         raw_qty_open=position_qty,
         metadata_raw=health.get("last_reconcile_metadata"),
+        raw_total_asset_qty=max(position_qty, float(dust_context.raw_holdings.broker_qty)),
+        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        reserved_exit_qty=reserved_exit_qty,
     )
-    dust_context = build_dust_display_context(health.get("last_reconcile_metadata"))
     dust = position_state.raw_holdings
     dust_view = position_state.operator_diagnostics
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
@@ -708,7 +716,25 @@ def cmd_health() -> None:
         "    "
         f"position={position_summary} "
         f"entry_allowed={1 if position_state.normalized_exposure.entry_allowed else 0} "
+        f"entry_block_reason={position_state.normalized_exposure.entry_block_reason} "
+        f"exit_allowed={1 if position_state.normalized_exposure.exit_allowed else 0} "
+        f"exit_block_reason={position_state.normalized_exposure.exit_block_reason} "
         f"effective_flat_due_to_harmless_dust={1 if position_state.effective_flat_due_to_harmless_dust else 0}"
+    )
+    print(
+        "    "
+        f"total_holdings_qty={float(position_state.normalized_exposure.raw_total_asset_qty):.8f} "
+        f"executable_exposure_qty={float(position_state.normalized_exposure.open_exposure_qty):.8f} "
+        f"tracked_dust_qty={float(position_state.normalized_exposure.dust_tracking_qty):.8f} "
+        f"reserved_exit_qty={float(position_state.normalized_exposure.reserved_exit_qty):.8f} "
+        f"sellable_executable_qty={float(position_state.normalized_exposure.sellable_executable_qty):.8f} "
+        f"terminal_state={position_state.normalized_exposure.terminal_state}"
+    )
+    print(
+        "    "
+        f"state_outcome={position_state.state_interpretation.operator_outcome} "
+        f"exit_submit_expected={1 if position_state.state_interpretation.exit_submit_expected else 0} "
+        f"state_message={position_state.state_interpretation.operator_message}"
     )
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
@@ -3633,4 +3659,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

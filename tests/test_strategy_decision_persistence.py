@@ -169,13 +169,22 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
                     },
                     "normalized_exposure": {
                         "raw_qty_open": 0.00009629,
+                        "raw_total_asset_qty": 0.00009629,
                         "dust_classification": "harmless_dust",
                         "dust_state": "harmless_dust",
                         "entry_allowed": True,
+                        "entry_block_reason": "none",
                         "effective_flat": True,
                         "effective_flat_due_to_harmless_dust": True,
                         "normalized_exposure_active": False,
                         "normalized_exposure_qty": 0.0,
+                        "open_exposure_qty": 0.0,
+                        "dust_tracking_qty": 0.00009629,
+                        "reserved_exit_qty": 0.0,
+                        "sellable_executable_qty": 0.0,
+                        "exit_allowed": False,
+                        "exit_block_reason": "no_executable_exit_lot_exists",
+                        "terminal_state": "dust_only",
                     },
                     "operator_diagnostics": {
                         "state": "harmless_dust",
@@ -186,6 +195,15 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
                         "new_orders_allowed": True,
                         "resume_allowed": True,
                         "treat_as_flat": True,
+                    },
+                    "state_interpretation": {
+                        "lifecycle_state": "dust_only",
+                        "lifecycle_label": "tracked unsellable residual",
+                        "operator_outcome": "tracked_unsellable_residual",
+                        "operator_message": "Residual holdings are tracked as dust at the state layer.",
+                        "entry_status": "allowed",
+                        "exit_status": "blocked:no_executable_exit_lot_exists",
+                        "exit_submit_expected": False,
                     },
                 },
             },
@@ -204,7 +222,15 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["effective_flat"] is True
     assert ctx["normalized_exposure_active"] is False
     assert ctx["normalized_exposure_qty"] == pytest.approx(0.0)
-    assert ctx["open_exposure_qty"] == pytest.approx(0.00009629)
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["dust_tracking_qty"] == pytest.approx(0.00009629)
+    assert ctx["reserved_exit_qty"] == pytest.approx(0.0)
+    assert ctx["sellable_executable_qty"] == pytest.approx(0.0)
+    assert ctx["exit_allowed"] is False
+    assert ctx["exit_block_reason"] == "no_executable_exit_lot_exists"
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["position_state"]["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
+    assert "submit_payload_qty" not in ctx["position_state"]["normalized_exposure"]
+    assert "sell_submit_qty_source" not in ctx["position_state"]["normalized_exposure"]

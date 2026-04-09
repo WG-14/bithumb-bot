@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 
 from .dust import (
     DUST_TRACKING_LOT_STATE,
@@ -9,7 +10,9 @@ from .dust import (
     DustClassification,
     DustDisplayContext,
     DustState,
+    ExecutableLot,
     build_dust_display_context,
+    build_executable_lot,
     is_strictly_below_min_qty,
 )
 from .markets import parse_user_market_input
@@ -29,6 +32,16 @@ ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE = "ambiguous_multi_candidate"
 ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH = "unattributed_no_strict_match"
 ENTRY_DECISION_LINKAGE_UNATTRIBUTED_MISSING_STRATEGY = "unattributed_missing_strategy"
 ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED = "degraded_recovery_unattributed"
+
+
+@dataclass(frozen=True)
+class PositionLotSnapshot:
+    raw_open_exposure_qty: float
+    executable_open_exposure_qty: float
+    dust_tracking_qty: float
+    raw_total_asset_qty: float
+    effective_min_trade_qty: float
+    exit_non_executable_reason: str
 
 
 def _row_value(row: object, key: str, index: int) -> object | None:
@@ -474,6 +487,104 @@ def mark_harmless_dust_positions(
         )
         updated_count += 1
     return updated_count
+
+
+def summarize_position_lots(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    executable_lot: ExecutableLot | None = None,
+) -> PositionLotSnapshot:
+    try:
+        open_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(qty_open), 0.0)
+            FROM open_position_lots
+            WHERE pair=? AND position_state=? AND qty_open > 1e-12
+            """,
+            (str(pair), OPEN_EXPOSURE_LOT_STATE),
+        ).fetchone()
+        dust_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(qty_open), 0.0)
+            FROM open_position_lots
+            WHERE pair=? AND position_state=? AND qty_open > 1e-12
+            """,
+            (str(pair), DUST_TRACKING_LOT_STATE),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        open_row = (0.0,)
+        dust_row = (0.0,)
+    raw_open_qty = max(0.0, float(open_row[0] if open_row is not None else 0.0))
+    tracked_dust_qty = max(0.0, float(dust_row[0] if dust_row is not None else 0.0))
+    if executable_lot is None:
+        executable_lot = build_executable_lot(
+            qty=raw_open_qty,
+            market_price=None,
+            min_qty=0.0,
+            qty_step=0.0,
+            min_notional_krw=0.0,
+        )
+    return PositionLotSnapshot(
+        raw_open_exposure_qty=raw_open_qty,
+        executable_open_exposure_qty=float(executable_lot.executable_qty),
+        dust_tracking_qty=max(0.0, tracked_dust_qty + float(executable_lot.dust_qty)),
+        raw_total_asset_qty=max(0.0, raw_open_qty + tracked_dust_qty),
+        effective_min_trade_qty=float(executable_lot.effective_min_trade_qty),
+        exit_non_executable_reason=str(executable_lot.exit_non_executable_reason),
+    )
+
+
+def summarize_reserved_exit_qty(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+) -> float:
+    """Return remaining qty already reserved by unresolved SELL orders."""
+
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty
+            FROM orders
+            WHERE symbol=?
+              AND side='SELL'
+              AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            """,
+            (str(pair),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 0.0
+    if row is None:
+        return 0.0
+    try:
+        value = row["reserved_exit_qty"] if hasattr(row, "keys") else row[0]
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError, IndexError, KeyError):
+        return 0.0
+
+
+def reclassify_non_executable_open_exposure(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    executable_lot: ExecutableLot,
+) -> int:
+    if executable_lot.executable_qty > 1e-12:
+        return 0
+    if executable_lot.raw_qty <= 1e-12:
+        return 0
+    result = conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_state=?
+        WHERE pair=?
+          AND position_state=?
+          AND qty_open > 1e-12
+        """,
+        (DUST_TRACKING_LOT_STATE, str(pair), OPEN_EXPOSURE_LOT_STATE),
+    )
+    return int(result.rowcount or 0)
 
 
 def _fetch_sellable_open_exposure_lots(

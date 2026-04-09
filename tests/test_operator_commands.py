@@ -5087,7 +5087,9 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_broker_local_match=1" in health_out
     assert "dust_qty_below_min=broker=1 local=1" in health_out
     assert "dust_notional_below_min=broker=0 local=0" in health_out
-    assert "position=flat entry_allowed=1 effective_flat_due_to_harmless_dust=1" in health_out
+    assert "position=flat entry_allowed=1" in health_out
+    assert "effective_flat_due_to_harmless_dust=1" in health_out
+    assert "tracked_dust_qty=0.00009629" in health_out
     assert "dust_effective_flat=1" in health_out
     assert "balance_source_flat_start_allowed=True" in health_out
     assert "balance_source_flat_start_reason=flat_start_effective_flat(" in health_out

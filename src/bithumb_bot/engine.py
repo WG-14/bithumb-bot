@@ -24,6 +24,7 @@ from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
+from .lifecycle import summarize_reserved_exit_qty
 from .dust import (
     DustClassification,
     DustState,
@@ -438,6 +439,7 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     conn = ensure_db()
     try:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
         state = runtime_state.snapshot()
     finally:
         conn.close()
@@ -446,6 +448,7 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     position_state = build_position_state_model(
         raw_qty_open=asset_qty,
         metadata_raw=state.last_reconcile_metadata,
+        reserved_exit_qty=reserved_exit_qty,
     )
     return open_count > 0, position_state.normalized_exposure.normalized_exposure_active
 

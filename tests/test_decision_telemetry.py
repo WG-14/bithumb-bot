@@ -7,6 +7,7 @@ import pytest
 from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
+from bithumb_bot.reporting import fetch_decision_telemetry_summary
 
 
 def test_record_strategy_decision_normalizes_blocked_entry_context(tmp_path, monkeypatch):
@@ -63,9 +64,9 @@ def test_record_strategy_decision_normalizes_blocked_entry_context(tmp_path, mon
     assert ctx["strategy_name"] == "sma_with_filter"
     assert ctx["pair"] == "KRW-BTC"
     assert ctx["interval"] == "1m"
-    assert ctx["entry_allowed_truth_source"] == "default:false"
-    assert ctx["effective_flat_truth_source"] == "default:false"
-    assert ctx["decision_truth_sources"]["entry_allowed"] == "default:false"
+    assert ctx["entry_allowed_truth_source"] == "fallback:flat_zero_holdings"
+    assert ctx["effective_flat_truth_source"] == "fallback:flat_zero_holdings"
+    assert ctx["decision_truth_sources"]["entry_allowed"] == "fallback:flat_zero_holdings"
     assert ctx["decision_truth_sources"]["raw_qty_open"] == "default:0.0"
 
 
@@ -131,7 +132,7 @@ def test_decision_telemetry_cli_exposes_sell_failure_category_fields(tmp_path, m
                 "raw_total_asset_qty": 0.00029193,
                 "open_exposure_qty": 0.0002,
                 "dust_tracking_qty": 0.00009193,
-                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
                 "normalized_exposure_qty": 0.0002,
@@ -180,7 +181,7 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
                 "raw_total_asset_qty": 0.00019192,
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
-                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
                 "normalized_exposure_qty": 0.00009629,
@@ -242,7 +243,7 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
                 "raw_total_asset_qty": 0.00019192,
                 "open_exposure_qty": 0.00009629,
                 "dust_tracking_qty": 0.00009563,
-                "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "position_gate": {
                     "entry_allowed": True,
@@ -266,15 +267,15 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["submit_payload_qty"] == pytest.approx(0.00009629)
     assert ctx["open_exposure_qty"] == 0.00009629
     assert ctx["dust_tracking_qty"] == 0.00009563
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009629)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_qty_boundary_kind"] == "none"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.00009629)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
+    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert ctx["sell_normalized_exposure_qty_truth_source"] == "fallback:raw_qty_open_or_zero"
     assert ctx["sell_open_exposure_qty_truth_source"] == "context.open_exposure_qty"
     assert ctx["sell_dust_tracking_qty_truth_source"] == "context.dust_tracking_qty"
@@ -332,12 +333,12 @@ def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_
 
     assert row is not None
     ctx = json.loads(str(row["context_json"]))
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009999)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.open_exposure_qty"
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:open_exposure_qty"
-    assert ctx["sell_qty_basis_qty_truth_source"] == "position_state.normalized_exposure.open_exposure_qty"
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
+    assert ctx["sell_qty_basis_qty_truth_source"] == "position_state.normalized_exposure.sellable_executable_qty"
 
 
 def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_path, monkeypatch):
@@ -365,7 +366,7 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
                     "open_exposure_qty": 0.0,
                     "dust_tracking_qty": 0.0,
                     "position_state_source": "position_state.raw_qty_open",
-                    "submit_qty_source": "position_state.normalized_exposure.open_exposure_qty",
+                    "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 },
             },
         )
@@ -387,6 +388,66 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
     assert ctx["position_state"]["normalized_exposure"]["raw_total_asset_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["open_exposure_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["dust_tracking_qty"] == 0.0
+
+
+def test_decision_telemetry_prefers_normalized_position_state_over_shadow_top_level_values(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = str(tmp_path / "decision-normalized-state-authority.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=3,
+            strategy_name="sma_with_filter",
+            signal="SELL",
+            reason="sma dead cross",
+            candle_ts=3,
+            market_price=1.0,
+            context={
+                "base_signal": "SELL",
+                "base_reason": "sma dead cross",
+                "entry_reason": "sma dead cross",
+                "raw_qty_open": 9.9,
+                "raw_total_asset_qty": 9.9,
+                "open_exposure_qty": 9.9,
+                "dust_tracking_qty": 8.8,
+                "normalized_exposure_qty": 9.9,
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.3,
+                        "raw_total_asset_qty": 0.35,
+                        "open_exposure_qty": 0.25,
+                        "dust_tracking_qty": 0.1,
+                        "normalized_exposure_qty": 0.25,
+                        "entry_allowed": False,
+                        "effective_flat": False,
+                        "normalized_exposure_active": True,
+                        "sellable_executable_qty": 0.25,
+                        "exit_allowed": True,
+                        "exit_block_reason": "none",
+                        "terminal_state": "open_exposure",
+                    }
+                },
+            },
+        )
+        conn.commit()
+        rows = fetch_decision_telemetry_summary(conn, limit=20)
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.raw_qty_open == pytest.approx(0.3)
+    assert row.raw_total_asset_qty == pytest.approx(0.35)
+    assert row.open_exposure_qty == pytest.approx(0.25)
+    assert row.dust_tracking_qty == pytest.approx(0.1)
+    assert row.position_qty == pytest.approx(0.25)
+    assert row.normalized_exposure_qty == pytest.approx(0.25)
 
 
 def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monkeypatch, capsys):
@@ -442,9 +503,9 @@ def test_decision_telemetry_cli_groups_blocked_hold_and_executed(tmp_path, monke
     assert rc == 0
     assert "[DECISION-TELEMETRY]" in out
     assert "BLOCKED_ENTRY" in out
-    assert "BUY,BLOCKED_ENTRY,BUY,HOLD,BUY_BLOCKED,1,0,filtered entry: gap" in out
-    assert "BUY,BUY,BUY,BUY,BUY_SUBMIT,0,0,sma golden cross" in out
-    assert "HOLD,HOLD,HOLD,HOLD,HOLD,0,0,position held: no exit rule triggered" in out
+    assert "BUY,BLOCKED_ENTRY,BUY,HOLD,BUY_BLOCKED,1,1,filtered entry: gap" in out
+    assert "BUY,BUY,BUY,BUY,BUY_SUBMIT,0,1,sma golden cross" in out
+    assert "HOLD,HOLD,HOLD,HOLD,HOLD,0,1,position held: no exit rule triggered" in out
 
 
 def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeypatch):

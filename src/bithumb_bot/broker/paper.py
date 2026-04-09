@@ -15,6 +15,9 @@ from ..observability import format_log_kv
 from ..decision_context import load_recorded_strategy_decision_context
 from .. import runtime_state
 from ..dust import build_normalized_exposure
+from ..lifecycle import summarize_reserved_exit_qty
+from ..order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
+from .order_rules import get_effective_order_rules
 from ..oms import (
     build_client_order_id,
     build_order_intent_key,
@@ -88,19 +91,53 @@ def paper_execute(
     try:
         init_portfolio(conn)
         cash, qty = get_portfolio(conn)
+        rules = get_effective_order_rules(settings.PAIR).rules
         normalized_exposure = build_normalized_exposure(
             raw_qty_open=float(qty),
             dust_context=runtime_state.snapshot().last_reconcile_metadata,
+            raw_total_asset_qty=float(qty),
+            open_exposure_qty=float(qty),
+            dust_tracking_qty=0.0,
+            reserved_exit_qty=summarize_reserved_exit_qty(conn, pair=settings.PAIR),
+            market_price=float(fill_price),
+            min_qty=float(rules.min_qty),
+            qty_step=float(rules.qty_step),
+            min_notional_krw=float(rules.min_notional_krw),
+            max_qty_decimals=int(rules.max_qty_decimals),
+            exit_fee_ratio=float(settings.PAPER_FEE_RATE),
+            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
         )
         decision_context, decision_loaded = load_recorded_strategy_decision_context(
             conn,
             decision_id=decision_id,
         )
         if decision_loaded:
-            effective_flat = bool(decision_context.get("effective_flat"))
-            entry_allowed = bool(decision_context.get("entry_allowed"))
-            normalized_exposure_active = bool(decision_context.get("normalized_exposure_active"))
-            open_exposure_qty = float(decision_context.get("open_exposure_qty", qty))
+            position_state = (
+                decision_context.get("position_state")
+                if isinstance(decision_context.get("position_state"), dict)
+                else {}
+            )
+            normalized_state = (
+                position_state.get("normalized_exposure")
+                if isinstance(position_state.get("normalized_exposure"), dict)
+                else {}
+            )
+            effective_flat = bool(
+                normalized_state.get("effective_flat", decision_context.get("effective_flat"))
+            )
+            entry_allowed = bool(
+                normalized_state.get("entry_allowed", decision_context.get("entry_allowed"))
+            )
+            normalized_exposure_active = bool(
+                normalized_state.get(
+                    "normalized_exposure_active",
+                    decision_context.get("normalized_exposure_active"),
+                )
+            )
+            open_exposure_qty = float(
+                normalized_state.get("open_exposure_qty", decision_context.get("open_exposure_qty", qty))
+            )
         else:
             effective_flat = bool(normalized_exposure.effective_flat)
             entry_allowed = bool(normalized_exposure.entry_allowed)
@@ -126,24 +163,36 @@ def paper_execute(
             if blocked:
                 return None
 
-            spend = cash * float(settings.BUY_FRACTION)
-            if settings.MAX_ORDER_KRW > 0:
-                spend = min(spend, float(settings.MAX_ORDER_KRW))
-            if spend <= 0:
+            entry_sizing = build_buy_execution_sizing(
+                pair=settings.PAIR,
+                cash_krw=float(cash),
+                market_price=float(fill_price),
+                entry_intent=(
+                    entry.get("intent")
+                    if isinstance((entry := decision_context.get("entry")), dict)
+                    else None
+                ),
+            )
+            if not entry_sizing.allowed:
                 return None
 
+            spend = float(entry_sizing.budget_krw)
             fee = spend * fee_rate
-            spend_net = max(0.0, spend - fee)
-            # Order sizing owns the rounding rule: round down one
-            # representable float so the simulated BUY never exceeds the cash
-            # budget. Fill application must only absorb the tiny residue this
-            # leaves behind; it must not perform another quantity round-down.
-            trade_qty = max(0.0, math.nextafter(spend_net / float(fill_price), 0.0))
+            trade_qty = float(entry_sizing.executable_qty)
             side = "BUY"
 
-        elif signal == "SELL" and qty > POSITION_EPSILON:
-            trade_qty = qty
-            fee = (qty * float(fill_price)) * fee_rate
+        elif signal == "SELL":
+            exit_sizing = build_sell_execution_sizing(
+                pair=settings.PAIR,
+                market_price=float(fill_price),
+                sellable_qty=float(normalized_exposure.sellable_executable_qty),
+                exit_allowed=bool(normalized_exposure.exit_allowed),
+                exit_block_reason=str(normalized_exposure.exit_block_reason),
+            )
+            if not exit_sizing.allowed:
+                return None
+            trade_qty = float(exit_sizing.executable_qty)
+            fee = (trade_qty * float(fill_price)) * fee_rate
             side = "SELL"
 
         else:
