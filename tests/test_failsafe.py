@@ -139,6 +139,13 @@ class _LoopConn:
             return _Rows({"cnt": 0})
 
         if (
+            "COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty" in q
+            and "FROM orders" in q
+            and "side='SELL'" in q
+        ):
+            return _Rows({"reserved_exit_qty": 0.0})
+
+        if (
             "AS pending_submit_count" in q
             and "AS submit_unknown_count" in q
             and "AS recovery_required_count" in q
@@ -1192,4 +1199,3 @@ def test_run_loop_position_loss_breach_sends_halt_notification(monkeypatch):
         "operator_next_action=review risk breach details, verify exposure, then run recovery-report" in n
         for n in halted
     )
-

@@ -167,6 +167,7 @@ def paper_execute(
                 pair=settings.PAIR,
                 cash_krw=float(cash),
                 market_price=float(fill_price),
+                fee_rate=float(settings.PAPER_FEE_RATE),
                 entry_intent=(
                     entry.get("intent")
                     if isinstance((entry := decision_context.get("entry")), dict)
@@ -176,9 +177,8 @@ def paper_execute(
             if not entry_sizing.allowed:
                 return None
 
-            spend = float(entry_sizing.budget_krw)
-            fee = spend * fee_rate
             trade_qty = float(entry_sizing.executable_qty)
+            fee = (trade_qty * float(fill_price)) * fee_rate
             side = "BUY"
 
         elif signal == "SELL":

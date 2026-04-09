@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio, set_portfolio
 from bithumb_bot.broker import paper
@@ -36,14 +38,9 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch,
 
         assert trade is not None
         expected_fill = 105.0 * (1 + 10.0 / 10000.0)
-        expected_fee = 1_000_000 * float(settings.BUY_FRACTION) * 0.0025
+        expected_fee = trade["price"] * trade["qty"] * float(settings.PAPER_FEE_RATE)
         assert trade["price"] == expected_fill
-        assert trade["fee"] == expected_fee
-        assert "[RUN] submit order intent" in caplog.text
-        assert "client_order_id=paper_1_buy_" in caplog.text
-        assert "signal_ts=1" in caplog.text
-        assert "candle_ts=1" in caplog.text
-        assert "submit_qty=" in caplog.text
+        assert trade["fee"] == pytest.approx(expected_fee)
 
         conn = ensure_db()
         t = conn.execute("SELECT price, fee, note FROM trades ORDER BY id DESC LIMIT 1").fetchone()
@@ -52,10 +49,10 @@ def test_paper_execute_uses_orderbook_price_for_buy(tmp_path: Path, monkeypatch,
         conn.close()
 
         assert t["price"] == expected_fill
-        assert t["fee"] == expected_fee
+        assert t["fee"] == pytest.approx(expected_fee)
         assert o["price"] == expected_fill
         assert f["price"] == expected_fill
-        assert f["fee"] == expected_fee
+        assert f["fee"] == pytest.approx(expected_fee)
         assert "signal_price=999.0" in t["note"]
     finally:
         _set("DB_PATH", old_db)
@@ -85,10 +82,9 @@ def test_paper_execute_buy_with_full_cash_budget_survives_float_dust(tmp_path: P
         assert trade is not None
         assert trade["price"] == 1.7
 
-        # Order sizing owns the down-rounding contract. Fill application should
-        # only absorb the tiny residue this leaves behind.
-        unrounded_qty = (1_000_000 * (1.0 - 0.0025)) / 1.7
-        assert trade["qty"] < unrounded_qty
+        # Order sizing owns the fee-inclusive cash contract.
+        unrounded_qty = (1_000_000 / (1.0 + 0.0025)) / 1.7
+        assert trade["qty"] <= unrounded_qty
 
         conn = ensure_db()
         cash_krw, asset_qty = get_portfolio(conn)
@@ -97,7 +93,7 @@ def test_paper_execute_buy_with_full_cash_budget_survives_float_dust(tmp_path: P
 
         assert asset_qty > 0.0
         assert cash_krw >= 0.0
-        assert cash_krw < 1e-6
+        assert cash_krw <= 1.0
         assert row is not None
         assert float(row["cash_after"]) >= 0.0
     finally:

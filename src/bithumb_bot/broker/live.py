@@ -2915,6 +2915,7 @@ def live_execute_signal(
                 pair=settings.PAIR,
                 cash_krw=float(cash),
                 market_price=float(market_price),
+                fee_rate=float(settings.LIVE_FEE_RATE_ESTIMATE),
                 entry_intent=decision_observability.get("entry_intent"),
             )
             if not entry_sizing.allowed:
