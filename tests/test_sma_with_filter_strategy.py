@@ -389,18 +389,18 @@ def test_non_executable_exit_stops_at_state_layer_and_does_not_emit_sell() -> No
 
     assert decision is not None
     assert decision.signal == "HOLD"
-    assert decision.reason == "no_executable_exit_lot_exists"
+    assert decision.reason == "dust_only_remainder"
     assert decision.context["raw_signal"] == "SELL"
     assert decision.context["terminal_state"] == "dust_only"
     assert decision.context["exit_allowed"] is False
-    assert decision.context["exit_block_reason"] == "no_executable_exit_lot_exists"
+    assert decision.context["exit_block_reason"] == "dust_only_remainder"
     assert decision.context["position_state"]["normalized_exposure"]["sellable_executable_qty"] == pytest.approx(0.0)
     assert decision.context["position_state"]["normalized_exposure"]["terminal_state"] == "dust_only"
     assert decision.context["position_state"]["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
     assert decision.context["position_state"]["state_interpretation"]["exit_submit_expected"] is False
     assert decision.context["exit"]["triggered"] is False
     assert decision.context["exit"]["policy"] == "none"
-    assert decision.context["exit"]["reason"] == "no_executable_exit_lot_exists"
+    assert decision.context["exit"]["reason"] == "dust_only_remainder"
     assert decision.context["state_outcome"] == "tracked_unsellable_residual"
     assert decision.context["exit_submit_expected"] is False
     assert state_row[0] == "dust_tracking"

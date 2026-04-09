@@ -40,6 +40,8 @@ class PositionLotSnapshot:
     executable_open_exposure_qty: float
     dust_tracking_qty: float
     raw_total_asset_qty: float
+    open_lot_count: int
+    dust_tracking_lot_count: int
     effective_min_trade_qty: float
     exit_non_executable_reason: str
 
@@ -498,7 +500,7 @@ def summarize_position_lots(
     try:
         open_row = conn.execute(
             """
-            SELECT COALESCE(SUM(qty_open), 0.0)
+            SELECT COALESCE(SUM(qty_open), 0.0), COUNT(*)
             FROM open_position_lots
             WHERE pair=? AND position_state=? AND qty_open > 1e-12
             """,
@@ -506,17 +508,19 @@ def summarize_position_lots(
         ).fetchone()
         dust_row = conn.execute(
             """
-            SELECT COALESCE(SUM(qty_open), 0.0)
+            SELECT COALESCE(SUM(qty_open), 0.0), COUNT(*)
             FROM open_position_lots
             WHERE pair=? AND position_state=? AND qty_open > 1e-12
             """,
             (str(pair), DUST_TRACKING_LOT_STATE),
         ).fetchone()
     except sqlite3.OperationalError:
-        open_row = (0.0,)
-        dust_row = (0.0,)
+        open_row = (0.0, 0)
+        dust_row = (0.0, 0)
     raw_open_qty = max(0.0, float(open_row[0] if open_row is not None else 0.0))
     tracked_dust_qty = max(0.0, float(dust_row[0] if dust_row is not None else 0.0))
+    open_lot_count = max(0, int(open_row[1] if open_row is not None else 0))
+    dust_lot_count = max(0, int(dust_row[1] if dust_row is not None else 0))
     if executable_lot is None:
         executable_lot = build_executable_lot(
             qty=raw_open_qty,
@@ -530,6 +534,8 @@ def summarize_position_lots(
         executable_open_exposure_qty=float(executable_lot.executable_qty),
         dust_tracking_qty=max(0.0, tracked_dust_qty + float(executable_lot.dust_qty)),
         raw_total_asset_qty=max(0.0, raw_open_qty + tracked_dust_qty),
+        open_lot_count=open_lot_count,
+        dust_tracking_lot_count=dust_lot_count,
         effective_min_trade_qty=float(executable_lot.effective_min_trade_qty),
         exit_non_executable_reason=str(executable_lot.exit_non_executable_reason),
     )
@@ -549,7 +555,7 @@ def summarize_reserved_exit_qty(
             FROM orders
             WHERE symbol=?
               AND side='SELL'
-              AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+              AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """,
             (str(pair),),
         ).fetchone()

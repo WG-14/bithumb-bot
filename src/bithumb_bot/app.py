@@ -46,7 +46,7 @@ from .run_lock import read_run_lock_status
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
-from .broker.order_rules import get_effective_order_rules, rule_source_for
+from .broker.order_rules import get_cached_order_rule_snapshot, get_effective_order_rules, rule_source_for
 from .broker.bithumb import build_broker_with_auth_diagnostics
 from .broker import bithumb as bithumb_broker_module
 from .broker.base import BrokerBalance, BrokerOrder
@@ -561,7 +561,7 @@ def cmd_health() -> None:
             """
             SELECT COUNT(*) AS open_order_count
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         if open_order_row is not None:
@@ -904,6 +904,18 @@ def cmd_health() -> None:
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
     print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
+    rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
+    if rule_snapshot is not None:
+        print(
+            "  order_rule_snapshot="
+            f"source_mode={rule_snapshot.source_mode} "
+            f"retrieved_at_sec={rule_snapshot.retrieved_at_sec:.3f} "
+            f"expires_at_sec={rule_snapshot.expires_at_sec:.3f} "
+            f"stale={1 if rule_snapshot.is_stale() else 0} "
+            f"fallback_used={1 if rule_snapshot.fallback_used else 0}"
+        )
+    else:
+        print("  order_rule_snapshot=unknown")
     for key, value in dust_context.fields.items():
         if isinstance(value, bool):
             rendered = 1 if value else 0
@@ -1423,7 +1435,7 @@ def cmd_broker_diagnose() -> None:
                 """
                 SELECT client_order_id, exchange_order_id
                 FROM orders
-                WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+                WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
                 """
             ).fetchall()
         finally:
@@ -1581,7 +1593,7 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
             """
             SELECT client_order_id, exchange_order_id
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             ORDER BY updated_ts DESC, created_ts DESC
             LIMIT ?
             """,
@@ -1604,7 +1616,15 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
         }
     )
     if not exchange_order_ids and not client_order_ids:
-        return [], "no local unresolved identifiers available for broker snapshot"
+        try:
+            from .broker.bithumb import BithumbBroker
+
+            return BithumbBroker().get_recent_orders_for_recovery(
+                limit=limit,
+                market=settings.PAIR,
+            ), None
+        except Exception as e:
+            return [], f"failed to load recovery-scoped broker orders: {type(e).__name__}: {e}"
     try:
         from .broker.bithumb import BithumbBroker
 

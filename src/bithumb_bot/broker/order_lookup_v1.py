@@ -55,10 +55,12 @@ def resolve_identifiers(
 def build_lookup_params(*, client_order_id: str | None, exchange_order_id: str | None) -> dict[str, str]:
     requested_exchange_order_id = clean_identifier(exchange_order_id)
     requested_client_order_id = clean_identifier(client_order_id)
+    if requested_client_order_id:
+        requested_client_order_id = validate_client_order_id(requested_client_order_id)
     if requested_exchange_order_id:
         return {"uuid": requested_exchange_order_id}
     if requested_client_order_id:
-        return {"client_order_id": validate_client_order_id(requested_client_order_id)}
+        return {"client_order_id": requested_client_order_id}
     raise ValueError("order lookup requires exchange_order_id(uuid) or client_order_id")
 
 

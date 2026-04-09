@@ -183,7 +183,7 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
                         "reserved_exit_qty": 0.0,
                         "sellable_executable_qty": 0.0,
                         "exit_allowed": False,
-                        "exit_block_reason": "no_executable_exit_lot_exists",
+                        "exit_block_reason": "dust_only_remainder",
                         "terminal_state": "dust_only",
                     },
                     "operator_diagnostics": {
@@ -202,7 +202,7 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
                         "operator_outcome": "tracked_unsellable_residual",
                         "operator_message": "Residual holdings are tracked as dust at the state layer.",
                         "entry_status": "allowed",
-                        "exit_status": "blocked:no_executable_exit_lot_exists",
+                        "exit_status": "blocked:dust_only_remainder",
                         "exit_submit_expected": False,
                     },
                 },
@@ -227,10 +227,12 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["reserved_exit_qty"] == pytest.approx(0.0)
     assert ctx["sellable_executable_qty"] == pytest.approx(0.0)
     assert ctx["exit_allowed"] is False
-    assert ctx["exit_block_reason"] == "no_executable_exit_lot_exists"
+    assert ctx["exit_block_reason"] == "dust_only_remainder"
     assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
     assert ctx["position_state"]["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
+    assert ctx["open_lot_count"] == 0
+    assert ctx["sellable_executable_lot_count"] == 0
     assert "submit_payload_qty" not in ctx["position_state"]["normalized_exposure"]
     assert "sell_submit_qty_source" not in ctx["position_state"]["normalized_exposure"]

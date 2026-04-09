@@ -39,6 +39,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(db_path))
     _set_live_runtime_paths(monkeypatch, base_dir=tmp_path.resolve())
     object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "paper")
 
     ensure_db().close()
     runtime_state.enable_trading()
@@ -2182,6 +2183,8 @@ def _patch_single_tick_run_loop(monkeypatch) -> None:
     object.__setattr__(settings, "OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC", 30)
     object.__setattr__(settings, "MAX_OPEN_ORDER_AGE_SEC", 900)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "test-key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "test-secret")
 
     object.__setattr__(settings, "MAX_ORDER_KRW", 100000)
     object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 50000)

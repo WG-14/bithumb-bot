@@ -39,7 +39,7 @@ from .observability import safety_event
 from .reason_codes import AMBIGUOUS_RECENT_FILL, AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH, WEAK_ORDER_CORRELATION
 
 
-LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
+LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED")
 
 REASON_REMOTE_OPEN_ORDER_FOUND = "REMOTE_OPEN_ORDER_FOUND"
 REASON_RECENT_FILL_APPLIED = "RECENT_FILL_APPLIED"
@@ -51,8 +51,8 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
 REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVERY"
 
-OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
-UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED"}
+UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
 NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_RECONCILE_FAILED,
     REASON_SOURCE_CONFLICT_HALT,
@@ -563,7 +563,7 @@ def _evaluate_dust_residual_policy(
     status_counts = conn.execute(
         """
         SELECT
-            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
             SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
             SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
         FROM orders
@@ -1990,15 +1990,49 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
 
             try:
-                cancel_result = broker.cancel_order(
+                request_cancel = getattr(broker, "request_cancel_order", broker.cancel_order)
+                cancel_result = request_cancel(
                     client_order_id=cancel_client_order_id,
                     exchange_order_id=remote.exchange_order_id,
                 )
                 cancel_accepted_count += 1
             except Exception as e:
+                error_text = f"{type(e).__name__}: {e}"
+                if "NOT_FOUND_NEEDS_RECONCILE" in error_text or "order not found" in error_text.lower():
+                    try:
+                        cancel_result = broker.get_order(
+                            client_order_id=cancel_client_order_id,
+                            exchange_order_id=(remote.exchange_order_id or None),
+                        )
+                        cancel_accepted_count += 1
+                    except Exception as lookup_exc:
+                        failed_count += 1
+                        target = remote_exchange_id or cancel_client_order_id
+                        error_messages.append(
+                            f"failed to cancel {target}: {error_text}; lookup={type(lookup_exc).__name__}: {lookup_exc}"
+                        )
+                        current = conn.execute(
+                            "SELECT status, side FROM orders WHERE client_order_id=?",
+                            (local_id,),
+                        ).fetchone()
+                        from_status = str(current["status"]) if current and current["status"] else "UNKNOWN"
+                        local_side = str(current["side"]) if current and current["side"] else str(remote.side)
+                        _mark_recovery_required_with_reason(
+                            conn,
+                            client_order_id=local_id,
+                            side=local_side,
+                            from_status=from_status,
+                            reason_code=RECONCILE_MISMATCH,
+                            reason=(
+                                "cancel not found needs interpretation and lookup failed; "
+                                f"exchange_order_id={remote_exchange_id or '<none>'}; "
+                                f"client_order_id={cancel_client_order_id}"
+                            ),
+                        )
+                        continue
                 failed_count += 1
                 target = remote_exchange_id or cancel_client_order_id
-                error_messages.append(f"failed to cancel {target}: {type(e).__name__}: {e}")
+                error_messages.append(f"failed to cancel {target}: {error_text}")
                 continue
 
             final_status = str(cancel_result.status or "").strip()
@@ -2039,6 +2073,8 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                     set_status(local_id, "CANCELED", conn=conn)
                 elif is_final_filled:
                     set_status(local_id, "FILLED", conn=conn)
+                elif final_status == CANCEL_REQUESTED_STATUS:
+                    set_status(local_id, CANCEL_REQUESTED_STATUS, conn=conn)
                 else:
                     reason = (
                         "cancel accepted but final status unresolved; "

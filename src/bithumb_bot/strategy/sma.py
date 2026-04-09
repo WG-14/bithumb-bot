@@ -182,6 +182,10 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
         "raw_total_asset_qty": float(exposure.raw_total_asset_qty),
         "open_exposure_qty": float(exposure.open_exposure_qty),
         "dust_tracking_qty": float(exposure.dust_tracking_qty),
+        "open_lot_count": int(exposure.open_lot_count),
+        "dust_tracking_lot_count": int(exposure.dust_tracking_lot_count),
+        "reserved_exit_lot_count": int(exposure.reserved_exit_lot_count),
+        "sellable_executable_lot_count": int(exposure.sellable_executable_lot_count),
         "reserved_exit_qty": float(exposure.reserved_exit_qty),
         "sellable_executable_qty": float(exposure.sellable_executable_qty),
         "dust_classification": str(exposure.dust_classification),
@@ -202,7 +206,7 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
 
 
 def _has_tracked_open_exposure(exposure: NormalizedExposure) -> bool:
-    return bool(float(exposure.open_exposure_qty) > 1e-12)
+    return bool(int(exposure.open_lot_count) > 0)
 
 
 def _evaluate_entry_edge_filter(
@@ -307,6 +311,8 @@ def _load_position_context(
             open_exposure_qty=0.0,
             dust_tracking_qty=lot_snapshot.dust_tracking_qty,
             reserved_exit_qty=reserved_exit_qty,
+            open_lot_count=lot_snapshot.open_lot_count,
+            dust_tracking_lot_count=lot_snapshot.dust_tracking_lot_count,
             market_price=float(market_price),
             min_qty=float(rules.min_qty),
             qty_step=float(rules.qty_step),
@@ -360,6 +366,8 @@ def _load_position_context(
         open_exposure_qty=lot_snapshot.raw_open_exposure_qty,
         dust_tracking_qty=lot_snapshot.dust_tracking_qty,
         reserved_exit_qty=reserved_exit_qty,
+        open_lot_count=lot_snapshot.open_lot_count,
+        dust_tracking_lot_count=lot_snapshot.dust_tracking_lot_count,
         market_price=float(market_price),
         min_qty=float(rules.min_qty),
         qty_step=float(rules.qty_step),

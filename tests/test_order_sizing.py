@@ -44,10 +44,14 @@ def test_buy_execution_sizing_finalizes_order_qty_from_entry_budget(sizing_rule_
 
     assert plan.side == "BUY"
     assert plan.allowed is True
-    assert plan.qty_source == "entry.intent_budget_krw"
+    assert plan.qty_source == "entry.intent_lot_count"
     assert plan.budget_krw == pytest.approx(10000.0)
     assert plan.requested_qty == pytest.approx(0.0005)
-    assert plan.executable_qty == pytest.approx(0.0005)
+    assert plan.internal_lot_size == pytest.approx(0.0004)
+    assert plan.intended_lot_count == 1
+    assert plan.executable_lot_count == 1
+    assert plan.executable_qty == pytest.approx(0.0004)
+    assert plan.decision_reason_code == "none"
 
 
 def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_sizing(
@@ -71,7 +75,11 @@ def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_s
     assert plan.budget_krw == pytest.approx(4000.0)
     assert plan.requested_qty == pytest.approx(0.0002)
     assert plan.executable_qty == pytest.approx(0.0)
-    assert plan.block_reason == "no_executable_exit_lot"
+    assert plan.internal_lot_size == pytest.approx(0.0004)
+    assert plan.intended_lot_count == 0
+    assert plan.executable_lot_count == 0
+    assert plan.block_reason == "no_executable_entry_lot"
+    assert plan.decision_reason_code == "no_executable_entry_lot"
 
 
 def test_buy_execution_sizing_does_not_reserve_fee_budget_before_qty_rounding(sizing_rule_overrides) -> None:
@@ -101,6 +109,10 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
 
     assert plan.side == "SELL"
     assert plan.allowed is True
-    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_qty"
+    assert plan.qty_source == "position_state.normalized_exposure.executable_exit_lot_count"
     assert plan.requested_qty == pytest.approx(0.12345678)
-    assert plan.executable_qty == pytest.approx(0.1234)
+    assert plan.executable_qty == pytest.approx(0.1232)
+    assert plan.internal_lot_size == pytest.approx(0.0004)
+    assert plan.intended_lot_count == 308
+    assert plan.executable_lot_count == 308
+    assert plan.decision_reason_code == "none"

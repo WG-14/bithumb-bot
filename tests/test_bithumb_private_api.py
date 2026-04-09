@@ -4,12 +4,20 @@ import base64
 import hashlib
 import json
 import logging
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import httpx
 import pytest
 
-from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI, classify_private_api_error
+from bithumb_bot.broker.bithumb import (
+    BithumbBroker,
+    BithumbPrivateAPI,
+    BithumbOrderNotReadyError,
+    BithumbRateLimitError,
+    classify_private_api_error,
+    classify_private_api_failure,
+)
 from bithumb_bot.broker.base import (
     BrokerIdentifierMismatchError,
     BrokerRejectError,
@@ -19,8 +27,9 @@ from bithumb_bot.broker.base import (
 from bithumb_bot.broker.order_list_v1 import parse_v1_order_list_row
 from bithumb_bot.broker.order_payloads import build_order_payload, validate_order_submit_payload
 from bithumb_bot.config import settings
+from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.public_api_orderbook import BestQuote
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 
 _HTTPX_TIMEOUT = getattr(httpx, "ReadTimeout", getattr(httpx, "RequestError"))
 _HTTPX_CONNECT = getattr(httpx, "ConnectError", getattr(httpx, "RequestError"))
@@ -73,6 +82,35 @@ def _configure_live():
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
     object.__setattr__(settings, "BITHUMB_API_KEY", "k")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "s")
+
+
+def _exact_lot_qty(
+    *,
+    market_price: float | None,
+    lot_count: int = 1,
+    bid_min_total_krw: float = 5000.0,
+    ask_min_total_krw: float = 5000.0,
+    bid_price_unit: float = 1.0,
+    ask_price_unit: float = 1.0,
+    min_notional_krw: float = 5000.0,
+) -> float:
+    rules = SimpleNamespace(
+        bid_min_total_krw=bid_min_total_krw,
+        ask_min_total_krw=ask_min_total_krw,
+        bid_price_unit=bid_price_unit,
+        ask_price_unit=ask_price_unit,
+        min_notional_krw=min_notional_krw,
+    )
+    lot_rules = build_market_lot_rules(
+        market_id="KRW-BTC",
+        market_price=market_price,
+        rules=rules,
+        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        source_mode="exchange",
+    )
+    return lot_count_to_qty(lot_count=lot_count, lot_size=lot_rules.lot_size)
 
 
 
@@ -172,13 +210,83 @@ def test_private_safe_call_retries_temporary_error(monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
+    monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
 
     broker = BithumbBroker()
     data = broker._get_private("/v1/accounts", {}, retry_safe=True)
 
     assert isinstance(data, list)
     assert _SequencedClient.calls == 2
-    assert sleeps == [0.2]
+    assert sleeps == [0.15]
+
+
+def test_private_rate_limit_retry_penalizes_bucket_and_uses_endpoint_aware_backoff(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [
+        _mk_response(429, {"error": {"name": "too_many_requests", "message": "slow down"}}),
+        _mk_response(200, [{"currency": "KRW", "balance": "1000", "locked": "0"}]),
+    ]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    sleeps: list[float] = []
+    penalties: list[tuple[str, float]] = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
+    monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb._REQUEST_THROTTLER.penalize",
+        lambda *, bucket, delay_sec: penalties.append((bucket, delay_sec)),
+    )
+
+    broker = BithumbBroker()
+    data = broker._get_private("/v1/orders", {"market": "KRW-BTC"}, retry_safe=True)
+
+    assert isinstance(data, list)
+    assert penalties == [("order", 0.35)]
+    assert sleeps == [0.35]
+
+
+def test_private_request_uses_fresh_nonce_per_retry(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [
+        _HTTPX_TIMEOUT("timeout"),
+        _mk_response(200, {"status": "0000", "data": []}),
+    ]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda _sec: None)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
+
+    broker = BithumbBroker()
+    broker._get_private("/v1/accounts", {}, retry_safe=True)
+
+    auth_headers = [req["headers"]["Authorization"] for req in _SequencedClient.requests]
+    assert len(auth_headers) == 2
+    assert auth_headers[0] != auth_headers[1]
+
+
+def test_private_order_submit_uses_utf8_json_content_type(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "order-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
+
+    broker = BithumbBroker()
+    broker._post_private(
+        "/v2/orders",
+        {
+            "market": "KRW-BTC",
+            "side": "bid",
+            "order_type": "price",
+            "price": "1000",
+            "client_order_id": "cid-json-1",
+        },
+    )
+
+    assert str(_SequencedClient.requests[0]["headers"]["Content-Type"]).startswith("application/json")
 
 
 def test_classify_private_api_error_categories_cover_v1_orders_contract_failures() -> None:
@@ -203,11 +311,23 @@ def test_classify_private_api_error_categories_cover_v1_orders_contract_failures
     assert code == "AUTH_INVALID_ACCESS_KEY"
     assert "access key" in summary
 
+    code, summary = classify_private_api_error(BrokerRejectError("status=409 error_name=duplicate_client_order_id body={}"))
+    assert code == "DUPLICATE_CLIENT_ORDER_ID"
+    assert "duplicate client order" in summary
+
     code, summary = classify_private_api_error(BrokerRejectError("unexpected broker response shape for private request"))
     assert code == "AUTH_RESPONSE_UNEXPECTED"
 
     code, summary = classify_private_api_error(BrokerTemporaryError("bithumb private /v1/orders transport error"))
     assert code == "TEMPORARY"
+
+
+def test_classify_private_api_error_uses_documented_error_names() -> None:
+    assert classify_private_api_error(BrokerRejectError("status=401 error_name=jwt_verification body={}"))[0] == "AUTH_JWT_VERIFICATION"
+    assert classify_private_api_error(BrokerRejectError("status=401 error_name=expired_jwt body={}"))[0] == "AUTH_JWT_EXPIRED"
+    assert classify_private_api_error(BrokerRejectError("status=401 error_name=NotAllowIP body={}"))[0] == "AUTH_IP_DENIED"
+    assert classify_private_api_error(BrokerRejectError("status=404 error_name=order_not_found body={}"))[0] == "ORDER_NOT_FOUND"
+    assert classify_private_api_error(BrokerRejectError("status=400 error_name=cross_trading body={}"))[0] == "CROSS_TRADING"
 
     code, summary = classify_private_api_error(BrokerIdentifierMismatchError("order lookup response exchange_order_id mismatch"))
     assert code == "IDENTIFIER_MISMATCH"
@@ -215,6 +335,45 @@ def test_classify_private_api_error_categories_cover_v1_orders_contract_failures
 
     code, summary = classify_private_api_error(BrokerSchemaError("order lookup response schema mismatch: expected object payload"))
     assert code == "DOC_SCHEMA"
+
+
+def test_classify_private_api_failure_new_buckets() -> None:
+    classification = classify_private_api_failure(BrokerRejectError("invalid_parameter: malformed market"))
+    assert classification.category == "PERMANENT_REJECT"
+    assert classification.summary
+
+    classification = classify_private_api_failure(BithumbRateLimitError("bithumb private /v1/orders throttled with http status=429"))
+    assert classification.category == "THROTTLED_BACKOFF"
+    assert classification.should_retry is True
+
+    classification = classify_private_api_failure(BithumbOrderNotReadyError("bithumb private /v2/order rejected with http status=422 error_name=order_not_ready"))
+    assert classification.category == "ORDER_NOT_READY"
+    assert classification.should_retry is True
+
+    classification = classify_private_api_failure(BrokerTemporaryError("bithumb private /v1/orders transport error"))
+    assert classification.category == "RETRYABLE_TRANSIENT"
+    assert classification.should_retry is True
+
+    classification = classify_private_api_failure(BrokerRejectError("order_not_found"))
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
+
+    classification = classify_private_api_failure(BrokerRejectError("cancel_not_allowed"))
+    assert classification.category == "CANCEL_NOT_ALLOWED"
+
+    classification = classify_private_api_failure(BrokerRejectError("invalid_query_payload"))
+    assert classification.category == "AUTH_OR_CONFIG_ERROR"
+    assert classification.disable_trading is True
+
+
+def test_classify_private_api_failure_uses_documented_error_table() -> None:
+    classification = classify_private_api_failure(
+        BrokerRejectError("status=404 error_name=order_not_found body={}")
+    )
+
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
+    assert classification.should_retry is False
 
 
 
@@ -498,9 +657,63 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
 
     assert claims["access_key"] == "k"
     assert "query_hash" in claims
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert call["content"] == b'{"market":"KRW-BTC","side":"ask","order_type":"market","volume":"0.1"}'
     assert "json" not in call
+
+
+def test_private_jwt_headers_include_query_hash_for_delete(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"order_id": "cancel-1"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    broker = BithumbBroker()
+    broker._delete_private("/v2/order", {"order_id": "cancel-1", "client_order_id": "cid-cancel"}, retry_safe=False)
+
+    call = _SequencedClient.requests[0]
+    auth = str(call["headers"]["Authorization"])
+    claims = _decode_jwt(auth.removeprefix("Bearer "))
+
+    assert claims["access_key"] == "k"
+    assert claims["query_hash"]
+    assert call["endpoint"] == "/v2/order?order_id=cancel-1&client_order_id=cid-cancel"
+
+
+def test_private_safe_get_retries_on_rate_limit(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [
+        _mk_response(429, {"error": {"name": "too_many_requests", "message": "slow down"}}),
+        _mk_response(200, [{"currency": "KRW", "balance": "1000", "locked": "0"}]),
+    ]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    sleeps: list[float] = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
+    monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
+
+    broker = BithumbBroker()
+    data = broker._get_private("/v1/accounts", {}, retry_safe=True)
+
+    assert isinstance(data, list)
+    assert _SequencedClient.calls == 2
+    assert sleeps == [0.2]
+
+
+def test_private_request_classifies_rate_limit_and_order_not_ready_errors(monkeypatch):
+    _configure_live()
+    rate_limit = BithumbRateLimitError("bithumb private /v1/accounts throttled with http status=429 body={}")
+    order_not_ready = BithumbOrderNotReadyError("bithumb private /v2/order rejected with http status=422 error_name=order_not_ready")
+
+    rate_code, rate_summary = classify_private_api_error(rate_limit)
+    ready_code, ready_summary = classify_private_api_error(order_not_ready)
+
+    assert rate_code == "RATE_LIMITED"
+    assert "rate limit" in rate_summary
+    assert ready_code == "ORDER_NOT_READY"
+    assert "not ready" in ready_summary
 
 
 
@@ -928,7 +1141,8 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     )
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(client_order_id="cid-1", side="BUY", qty=0.1234, price=None)
+    qty = _exact_lot_qty(market_price=150_000_000.0)
+    order = broker.place_order(client_order_id="cid-1", side="BUY", qty=qty, price=None)
 
     assert order.exchange_order_id == "mkt-1"
     assert call["endpoint"] == "/v2/orders"
@@ -937,7 +1151,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "bid",
         "order_type": "price",
-        "price": str(int(Decimal("150000000.0") * Decimal("0.1234"))),
+        "price": broker._format_krw_amount(Decimal("150000000.0") * Decimal(str(qty))),
         "client_order_id": "cid-1",
     }
 
@@ -960,7 +1174,8 @@ def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(client_order_id=valid_client_order_id, side="BUY", qty=0.1234, price=None)
+    qty = _exact_lot_qty(market_price=150_000_000.0)
+    order = broker.place_order(client_order_id=valid_client_order_id, side="BUY", qty=qty, price=None)
 
     assert order.client_order_id == valid_client_order_id
     assert call["payload"]["client_order_id"] == valid_client_order_id
@@ -997,7 +1212,7 @@ def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
     )
 
     with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
-        broker.place_order(client_order_id="cid-invalid-ask", side="BUY", qty=0.1234, price=None)
+        broker.place_order(client_order_id="cid-invalid-ask", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
 
 
 def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
@@ -1010,7 +1225,7 @@ def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
     )
 
     with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
-        broker.place_order(client_order_id="cid-quote-fail", side="BUY", qty=0.1234, price=None)
+        broker.place_order(client_order_id="cid-quote-fail", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
 
 
 
@@ -1028,7 +1243,7 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.4321, price=None)
+    order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.4320, price=None)
 
     assert order.exchange_order_id == "mkt-2"
     assert call["endpoint"] == "/v2/orders"
@@ -1036,17 +1251,95 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         "market": "KRW-BTC",
         "side": "ask",
         "order_type": "market",
-        "volume": "0.4321",
+        "volume": "0.432",
         "client_order_id": "cid-2",
     }
 
+
+def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                        "order_sides": ("bid",),
+                        "order_types": ("limit",),
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    with pytest.raises(BrokerRejectError, match="rejected order side before submit"):
+        broker.place_order(client_order_id="cid-side", side="SELL", qty=0.4320, price=None)
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        broker.place_order(client_order_id="cid-type", side="BUY", qty=0.4320, price=None)
+
+
+def test_place_order_accepts_supported_side_and_type_from_chance_rules(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                        "min_notional_krw": 5000.0,
+                        "order_sides": ("bid", "ask"),
+                        "order_types": ("limit", "price", "market"),
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
+    )
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        return {"uuid": "mkt-chance-ok"}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+
+    order = broker.place_order(client_order_id="cid-chance-ok", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
+
+    assert order.exchange_order_id == "mkt-chance-ok"
+    assert call["endpoint"] == "/v2/orders"
 
 
 def test_place_order_blocks_volume_that_would_be_silently_truncated():
     _configure_live()
     broker = BithumbBroker()
 
-    with pytest.raises(BrokerRejectError, match="qty requires explicit normalization before submit"):
+    with pytest.raises(BrokerRejectError, match="qty requires explicit .*normalization before submit"):
         broker.place_order(client_order_id="cid-truncate", side="SELL", qty=0.123456789, price=None)
 
 
@@ -1069,7 +1362,8 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(client_order_id="cid-3", side="BUY", qty=0.4, price=149500000)
+    qty = _exact_lot_qty(market_price=149500000.0)
+    order = broker.place_order(client_order_id="cid-3", side="BUY", qty=qty, price=149500000)
 
     assert order.exchange_order_id == "lmt-2"
     assert call["endpoint"] == "/v2/orders"
@@ -1078,7 +1372,7 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "side": "bid",
         "order_type": "limit",
         "price": "149500000",
-        "volume": "0.4",
+        "volume": broker._format_volume(qty),
         "client_order_id": "cid-3",
     }
     assert order.raw == {
@@ -1107,7 +1401,8 @@ def test_place_order_preserves_local_client_order_id_when_response_omits_it(monk
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(client_order_id="cid-omit", side="BUY", qty=0.4, price=149500000)
+    qty = _exact_lot_qty(market_price=149500000.0)
+    order = broker.place_order(client_order_id="cid-omit", side="BUY", qty=qty, price=149500000)
 
     assert order.exchange_order_id == "lmt-omit-client-id"
     assert call["payload"]["client_order_id"] == "cid-omit"
@@ -1135,7 +1430,7 @@ def test_place_order_rejects_when_response_client_order_id_mismatches(monkeypatc
     )
 
     with pytest.raises(BrokerRejectError, match="order submit response client_order_id mismatch"):
-        broker.place_order(client_order_id="cid-local", side="BUY", qty=0.4, price=149500000)
+        broker.place_order(client_order_id="cid-local", side="BUY", qty=_exact_lot_qty(market_price=149500000.0), price=149500000)
 
 
 def test_place_order_accepts_coid_alias_when_client_order_id_missing(monkeypatch):
@@ -1153,7 +1448,7 @@ def test_place_order_accepts_coid_alias_when_client_order_id_missing(monkeypatch
         },
     )
 
-    order = broker.place_order(client_order_id="cid-coid-only", side="BUY", qty=0.4, price=149500000)
+    order = broker.place_order(client_order_id="cid-coid-only", side="BUY", qty=_exact_lot_qty(market_price=149500000.0), price=149500000)
 
     assert order.exchange_order_id == "lmt-coid-only"
     assert order.client_order_id == "cid-coid-only"
@@ -1174,7 +1469,7 @@ def test_place_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch)
     )
 
     with pytest.raises(BrokerRejectError, match="client identifier mismatch"):
-        broker.place_order(client_order_id="cid-primary", side="BUY", qty=0.4, price=149500000)
+        broker.place_order(client_order_id="cid-primary", side="BUY", qty=_exact_lot_qty(market_price=149500000.0), price=149500000)
 
 
 def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkeypatch):
@@ -1203,7 +1498,7 @@ def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkey
     )
 
     with pytest.raises(BrokerRejectError, match="limit price does not match side price_unit"):
-        broker.place_order(client_order_id="cid-lmt-unit", side="BUY", qty=0.01, price=149500001)
+        broker.place_order(client_order_id="cid-lmt-unit", side="BUY", qty=_exact_lot_qty(market_price=149500001.0), price=149500001)
 
 
 def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):
@@ -1232,7 +1527,7 @@ def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):
     )
 
     with pytest.raises(BrokerRejectError, match="order notional below side minimum for limit order"):
-        broker.place_order(client_order_id="cid-lmt-min", side="SELL", qty=0.00001, price=100000000)
+        broker.place_order(client_order_id="cid-lmt-min", side="SELL", qty=_exact_lot_qty(market_price=13000000.0), price=13000000)
 
 
 
@@ -1274,14 +1569,18 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    broker.place_order(client_order_id="cid-mkt-unit", side="BUY", qty=0.0002, price=None)
+    qty = _exact_lot_qty(market_price=99_999_990.0)
+    broker.place_order(client_order_id="cid-mkt-unit", side="BUY", qty=qty, price=None)
 
     assert call["endpoint"] == "/v2/orders"
     assert call["payload"] == {
         "market": "KRW-BTC",
         "side": "bid",
         "order_type": "price",
-        "price": "19990",
+        "price": broker._format_krw_amount(
+            (Decimal("99999990.0") * Decimal(str(qty)) / Decimal("10")).to_integral_value(rounding=ROUND_DOWN)
+            * Decimal("10")
+        ),
         "client_order_id": "cid-mkt-unit",
     }
 
@@ -1384,20 +1683,20 @@ def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(mo
         ),
     )
 
-    def _fake_post(endpoint, payload, retry_safe=False):
+    def _fake_delete(endpoint, params, retry_safe=False):
         call["endpoint"] = endpoint
-        call["payload"] = payload
+        call["payload"] = params
         call["retry_safe"] = retry_safe
-        return {"order_id": payload["order_id"], "client_order_id": payload["client_order_id"]}
+        return {"order_id": params["order_id"], "client_order_id": params["client_order_id"]}
 
-    monkeypatch.setattr(broker, "_post_private", _fake_post)
+    monkeypatch.setattr(broker, "_delete_private", _fake_delete)
 
     order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
 
     assert order.exchange_order_id == "cancel-1"
     assert order.status == "CANCEL_REQUESTED"
     assert call == {
-        "endpoint": "/v2/orders/cancel",
+        "endpoint": "/v2/order",
         "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
         "retry_safe": False,
     }
@@ -1424,17 +1723,17 @@ def test_cancel_order_accepts_client_order_id_only_response(monkeypatch):
         ),
     )
 
-    def _fake_post(endpoint, payload, retry_safe=False):
+    def _fake_delete(endpoint, params, retry_safe=False):
         call["endpoint"] = endpoint
-        call["payload"] = payload
-        return {"client_order_id": payload["client_order_id"]}
+        call["payload"] = params
+        return {"client_order_id": params["client_order_id"]}
 
-    monkeypatch.setattr(broker, "_post_private", _fake_post)
+    monkeypatch.setattr(broker, "_delete_private", _fake_delete)
 
     order = broker.cancel_order(client_order_id="cid-cancel-only", exchange_order_id=None)
 
     assert call == {
-        "endpoint": "/v2/orders/cancel",
+        "endpoint": "/v2/order",
         "payload": {"client_order_id": "cid-cancel-only"},
     }
     assert order.client_order_id == "cid-cancel-only"
@@ -1465,7 +1764,7 @@ def test_cancel_order_maps_already_canceled_reject_to_canceled(monkeypatch):
     def _reject(*_args, **_kwargs):
         raise BrokerRejectError("order already canceled")
 
-    monkeypatch.setattr(broker, "_post_private", _reject)
+    monkeypatch.setattr(broker, "_delete_private", _reject)
     order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
     assert order.status == "CANCELED"
 
@@ -1491,10 +1790,10 @@ def test_cancel_order_raises_on_order_id_mismatch(monkeypatch):
     )
     monkeypatch.setattr(
         broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
+        "_delete_private",
+        lambda endpoint, params, retry_safe=False: {
             "order_id": "different-order-id",
-            "client_order_id": payload["client_order_id"],
+            "client_order_id": params["client_order_id"],
         },
     )
 
@@ -1523,10 +1822,10 @@ def test_cancel_order_accepts_coid_alias_when_client_order_id_missing(monkeypatc
     )
     monkeypatch.setattr(
         broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "order_id": payload["order_id"],
-            "coid": payload["client_order_id"],
+        "_delete_private",
+        lambda endpoint, params, retry_safe=False: {
+            "order_id": params["order_id"],
+            "coid": params["client_order_id"],
         },
     )
 
@@ -1534,6 +1833,7 @@ def test_cancel_order_accepts_coid_alias_when_client_order_id_missing(monkeypatc
 
     assert order.exchange_order_id == "cancel-coid-1"
     assert order.client_order_id == "cid-cancel-coid"
+    assert order.status == "CANCEL_REQUESTED"
 
 
 def test_cancel_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch):
@@ -1557,16 +1857,98 @@ def test_cancel_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch
     )
     monkeypatch.setattr(
         broker,
-        "_post_private",
-        lambda endpoint, payload, retry_safe=False: {
-            "order_id": payload["order_id"],
-            "client_order_id": payload["client_order_id"],
+        "_delete_private",
+        lambda endpoint, params, retry_safe=False: {
+            "order_id": params["order_id"],
+            "client_order_id": params["client_order_id"],
             "coid": "different-cid",
         },
     )
 
     with pytest.raises(BrokerRejectError, match="client identifier mismatch"):
         broker.cancel_order(client_order_id="cid-cancel-conflict", exchange_order_id="cancel-conflict-1")
+
+
+def test_cancel_order_validates_client_order_id_even_when_exchange_id_is_present(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+        broker.cancel_order(client_order_id="bad id", exchange_order_id="cancel-1")
+
+
+def test_cancel_order_retries_when_order_not_ready_then_succeeds(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "BITHUMB_CANCEL_RETRY_ATTEMPTS", 3)
+    object.__setattr__(settings, "BITHUMB_CANCEL_RETRY_BACKOFF_SEC", 0.01)
+    broker = BithumbBroker()
+    calls: dict[str, int] = {"delete": 0, "lookup": 0}
+    sleeps: list[float] = []
+
+    def _fake_get_order(*, client_order_id, exchange_order_id=None):
+        calls["lookup"] += 1
+        return broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-ready-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05" if calls["lookup"] == 1 else "0.00",
+                "executed_volume": "0.00" if calls["lookup"] == 1 else "0.05",
+                "state": "wait" if calls["lookup"] == 1 else "done",
+            },
+            client_order_id=client_order_id,
+        )
+
+    def _fake_delete(endpoint, params, retry_safe=False):
+        calls["delete"] += 1
+        if calls["delete"] == 1:
+            raise BrokerRejectError("order_not_ready")
+        return {"order_id": params["order_id"], "client_order_id": params["client_order_id"], "state": "cancel"}
+
+    monkeypatch.setattr(broker, "get_order", _fake_get_order)
+    monkeypatch.setattr(broker, "_delete_private", _fake_delete)
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
+
+    order = broker.cancel_order(client_order_id="cid-cancel-ready", exchange_order_id="cancel-ready-1")
+
+    assert calls == {"delete": 2, "lookup": 2}
+    assert sleeps == [0.01]
+    assert order.status == "FILLED"
+    assert order.exchange_order_id == "cancel-ready-1"
+
+
+def test_cancel_order_exhausts_retry_budget_for_order_not_ready(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "BITHUMB_CANCEL_RETRY_ATTEMPTS", 2)
+    object.__setattr__(settings, "BITHUMB_CANCEL_RETRY_BACKOFF_SEC", 0.01)
+    broker = BithumbBroker()
+    sleeps: list[float] = []
+
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-limit-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+    monkeypatch.setattr(broker, "_delete_private", lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokerRejectError("order_not_ready")))
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.time.sleep", lambda sec: sleeps.append(sec))
+
+    with pytest.raises(BrokerTemporaryError, match="cancel retry exhausted"):
+        broker.cancel_order(client_order_id="cid-cancel-limit", exchange_order_id="cancel-limit-1")
+
+    assert sleeps == [0.01]
 
 
 def test_get_order_uses_v1_order_lookup(monkeypatch):
@@ -1606,34 +1988,12 @@ def test_get_order_uses_v1_order_lookup(monkeypatch):
     assert order.raw["uuid"] == "filled-1"
 
 
-def test_get_order_prefers_uuid_when_client_order_id_is_invalid(monkeypatch):
+def test_get_order_rejects_invalid_client_order_id_even_when_uuid_is_present(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
-    call: dict[str, object] = {}
 
-    def _fake_get(endpoint, params, retry_safe=False):
-        call["endpoint"] = endpoint
-        call["params"] = params
-        return {
-            "uuid": "filled-priority-1",
-            "client_order_id": "cid-priority",
-            "market": "KRW-BTC",
-            "ord_type": "limit",
-            "side": "bid",
-            "price": "149000000",
-            "volume": "0.05",
-            "remaining_volume": "0.00",
-            "executed_volume": "0.05",
-            "created_at": "2024-01-01T00:00:00+00:00",
-            "state": "done",
-        }
-
-    monkeypatch.setattr(broker, "_get_private", _fake_get)
-
-    order = broker.get_order(client_order_id="bad id with space", exchange_order_id="filled-priority-1")
-
-    assert call == {"endpoint": "/v1/order", "params": {"uuid": "filled-priority-1"}}
-    assert order.exchange_order_id == "filled-priority-1"
+    with pytest.raises(BrokerRejectError, match="contains invalid characters"):
+        broker.get_order(client_order_id="bad id with space", exchange_order_id="filled-priority-1")
 
 
 def test_get_order_lookup_identifier_priority_prefers_uuid_over_client_order_id(monkeypatch):
@@ -1700,6 +2060,63 @@ def test_get_order_supports_client_order_id_lookup(monkeypatch):
     assert order.raw["ord_type"] == "limit"
     assert order.raw["client_order_id"] == "cid-client-only"
     assert order.raw["uuid"] == "filled-by-client-1"
+
+
+def test_get_recent_orders_for_recovery_uses_market_scoped_scan_without_identifiers(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    calls: list[dict[str, object]] = []
+
+    def _fake_get(endpoint, params, retry_safe=False):
+        calls.append({"endpoint": endpoint, "params": params, "retry_safe": retry_safe})
+        states = tuple(params["states"])
+        if states == ("wait", "done", "cancel"):
+            return [
+                {
+                    "uuid": "recover-1",
+                    "market": params["market"],
+                    "ord_type": "limit",
+                    "side": "bid",
+                    "price": "149000000",
+                    "volume": "0.05",
+                    "remaining_volume": "0.05",
+                    "executed_volume": "0.00",
+                    "state": "wait",
+                    "created_at": "2024-01-01T00:00:00+00:00",
+                    "updated_at": "2024-01-01T00:00:00+00:00",
+                }
+            ]
+        if states == ("watch",):
+            return [
+                {
+                    "uuid": "recover-watch-1",
+                    "market": params["market"],
+                    "ord_type": "limit",
+                    "side": "ask",
+                    "price": "150000000",
+                    "volume": "0.02",
+                    "remaining_volume": "0.01",
+                    "executed_volume": "0.01",
+                    "state": "watch",
+                    "created_at": "2024-01-01T00:01:00+00:00",
+                    "updated_at": "2024-01-01T00:02:00+00:00",
+                }
+            ]
+        raise AssertionError(states)
+
+    monkeypatch.setattr(broker, "_get_private", _fake_get)
+
+    orders = broker.get_recent_orders_for_recovery(limit=5, market="KRW-BTC", page_size=2)
+
+    assert [call["endpoint"] for call in calls] == ["/v1/orders", "/v1/orders"]
+    assert calls[0]["params"]["market"] == "KRW-BTC"
+    assert calls[0]["params"]["states"] == ["wait", "done", "cancel"]
+    assert "uuids" not in calls[0]["params"]
+    assert "client_order_ids" not in calls[0]["params"]
+    assert calls[0]["retry_safe"] is True
+    assert calls[1]["params"]["states"] == ["watch"]
+    assert len(orders) == 2
+    assert {order.exchange_order_id for order in orders} == {"recover-1", "recover-watch-1"}
 
 
 def test_get_order_requires_at_least_one_identifier():
@@ -2978,7 +3395,7 @@ def test_private_non_order_posts_keep_json_body(monkeypatch):
     api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert call["json"] == {"order_id": "abc123"}
     assert "content" not in call
 
@@ -3004,11 +3421,10 @@ def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
     payload = {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}
     api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0]["payload"] == payload
-    assert calls[1]["payload"] == payload
-    assert calls[0]["nonce"] == calls[1]["nonce"]
-    assert calls[0]["timestamp"] == calls[1]["timestamp"]
+    assert calls[0]["nonce"] is not None
+    assert calls[0]["timestamp"] is not None
 
 
 def test_order_submit_auth_context_matches_official_claim_contract(monkeypatch):
@@ -3035,7 +3451,7 @@ def test_order_submit_auth_context_matches_official_claim_contract(monkeypatch):
         "query_hash": hashlib.sha512(context["canonical_payload"].encode("utf-8")).hexdigest(),
         "query_hash_alg": "SHA512",
     }
-    assert context["headers"]["Content-Type"] == "application/json"
+    assert str(context["headers"]["Content-Type"]).startswith("application/json")
     assert context["headers"]["Authorization"].startswith("Bearer ")
     assert context["request_kwargs"] == {
         "content": b'{"market":"KRW-BTC","side":"bid","order_type":"price","price":"9998"}',
@@ -3060,7 +3476,7 @@ def test_non_order_post_does_not_use_order_submit_auth_builder(monkeypatch):
     api.request("POST", "/v2/orders/cancel", json_body={"order_id": "abc123"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert call["json"] == {"order_id": "abc123"}
 
 
@@ -3098,7 +3514,7 @@ def test_order_submit_uses_json_body_with_query_hash_from_canonical_payload(monk
     auth = str(call["headers"]["Authorization"])
     claims = _decode_jwt(auth.removeprefix("Bearer "))
 
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert call["content"] == expected_content
     assert "json" not in call
     assert claims["query_hash"] == BithumbPrivateAPI._query_hash_from_canonical_payload(expected_query)["query_hash"]
@@ -3125,7 +3541,7 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
     claims = _decode_jwt(auth.removeprefix("Bearer "))
     request_body_text = call["content"].decode()
 
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert request_body_text == '{"market":"KRW-BTC","side":"bid","order_type":"price","price":"10002"}'
     assert claims["nonce"] == "nonce-fixed"
     assert claims["timestamp"] == 1712230310689
@@ -3151,7 +3567,7 @@ def test_order_http_debug_request_logs_query_hash_and_json_body(monkeypatch, cap
 
     order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] request" in record.message]
     assert order_logs
-    assert "content_type=application/json" in order_logs[-1]
+    assert "content_type=\"application/json" in order_logs[-1]
     assert "canonical_query_string=market=KRW-BTC&side=bid&order_type=price&price=9999" in order_logs[-1]
     assert "query_hash_alg=SHA512" in order_logs[-1]
     assert "nonce_present=1" in order_logs[-1]
@@ -3199,7 +3615,7 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
     claims = _decode_jwt(auth.removeprefix("Bearer "))
     canonical_payload = "market=KRW-BTC&side=bid&order_type=price&price=9998"
 
-    assert call["headers"]["Content-Type"] == "application/json"
+    assert str(call["headers"]["Content-Type"]).startswith("application/json")
     assert call["content"] == b'{"market":"KRW-BTC","side":"bid","order_type":"price","price":"9998"}'
     assert "json" not in call
     assert claims == {

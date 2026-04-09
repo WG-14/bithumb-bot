@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import settings
+from ..db_core import ensure_db, record_order_rule_snapshot
 from ..markets import ExchangeMarketCodeError, canonical_market_id, parse_documented_market_code
 from ..notifier import notify
+from .base import BrokerRejectError
 from .bithumb import BithumbBroker, classify_private_api_error
 
 _CACHE_TTL_SEC = 300.0
@@ -93,6 +95,19 @@ class RuleResolution:
     fallback_reason_summary: str = ""
     fallback_reason_detail: str = ""
     fallback_risk: str = ""
+    retrieved_at_sec: float = 0.0
+    expires_at_sec: float = 0.0
+    stale: bool = False
+    source_mode: str = "exchange"
+    snapshot_persisted: bool = False
+
+    def is_stale(self, *, now_sec: float | None = None) -> bool:
+        if self.stale:
+            return True
+        if self.expires_at_sec <= 0:
+            return False
+        current = float(time.time() if now_sec is None else now_sec)
+        return current >= float(self.expires_at_sec)
 
 
 class OrderChanceSchemaError(RuntimeError):
@@ -194,6 +209,54 @@ def optional_rule_source_warnings(source: dict[str, str] | None) -> list[str]:
                 f"{field} source is {field_source}; limit price tick normalization may be pass-through"
             )
     return warnings
+
+
+def _normalize_chance_side(side: str) -> str:
+    token = str(side or "").strip().upper()
+    if token in {"BUY", "BID"}:
+        return "bid"
+    if token in {"SELL", "ASK"}:
+        return "ask"
+    raise BrokerRejectError(f"unsupported order side: {side}")
+
+
+def _normalize_chance_order_type(order_type: str) -> str:
+    token = str(order_type or "").strip().lower()
+    if token in {"limit", "price", "market"}:
+        return token
+    raise BrokerRejectError(f"unsupported order_type: {order_type}")
+
+
+def validate_order_chance_support(
+    *,
+    rules: DerivedOrderConstraints,
+    side: str,
+    order_type: str,
+) -> None:
+    normalized_side = _normalize_chance_side(side)
+    normalized_order_type = _normalize_chance_order_type(order_type)
+
+    supported_sides = tuple(
+        str(item).strip().lower()
+        for item in getattr(rules, "order_sides", ()) or ()
+        if str(item).strip()
+    )
+    if supported_sides and normalized_side not in supported_sides:
+        raise BrokerRejectError(
+            "/v1/orders/chance rejected order side before submit: "
+            f"side={str(side).strip().upper()} supported={sorted(set(supported_sides))}"
+        )
+
+    supported_types = tuple(
+        str(item).strip().lower()
+        for item in getattr(rules, "order_types", ()) or ()
+        if str(item).strip()
+    )
+    if supported_types and normalized_order_type not in supported_types:
+        raise BrokerRejectError(
+            "/v1/orders/chance rejected order type before submit: "
+            f"order_type={normalized_order_type} supported={sorted(set(supported_types))}"
+        )
 
 
 def _local_fallback_constraints() -> LocalFallbackConstraints:
@@ -331,16 +394,36 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
 
     cached = _cached_rules.get(pair)
     if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
-        return cached[1]
+        cached_resolution = cached[1]
+        if (
+            cached_resolution.fallback_used
+            and settings.MODE == "live"
+            and not bool(settings.LIVE_DRY_RUN)
+            and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK)
+        ):
+            raise BrokerRejectError(
+                f"live order rule snapshot unavailable for {pair}; cached fallback is disabled"
+            )
+        return cached_resolution
     try:
         exchange = fetch_exchange_order_rules(pair)
     except Exception as exc:
+        fallback_issues = required_rule_issues(fallback)
         code, summary = classify_private_api_error(exc)
         detail = f"{type(exc).__name__}: {exc}"
         fallback_risk = (
             "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
             "may stay on local fallback until /v1/orders/chance succeeds again"
         )
+        if fallback_issues and settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
+            raise BrokerRejectError(
+                f"live order rule fallback invalid for {pair}: " + "; ".join(fallback_issues)
+            ) from exc
+        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN) and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK):
+            raise BrokerRejectError(
+                f"live order rule snapshot unavailable for {pair}; fallback disabled "
+                f"(reason_code={code}; reason={summary}; detail={detail})"
+            ) from exc
         notify(
             f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "
             f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
@@ -371,7 +454,27 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             fallback_reason_summary=summary,
             fallback_reason_detail=detail,
             fallback_risk=fallback_risk,
+            retrieved_at_sec=now,
+            expires_at_sec=now + _CACHE_TTL_SEC,
+            stale=False,
+            source_mode="fallback",
         )
+        if settings.MODE == "live":
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "live order rule snapshot fallback engaged pair=%s retrieved_at_sec=%.3f expires_at_sec=%.3f reason_code=%s reason=%s source_min_qty=%s source_qty_step=%s source_min_notional=%s source_max_qty_decimals=%s",
+                pair,
+                resolution.retrieved_at_sec,
+                resolution.expires_at_sec,
+                code,
+                summary,
+                resolution.source.get("min_qty", "missing"),
+                resolution.source.get("qty_step", "missing"),
+                resolution.source.get("min_notional_krw", "missing"),
+                resolution.source.get("max_qty_decimals", "missing"),
+            )
+        resolution = _persist_rule_snapshot_if_possible(resolution)
         _cached_rules[pair] = (now, resolution, fallback)
         return resolution
 
@@ -410,8 +513,83 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         "max_qty_decimals": "local_fallback",
         "ruleset": "merged",
     }
-    resolution = RuleResolution(rules=merged, source=source)
+    resolution = RuleResolution(
+        rules=merged,
+        source=source,
+        retrieved_at_sec=now,
+        expires_at_sec=now + _CACHE_TTL_SEC,
+        stale=False,
+        source_mode="exchange",
+    )
+    if settings.MODE == "live":
+        import logging
+
+        logging.getLogger(__name__).info(
+            "live order rule snapshot refreshed pair=%s retrieved_at_sec=%.3f expires_at_sec=%.3f source=exchange source_min_qty=%s source_qty_step=%s source_min_notional=%s source_max_qty_decimals=%s",
+            pair,
+            resolution.retrieved_at_sec,
+            resolution.expires_at_sec,
+            resolution.source.get("min_qty", "missing"),
+            resolution.source.get("qty_step", "missing"),
+            resolution.source.get("min_notional_krw", "missing"),
+            resolution.source.get("max_qty_decimals", "missing"),
+        )
+    resolution = _persist_rule_snapshot_if_possible(resolution)
     _cached_rules[pair] = (now, resolution, fallback)
     return resolution
+
+
+def get_cached_order_rule_snapshot(pair: str) -> RuleResolution | None:
+    cached = _cached_rules.get(pair)
+    if not cached:
+        return None
+    return cached[1]
+
+
+def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolution:
+    market = str(getattr(resolution.rules, "market_id", "") or parse_documented_market_code(settings.PAIR))
+    rules_payload = {
+        field: getattr(resolution.rules, field)
+        for field in resolution.rules.__dataclass_fields__.keys()
+    }
+    conn = None
+    try:
+        conn = ensure_db()
+        record_order_rule_snapshot(
+            conn,
+            market=market,
+            fetched_ts=int(max(0.0, float(resolution.retrieved_at_sec)) * 1000),
+            source_mode=str(resolution.source_mode),
+            fallback_used=bool(resolution.fallback_used),
+            fallback_reason_code=str(resolution.fallback_reason_code or ""),
+            fallback_reason_summary=str(resolution.fallback_reason_summary or ""),
+            rules_payload=rules_payload,
+            source_payload=dict(resolution.source),
+        )
+        conn.commit()
+        return RuleResolution(
+            rules=resolution.rules,
+            source=resolution.source,
+            fallback_used=resolution.fallback_used,
+            fallback_reason_code=resolution.fallback_reason_code,
+            fallback_reason_summary=resolution.fallback_reason_summary,
+            fallback_reason_detail=resolution.fallback_reason_detail,
+            fallback_risk=resolution.fallback_risk,
+            retrieved_at_sec=resolution.retrieved_at_sec,
+            expires_at_sec=resolution.expires_at_sec,
+            stale=resolution.stale,
+            source_mode=resolution.source_mode,
+            snapshot_persisted=True,
+        )
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return resolution
+    finally:
+        if conn is not None:
+            conn.close()
 
 OrderRules = DerivedOrderConstraints

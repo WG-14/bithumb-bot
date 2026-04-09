@@ -278,6 +278,10 @@ def test_validate_status_transition_allows_only_whitelisted_paths():
     assert allowed is True
     assert reason is None
 
+    allowed, reason = validate_status_transition(from_status="NEW", to_status="CANCEL_REQUESTED")
+    assert allowed is True
+    assert reason is None
+
     allowed, reason = validate_status_transition(from_status="FILLED", to_status="NEW")
     assert allowed is False
     assert "disallowed status transition" in str(reason)

@@ -269,7 +269,7 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
             """
             SELECT COUNT(*) AS cnt
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)
@@ -519,6 +519,7 @@ class Settings:
     )
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
+    LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
 
     # risk
     MAX_ORDER_KRW: float = float(os.getenv("MAX_ORDER_KRW", "0"))
@@ -533,6 +534,10 @@ class Settings:
     BITHUMB_API_BASE: str = os.getenv("BITHUMB_API_BASE", "https://api.bithumb.com")
     BITHUMB_API_KEY: str = os.getenv("BITHUMB_API_KEY", "")
     BITHUMB_API_SECRET: str = os.getenv("BITHUMB_API_SECRET", "")
+    BITHUMB_PRIVATE_RPS_LIMIT: float = parse_float_env("BITHUMB_PRIVATE_RPS_LIMIT", "140")
+    BITHUMB_ORDER_RPS_LIMIT: float = parse_float_env("BITHUMB_ORDER_RPS_LIMIT", "10")
+    BITHUMB_CANCEL_RETRY_ATTEMPTS: int = int(os.getenv("BITHUMB_CANCEL_RETRY_ATTEMPTS", "3"))
+    BITHUMB_CANCEL_RETRY_BACKOFF_SEC: float = parse_float_env("BITHUMB_CANCEL_RETRY_BACKOFF_SEC", "0.15")
     LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
     LIVE_REAL_ORDER_ARMED: bool = parse_bool_env("LIVE_REAL_ORDER_ARMED", "false")
     OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC: int = int(
@@ -854,6 +859,19 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append("BITHUMB_API_KEY is required when MODE=live")
     if not cfg.BITHUMB_API_SECRET.strip():
         issues.append("BITHUMB_API_SECRET is required when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_PRIVATE_RPS_LIMIT)) or cfg.BITHUMB_PRIVATE_RPS_LIMIT <= 0:
+        issues.append("BITHUMB_PRIVATE_RPS_LIMIT must be a finite value > 0 when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_ORDER_RPS_LIMIT)) or cfg.BITHUMB_ORDER_RPS_LIMIT <= 0:
+        issues.append("BITHUMB_ORDER_RPS_LIMIT must be a finite value > 0 when MODE=live")
+    if bool(cfg.LIVE_ALLOW_ORDER_RULE_FALLBACK) and not cfg.LIVE_DRY_RUN:
+        LOG.warning(
+            "live preflight warning: LIVE_ALLOW_ORDER_RULE_FALLBACK=true permits emergency fallback "
+            "when /v1/orders/chance is unavailable"
+        )
+    if cfg.BITHUMB_CANCEL_RETRY_ATTEMPTS <= 0:
+        issues.append("BITHUMB_CANCEL_RETRY_ATTEMPTS must be > 0 when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_CANCEL_RETRY_BACKOFF_SEC)) or cfg.BITHUMB_CANCEL_RETRY_BACKOFF_SEC <= 0:
+        issues.append("BITHUMB_CANCEL_RETRY_BACKOFF_SEC must be a finite value > 0 when MODE=live")
 
     if not cfg.LIVE_DRY_RUN:
         if not cfg.LIVE_REAL_ORDER_ARMED:
@@ -924,5 +942,3 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live mode preflight validation failed: " + "; ".join(issues)
         )
-
-

@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import time
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
@@ -83,6 +84,7 @@ SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
 SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
 SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+_DECIMAL_ZERO = Decimal("0")
 
 
 class FillFeeStrictModeError(RuntimeError):
@@ -107,6 +109,23 @@ def _parse_fill_fee(*, fill_fee_raw: object) -> tuple[bool, float]:
     if not math.isfinite(fill_fee) or fill_fee < 0:
         return False, 0.0
     return True, fill_fee
+
+
+def _decimal_from_number(value: object) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"invalid numeric value: {value}") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"invalid non-finite numeric value: {value}")
+    return parsed
+
+
+def _decimal_quantizer(*, places: int) -> Decimal | None:
+    normalized_places = max(0, int(places))
+    if normalized_places <= 0:
+        return None
+    return Decimal("1").scaleb(-normalized_places)
 
 
 def _aggregate_fills_for_apply(
@@ -857,20 +876,20 @@ def validate_order(*, signal: str, side: str, qty: float, market_price: float) -
 
 
 def _normalize_order_qty_snapshot(*, qty: float) -> dict[str, float | int]:
-    normalized = float(qty)
-    if not math.isfinite(normalized) or normalized <= 0:
+    normalized = _decimal_from_number(qty)
+    if normalized <= 0:
         raise ValueError(f"invalid order qty: {qty}")
 
     rules = get_effective_order_rules(settings.PAIR).rules
 
-    step = float(rules.qty_step)
-    if math.isfinite(step) and step > 0:
-        normalized = math.floor((normalized / step) + POSITION_EPSILON) * step
+    step = _decimal_from_number(getattr(rules, "qty_step", 0) or 0)
+    if step > 0:
+        normalized = (normalized / step).to_integral_value(rounding=ROUND_FLOOR) * step
 
     max_decimals = int(rules.max_qty_decimals)
-    if max_decimals > 0:
-        scale = 10 ** max_decimals
-        normalized = math.floor((normalized * scale) + POSITION_EPSILON) / scale
+    quantizer = _decimal_quantizer(places=max_decimals)
+    if quantizer is not None:
+        normalized = normalized.quantize(quantizer, rounding=ROUND_FLOOR)
 
     return {
         "input_qty": float(qty),
@@ -942,10 +961,16 @@ def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> 
 
 
 def _floor_qty_to_places(*, qty: float, places: int) -> float:
-    if not math.isfinite(float(qty)) or float(qty) <= 0:
+    try:
+        normalized = _decimal_from_number(qty)
+    except ValueError:
         return 0.0
-    scale = 10 ** max(0, int(places))
-    return math.floor((float(qty) * scale) + POSITION_EPSILON) / scale
+    if normalized <= 0:
+        return 0.0
+    quantizer = _decimal_quantizer(places=places)
+    if quantizer is None:
+        return float(normalized)
+    return float(normalized.quantize(quantizer, rounding=ROUND_FLOOR))
 
 
 def _sell_qty_is_unsellable(
@@ -964,17 +989,18 @@ def _sell_qty_is_unsellable(
 
 
 def _sell_qty_is_min_qty_boundary_rounding_case(*, qty: float, min_qty: float) -> bool:
-    qty = float(qty)
-    min_qty = float(min_qty)
-    if not math.isfinite(qty) or not math.isfinite(min_qty):
+    try:
+        qty_decimal = _decimal_from_number(qty)
+        min_qty_decimal = _decimal_from_number(min_qty)
+    except ValueError:
         return False
-    if qty <= POSITION_EPSILON or min_qty <= 0:
+    if qty_decimal <= 0 or min_qty_decimal <= 0:
         return False
-    if qty >= min_qty:
+    if qty_decimal >= min_qty_decimal:
         return False
     # A one-tick ledger/fill rounding miss can leave the sellable lot just below
     # the exchange minimum. Only snap these narrow boundary cases upward.
-    return (min_qty - qty) <= SELL_MIN_QTY_BOUNDARY_EPSILON
+    return (min_qty_decimal - qty_decimal) <= Decimal(str(SELL_MIN_QTY_BOUNDARY_EPSILON))
 
 
 def _normalize_sell_dust_details(
@@ -1903,13 +1929,6 @@ def validate_pretrade(
     if not math.isfinite(float(market_price)) or float(market_price) <= 0:
         raise ValueError(f"invalid market/reference price: {market_price}")
 
-    rules = get_effective_order_rules(settings.PAIR).rules
-
-    notional = float(qty) * float(market_price)
-    min_notional = side_min_total_krw(rules=rules, side=side)
-    if min_notional > 0 and notional < min_notional:
-        raise ValueError(f"order notional below minimum ({side}): {notional:.2f} < {min_notional:.2f}")
-
     balance_snapshot = fetch_balance_snapshot(broker)
     source_id = str(balance_snapshot.source_id or "unknown")
     observed_ts_ms = int(balance_snapshot.observed_ts_ms)
@@ -1924,6 +1943,13 @@ def validate_pretrade(
         raise ValueError("invalid live balance source: dry_run_static")
     if observed_ts_ms <= 0 and source_id not in {"dry_run_static", "legacy_balance_api"}:
         raise ValueError(f"invalid balance snapshot observed_ts_ms: source={source_id} observed_ts_ms={observed_ts_ms}")
+
+    rules = get_effective_order_rules(settings.PAIR).rules
+
+    notional = float(qty) * float(market_price)
+    min_notional = side_min_total_krw(rules=rules, side=side)
+    if min_notional > 0 and notional < min_notional:
+        raise ValueError(f"order notional below minimum ({side}): {notional:.2f} < {min_notional:.2f}")
 
     buffer_mult = 1.0 + max(0.0, float(settings.PRETRADE_BALANCE_BUFFER_BPS)) / 10_000.0
     if side == "BUY":
@@ -2162,6 +2188,16 @@ def _record_submit_attempt_result(
     timeout_flag: bool,
     submit_evidence: str | None,
     exchange_order_id_obtained: bool,
+    order_type: str | None = None,
+    internal_lot_size: float | None = None,
+    effective_min_trade_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
+    final_intended_qty: float | None = None,
+    final_submitted_qty: float | None = None,
+    decision_reason_code: str | None = None,
 ) -> None:
     record_submit_attempt(
         conn=conn,
@@ -2180,6 +2216,16 @@ def _record_submit_attempt_result(
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
         order_status=order_status,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
     )
 
 
@@ -2195,6 +2241,16 @@ def _record_submit_attempt_preflight(
     payload_hash: str,
     reference_price: float | None,
     submit_evidence: str | None,
+    order_type: str | None = None,
+    internal_lot_size: float | None = None,
+    effective_min_trade_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
+    final_intended_qty: float | None = None,
+    final_submitted_qty: float | None = None,
+    decision_reason_code: str | None = None,
 ) -> None:
     record_submit_attempt(
         conn=conn,
@@ -2214,6 +2270,16 @@ def _record_submit_attempt_preflight(
         exchange_order_id_obtained=False,
         order_status="PENDING_SUBMIT",
         event_type="submit_attempt_preflight",
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
     )
 
 
@@ -2273,6 +2339,16 @@ def _submit_via_standard_path(
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
+    order_type: str,
+    internal_lot_size: float | None,
+    effective_min_trade_qty: float | None,
+    qty_step: float | None,
+    min_notional_krw: float | None,
+    intended_lot_count: int | None,
+    executable_lot_count: int | None,
+    final_intended_qty: float,
+    final_submitted_qty: float,
+    decision_reason_code: str | None,
 ):
     symbol = settings.PAIR
     decision_observability = decision_observability or {}
@@ -2305,6 +2381,18 @@ def _submit_via_standard_path(
         sell_failure_category="none",
         sell_failure_detail="none",
     )
+    lot_evidence_fields = {
+        "order_type": order_type,
+        "internal_lot_size": None if internal_lot_size is None else float(internal_lot_size),
+        "effective_min_trade_qty": None if effective_min_trade_qty is None else float(effective_min_trade_qty),
+        "qty_step": None if qty_step is None else float(qty_step),
+        "min_notional_krw": None if min_notional_krw is None else float(min_notional_krw),
+        "intended_lot_count": None if intended_lot_count is None else int(intended_lot_count),
+        "executable_lot_count": None if executable_lot_count is None else int(executable_lot_count),
+        "final_intended_qty": float(final_intended_qty),
+        "final_submitted_qty": float(final_submitted_qty),
+        "decision_reason_code": decision_reason_code,
+    }
     payload = {
         "client_order_id": client_order_id,
         "submit_attempt_id": submit_attempt_id,
@@ -2333,6 +2421,7 @@ def _submit_via_standard_path(
             "submit_mode": settings.MODE,
             "error_class": None,
             "error_summary": None,
+            **lot_evidence_fields,
         }
     )
 
@@ -2348,6 +2437,17 @@ def _submit_via_standard_path(
         exit_decision_id=(decision_id if side == "SELL" else None),
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
+        local_intent_state="PENDING_SUBMIT",
         ts_ms=ts,
         status="PENDING_SUBMIT",
     )
@@ -2371,6 +2471,16 @@ def _submit_via_standard_path(
         payload_hash=payload_hash,
         reference_price=reference_price,
         submit_evidence=preflight_evidence,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
     )
     notify(
         safety_event(
@@ -2411,6 +2521,12 @@ def _submit_via_standard_path(
                 dust_tracking_qty=float(dust_tracking_qty),
                 reference_price=reference_price,
                 client_order_id=client_order_id,
+                internal_lot_size=internal_lot_size,
+                intended_lot_count=intended_lot_count,
+                executable_lot_count=executable_lot_count,
+                final_intended_qty=final_intended_qty,
+                final_submitted_qty=final_submitted_qty,
+                decision_reason_code=decision_reason_code,
             )
         )
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
@@ -2456,6 +2572,7 @@ def _submit_via_standard_path(
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
             }
@@ -2485,6 +2602,16 @@ def _submit_via_standard_path(
             timeout_flag=timeout_flag,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
+            order_type=order_type,
+            internal_lot_size=internal_lot_size,
+            effective_min_trade_qty=effective_min_trade_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            final_intended_qty=final_intended_qty,
+            final_submitted_qty=final_submitted_qty,
+            decision_reason_code=decision_reason_code,
         )
         update_order_intent_dedup(
             conn,
@@ -2535,6 +2662,7 @@ def _submit_via_standard_path(
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
             }
@@ -2564,6 +2692,16 @@ def _submit_via_standard_path(
             timeout_flag=False,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
+            order_type=order_type,
+            internal_lot_size=internal_lot_size,
+            effective_min_trade_qty=effective_min_trade_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            final_intended_qty=final_intended_qty,
+            final_submitted_qty=final_submitted_qty,
+            decision_reason_code=decision_reason_code,
         )
         update_order_intent_dedup(
             conn,
@@ -2603,6 +2741,7 @@ def _submit_via_standard_path(
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
             }
@@ -2632,6 +2771,16 @@ def _submit_via_standard_path(
             timeout_flag=False,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
+            order_type=order_type,
+            internal_lot_size=internal_lot_size,
+            effective_min_trade_qty=effective_min_trade_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            final_intended_qty=final_intended_qty,
+            final_submitted_qty=final_submitted_qty,
+            decision_reason_code=decision_reason_code,
         )
         update_order_intent_dedup(
             conn,
@@ -2680,6 +2829,7 @@ def _submit_via_standard_path(
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **lot_evidence_fields,
                 "error_class": None,
                 "error_summary": "missing exchange_order_id",
             }
@@ -2709,6 +2859,16 @@ def _submit_via_standard_path(
             timeout_flag=False,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
+            order_type=order_type,
+            internal_lot_size=internal_lot_size,
+            effective_min_trade_qty=effective_min_trade_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            final_intended_qty=final_intended_qty,
+            final_submitted_qty=final_submitted_qty,
+            decision_reason_code=decision_reason_code,
         )
         update_order_intent_dedup(
             conn,
@@ -2736,6 +2896,7 @@ def _submit_via_standard_path(
             "response_ts": response_ts,
             "submit_path": submit_path,
             "submit_mode": settings.MODE,
+            **lot_evidence_fields,
             "error_class": None,
             "error_summary": None,
         }
@@ -2758,6 +2919,16 @@ def _submit_via_standard_path(
         timeout_flag=False,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=True,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
     )
     update_order_intent_dedup(
         conn,
@@ -2926,6 +3097,7 @@ def live_execute_signal(
                         final_signal=decision_observability["final_signal"],
                         side="BUY",
                         reason=str(entry_sizing.block_reason),
+                        decision_reason_code=str(entry_sizing.decision_reason_code),
                         signal=signal,
                         entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
                         effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
@@ -2933,6 +3105,11 @@ def live_execute_signal(
                         normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
                         raw_qty_open=float(decision_observability["raw_qty_open"]),
                         entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
+                        internal_lot_size=float(entry_sizing.internal_lot_size),
+                        intended_lot_count=int(entry_sizing.intended_lot_count),
+                        executable_lot_count=int(entry_sizing.executable_lot_count),
+                        final_intended_qty=float(entry_sizing.executable_qty),
+                        final_submitted_qty=float(entry_sizing.executable_qty),
                     )
                 )
                 return None
@@ -2978,6 +3155,7 @@ def live_execute_signal(
                             signal=signal,
                             side="SELL",
                             reason="reserved_for_open_sell_orders",
+                            decision_reason_code="reserved_for_open_sell_orders",
                             open_exposure_qty=float(normalized_exposure.open_exposure_qty),
                             reserved_exit_qty=float(normalized_exposure.reserved_exit_qty),
                             sellable_executable_qty=float(normalized_exposure.sellable_executable_qty),
@@ -3011,6 +3189,7 @@ def live_execute_signal(
                             signal=signal,
                             side="SELL",
                             reason=skip_reason,
+                            decision_reason_code="no_executable_exit_lot",
                             position_qty=float(open_exposure_qty),
                             submit_payload_qty=0.0,
                             open_exposure_qty=float(open_exposure_qty),
@@ -3094,6 +3273,24 @@ def live_execute_signal(
                     exit_block_reason=str(normalized_exposure.exit_block_reason),
                 )
                 if not exit_sizing.allowed:
+                    RUN_LOG.info(
+                        format_log_kv(
+                            "[ORDER_SKIP] exit sizing blocked",
+                            base_signal=decision_observability["base_signal"],
+                            final_signal=decision_observability["final_signal"],
+                            signal=signal,
+                            side="SELL",
+                            reason=str(exit_sizing.block_reason),
+                            decision_reason_code=str(exit_sizing.decision_reason_code),
+                            open_exposure_qty=float(normalized_exposure.open_exposure_qty),
+                            dust_tracking_qty=float(normalized_exposure.dust_tracking_qty),
+                            internal_lot_size=float(exit_sizing.internal_lot_size),
+                            intended_lot_count=int(exit_sizing.intended_lot_count),
+                            executable_lot_count=int(exit_sizing.executable_lot_count),
+                            final_intended_qty=float(exit_sizing.executable_qty),
+                            final_submitted_qty=float(exit_sizing.executable_qty),
+                        )
+                    )
                     return None
                 order_qty = float(exit_sizing.executable_qty)
                 submit_qty_source = str(exit_sizing.qty_source)
@@ -3616,6 +3813,16 @@ def live_execute_signal(
             decision_id=decision_id,
             decision_reason=decision_reason,
             exit_rule_name=exit_rule_name,
+            order_type=("price" if side == "BUY" else "market"),
+            internal_lot_size=float(entry_sizing.internal_lot_size if side == "BUY" else exit_sizing.internal_lot_size),
+            effective_min_trade_qty=float(entry_sizing.effective_min_trade_qty if side == "BUY" else exit_sizing.effective_min_trade_qty),
+            qty_step=float(entry_sizing.qty_step if side == "BUY" else exit_sizing.qty_step),
+            min_notional_krw=float(entry_sizing.min_notional_krw if side == "BUY" else exit_sizing.min_notional_krw),
+            intended_lot_count=int(entry_sizing.intended_lot_count if side == "BUY" else exit_sizing.intended_lot_count),
+            executable_lot_count=int(entry_sizing.executable_lot_count if side == "BUY" else exit_sizing.executable_lot_count),
+            final_intended_qty=float(order_qty),
+            final_submitted_qty=float(normalized_qty),
+            decision_reason_code=str(entry_sizing.decision_reason_code if side == "BUY" else exit_sizing.decision_reason_code),
         )
         if order is None:
             return None

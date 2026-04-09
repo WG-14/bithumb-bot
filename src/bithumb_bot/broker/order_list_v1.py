@@ -9,16 +9,20 @@ from .order_lookup_v1 import V1_ORDER_STATES, clean_identifier
 from .order_payloads import validate_client_order_id
 
 _ORDER_BY_VALUES = {"asc", "desc"}
-_MAX_IDENTIFIER_COUNT = 100
+_MAX_IDENTIFIER_COUNT = 30
 _MAX_PAGE = 10_000
 _MAX_LIMIT = 100
+_GENERAL_ORDER_STATES = {"wait", "done", "cancel"}
+_WATCH_STATE = "watch"
 
 
 @dataclass(frozen=True)
 class OrderListQuery:
+    market: str | None = None
     uuids: tuple[str, ...] = ()
     client_order_ids: tuple[str, ...] = ()
     state: str | None = None
+    states: tuple[str, ...] = ()
     page: int = 1
     order_by: str = "desc"
     limit: int | None = None
@@ -28,12 +32,16 @@ class OrderListQuery:
             "page": self.page,
             "order_by": self.order_by,
         }
+        if self.market is not None:
+            params["market"] = self.market
         if self.uuids:
             params["uuids"] = list(self.uuids)
         if self.client_order_ids:
             params["client_order_ids"] = list(self.client_order_ids)
         if self.state is not None:
             params["state"] = self.state
+        if self.states:
+            params["states"] = list(self.states)
         if self.limit is not None:
             params["limit"] = self.limit
         return params
@@ -70,6 +78,31 @@ def _validate_identifier_list(values: list[str], *, field_name: str) -> tuple[st
             raise ValueError(f"{field_name} must not include empty identifiers")
         out.append(cleaned)
     return tuple(out)
+
+
+def _normalize_order_state(value: object, *, field_name: str) -> str:
+    state = clean_identifier(value).lower()
+    if not state:
+        raise ValueError(f"{field_name} must not be empty")
+    if state not in V1_ORDER_STATES:
+        raise ValueError(f"{field_name} must be one of {sorted(V1_ORDER_STATES)}")
+    return state
+
+
+def _validate_state_selection(*, state: str | None, states: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    if state is not None and states:
+        raise ValueError("state and states are mutually exclusive")
+    if state is None and not states:
+        return None, ()
+    if state is not None:
+        return _normalize_order_state(state, field_name="state"), ()
+
+    normalized_states = tuple(_normalize_order_state(item, field_name="states") for item in states)
+    has_watch = _WATCH_STATE in normalized_states
+    has_general_state = any(token in _GENERAL_ORDER_STATES for token in normalized_states)
+    if has_watch and has_general_state:
+        raise ValueError("states must not mix watch with wait, done, or cancel")
+    return None, normalized_states
 
 
 def _required_text(row: dict[str, object], key: str, *, context: str) -> str:
@@ -370,24 +403,39 @@ def parse_v1_order_list_row(row: dict[str, object]) -> V1ListNormalizedOrder:
 
 def build_order_list_params(
     *,
+    market: str | None = None,
     uuids: list[str] | tuple[str, ...] | None = None,
     client_order_ids: list[str] | tuple[str, ...] | None = None,
     state: str | None = None,
+    states: list[str] | tuple[str, ...] | None = None,
     page: int = 1,
     order_by: str = "desc",
     limit: int | None = None,
+    allow_broad_scan: bool = False,
 ) -> dict[str, object]:
     uuid_values = _validate_identifier_list(list(uuids or []), field_name="uuids")
     client_values = _validate_identifier_list(
         [validate_client_order_id(value) for value in list(client_order_ids or [])],
         field_name="client_order_ids",
     )
-    if not uuid_values and not client_values:
-        raise ValueError("order list lookup requires uuids or client_order_ids")
+    normalized_state, normalized_states = _validate_state_selection(
+        state=state,
+        states=tuple(str(value) for value in list(states or [])),
+    )
 
-    normalized_state = clean_identifier(state).lower() if state is not None else None
-    if normalized_state is not None and normalized_state not in V1_ORDER_STATES:
-        raise ValueError(f"state must be one of {sorted(V1_ORDER_STATES)}")
+    if not uuid_values and not client_values:
+        if not allow_broad_scan:
+            raise ValueError("order list lookup requires uuids or client_order_ids")
+        if not clean_identifier(market):
+            raise ValueError("recovery order list lookup requires market when identifiers are omitted")
+        if normalized_state is None and not normalized_states:
+            raise ValueError("recovery order list lookup requires state or states when identifiers are omitted")
+
+    normalized_market = clean_identifier(market)
+    if normalized_market:
+        from ..markets import parse_documented_market_code
+
+        normalized_market = parse_documented_market_code(normalized_market)
 
     normalized_page = int(page)
     if normalized_page < 1 or normalized_page > _MAX_PAGE:
@@ -404,9 +452,11 @@ def build_order_list_params(
             raise ValueError(f"limit must be between 1 and {_MAX_LIMIT}")
 
     return OrderListQuery(
+        market=normalized_market or None,
         uuids=uuid_values,
         client_order_ids=client_values,
         state=normalized_state,
+        states=normalized_states,
         page=normalized_page,
         order_by=normalized_order_by,
         limit=normalized_limit,

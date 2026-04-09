@@ -6,12 +6,15 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import time
 import uuid
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 import math
 from urllib.parse import urlencode
+from dataclasses import dataclass
 from typing import TypedDict
 
 import httpx
@@ -36,6 +39,9 @@ from .accounts_v1 import (
     to_broker_balance,
 )
 from .myasset_ws import MyAssetWsBalanceSource
+from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
+from .myorder_runtime import MyOrderIngestResult, ingest_myorder_event
+from ..lot_model import DUST_POSITION_EPS, build_market_lot_rules, lot_count_to_qty
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -69,12 +75,307 @@ _HTTPX_TRANSIENT_ERRORS = tuple(
 )
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
+_PRIVATE_REQUEST_RATE_LIMIT_BUCKET = "private"
+_ORDER_REQUEST_RATE_LIMIT_BUCKET = "order"
+_ORDER_RATE_LIMIT_ENDPOINTS = {
+    "/v1/order",
+    "/v1/orders",
+    "/v1/orders/chance",
+    "/v2/order",
+    "/v2/orders",
+}
+_ERROR_NAME_RE = re.compile(r"\berror_name=([A-Za-z0-9_]+)")
+_AUTH_ERROR_NAMES = frozenset({"invalid_query_payload", "jwt_verification", "expired_jwt", "invalid_access_key", "notallowip", "out_of_scope"})
+_RATE_LIMIT_ERROR_NAMES = frozenset({"too_many_requests"})
+_PARAM_ERROR_NAMES = frozenset({"invalid_parameter", "invalid_price", "invalid_price_ask", "invalid_price_bid", "under_price_limit_ask", "under_price_limit_bid"})
+_ORDER_RULE_ERROR_NAMES = frozenset({"cross_trading", "under_min_total", "too_many_orders"})
+_NOT_FOUND_ERROR_NAMES = frozenset({"order_not_found"})
+_ORDER_NOT_READY_ERROR_NAMES = frozenset({"order_not_ready"})
 
 
 class BithumbAuthError(BrokerRejectError):
     def __init__(self, reason_code: str, message: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+class BithumbRateLimitError(BrokerTemporaryError):
+    pass
+
+
+class BithumbOrderNotReadyError(BrokerTemporaryError):
+    pass
+
+
+@dataclass(frozen=True)
+class PrivateApiFailureClassification:
+    category: str
+    summary: str
+    should_retry: bool = False
+    disable_trading: bool = False
+    needs_reconcile: bool = False
+
+
+@dataclass
+class _BucketThrottleState:
+    next_allowed_at: float = 0.0
+    penalty_until: float = 0.0
+
+
+class _RequestThrottleCoordinator:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state_by_bucket: dict[str, _BucketThrottleState] = {}
+
+    def acquire(self, *, bucket: str, limit_per_sec: float) -> float:
+        limit = float(limit_per_sec)
+        if not math.isfinite(limit) or limit <= 0:
+            return 0.0
+
+        interval = 1.0 / limit
+        now = time.monotonic()
+        with self._lock:
+            state = self._state_by_bucket.setdefault(bucket, _BucketThrottleState())
+            gate_until = max(state.next_allowed_at, state.penalty_until)
+            wait = max(0.0, gate_until - now)
+            state.next_allowed_at = max(now, gate_until) + interval
+        if wait > 0:
+            time.sleep(wait)
+        return wait
+
+    def penalize(self, *, bucket: str, delay_sec: float) -> None:
+        normalized_delay = max(0.0, float(delay_sec))
+        if normalized_delay <= 0.0:
+            return
+        now = time.monotonic()
+        with self._lock:
+            state = self._state_by_bucket.setdefault(bucket, _BucketThrottleState())
+            state.penalty_until = max(state.penalty_until, now + normalized_delay)
+
+
+_REQUEST_THROTTLER = _RequestThrottleCoordinator()
+
+_DOCUMENTED_PRIVATE_ERROR_CODES: dict[str, tuple[str, str, str, bool, bool, bool]] = {
+    "invalid_query_payload": ("AUTH_QUERY_HASH_MISMATCH", "JWT query_hash mismatch; GET query string/body hash must match transmitted params", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "jwt_verification": ("AUTH_JWT_VERIFICATION", "JWT verification failed", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "expired_jwt": ("AUTH_JWT_EXPIRED", "JWT expired before broker accepted the request", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "invalid_access_key": ("AUTH_INVALID_ACCESS_KEY", "API access key rejected by broker", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "notallowip": ("AUTH_IP_DENIED", "client IP is not allowed for this API key", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "out_of_scope": ("PERMISSION", "API key scope/permission denied", "AUTH_OR_CONFIG_ERROR", False, True, False),
+    "too_many_requests": ("RATE_LIMITED", "private API rate limit or overload encountered", "THROTTLED_BACKOFF", True, False, False),
+    "order_not_found": ("ORDER_NOT_FOUND", "order lookup/cancel target not found", "NOT_FOUND_NEEDS_RECONCILE", False, False, True),
+    "order_not_ready": ("ORDER_NOT_READY", "order not ready yet; refresh and retry later", "ORDER_NOT_READY", True, False, False),
+    "cross_trading": ("CROSS_TRADING", "exchange rejected self-crossing order", "EXCHANGE_RULE_VIOLATION", False, False, False),
+    "under_min_total": ("FUNDS", "balance or orderable-funds check failed", "PREFLIGHT_BLOCKED", False, False, False),
+    "too_many_orders": ("FUNDS", "balance or orderable-funds check failed", "PREFLIGHT_BLOCKED", False, False, False),
+    "invalid_parameter": ("PARAM", "market/order parameter validation failed", "PERMANENT_REJECT", False, False, False),
+    "invalid_price": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+    "invalid_price_ask": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+    "invalid_price_bid": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+    "under_price_limit_ask": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+    "under_price_limit_bid": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+}
+
+
+def _request_bucket_for_endpoint(*, method: str, endpoint: str) -> str:
+    normalized_endpoint = str(endpoint or "").split("?", 1)[0]
+    if normalized_endpoint in _ORDER_RATE_LIMIT_ENDPOINTS:
+        return _ORDER_REQUEST_RATE_LIMIT_BUCKET
+    normalized_method = str(method or "").strip().upper()
+    if normalized_method in {"POST", "DELETE"} and normalized_endpoint.startswith("/v2/"):
+        return _ORDER_REQUEST_RATE_LIMIT_BUCKET
+    return _PRIVATE_REQUEST_RATE_LIMIT_BUCKET
+
+
+def _private_error_name(detail: str) -> str:
+    match = _ERROR_NAME_RE.search(str(detail or ""))
+    return str(match.group(1) if match else "").strip().lower()
+
+
+def _is_rate_limit_indicator(*, status_code: int, error_name: str, error_message: str, body: str) -> bool:
+    detail = " ".join(token.lower() for token in (error_name, error_message, body) if token)
+    if status_code == 429:
+        return True
+    if str(error_name or "").strip().lower() in _RATE_LIMIT_ERROR_NAMES:
+        return True
+    if any(token in detail for token in ("too many requests", "rate limit", "throttl", "throttle", "overload", "overloaded")):
+        return True
+    return False
+
+
+def _is_order_not_ready_indicator(*, status_code: int, error_name: str, error_message: str, body: str) -> bool:
+    detail = " ".join(token.lower() for token in (error_name, error_message, body) if token)
+    if status_code != 422:
+        return False
+    return str(error_name or "").strip().lower() in _ORDER_NOT_READY_ERROR_NAMES or "order_not_ready" in detail or "not ready" in detail
+
+
+def _documented_private_error_descriptor(error_name: str) -> tuple[str, str, str, bool, bool, bool] | None:
+    return _DOCUMENTED_PRIVATE_ERROR_CODES.get(str(error_name or "").strip().lower())
+
+
+def _retry_backoff_delay(*, attempt: int, bucket: str, reason: str) -> float:
+    normalized_attempt = max(0, int(attempt))
+    if reason == "rate_limit":
+        base = 0.35 if bucket == _ORDER_REQUEST_RATE_LIMIT_BUCKET else 0.2
+        return min(base * (2 ** normalized_attempt), 4.0)
+    base = 0.2 if bucket == _ORDER_REQUEST_RATE_LIMIT_BUCKET else 0.15
+    return min(base * (2 ** normalized_attempt), 1.0)
+
+
+def classify_private_api_failure(exc: Exception) -> PrivateApiFailureClassification:
+    detail = str(exc).lower()
+    error_name = _private_error_name(detail)
+    documented = _documented_private_error_descriptor(error_name)
+    if isinstance(exc, BithumbAuthError):
+        return PrivateApiFailureClassification(
+            category="AUTH_OR_CONFIG_ERROR",
+            summary=exc.reason_code,
+            disable_trading=True,
+        )
+    if documented is not None:
+        _code, summary, category, should_retry, disable_trading, needs_reconcile = documented
+        return PrivateApiFailureClassification(
+            category=category,
+            summary=summary,
+            should_retry=should_retry,
+            disable_trading=disable_trading,
+            needs_reconcile=needs_reconcile,
+        )
+    if isinstance(exc, BithumbRateLimitError) or error_name in _RATE_LIMIT_ERROR_NAMES or any(
+        token in detail for token in ("rate limit", "too many requests", "throttl", "throttle", "overload", "overloaded")
+    ):
+        return PrivateApiFailureClassification(
+            category="THROTTLED_BACKOFF",
+            summary="private API rate limit or overload encountered",
+            should_retry=True,
+        )
+    if isinstance(exc, BithumbOrderNotReadyError) or error_name in _ORDER_NOT_READY_ERROR_NAMES or "order_not_ready" in detail:
+        return PrivateApiFailureClassification(
+            category="ORDER_NOT_READY",
+            summary="order is not ready for the requested transition yet",
+            should_retry=True,
+        )
+    if error_name in _ORDER_RULE_ERROR_NAMES or "cross_trading" in detail:
+        return PrivateApiFailureClassification(
+            category="EXCHANGE_RULE_VIOLATION",
+            summary="exchange rejected order by documented rule",
+        )
+    if isinstance(exc, BrokerTemporaryError) or any(token in detail for token in ("transport error", "server error", "timeout", "timed out", "temporar")):
+        return PrivateApiFailureClassification(
+            category="RETRYABLE_TRANSIENT",
+            summary="temporary network/server error",
+            should_retry=True,
+        )
+    if isinstance(exc, BrokerIdentifierMismatchError) or "identifier mismatch" in detail:
+        return PrivateApiFailureClassification(
+            category="RECOVERY_REQUIRED",
+            summary="request/response identifiers conflict",
+            disable_trading=True,
+            needs_reconcile=True,
+        )
+    if isinstance(exc, BrokerSchemaError) or "schema mismatch" in detail:
+        return PrivateApiFailureClassification(
+            category="RECOVERY_REQUIRED",
+            summary="documented response schema mismatch",
+            disable_trading=True,
+            needs_reconcile=True,
+        )
+    if any(token in detail for token in ("too many requests", "rate limit", "throttl", "throttle", "overload", "overloaded")):
+        return PrivateApiFailureClassification(
+            category="THROTTLED_BACKOFF",
+            summary="private API rate limit or overload encountered",
+            should_retry=True,
+        )
+    if error_name in _AUTH_ERROR_NAMES or any(token in detail for token in ("invalid_query_payload", "query hash mismatch", "query_hash mismatch", "jwt_verification", "expired_jwt", "notallowip", "out_of_scope")):
+        return PrivateApiFailureClassification(
+            category="AUTH_OR_CONFIG_ERROR",
+            summary="JWT/auth/config failure",
+            disable_trading=True,
+        )
+    if error_name == "invalid_access_key" or "invalid_access_key" in detail:
+        return PrivateApiFailureClassification(
+            category="AUTH_OR_CONFIG_ERROR",
+            summary="API access key rejected by broker",
+            disable_trading=True,
+        )
+    if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail or "signature" in detail:
+        return PrivateApiFailureClassification(
+            category="AUTH_OR_CONFIG_ERROR",
+            summary="authentication/signature failed",
+            disable_trading=True,
+        )
+    if "status=403" in detail or "out_of_scope" in detail or "permission" in detail:
+        return PrivateApiFailureClassification(
+            category="AUTH_OR_CONFIG_ERROR",
+            summary="API key scope/permission denied",
+            disable_trading=True,
+        )
+    if any(token in detail for token in ("unexpected broker response", "unexpected /v1/orders/chance payload type", "unexpected /v1/accounts payload type")):
+        return PrivateApiFailureClassification(
+            category="RECOVERY_REQUIRED",
+            summary="private broker returned an unexpected response shape",
+            disable_trading=True,
+            needs_reconcile=True,
+        )
+    if "order_not_ready" in detail:
+        return PrivateApiFailureClassification(
+            category="ORDER_NOT_READY",
+            summary="order is not ready for the requested transition yet",
+            should_retry=True,
+        )
+    if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
+        return PrivateApiFailureClassification(
+            category="RECOVERY_REQUIRED",
+            summary="startup/recovery path requires identifier-based lookup only",
+            disable_trading=True,
+            needs_reconcile=True,
+        )
+    if error_name in {"under_min_total", "too_many_orders"} or any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
+        return PrivateApiFailureClassification(
+            category="PREFLIGHT_BLOCKED",
+            summary="balance or orderable-funds check failed",
+        )
+    if error_name in _PARAM_ERROR_NAMES or any(token in detail for token in ("invalid_parameter", "validation")):
+        return PrivateApiFailureClassification(
+            category="PERMANENT_REJECT",
+            summary="market/order parameter validation failed",
+        )
+    if error_name in {"invalid_price", "invalid_price_ask", "invalid_price_bid", "under_price_limit_ask", "under_price_limit_bid"} or any(token in detail for token in ("invalid_price", "price out of range", "price unit", "under_price_limit")):
+        return PrivateApiFailureClassification(
+            category="EXCHANGE_RULE_VIOLATION",
+            summary="price rule violated",
+        )
+    if error_name in _NOT_FOUND_ERROR_NAMES or any(token in detail for token in ("not found", "order_not_found", "no such order", "unknown order")):
+        return PrivateApiFailureClassification(
+            category="NOT_FOUND_NEEDS_RECONCILE",
+            summary="order lookup or cancel returned not found",
+            needs_reconcile=True,
+        )
+    if error_name in {"duplicate_client_order_id", "id_conflict"} or any(
+        token in detail for token in ("duplicate_client_order_id", "id_conflict", "duplicate client order")
+    ):
+        return PrivateApiFailureClassification(
+            category="DUPLICATE_CLIENT_ORDER_ID",
+            summary="duplicate client order id or identifier conflict",
+        )
+    if any(token in detail for token in ("cancel_not_allowed", "already finalized", "terminal state")):
+        return PrivateApiFailureClassification(
+            category="CANCEL_NOT_ALLOWED",
+            summary="cancel not allowed in current state",
+        )
+    if "422" in detail or "order state" in detail or "transition" in detail:
+        return PrivateApiFailureClassification(
+            category="ORDER_STATE_RACE",
+            summary="order transition or terminal-state race",
+            needs_reconcile=True,
+        )
+    return PrivateApiFailureClassification(
+        category="RECOVERY_REQUIRED",
+        summary="unclassified private API failure; operator investigation required",
+        disable_trading=True,
+        needs_reconcile=True,
+    )
 
 
 class _OrderSubmitAuthContext(TypedDict):
@@ -89,7 +390,7 @@ class _OrderSubmitAuthContext(TypedDict):
 
 class BithumbPrivateAPI:
     ORDER_SUBMIT_ENDPOINT = "/v2/orders"
-    ORDER_SUBMIT_CONTENT_TYPE = "application/json"
+    ORDER_SUBMIT_CONTENT_TYPE = "application/json; charset=utf-8"
 
     def __init__(self, *, api_key: str, api_secret: str, base_url: str, dry_run: bool) -> None:
         self.api_key = api_key
@@ -138,6 +439,22 @@ class BithumbPrivateAPI:
     @classmethod
     def _query_hash_claims(cls, payload: dict[str, object] | None) -> dict[str, str]:
         return cls._query_hash_from_canonical_payload(cls._query_string(payload))
+
+    @staticmethod
+    def _request_bucket_for(method: str, endpoint: str) -> str:
+        return _request_bucket_for_endpoint(method=method, endpoint=endpoint)
+
+    @staticmethod
+    def _request_bucket_limit(bucket: str) -> float:
+        if bucket == _ORDER_REQUEST_RATE_LIMIT_BUCKET:
+            return float(getattr(settings, "BITHUMB_ORDER_RPS_LIMIT", 8.0))
+        return float(getattr(settings, "BITHUMB_PRIVATE_RPS_LIMIT", 120.0))
+
+    def _acquire_request_slot(self, *, method: str, endpoint: str) -> tuple[str, float, float]:
+        bucket = self._request_bucket_for(method, endpoint)
+        limit_per_sec = self._request_bucket_limit(bucket)
+        waited = _REQUEST_THROTTLER.acquire(bucket=bucket, limit_per_sec=limit_per_sec)
+        return bucket, limit_per_sec, waited
 
     def _jwt_token_from_claims(self, claims: dict[str, object]) -> str:
         token = _jwt.encode(claims, self.api_secret, algorithm="HS256")
@@ -261,6 +578,8 @@ class BithumbPrivateAPI:
         auth_payload = params if normalized_method in {"GET", "DELETE"} else json_body
         canonical_payload = self._query_string(auth_payload) if auth_payload else ""
         query_hash_claims = self._query_hash_from_canonical_payload(canonical_payload)
+        request_bucket = self._request_bucket_for(normalized_method, endpoint)
+        request_bucket_limit = self._request_bucket_limit(request_bucket)
         if self.dry_run and not is_read_only:
             auth_branch = "dry_run_write_block"
         elif normalized_method in {"GET", "DELETE"}:
@@ -280,6 +599,8 @@ class BithumbPrivateAPI:
             "query_hash_included": bool(query_hash_claims.get("query_hash")),
             "query_hash_alg": query_hash_claims.get("query_hash_alg"),
             "query_hash_preview": self._mask_query_hash(str(query_hash_claims.get("query_hash") or "")),
+            "throttle_bucket": request_bucket,
+            "throttle_limit_per_sec": request_bucket_limit,
             "canonical_payload_present": bool(canonical_payload),
             "canonical_payload_length": len(canonical_payload),
             "payload_key_count": len(payload_items),
@@ -289,7 +610,7 @@ class BithumbPrivateAPI:
             "content_type": (
                 self.ORDER_SUBMIT_CONTENT_TYPE
                 if normalized_method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and json_body
-                else ("application/json" if json_body else None)
+                else ("application/json; charset=utf-8" if json_body else None)
             ),
             "api_key_present": bool(self.api_key),
             "api_key_length": len(self.api_key or ""),
@@ -344,7 +665,6 @@ class BithumbPrivateAPI:
             json_body = validate_order_submit_payload(json_body or {})
 
         attempts = 3 if retry_safe else 1
-        backoffs = (0.2, 0.5)
         auth_payload = params if method in {"GET", "DELETE"} else json_body
         debug_order_submit = is_order_submit
         request_kwargs: dict[str, object] = {}
@@ -353,45 +673,53 @@ class BithumbPrivateAPI:
         signed_payload_repr = repr(signed_payload) if debug_order_submit else ""
         transmitted_payload_repr = ""
         request_content_type: str | None = None
-        fixed_nonce: str | None = None
-        fixed_timestamp: int | None = None
         if method in {"GET", "DELETE"} and params:
             request_endpoint = f"{endpoint}?{canonical_payload}"
         if json_body:
             if is_order_submit:
-                fixed_nonce = str(uuid.uuid4())
-                fixed_timestamp = round(time.time() * 1000)
-                order_context = self._order_submit_auth_context(
-                    json_body,
-                    nonce=fixed_nonce,
-                    timestamp=fixed_timestamp,
-                )
-                request_content_type = order_context["headers"].get("Content-Type")
-                request_kwargs.update(order_context["request_kwargs"])
-                canonical_payload = order_context["canonical_payload"]
-                transmitted_payload_repr = repr(order_context["request_body_text"]) if debug_order_submit else ""
+                request_content_type = self.ORDER_SUBMIT_CONTENT_TYPE
             else:
-                request_content_type = "application/json"
+                request_content_type = "application/json; charset=utf-8"
                 if debug_order_submit:
                     transmitted_payload_repr = repr(self._json_body_text(json_body))
                 request_kwargs["json"] = json_body
 
         for attempt in range(attempts):
+            request_bucket = self._request_bucket_for(method, endpoint)
+            request_bucket_limit = self._request_bucket_limit(request_bucket)
+            waited = _REQUEST_THROTTLER.acquire(bucket=request_bucket, limit_per_sec=request_bucket_limit)
+            if waited > 0:
+                RUN_LOG.debug(
+                    format_log_kv(
+                        "[PRIVATE_THROTTLE]",
+                        bucket=request_bucket,
+                        limit_per_sec=request_bucket_limit,
+                        waited_sec=round(waited, 6),
+                        method=method,
+                        endpoint=endpoint,
+                        attempt=attempt + 1,
+                    )
+                )
+            attempt_nonce = str(uuid.uuid4())
+            attempt_timestamp = round(time.time() * 1000)
             if is_order_submit:
                 order_context = self._order_submit_auth_context(
                     json_body or {},
-                    nonce=fixed_nonce,
-                    timestamp=fixed_timestamp,
+                    nonce=attempt_nonce,
+                    timestamp=attempt_timestamp,
                 )
                 headers = order_context["headers"]
                 canonical_payload = order_context["canonical_payload"]
+                request_kwargs = dict(order_context["request_kwargs"])
+                request_content_type = str(order_context["headers"].get("Content-Type") or self.ORDER_SUBMIT_CONTENT_TYPE)
+                transmitted_payload_repr = repr(order_context["request_body_text"]) if debug_order_submit else ""
             else:
                 headers = self._headers(
                     auth_payload,
                     content_type=request_content_type,
                     canonical_payload=canonical_payload,
-                    nonce=fixed_nonce,
-                    timestamp=fixed_timestamp,
+                    nonce=attempt_nonce,
+                    timestamp=attempt_timestamp,
                 )
             if debug_order_submit:
                 query_hash = str(order_context["query_hash_claims"].get("query_hash", ""))
@@ -443,22 +771,74 @@ class BithumbPrivateAPI:
                 data = res.json() if response_content != b"" else {}
             except _HTTPX_TRANSIENT_ERRORS as exc:
                 if attempt < attempts - 1:
-                    time.sleep(backoffs[attempt])
+                    time.sleep(
+                        _retry_backoff_delay(
+                            attempt=attempt,
+                            bucket=request_bucket,
+                            reason="transport",
+                        )
+                    )
                     continue
                 raise BrokerTemporaryError(
                     f"bithumb private {endpoint} transport error: {type(exc).__name__}: {exc}"
                 ) from exc
             except httpx.HTTPStatusError as exc:
+                body = response_excerpt(exc.response) if response_excerpt else ""
+                error_name, error_message = self._response_error_details(exc.response)
+                if _is_order_not_ready_indicator(
+                    status_code=exc.response.status_code,
+                    error_name=error_name,
+                    error_message=error_message,
+                    body=body,
+                ):
+                    raise BithumbOrderNotReadyError(
+                        f"bithumb private {endpoint} rejected with http status={exc.response.status_code} "
+                        f"error_name={error_name or '-'} error_message={error_message or '-'} body={body}"
+                    ) from exc
+                if _is_rate_limit_indicator(
+                    status_code=exc.response.status_code,
+                    error_name=error_name,
+                    error_message=error_message,
+                    body=body,
+                ):
+                    delay = _retry_backoff_delay(
+                        attempt=attempt,
+                        bucket=request_bucket,
+                        reason="rate_limit",
+                    )
+                    _REQUEST_THROTTLER.penalize(bucket=request_bucket, delay_sec=delay)
+                    RUN_LOG.warning(
+                        format_log_kv(
+                            "[PRIVATE_RATE_LIMIT]",
+                            bucket=request_bucket,
+                            method=method,
+                            endpoint=endpoint,
+                            attempt=attempt + 1,
+                            delay_sec=round(delay, 6),
+                            status_code=exc.response.status_code,
+                            error_name=error_name or "-",
+                        )
+                    )
+                    if retry_safe and attempt < attempts - 1:
+                        time.sleep(delay)
+                        continue
+                    raise BithumbRateLimitError(
+                        f"bithumb private {endpoint} throttled with http status={exc.response.status_code} "
+                        f"error_name={error_name or '-'} error_message={error_message or '-'} body={body}"
+                    ) from exc
                 if 500 <= exc.response.status_code <= 599:
                     if attempt < attempts - 1:
-                        time.sleep(backoffs[attempt])
+                        time.sleep(
+                            _retry_backoff_delay(
+                                attempt=attempt,
+                                bucket=request_bucket,
+                                reason="server",
+                            )
+                        )
                         continue
-                    body = response_excerpt(exc.response) if response_excerpt else ""
                     raise BrokerTemporaryError(
                         f"bithumb private {endpoint} server error status={exc.response.status_code} body={body}"
                     ) from exc
-                body = response_excerpt(exc.response) if response_excerpt else ""
-                error_name, error_message = self._response_error_details(exc.response)
                 detail_parts = [
                     f"bithumb private {endpoint} rejected with http status={exc.response.status_code}",
                 ]
@@ -481,6 +861,8 @@ class BithumbPrivateAPI:
 
 def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
     detail = str(exc).lower()
+    if "order_not_ready" in detail or "not ready yet" in detail:
+        return "ORDER_NOT_READY", "order not ready yet"
     if any(token in detail for token in ("already canceled", "already cancelled", "already cancel", "state=cancel", "취소")):
         return "ALREADY_CANCELED", "order already canceled"
     if any(token in detail for token in ("already filled", "already executed", "fully executed", "state=done", "체결")):
@@ -494,12 +876,25 @@ def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
 
 def classify_private_api_error(exc: Exception) -> tuple[str, str]:
     detail = str(exc).lower()
+    error_name = _private_error_name(detail)
+    documented = _documented_private_error_descriptor(error_name)
     if isinstance(exc, BithumbAuthError):
         if exc.reason_code == "AUTH_KEY_MISSING":
             return "AUTH_KEY_MISSING", "API key missing before JWT signing"
         if exc.reason_code == "AUTH_SECRET_MISSING":
             return "AUTH_SECRET_MISSING", "API secret missing before JWT signing"
         return exc.reason_code, "private API auth material missing before signing"
+    if isinstance(exc, BithumbRateLimitError):
+        return "RATE_LIMITED", "private API rate limit or overload encountered"
+    if isinstance(exc, BithumbOrderNotReadyError):
+        return "ORDER_NOT_READY", "order not ready yet; refresh and retry later"
+    if documented is not None:
+        code, summary, _category, _should_retry, _disable_trading, _needs_reconcile = documented
+        return code, summary
+    if error_name in _RATE_LIMIT_ERROR_NAMES or any(token in detail for token in ("too many requests", "rate limit", "throttl", "throttle", "overload", "overloaded")):
+        return "RATE_LIMITED", "private API rate limit or overload encountered"
+    if error_name in _ORDER_NOT_READY_ERROR_NAMES or "order_not_ready" in detail:
+        return "ORDER_NOT_READY", "order not ready yet; refresh and retry later"
     if isinstance(exc, BrokerTemporaryError) or any(
         token in detail for token in ("transport error", "server error", "timeout", "timed out", "temporar")
     ):
@@ -508,10 +903,24 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "IDENTIFIER_MISMATCH", "request/response identifiers conflict; reject and investigate"
     if isinstance(exc, BrokerSchemaError) or "schema mismatch" in detail:
         return "DOC_SCHEMA", "documented response schema mismatch (/v1/orders or /v1/order)"
-    if any(token in detail for token in ("invalid_query_payload", "query hash mismatch", "query_hash mismatch")):
+    if error_name == "invalid_query_payload" or any(token in detail for token in ("invalid_query_payload", "query hash mismatch", "query_hash mismatch")):
         return "AUTH_QUERY_HASH_MISMATCH", "JWT query_hash mismatch; GET query string/body hash must match transmitted params"
-    if "invalid_access_key" in detail:
+    if error_name == "jwt_verification":
+        return "AUTH_JWT_VERIFICATION", "JWT verification failed"
+    if error_name == "expired_jwt":
+        return "AUTH_JWT_EXPIRED", "JWT expired before broker accepted the request"
+    if error_name == "notallowip":
+        return "AUTH_IP_DENIED", "client IP is not allowed for this API key"
+    if error_name == "out_of_scope":
+        return "PERMISSION", "API key scope/permission denied"
+    if error_name == "invalid_access_key" or "invalid_access_key" in detail:
         return "AUTH_INVALID_ACCESS_KEY", "API access key rejected by broker"
+    if error_name in {"duplicate_client_order_id", "id_conflict"} or any(
+        token in detail for token in ("duplicate_client_order_id", "id_conflict", "duplicate client order")
+    ):
+        return "DUPLICATE_CLIENT_ORDER_ID", "duplicate client order id or identifier conflict"
+    if any(token in detail for token in ("cancel_not_allowed", "already finalized", "terminal state")):
+        return "CANCEL_NOT_ALLOWED", "cancel not allowed in current state"
     if "status=401" in detail or "unauthorized" in detail or "invalid jwt" in detail or "signature" in detail:
         return "AUTH_SIGN", "authentication/signature failed (401 / invalid JWT / key-secret mismatch)"
     if "status=403" in detail or "out_of_scope" in detail or "permission" in detail:
@@ -520,10 +929,14 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "AUTH_RESPONSE_UNEXPECTED", "private broker returned an unexpected response shape"
     if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
         return "RECOVERY_REQUIRED", "startup/recovery path requires identifier-based lookup only"
-    if any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
+    if error_name == "cross_trading":
+        return "CROSS_TRADING", "exchange rejected self-crossing order"
+    if error_name in {"under_min_total", "too_many_orders"} or any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
         return "FUNDS", "balance or orderable-funds check failed"
-    if any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
+    if error_name in _PARAM_ERROR_NAMES or any(token in detail for token in ("market", "price", "volume", "ord_type", "validation")):
         return "PARAM", "market/order parameter validation failed"
+    if error_name in _NOT_FOUND_ERROR_NAMES:
+        return "ORDER_NOT_FOUND", "order lookup/cancel target not found"
     return "UNRECOVERABLE", "unclassified private API failure; operator investigation required"
 
 
@@ -773,6 +1186,8 @@ class BithumbBroker:
                 chance_auth_branch=chance_auth.get("auth_branch"),
                 chance_query_hash_included=chance_auth.get("query_hash_included"),
                 chance_query_hash_preview=chance_auth.get("query_hash_preview"),
+                chance_throttle_bucket=chance_auth.get("throttle_bucket"),
+                chance_throttle_limit_per_sec=chance_auth.get("throttle_limit_per_sec"),
                 chance_payload_keys=chance_auth.get("payload_keys"),
                 fallback_branch_used=chance_auth.get("fallback_branch_used"),
             ),
@@ -873,6 +1288,34 @@ class BithumbBroker:
             json_body=json_body,
             retry_safe=retry_safe,
             response_excerpt=self._response_body_excerpt,
+        )
+
+    def _build_quantity_guard(
+        self,
+        *,
+        side: str,
+        qty: float,
+        market_price: float | None,
+        min_qty: float,
+        qty_step: float,
+        min_notional_krw: float,
+        max_qty_decimals: int,
+        exit_fee_ratio: float = 0.0,
+        exit_slippage_bps: float = 0.0,
+        exit_buffer_ratio: float = 0.0,
+    ):
+        from ..dust import build_executable_lot
+
+        return build_executable_lot(
+            qty=qty,
+            market_price=market_price,
+            min_qty=min_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            max_qty_decimals=max_qty_decimals,
+            exit_fee_ratio=exit_fee_ratio,
+            exit_slippage_bps=exit_slippage_bps,
+            exit_buffer_ratio=exit_buffer_ratio,
         )
 
     def _log_v1_orders_parse_failure(
@@ -1462,6 +1905,19 @@ class BithumbBroker:
         return raw
 
     @staticmethod
+    def normalize_myorder_event(payload: dict[str, object]) -> NormalizedMyOrderEvent:
+        return normalize_myorder_event_payload(payload)
+
+    @staticmethod
+    def ingest_myorder_event_runtime(
+        conn,
+        *,
+        payload: dict[str, object],
+        strategy_name: str | None = None,
+    ) -> MyOrderIngestResult:
+        return ingest_myorder_event(conn, payload=payload, strategy_name=strategy_name)
+
+    @staticmethod
     def _v1_list_quantities(normalized) -> tuple[float, float]:
         qty_filled = float(normalized.executed_volume or 0.0)
         if normalized.volume is not None:
@@ -1501,38 +1957,59 @@ class BithumbBroker:
             return BrokerOrder(validated_client_order_id, f"dry_{validated_client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
         normalized_side = normalize_order_side(side)
-        payload: dict[str, object]
         market = self._market()
         from .order_rules import (
             get_effective_order_rules,
             normalize_limit_price_for_side,
+            validate_order_chance_support,
             side_min_total_krw,
             side_price_unit,
         )
 
-        rules = get_effective_order_rules(market).rules
+        order_rules_resolution = get_effective_order_rules(market)
+        rules = order_rules_resolution.rules
         order_side = "BUY" if normalized_side == "bid" else "SELL"
-        volume_text = self._format_volume(qty)
-        if price is not None or normalized_side == "ask":
-            self._validate_volume_constraints(
-                qty=qty,
-                volume_text=volume_text,
-                min_qty=getattr(rules, "min_qty", 0.0),
-                qty_step=getattr(rules, "qty_step", 0.0),
-                max_qty_decimals=int(getattr(rules, "max_qty_decimals", 0) or 0),
-                context="/v2/orders",
+        validate_order_chance_support(rules=rules, side=side, order_type=("price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")))
+        effective_market_price: float | None = price
+        if price is None and normalized_side == "bid":
+            try:
+                quote = fetch_orderbook_top(market)
+                effective_market_price = validated_best_quote_ask_price(quote, requested_market=market)
+            except Exception as exc:
+                raise BrokerTemporaryError(
+                    "market buy blocked: failed to load validated best ask "
+                    f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
+                ) from exc
+
+        lot_rules = build_market_lot_rules(
+            market_id=market,
+            market_price=effective_market_price,
+            rules=rules,
+            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+            source_mode="exchange",
+        )
+        qty_split = lot_rules.split_qty(float(qty))
+        if qty_split.executable is False:
+            raise BrokerRejectError(
+                f"{normalized_side.lower()} qty suppressed by quantity rule: "
+                f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
+                f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
+                f"lot_count={qty_split.lot_count} client_order_id={validated_client_order_id}"
             )
+        if qty_split.dust_qty > DUST_POSITION_EPS:
+            raise BrokerRejectError(
+                f"qty requires explicit lot normalization before submit: "
+                f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
+                f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
+            )
+
+        normalized_qty = lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+        payload: dict[str, object]
         if price is None:
             if normalized_side == "bid":
-                try:
-                    quote = fetch_orderbook_top(market)
-                    ask = validated_best_quote_ask_price(quote, requested_market=market)
-                except Exception as exc:
-                    raise BrokerTemporaryError(
-                        "market buy blocked: failed to load validated best ask "
-                        f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
-                    ) from exc
-                notional = self._decimal_from_value(ask) * self._decimal_from_value(qty)
+                notional = self._decimal_from_value(effective_market_price) * self._decimal_from_value(normalized_qty)
                 bid_price_unit = self._decimal_from_value(side_price_unit(rules=rules, side=order_side))
                 if bid_price_unit > 0:
                     notional = (notional / bid_price_unit).to_integral_value(rounding=ROUND_DOWN) * bid_price_unit
@@ -1554,7 +2031,7 @@ class BithumbBroker:
                     market=market,
                     side=normalized_side,
                     ord_type="market",
-                    volume=volume_text,
+                    volume=self._format_volume(normalized_qty),
                     client_order_id=validated_client_order_id,
                 )
         else:
@@ -1573,7 +2050,7 @@ class BithumbBroker:
                     f"price_unit={price_unit:.8f} suggested={format(normalized_limit_price, 'f')}"
                 )
 
-            notional = requested_limit_price * self._decimal_from_value(qty)
+            notional = requested_limit_price * self._decimal_from_value(normalized_qty)
             min_total = side_min_total_krw(rules=rules, side=order_side)
             if min_total > 0 and notional < self._decimal_from_value(min_total):
                 raise BrokerRejectError(
@@ -1584,7 +2061,7 @@ class BithumbBroker:
                 market=market,
                 side=normalized_side,
                 ord_type="limit",
-                volume=volume_text,
+                volume=self._format_volume(normalized_qty),
                 price=self._format_krw_amount(requested_limit_price),
                 client_order_id=validated_client_order_id,
             )
@@ -1599,6 +2076,11 @@ class BithumbBroker:
                 volume=payload.get("volume"),
                 price=payload.get("price"),
                 client_order_id=validated_client_order_id,
+                requested_qty=float(qty),
+                executable_qty=float(normalized_qty),
+                dust_qty=float(qty_split.dust_qty),
+                lot_count=int(qty_split.lot_count),
+                lot_size=float(lot_rules.lot_size),
                 canonical_query_string=canonical_payload,
                 payload_fields=",".join(payload.keys()),
             )
@@ -1628,104 +2110,242 @@ class BithumbBroker:
         raw.setdefault("market", payload.get("market"))
         raw.setdefault("order_type", payload.get("order_type"))
         raw.setdefault("ord_type", payload.get("order_type"))
-        return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, qty, 0.0, now, now, raw)
+        return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, float(normalized_qty), 0.0, now, now, raw)
 
-    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
-        order = self.get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+    def request_cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        requested_client_order_id_raw = str(client_order_id or "").strip()
+        requested_client_order_id = (
+            validate_client_order_id(requested_client_order_id_raw)
+            if requested_client_order_id_raw
+            else ""
+        )
+        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        now = int(time.time() * 1000)
         if self.dry_run:
-            now = int(time.time() * 1000)
-            return BrokerOrder(order.client_order_id, order.exchange_order_id, order.side, "CANCELED", order.price, order.qty_req, order.qty_filled, order.created_ts, now)
+            return BrokerOrder(
+                requested_client_order_id,
+                requested_exchange_order_id or "",
+                "BUY",
+                CANCEL_REQUESTED_STATUS,
+                None,
+                0.0,
+                0.0,
+                now,
+                now,
+            )
 
         cancel_payload: dict[str, object] = {}
-        if order.exchange_order_id:
-            cancel_payload["order_id"] = str(order.exchange_order_id)
-        if order.client_order_id:
-            cancel_payload["client_order_id"] = str(order.client_order_id)
+        if requested_client_order_id:
+            cancel_payload["client_order_id"] = requested_client_order_id
+        if requested_exchange_order_id:
+            cancel_payload["order_id"] = requested_exchange_order_id
         if not cancel_payload:
             raise BrokerRejectError("cancel requires order_id or client_order_id")
 
-        try:
-            response = self._post_private("/v2/orders/cancel", cancel_payload, retry_safe=False)
-        except BrokerRejectError as exc:
-            category, description = _classify_cancel_reject(exc)
-            now = int(time.time() * 1000)
-            if category == "ALREADY_CANCELED":
-                return BrokerOrder(
-                    order.client_order_id,
-                    order.exchange_order_id,
-                    order.side,
-                    "CANCELED",
-                    order.price,
-                    order.qty_req,
-                    order.qty_filled,
-                    order.created_ts,
-                    now,
-                )
-            if category == "ALREADY_FILLED":
-                return BrokerOrder(
-                    order.client_order_id,
-                    order.exchange_order_id,
-                    order.side,
-                    "FILLED",
-                    order.price,
-                    order.qty_req,
-                    order.qty_req,
-                    order.created_ts,
-                    now,
-                )
-            raise BrokerRejectError(f"cancel rejected category={category} description={description}: {exc}") from exc
+        response = self._delete_private("/v2/order", cancel_payload, retry_safe=False)
         if not isinstance(response, dict):
-            raise BrokerRejectError(f"unexpected /v2/orders/cancel payload type: {type(response).__name__}")
+            raise BrokerRejectError(f"unexpected /v2/order payload type: {type(response).__name__}")
         response_row = response.get("data") if isinstance(response.get("data"), dict) else response
         resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
             response_row if isinstance(response_row, dict) else {},
             fallback_client_order_id=str(response.get("client_order_id") or ""),
             fallback_exchange_order_id=str(response.get("order_id") or response.get("uuid") or ""),
             allow_coid_alias=True,
-            context="/v2/orders/cancel response",
+            context="/v2/order response",
         )
-        requested_order_id = str(cancel_payload.get("order_id") or "")
-        requested_client_order_id = str(cancel_payload.get("client_order_id") or "")
-        if requested_order_id and resolved_exchange_order_id and resolved_exchange_order_id != requested_order_id:
+        if requested_exchange_order_id and resolved_exchange_order_id and resolved_exchange_order_id != requested_exchange_order_id:
             raise BrokerRejectError(
-                "cancel response order_id mismatch: "
-                f"requested={requested_order_id} response={resolved_exchange_order_id}"
+                f"cancel response order_id mismatch: requested={requested_exchange_order_id} response={resolved_exchange_order_id}"
             )
-        if (
-            requested_client_order_id
-            and resolved_client_order_id
-            and resolved_client_order_id != requested_client_order_id
-            and not (requested_order_id and resolved_exchange_order_id)
-        ):
+        if requested_client_order_id and resolved_client_order_id and resolved_client_order_id != requested_client_order_id:
             raise BrokerRejectError(
-                "cancel response client_order_id mismatch: "
-                f"requested={requested_client_order_id} response={resolved_client_order_id}"
+                f"cancel response client_order_id mismatch: requested={requested_client_order_id} response={resolved_client_order_id}"
             )
-
-        if isinstance(response_row, dict) and str(response_row.get("state") or ""):
-            return self._order_from_v2_row(
-                response_row,
-                client_order_id=order.client_order_id,
-                exchange_order_id=order.exchange_order_id or "",
-            )
-
-        now = int(time.time() * 1000)
-        response_raw = self._raw_v2_order_fields(
+        if requested_client_order_id and not resolved_client_order_id:
+            resolved_client_order_id = requested_client_order_id
+        if requested_exchange_order_id and not resolved_exchange_order_id:
+            resolved_exchange_order_id = requested_exchange_order_id
+        raw = self._raw_v2_order_fields(
             response_row if isinstance(response_row, dict) else {},
-            fallback_client_order_id=order.client_order_id,
-            fallback_exchange_order_id=resolved_exchange_order_id or order.exchange_order_id or "",
+            fallback_client_order_id=resolved_client_order_id or requested_client_order_id,
+            fallback_exchange_order_id=resolved_exchange_order_id or requested_exchange_order_id,
         )
+        raw.setdefault("market", response.get("market"))
+        raw.setdefault("state", "cancel")
+        raw.setdefault("order_type", response.get("order_type"))
+        raw.setdefault("ord_type", response.get("order_type"))
         return BrokerOrder(
-            order.client_order_id,
-            resolved_exchange_order_id or order.exchange_order_id,
-            order.side,
+            resolved_client_order_id or requested_client_order_id,
+            resolved_exchange_order_id or requested_exchange_order_id,
+            str(response.get("side") or "BUY"),
             CANCEL_REQUESTED_STATUS,
-            order.price,
-            order.qty_req,
-            order.qty_filled,
-            order.created_ts,
+            None,
+            float(response.get("volume") or 0.0),
+            float(response.get("executed_volume") or 0.0),
             now,
-            response_raw,
+            now,
+            raw,
+        )
+
+    def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        requested_client_order_id_raw = str(client_order_id or "").strip()
+        requested_client_order_id = (
+            validate_client_order_id(requested_client_order_id_raw)
+            if requested_client_order_id_raw
+            else ""
+        )
+        requested_exchange_order_id = str(exchange_order_id or "").strip()
+        now = int(time.time() * 1000)
+        if self.dry_run:
+            return BrokerOrder(
+                requested_client_order_id,
+                requested_exchange_order_id or "",
+                "BUY",
+                "CANCELED",
+                None,
+                0.0,
+                0.0,
+                now,
+                now,
+            )
+        max_attempts = max(1, int(getattr(settings, "BITHUMB_CANCEL_RETRY_ATTEMPTS", 3)))
+        backoffs = (
+            float(getattr(settings, "BITHUMB_CANCEL_RETRY_BACKOFF_SEC", 0.15)),
+            float(getattr(settings, "BITHUMB_CANCEL_RETRY_BACKOFF_SEC_2", 0.3)),
+        )
+
+        for attempt in range(max_attempts):
+            try:
+                cancel_requested = self.request_cancel_order(
+                    client_order_id=requested_client_order_id,
+                    exchange_order_id=requested_exchange_order_id or None,
+                )
+            except BrokerTemporaryError as exc:
+                code, summary = classify_private_api_error(exc)
+                if code not in {"RATE_LIMITED", "ORDER_NOT_READY", "TEMPORARY"} or attempt >= max_attempts - 1:
+                    raise BrokerTemporaryError(
+                        f"cancel retry exhausted category={code} summary={summary}: {exc}"
+                    ) from exc
+                RUN_LOG.warning(
+                    format_log_kv(
+                        "[CANCEL_RETRY_DEFERRED]",
+                        client_order_id=requested_client_order_id,
+                        exchange_order_id=requested_exchange_order_id or "-",
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        category=code,
+                        summary=summary,
+                    )
+                )
+                time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
+                try:
+                    current = self.get_order(
+                        client_order_id=requested_client_order_id,
+                        exchange_order_id=requested_exchange_order_id or None,
+                    )
+                except Exception:
+                    current = None
+                if current is not None and current.status in {"CANCELED", "FILLED"}:
+                    return current
+                continue
+            except BrokerRejectError as exc:
+                category, description = _classify_cancel_reject(exc)
+                if category == "ALREADY_CANCELED":
+                    return BrokerOrder(
+                        requested_client_order_id,
+                        requested_exchange_order_id,
+                        "BUY",
+                        "CANCELED",
+                        None,
+                        0.0,
+                        0.0,
+                        now,
+                        now,
+                    )
+                if category == "ALREADY_FILLED":
+                    return BrokerOrder(
+                        requested_client_order_id,
+                        requested_exchange_order_id,
+                        "BUY",
+                        "FILLED",
+                        None,
+                        0.0,
+                        0.0,
+                        now,
+                        now,
+                    )
+                if category == "ORDER_NOT_READY":
+                    if attempt >= max_attempts - 1:
+                        raise BrokerTemporaryError(
+                            f"cancel retry exhausted category=ORDER_NOT_READY summary={description}: {exc}"
+                        ) from exc
+                    RUN_LOG.warning(
+                        format_log_kv(
+                            "[CANCEL_RETRY_DEFERRED]",
+                            client_order_id=requested_client_order_id,
+                            exchange_order_id=requested_exchange_order_id or "-",
+                            attempt=attempt + 1,
+                            max_attempts=max_attempts,
+                            category=category,
+                            summary=description,
+                        )
+                    )
+                    time.sleep(backoffs[min(attempt, len(backoffs) - 1)])
+                    try:
+                        current = self.get_order(
+                            client_order_id=requested_client_order_id,
+                            exchange_order_id=requested_exchange_order_id or None,
+                        )
+                    except Exception:
+                        current = None
+                    if current is not None and current.status in {"CANCELED", "FILLED"}:
+                        return current
+                    continue
+                if category == "NOT_FOUND":
+                    try:
+                        current = self.get_order(
+                            client_order_id=requested_client_order_id or None,
+                            exchange_order_id=requested_exchange_order_id or None,
+                        )
+                    except Exception as lookup_exc:
+                        raise BrokerRejectError(
+                            f"cancel rejected category=NOT_FOUND_NEEDS_RECONCILE description={description}: {exc}; "
+                            f"lookup_failed={type(lookup_exc).__name__}: {lookup_exc}"
+                        ) from exc
+                    if current.status in {"CANCELED", "FILLED"}:
+                        return current
+                    raise BrokerRejectError(
+                        f"cancel rejected category=NOT_FOUND_NEEDS_RECONCILE description={description}: "
+                        f"lookup_status={current.status}"
+                    ) from exc
+                raise BrokerRejectError(f"cancel rejected category={category} description={description}: {exc}") from exc
+            cancel_status = str(cancel_requested.status or CANCEL_REQUESTED_STATUS).strip() or CANCEL_REQUESTED_STATUS
+            if cancel_status == CANCEL_REQUESTED_STATUS:
+                try:
+                    current = self.get_order(
+                        client_order_id=requested_client_order_id or None,
+                        exchange_order_id=requested_exchange_order_id or None,
+                    )
+                    if current.status in {"CANCELED", "FILLED"}:
+                        return current
+                    return BrokerOrder(
+                        current.client_order_id,
+                        current.exchange_order_id,
+                        current.side,
+                        CANCEL_REQUESTED_STATUS,
+                        current.price,
+                        current.qty_req,
+                        current.qty_filled,
+                        current.created_ts,
+                        current.updated_ts,
+                        current.raw,
+                    )
+                except Exception:
+                    return cancel_requested
+            return cancel_requested
+
+        raise BrokerTemporaryError(
+            f"cancel retry exhausted category=ORDER_NOT_READY summary=cancel request remained not ready after {max_attempts} attempts"
         )
 
     def get_order(
@@ -2103,6 +2723,91 @@ class BithumbBroker:
                 snapshot_key = str(order.exchange_order_id or order.client_order_id or "")
                 if snapshot_key:
                     snapshots[snapshot_key] = order
+
+        out = list(snapshots.values())
+        out.sort(key=lambda order: int(order.updated_ts), reverse=True)
+        return out[:lim]
+
+    def get_recent_orders_for_recovery(
+        self,
+        *,
+        limit: int = 100,
+        market: str | None = None,
+        page_size: int | None = None,
+    ) -> list[BrokerOrder]:
+        if self.dry_run:
+            return []
+
+        lim = max(0, int(limit))
+        if lim == 0:
+            return []
+
+        requested_market = parse_documented_market_code(market or self._market())
+        conservative_page_size = min(max(1, lim), max(1, int(page_size or 30)), 30)
+        recovery_states: tuple[tuple[str, ...], ...] = (("wait", "done", "cancel"), ("watch",))
+        snapshots: dict[str, BrokerOrder] = {}
+
+        for states in recovery_states:
+            page = 1
+            while len(snapshots) < lim:
+                params = build_order_list_params(
+                    market=requested_market,
+                    states=states,
+                    page=page,
+                    order_by="desc",
+                    limit=conservative_page_size,
+                    allow_broad_scan=True,
+                )
+                data = self._get_private("/v1/orders", params, retry_safe=True)
+                self._journal_read_summary(path=f"/v1/orders(recovery:{'+'.join(states)})", data=data)
+                if not isinstance(data, list):
+                    raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
+                if not data:
+                    break
+                for row in data:
+                    if not isinstance(row, dict):
+                        raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
+                    try:
+                        normalized = parse_v1_order_list_row(row)
+                    except BrokerRejectError as exc:
+                        self._log_v1_orders_parse_failure(
+                            endpoint="/v1/orders",
+                            state="+".join(states),
+                            exchange_ids_count=0,
+                            client_ids_count=0,
+                            row=row,
+                            reason=str(exc),
+                        )
+                        raise
+                    qty_req, qty_filled = self._v1_list_quantities(normalized)
+                    self._log_v1_orders_price_resolution(
+                        endpoint="/v1/orders",
+                        state="+".join(states),
+                        exchange_ids_count=0,
+                        client_ids_count=0,
+                        row=row,
+                        normalized=normalized,
+                    )
+                    order = BrokerOrder(
+                        client_order_id=normalized.client_order_id,
+                        exchange_order_id=normalized.uuid,
+                        side=normalized.side,
+                        status=v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled),
+                        price=normalized.price,
+                        qty_req=qty_req,
+                        qty_filled=qty_filled,
+                        created_ts=int(normalized.created_ts),
+                        updated_ts=int(normalized.updated_ts),
+                        raw=self._raw_v1_order_fields(row),
+                    )
+                    snapshot_key = str(order.exchange_order_id or order.client_order_id or "")
+                    if snapshot_key:
+                        snapshots[snapshot_key] = order
+                    if len(snapshots) >= lim:
+                        break
+                if len(data) < conservative_page_size:
+                    break
+                page += 1
 
         out = list(snapshots.values())
         out.sort(key=lambda order: int(order.updated_ts), reverse=True)

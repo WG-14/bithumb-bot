@@ -12,7 +12,7 @@ from .db_core import ensure_db
 from .config import settings
 
 
-OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED")
+OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED")
 TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED", "RECOVERY_REQUIRED")
 ORDER_INTENT_DEDUP_RELEASE_STATUSES = {"FAILED", "RELEASED"}
 
@@ -103,10 +103,11 @@ def collect_risky_order_state(
 
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "PENDING_SUBMIT": ("PENDING_SUBMIT", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"),
-    "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
-    "PARTIAL": ("PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
-    "SUBMIT_UNKNOWN": ("SUBMIT_UNKNOWN", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
+    "PENDING_SUBMIT": ("PENDING_SUBMIT", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "PARTIAL": ("PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "SUBMIT_UNKNOWN": ("SUBMIT_UNKNOWN", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "CANCEL_REQUESTED": ("CANCEL_REQUESTED", "CANCELED", "FILLED", "PARTIAL", "RECOVERY_REQUIRED"),
     "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED"),
     "FILLED": ("FILLED",),
     "CANCELED": ("CANCELED",),
@@ -137,6 +138,7 @@ def _record_order_event(
     message: str | None = None,
     symbol: str | None = None,
     side: str | None = None,
+    order_type: str | None = None,
     submit_attempt_id: str | None = None,
     mode: str | None = None,
     intent_ts: int | None = None,
@@ -148,6 +150,15 @@ def _record_order_event(
     timeout_flag: bool | None = None,
     submit_evidence: str | None = None,
     exchange_order_id_obtained: bool | None = None,
+    internal_lot_size: float | None = None,
+    effective_min_trade_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
+    final_intended_qty: float | None = None,
+    final_submitted_qty: float | None = None,
+    decision_reason_code: str | None = None,
 ) -> None:
     conn.execute(
         """
@@ -160,11 +171,12 @@ def _record_order_event(
             fill_id,
             qty,
             price,
-            message,
-            symbol,
-            side,
-            submit_attempt_id,
-            mode,
+                message,
+                symbol,
+                side,
+                order_type,
+                submit_attempt_id,
+                mode,
             intent_ts,
             submit_ts,
             payload_fingerprint,
@@ -173,8 +185,17 @@ def _record_order_event(
             exception_class,
             timeout_flag,
             submit_evidence,
-            exchange_order_id_obtained
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            exchange_order_id_obtained,
+            internal_lot_size,
+            effective_min_trade_qty,
+            qty_step,
+            min_notional_krw,
+            intended_lot_count,
+            executable_lot_count,
+            final_intended_qty,
+            final_submitted_qty,
+            decision_reason_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             client_order_id,
@@ -188,6 +209,7 @@ def _record_order_event(
             (message[:500] if message else None),
             symbol,
             side,
+            order_type,
             submit_attempt_id,
             mode,
             int(intent_ts) if intent_ts is not None else None,
@@ -199,6 +221,15 @@ def _record_order_event(
             (1 if timeout_flag else 0) if timeout_flag is not None else None,
             submit_evidence,
             (1 if exchange_order_id_obtained else 0) if exchange_order_id_obtained is not None else None,
+            (float(internal_lot_size) if internal_lot_size is not None else None),
+            (float(effective_min_trade_qty) if effective_min_trade_qty is not None else None),
+            (float(qty_step) if qty_step is not None else None),
+            (float(min_notional_krw) if min_notional_krw is not None else None),
+            (int(intended_lot_count) if intended_lot_count is not None else None),
+            (int(executable_lot_count) if executable_lot_count is not None else None),
+            (float(final_intended_qty) if final_intended_qty is not None else None),
+            (float(final_submitted_qty) if final_submitted_qty is not None else None),
+            decision_reason_code,
         ),
     )
 
@@ -387,6 +418,16 @@ def record_submit_attempt(
     submit_attempt_id: str,
     event_type: str = "submit_attempt_recorded",
     message: str | None = None,
+    order_type: str | None = None,
+    internal_lot_size: float | None = None,
+    effective_min_trade_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
+    final_intended_qty: float | None = None,
+    final_submitted_qty: float | None = None,
+    decision_reason_code: str | None = None,
     conn: sqlite3.Connection,
 ) -> None:
     _record_order_event(
@@ -399,6 +440,7 @@ def record_submit_attempt(
         price=price,
         symbol=symbol,
         side=side,
+        order_type=order_type,
         submit_attempt_id=submit_attempt_id,
         submit_ts=submit_ts,
         payload_fingerprint=payload_fingerprint,
@@ -408,6 +450,15 @@ def record_submit_attempt(
         timeout_flag=timeout_flag,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
         message=message,
     )
 
@@ -474,6 +525,17 @@ def create_order(
     exit_decision_id: int | None = None,
     decision_reason: str | None = None,
     exit_rule_name: str | None = None,
+    order_type: str | None = None,
+    internal_lot_size: float | None = None,
+    effective_min_trade_qty: float | None = None,
+    qty_step: float | None = None,
+    min_notional_krw: float | None = None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
+    final_intended_qty: float | None = None,
+    final_submitted_qty: float | None = None,
+    decision_reason_code: str | None = None,
+    local_intent_state: str | None = None,
     status: str = "NEW",
     ts_ms: int | None = None,
     conn: sqlite3.Connection | None = None,
@@ -485,17 +547,20 @@ def create_order(
         conn.execute(
             """
             INSERT INTO orders(
-                client_order_id, submit_attempt_id, exchange_order_id, status, side, price, qty_req, qty_filled,
+                client_order_id, submit_attempt_id, exchange_order_id, status, side, order_type, price, qty_req, qty_filled,
                 strategy_name, entry_decision_id, exit_decision_id, decision_reason, exit_rule_name,
+                internal_lot_size, effective_min_trade_qty, qty_step, min_notional_krw, intended_lot_count,
+                executable_lot_count, final_intended_qty, final_submitted_qty, decision_reason_code, local_intent_state,
                 created_ts, updated_ts, last_error
             )
-            VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 client_order_id,
                 submit_attempt_id,
                 status,
                 side,
+                order_type,
                 price,
                 float(qty_req),
                 strategy_name,
@@ -503,6 +568,16 @@ def create_order(
                 (int(exit_decision_id) if exit_decision_id is not None else None),
                 decision_reason,
                 exit_rule_name,
+                internal_lot_size,
+                effective_min_trade_qty,
+                qty_step,
+                min_notional_krw,
+                intended_lot_count,
+                executable_lot_count,
+                final_intended_qty,
+                final_submitted_qty,
+                decision_reason_code,
+                local_intent_state,
                 ts,
                 ts,
             ),
@@ -517,6 +592,7 @@ def create_order(
             price=price,
             symbol=symbol or settings.PAIR,
             side=side,
+            order_type=order_type,
             submit_attempt_id=submit_attempt_id,
             mode=mode or settings.MODE,
             intent_ts=ts,

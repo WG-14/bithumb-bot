@@ -3,21 +3,27 @@ from __future__ import annotations
 import json
 import math
 import re
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final
+
+from .lot_model import build_market_lot_rules, qty_to_executable_lot_count
 
 
 DUST_POSITION_EPS = 1e-12
 OPEN_EXPOSURE_LOT_STATE: Final = "open_exposure"
 DUST_TRACKING_LOT_STATE: Final = "dust_tracking"
 _SUMMARY_TOKEN_RE = re.compile(r"([a-z_]+)=([^\s]+)")
+_DECIMAL_ZERO = Decimal("0")
 
 LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
     OPEN_EXPOSURE_LOT_STATE: {
         "meaning": "real strategy-visible position",
         "strategy_qty_source": "open_exposure_qty",
+        "strategy_lot_source": "open_lot_count",
         "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
+        "sell_submit_lot_source": "position_state.normalized_exposure.sellable_executable_lot_count",
         "sell_submission_allowed": True,
         "sell_submit_includes_dust_tracking": False,
         "qty_boundary_rule": "qty_open >= min_qty remains open_exposure; SELL sizing consumes sellable_executable_qty from normalized state",
@@ -26,7 +32,9 @@ LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
     DUST_TRACKING_LOT_STATE: {
         "meaning": "operator tracking residual",
         "strategy_qty_source": "dust_tracking_qty",
+        "strategy_lot_source": "dust_tracking_lot_count",
         "sell_submit_qty_source": "excluded_from_sell_qty",
+        "sell_submit_lot_source": "excluded_from_sell_lot_count",
         "sell_submission_allowed": False,
         "sell_submit_includes_dust_tracking": False,
         "qty_boundary_rule": "qty_open < min_qty is tracked here; SELL submission excludes dust_tracking by default",
@@ -593,6 +601,10 @@ class NormalizedExposure:
     open_exposure_qty: float
     dust_tracking_qty: float
     reserved_exit_qty: float
+    open_lot_count: int
+    dust_tracking_lot_count: int
+    reserved_exit_lot_count: int
+    sellable_executable_lot_count: int
     sellable_executable_qty: float
     effective_min_trade_qty: float
     exit_non_executable_reason: str
@@ -661,6 +673,10 @@ class NormalizedExposure:
             "executable_exposure_qty": float(self.open_exposure_qty),
             "dust_tracking_qty": float(self.dust_tracking_qty),
             "reserved_exit_qty": float(self.reserved_exit_qty),
+            "open_lot_count": int(self.open_lot_count),
+            "dust_tracking_lot_count": int(self.dust_tracking_lot_count),
+            "reserved_exit_lot_count": int(self.reserved_exit_lot_count),
+            "sellable_executable_lot_count": int(self.sellable_executable_lot_count),
             "sellable_executable_qty": float(self.sellable_executable_qty),
             "effective_min_trade_qty": float(self.effective_min_trade_qty),
             "exit_non_executable_reason": self.exit_non_executable_reason,
@@ -744,8 +760,16 @@ def lot_state_strategy_qty_source(position_state: str) -> str:
     return str(lot_state_quantity_rule(position_state)["strategy_qty_source"])
 
 
+def lot_state_strategy_lot_source(position_state: str) -> str:
+    return str(lot_state_quantity_rule(position_state)["strategy_lot_source"])
+
+
 def lot_state_sell_submit_qty_source(position_state: str) -> str:
     return str(lot_state_quantity_rule(position_state)["sell_submit_qty_source"])
+
+
+def lot_state_sell_submit_lot_source(position_state: str) -> str:
+    return str(lot_state_quantity_rule(position_state)["sell_submit_lot_source"])
 
 
 def lot_state_sell_submission_allowed(position_state: str) -> bool:
@@ -767,7 +791,9 @@ def lot_state_quantity_rule(position_state: str) -> dict[str, object]:
         return {
             "meaning": "unknown lot state",
             "strategy_qty_source": "unknown",
+            "strategy_lot_source": "unknown",
             "sell_submit_qty_source": "excluded_from_sell_qty",
+            "sell_submit_lot_source": "excluded_from_sell_lot_count",
             "sell_submission_allowed": False,
             "sell_submit_includes_dust_tracking": False,
             "qty_boundary_rule": "unknown lot state is not sellable",
@@ -806,30 +832,60 @@ def _effective_qty_step(*, qty_step: float, min_qty: float, max_qty_decimals: in
     return 0.0
 
 
-def _floor_qty_to_step(*, qty: float, qty_step: float, max_qty_decimals: int | None) -> float:
-    normalized_qty = max(0.0, float(qty))
-    step = _effective_qty_step(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
-    if step > 0.0:
-        normalized_qty = math.floor((normalized_qty / step) + DUST_POSITION_EPS) * step
+def _decimal_from_number(value: float | int | str | None, *, default: Decimal = _DECIMAL_ZERO) -> Decimal:
+    if value is None:
+        return default
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return default
+    if not parsed.is_finite():
+        return default
+    return parsed
+
+
+def _decimal_quantizer(*, max_qty_decimals: int | None) -> Decimal | None:
     decimals = max(0, int(max_qty_decimals or 0))
-    if decimals > 0:
-        scale = 10 ** decimals
-        normalized_qty = math.floor((normalized_qty * scale) + DUST_POSITION_EPS) / scale
-    return max(0.0, normalized_qty)
+    if decimals <= 0:
+        return None
+    return Decimal("1").scaleb(-decimals)
+
+
+def _effective_qty_step_decimal(*, qty_step: float, min_qty: float, max_qty_decimals: int | None) -> Decimal:
+    step = _decimal_from_number(qty_step)
+    if step > 0:
+        return step
+    minimum = _decimal_from_number(min_qty)
+    if minimum > 0:
+        return minimum
+    quantizer = _decimal_quantizer(max_qty_decimals=max_qty_decimals)
+    if quantizer is not None:
+        return quantizer
+    return _DECIMAL_ZERO
+
+
+def _floor_qty_to_step(*, qty: float, qty_step: float, max_qty_decimals: int | None) -> float:
+    normalized_qty = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    step = _effective_qty_step_decimal(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
+    if step > 0:
+        normalized_qty = (normalized_qty / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    quantizer = _decimal_quantizer(max_qty_decimals=max_qty_decimals)
+    if quantizer is not None:
+        normalized_qty = normalized_qty.quantize(quantizer, rounding=ROUND_FLOOR)
+    return max(0.0, float(normalized_qty))
 
 
 def _ceil_qty_to_step(*, qty: float, qty_step: float, max_qty_decimals: int | None) -> float:
-    normalized_qty = max(0.0, float(qty))
-    if normalized_qty <= 0.0:
+    normalized_qty = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    if normalized_qty <= 0:
         return 0.0
-    step = _effective_qty_step(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
-    if step > 0.0:
-        normalized_qty = math.ceil((normalized_qty / step) - DUST_POSITION_EPS) * step
-    decimals = max(0, int(max_qty_decimals or 0))
-    if decimals > 0:
-        scale = 10 ** decimals
-        normalized_qty = math.ceil((normalized_qty * scale) - DUST_POSITION_EPS) / scale
-    return max(0.0, normalized_qty)
+    step = _effective_qty_step_decimal(qty_step=qty_step, min_qty=0.0, max_qty_decimals=max_qty_decimals)
+    if step > 0:
+        normalized_qty = (normalized_qty / step).to_integral_value(rounding=ROUND_CEILING) * step
+    quantizer = _decimal_quantizer(max_qty_decimals=max_qty_decimals)
+    if quantizer is not None:
+        normalized_qty = normalized_qty.quantize(quantizer, rounding=ROUND_CEILING)
+    return max(0.0, float(normalized_qty))
 
 
 def build_executable_lot(
@@ -844,18 +900,20 @@ def build_executable_lot(
     exit_slippage_bps: float = 0.0,
     exit_buffer_ratio: float = 0.0,
 ) -> ExecutableLot:
-    raw_qty = max(0.0, float(qty))
-    normalized_min_qty = max(0.0, float(min_qty))
-    normalized_min_notional = max(0.0, float(min_notional_krw))
-    normalized_exit_fee_ratio = max(0.0, float(exit_fee_ratio))
-    normalized_exit_slippage_ratio = max(0.0, float(exit_slippage_bps)) / 10_000.0
-    normalized_exit_buffer_ratio = max(0.0, float(exit_buffer_ratio))
-    step = _effective_qty_step(
+    raw_qty_decimal = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    raw_qty = float(raw_qty_decimal)
+    normalized_min_qty_decimal = max(_DECIMAL_ZERO, _decimal_from_number(min_qty))
+    normalized_min_notional_decimal = max(_DECIMAL_ZERO, _decimal_from_number(min_notional_krw))
+    normalized_exit_fee_ratio_decimal = max(_DECIMAL_ZERO, _decimal_from_number(exit_fee_ratio))
+    normalized_exit_slippage_ratio_decimal = max(_DECIMAL_ZERO, _decimal_from_number(exit_slippage_bps)) / Decimal("10000")
+    normalized_exit_buffer_ratio_decimal = max(_DECIMAL_ZERO, _decimal_from_number(exit_buffer_ratio))
+    step_decimal = _effective_qty_step_decimal(
         qty_step=qty_step,
-        min_qty=normalized_min_qty,
+        min_qty=float(normalized_min_qty_decimal),
         max_qty_decimals=max_qty_decimals,
     )
-    buffered_min_qty = normalized_min_qty
+    step = float(step_decimal)
+    buffered_min_qty = float(normalized_min_qty_decimal)
     if buffered_min_qty > 0.0 and step > 0.0:
         buffered_min_qty = _ceil_qty_to_step(
             qty=(buffered_min_qty + step),
@@ -864,19 +922,20 @@ def build_executable_lot(
         )
     exit_price_floor: float | None = None
     if market_price is not None:
-        normalized_price = max(0.0, float(market_price))
-        if normalized_price > 0.0:
-            exit_price_floor = normalized_price * max(
-                0.0,
-                1.0
-                - normalized_exit_fee_ratio
-                - normalized_exit_slippage_ratio
-                - normalized_exit_buffer_ratio,
+        normalized_price_decimal = max(_DECIMAL_ZERO, _decimal_from_number(market_price))
+        if normalized_price_decimal > 0:
+            exit_price_ratio = max(
+                _DECIMAL_ZERO,
+                Decimal("1")
+                - normalized_exit_fee_ratio_decimal
+                - normalized_exit_slippage_ratio_decimal
+                - normalized_exit_buffer_ratio_decimal,
             )
+            exit_price_floor = float(normalized_price_decimal * exit_price_ratio)
     notional_min_qty = 0.0
-    if normalized_min_notional > 0.0 and exit_price_floor is not None and exit_price_floor > 0.0:
+    if float(normalized_min_notional_decimal) > 0.0 and exit_price_floor is not None and exit_price_floor > 0.0:
         notional_min_qty = _ceil_qty_to_step(
-            qty=(normalized_min_notional / exit_price_floor),
+            qty=(float(normalized_min_notional_decimal) / exit_price_floor),
             qty_step=step,
             max_qty_decimals=max_qty_decimals,
         )
@@ -905,13 +964,13 @@ def build_executable_lot(
         executable_qty=max(0.0, executable_qty),
         dust_qty=max(0.0, dust_qty),
         effective_min_trade_qty=max(0.0, effective_min_trade_qty),
-        min_qty=normalized_min_qty,
+        min_qty=float(normalized_min_qty_decimal),
         qty_step=max(0.0, float(step)),
-        min_notional_krw=normalized_min_notional,
+        min_notional_krw=float(normalized_min_notional_decimal),
         exit_price_floor=exit_price_floor,
-        exit_fee_ratio=normalized_exit_fee_ratio,
-        exit_slippage_ratio=normalized_exit_slippage_ratio,
-        exit_buffer_ratio=normalized_exit_buffer_ratio,
+        exit_fee_ratio=float(normalized_exit_fee_ratio_decimal),
+        exit_slippage_ratio=float(normalized_exit_slippage_ratio_decimal),
+        exit_buffer_ratio=float(normalized_exit_buffer_ratio_decimal),
         exit_non_executable_reason=exit_non_executable_reason,
     )
 
@@ -1227,6 +1286,8 @@ def build_position_state_model(
     open_exposure_qty: float | None = None,
     dust_tracking_qty: float | None = None,
     reserved_exit_qty: float | None = None,
+    open_lot_count: int | None = None,
+    dust_tracking_lot_count: int | None = None,
     market_price: float | None = None,
     min_qty: float | None = None,
     qty_step: float | None = None,
@@ -1244,6 +1305,8 @@ def build_position_state_model(
         open_exposure_qty=open_exposure_qty,
         dust_tracking_qty=dust_tracking_qty,
         reserved_exit_qty=reserved_exit_qty,
+        open_lot_count=open_lot_count,
+        dust_tracking_lot_count=dust_tracking_lot_count,
         market_price=market_price,
         min_qty=min_qty,
         qty_step=qty_step,
@@ -1287,6 +1350,8 @@ def _build_position_state_normalized_exposure(
     open_exposure_qty: float | None,
     dust_tracking_qty: float | None,
     reserved_exit_qty: float | None,
+    open_lot_count: int | None,
+    dust_tracking_lot_count: int | None,
     market_price: float | None,
     min_qty: float | None,
     qty_step: float | None,
@@ -1303,6 +1368,8 @@ def _build_position_state_normalized_exposure(
         open_exposure_qty=open_exposure_qty,
         dust_tracking_qty=dust_tracking_qty,
         reserved_exit_qty=reserved_exit_qty,
+        open_lot_count=open_lot_count,
+        dust_tracking_lot_count=dust_tracking_lot_count,
         market_price=market_price,
         min_qty=min_qty,
         qty_step=qty_step,
@@ -1342,6 +1409,10 @@ def _build_position_state_fields(
         "open_exposure_qty": float(normalized_exposure.open_exposure_qty),
         "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
         "reserved_exit_qty": float(normalized_exposure.reserved_exit_qty),
+        "open_lot_count": int(normalized_exposure.open_lot_count),
+        "dust_tracking_lot_count": int(normalized_exposure.dust_tracking_lot_count),
+        "reserved_exit_lot_count": int(normalized_exposure.reserved_exit_lot_count),
+        "sellable_executable_lot_count": int(normalized_exposure.sellable_executable_lot_count),
         "sellable_executable_qty": float(normalized_exposure.sellable_executable_qty),
     }
 
@@ -1354,6 +1425,8 @@ def build_normalized_exposure(
     open_exposure_qty: float | None = None,
     dust_tracking_qty: float | None = None,
     reserved_exit_qty: float | None = None,
+    open_lot_count: int | None = None,
+    dust_tracking_lot_count: int | None = None,
     market_price: float | None = None,
     min_qty: float | None = None,
     qty_step: float | None = None,
@@ -1392,22 +1465,64 @@ def build_normalized_exposure(
     effective_open_exposure_qty = executable_exposure.effective_open_exposure_qty
     effective_reserved_exit_qty = executable_exposure.effective_reserved_exit_qty
     sellable_executable_qty = executable_exposure.sellable_executable_qty
+    lot_rules = build_market_lot_rules(
+        market_id="unknown",
+        market_price=market_price,
+        rules=type(
+            "_LotRules",
+            (),
+            {
+                "market_id": "",
+                "bid_min_total_krw": 0.0,
+                "ask_min_total_krw": 0.0,
+                "bid_price_unit": 0.0,
+                "ask_price_unit": 0.0,
+                "order_types": (),
+                "order_sides": (),
+                "bid_fee": 0.0,
+                "ask_fee": 0.0,
+                "maker_bid_fee": 0.0,
+                "maker_ask_fee": 0.0,
+                "min_qty": 0.0 if min_qty is None else float(min_qty),
+                "qty_step": 0.0 if qty_step is None else float(qty_step),
+                "min_notional_krw": 0.0 if min_notional_krw is None else float(min_notional_krw),
+                "max_qty_decimals": 0 if max_qty_decimals is None else int(max_qty_decimals),
+            },
+        )(),
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
+        source_mode="derived",
+    )
+    normalized_open_lot_count = int(
+        open_lot_count
+        if open_lot_count is not None
+        else qty_to_executable_lot_count(qty=effective_open_exposure_qty, lot_rules=lot_rules)
+    )
+    normalized_dust_lot_count = int(
+        dust_tracking_lot_count
+        if dust_tracking_lot_count is not None
+        else qty_to_executable_lot_count(qty=normalized_dust_tracking_qty, lot_rules=lot_rules)
+    )
+    normalized_reserved_exit_lot_count = int(
+        qty_to_executable_lot_count(qty=effective_reserved_exit_qty, lot_rules=lot_rules)
+    )
+    normalized_sellable_lot_count = int(qty_to_executable_lot_count(qty=sellable_executable_qty, lot_rules=lot_rules))
+    if normalized_open_lot_count <= 0:
+        effective_open_exposure_qty = 0.0
+        sellable_executable_qty = 0.0
+        normalized_dust_tracking_qty = max(normalized_dust_tracking_qty, normalized_total_asset_qty)
+        normalized_dust_lot_count = int(qty_to_executable_lot_count(qty=normalized_dust_tracking_qty, lot_rules=lot_rules))
+        normalized_sellable_lot_count = 0
     entry_allowed = bool(
         normalized_total_asset_qty <= DUST_POSITION_EPS
         or should_treat_as_flat_for_entry_gate(display_context)
     )
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
-    # `normalized_exposure_active` tracks whether the shared state still has a
-    # position to manage, which is separate from entry-flat semantics and from
-    # the sellable executable quantity.
-    normalized_active = bool(raw_qty_open > DUST_POSITION_EPS or effective_open_exposure_qty > DUST_POSITION_EPS)
-    normalized_qty = float(
-        raw_qty_open
-        if raw_qty_open > DUST_POSITION_EPS
-        else effective_open_exposure_qty
-        if normalized_active
-        else 0.0
-    )
+    # `normalized_exposure_active` now tracks executable open exposure only.
+    # Dust-only residue is intentionally not a normal strategy-managed position.
+    normalized_active = bool(normalized_open_lot_count > 0 or normalized_reserved_exit_lot_count > 0)
+    normalized_qty = float(effective_open_exposure_qty if normalized_open_lot_count > 0 else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
     elif normalized_total_asset_qty > DUST_POSITION_EPS:
@@ -1416,7 +1531,8 @@ def build_normalized_exposure(
         entry_block_reason = "none"
     executable_sell_qty = max(0.0, float(sellable_executable_qty))
     executable_sell_ready = bool(
-        executable_sell_qty > DUST_POSITION_EPS
+        normalized_open_lot_count > 0
+        and executable_sell_qty > DUST_POSITION_EPS
         and (
             normalized_min_qty <= DUST_POSITION_EPS
             or executable_sell_qty >= normalized_min_qty
@@ -1426,13 +1542,13 @@ def build_normalized_exposure(
         exit_allowed = True
         exit_block_reason = "none"
         terminal_state = "open_exposure"
-    elif effective_open_exposure_qty > DUST_POSITION_EPS and effective_reserved_exit_qty > DUST_POSITION_EPS:
+    elif normalized_open_lot_count > 0 and effective_reserved_exit_qty > DUST_POSITION_EPS:
         exit_allowed = False
         exit_block_reason = "reserved_for_open_sell_orders"
         terminal_state = "reserved_exit_pending"
     elif normalized_dust_tracking_qty > DUST_POSITION_EPS:
         exit_allowed = False
-        exit_block_reason = "no_executable_exit_lot_exists"
+        exit_block_reason = "dust_only_remainder"
         terminal_state = "dust_only"
     elif normalized_total_asset_qty <= DUST_POSITION_EPS:
         exit_allowed = False
@@ -1451,6 +1567,10 @@ def build_normalized_exposure(
         open_exposure_qty=effective_open_exposure_qty,
         dust_tracking_qty=normalized_dust_tracking_qty,
         reserved_exit_qty=effective_reserved_exit_qty,
+        open_lot_count=normalized_open_lot_count,
+        dust_tracking_lot_count=normalized_dust_lot_count,
+        reserved_exit_lot_count=normalized_reserved_exit_lot_count,
+        sellable_executable_lot_count=normalized_sellable_lot_count,
         sellable_executable_qty=sellable_executable_qty,
         effective_min_trade_qty=float(executable_exposure.executable_lot.effective_min_trade_qty),
         exit_non_executable_reason=str(executable_exposure.executable_lot.exit_non_executable_reason),

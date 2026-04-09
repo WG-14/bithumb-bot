@@ -39,8 +39,23 @@ def test_build_order_list_params_rejects_missing_identifiers() -> None:
 
 
 def test_build_order_list_params_rejects_identifier_length_over_limit() -> None:
-    with pytest.raises(ValueError, match="allows at most 100 items"):
-        build_order_list_params(uuids=[f"uuid-{idx}" for idx in range(101)])
+    with pytest.raises(ValueError, match="allows at most 30 items"):
+        build_order_list_params(uuids=[f"uuid-{idx}" for idx in range(31)])
+
+
+def test_build_order_list_params_accepts_identifier_length_limit() -> None:
+    params = build_order_list_params(uuids=[f"uuid-{idx}" for idx in range(30)])
+    assert params["uuids"] == [f"uuid-{idx}" for idx in range(30)]
+
+
+def test_build_order_list_params_rejects_identifier_length_over_limit_for_client_ids() -> None:
+    with pytest.raises(ValueError, match="allows at most 30 items"):
+        build_order_list_params(client_order_ids=[f"cid-{idx}" for idx in range(31)])
+
+
+def test_build_order_list_params_accepts_client_identifier_length_limit() -> None:
+    params = build_order_list_params(client_order_ids=[f"cid-{idx}" for idx in range(30)])
+    assert params["client_order_ids"] == [f"cid-{idx}" for idx in range(30)]
 
 
 def test_build_order_list_params_rejects_invalid_state() -> None:
@@ -56,6 +71,55 @@ def test_build_order_list_params_rejects_zero_page() -> None:
 def test_build_order_list_params_rejects_invalid_order_by() -> None:
     with pytest.raises(ValueError, match="order_by must be one of"):
         build_order_list_params(uuids=["uuid-1"], order_by="latest")
+
+
+def test_build_order_list_params_accepts_broad_recovery_scan_with_market_and_states() -> None:
+    params = build_order_list_params(
+        market="KRW-BTC",
+        states=["wait", "done"],
+        allow_broad_scan=True,
+        limit=10,
+    )
+
+    assert params == {
+        "page": 1,
+        "order_by": "desc",
+        "market": "KRW-BTC",
+        "states": ["wait", "done"],
+        "limit": 10,
+    }
+
+
+def test_build_order_list_params_rejects_state_and_states_together() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        build_order_list_params(
+            market="KRW-BTC",
+            state="wait",
+            states=["done"],
+            allow_broad_scan=True,
+        )
+
+
+def test_build_order_list_params_rejects_watch_mixed_with_general_states() -> None:
+    with pytest.raises(ValueError, match="must not mix watch"):
+        build_order_list_params(
+            market="KRW-BTC",
+            states=["wait", "watch"],
+            allow_broad_scan=True,
+        )
+
+
+def test_build_order_list_params_accepts_watch_only_recovery_scan() -> None:
+    params = build_order_list_params(
+        market="KRW-BTC",
+        states=["watch"],
+        allow_broad_scan=True,
+        page=2,
+    )
+
+    assert params["states"] == ["watch"]
+    assert params["market"] == "KRW-BTC"
+    assert params["page"] == 2
 
 
 def test_build_order_list_params_rejects_out_of_range_limit() -> None:

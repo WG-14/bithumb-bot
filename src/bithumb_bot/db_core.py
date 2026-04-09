@@ -6,6 +6,7 @@ import json
 import sqlite3
 from decimal import Decimal, ROUND_HALF_EVEN
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .config import prepare_db_path_for_connection, settings
@@ -436,6 +437,90 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_rule_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            fetched_ts INTEGER NOT NULL,
+            source_mode TEXT NOT NULL,
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            fallback_reason_code TEXT,
+            fallback_reason_summary TEXT,
+            rule_signature TEXT NOT NULL,
+            rules_json TEXT NOT NULL,
+            source_json TEXT NOT NULL,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    _ensure_column(conn, "order_rule_snapshots", "market", "market TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "order_rule_snapshots", "fetched_ts", "fetched_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_rule_snapshots", "source_mode", "source_mode TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_used", "fallback_used INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_reason_code", "fallback_reason_code TEXT")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_reason_summary", "fallback_reason_summary TEXT")
+    _ensure_column(conn, "order_rule_snapshots", "rule_signature", "rule_signature TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "order_rule_snapshots", "rules_json", "rules_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "order_rule_snapshots", "source_json", "source_json TEXT NOT NULL DEFAULT '{}'")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_order_rule_snapshots_market_signature
+        ON order_rule_snapshots(market, rule_signature)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_rule_snapshots_market_fetched
+        ON order_rule_snapshots(market, fetched_ts DESC, id DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS private_stream_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stream_name TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            event_ts INTEGER NOT NULL,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            order_status TEXT,
+            fill_id TEXT,
+            qty REAL,
+            price REAL,
+            payload_json TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,
+            applied_status TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    _ensure_column(conn, "private_stream_events", "stream_name", "stream_name TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "private_stream_events", "dedupe_key", "dedupe_key TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "private_stream_events", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "private_stream_events", "client_order_id", "client_order_id TEXT")
+    _ensure_column(conn, "private_stream_events", "exchange_order_id", "exchange_order_id TEXT")
+    _ensure_column(conn, "private_stream_events", "order_status", "order_status TEXT")
+    _ensure_column(conn, "private_stream_events", "fill_id", "fill_id TEXT")
+    _ensure_column(conn, "private_stream_events", "qty", "qty REAL")
+    _ensure_column(conn, "private_stream_events", "price", "price REAL")
+    _ensure_column(conn, "private_stream_events", "payload_json", "payload_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "private_stream_events", "applied", "applied INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "private_stream_events", "applied_status", "applied_status TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_private_stream_events_dedupe
+        ON private_stream_events(dedupe_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_private_stream_events_lookup
+        ON private_stream_events(stream_name, event_ts DESC, id DESC)
+        """
+    )
+
     _ensure_column(
         conn,
         "bot_health",
@@ -661,6 +746,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             exchange_order_id TEXT,
             status TEXT NOT NULL,
             side TEXT NOT NULL,
+            order_type TEXT,
             price REAL,
             qty_req REAL NOT NULL,
             qty_filled REAL NOT NULL DEFAULT 0,
@@ -669,6 +755,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             exit_decision_id INTEGER,
             decision_reason TEXT,
             exit_rule_name TEXT,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
+            local_intent_state TEXT,
             created_ts INTEGER NOT NULL,
             updated_ts INTEGER NOT NULL,
             last_error TEXT
@@ -677,11 +773,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "orders", "submit_attempt_id", "submit_attempt_id TEXT")
+    _ensure_column(conn, "orders", "order_type", "order_type TEXT")
     _ensure_column(conn, "orders", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "orders", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "orders", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "orders", "decision_reason", "decision_reason TEXT")
     _ensure_column(conn, "orders", "exit_rule_name", "exit_rule_name TEXT")
+    _ensure_column(conn, "orders", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "orders", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "orders", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "orders", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "orders", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "orders", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "orders", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "orders", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "orders", "decision_reason_code", "decision_reason_code TEXT")
+    _ensure_column(conn, "orders", "local_intent_state", "local_intent_state TEXT")
 
     conn.execute(
         """
@@ -727,6 +834,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             message TEXT,
             symbol TEXT,
             side TEXT,
+            order_type TEXT,
             submit_attempt_id TEXT,
             mode TEXT,
             intent_ts INTEGER,
@@ -738,6 +846,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             timeout_flag INTEGER,
             submit_evidence TEXT,
             exchange_order_id_obtained INTEGER,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
@@ -745,6 +862,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "order_events", "symbol", "symbol TEXT")
     _ensure_column(conn, "order_events", "side", "side TEXT")
+    _ensure_column(conn, "order_events", "order_type", "order_type TEXT")
     _ensure_column(conn, "order_events", "submit_attempt_id", "submit_attempt_id TEXT")
     _ensure_column(conn, "order_events", "mode", "mode TEXT")
     _ensure_column(conn, "order_events", "intent_ts", "intent_ts INTEGER")
@@ -756,6 +874,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "order_events", "timeout_flag", "timeout_flag INTEGER")
     _ensure_column(conn, "order_events", "submit_evidence", "submit_evidence TEXT")
     _ensure_column(conn, "order_events", "exchange_order_id_obtained", "exchange_order_id_obtained INTEGER")
+    _ensure_column(conn, "order_events", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "order_events", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "order_events", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "order_events", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "order_events", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_events", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "order_events", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "order_events", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "order_events", "decision_reason_code", "decision_reason_code TEXT")
 
     conn.execute(
         """
@@ -822,6 +949,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             normalized_non_positive INTEGER NOT NULL DEFAULT 0,
             normalized_below_min INTEGER NOT NULL DEFAULT 0,
             notional_below_min INTEGER NOT NULL DEFAULT 0,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
             summary TEXT,
             context_json TEXT,
             created_ts INTEGER NOT NULL,
@@ -847,6 +983,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "order_suppressions", "normalized_non_positive", "normalized_non_positive INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "order_suppressions", "normalized_below_min", "normalized_below_min INTEGER NOT NULL DEFAULT 0")
     _ensure_column(conn, "order_suppressions", "notional_below_min", "notional_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "order_suppressions", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "order_suppressions", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "order_suppressions", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "order_suppressions", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_suppressions", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "order_suppressions", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "order_suppressions", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "order_suppressions", "decision_reason_code", "decision_reason_code TEXT")
     _ensure_column(conn, "order_suppressions", "summary", "summary TEXT")
     _ensure_column(conn, "order_suppressions", "context_json", "context_json TEXT")
 
@@ -1341,3 +1486,190 @@ def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, 
         ),
         "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
     }
+
+
+@dataclass(frozen=True)
+class OrderRuleSnapshotRecord:
+    market: str
+    fetched_ts: int
+    source_mode: str
+    fallback_used: bool
+    fallback_reason_code: str
+    fallback_reason_summary: str
+    rule_signature: str
+    rules_json: str
+    source_json: str
+
+
+def record_order_rule_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    market: str,
+    fetched_ts: int,
+    source_mode: str,
+    fallback_used: bool,
+    fallback_reason_code: str | None,
+    fallback_reason_summary: str | None,
+    rules_payload: dict[str, Any],
+    source_payload: dict[str, str],
+) -> OrderRuleSnapshotRecord:
+    rules_json = json.dumps(rules_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    source_json = json.dumps(source_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    signature_payload = {
+        "market": str(market),
+        "source_mode": str(source_mode),
+        "fallback_used": bool(fallback_used),
+        "fallback_reason_code": str(fallback_reason_code or ""),
+        "fallback_reason_summary": str(fallback_reason_summary or ""),
+        "rules_json": rules_json,
+        "source_json": source_json,
+    }
+    rule_signature = hashlib.sha256(
+        json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO order_rule_snapshots(
+            market,
+            fetched_ts,
+            source_mode,
+            fallback_used,
+            fallback_reason_code,
+            fallback_reason_summary,
+            rule_signature,
+            rules_json,
+            source_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(market),
+            int(fetched_ts),
+            str(source_mode),
+            1 if fallback_used else 0,
+            (str(fallback_reason_code) if fallback_reason_code else None),
+            (str(fallback_reason_summary) if fallback_reason_summary else None),
+            rule_signature,
+            rules_json,
+            source_json,
+        ),
+    )
+    return OrderRuleSnapshotRecord(
+        market=str(market),
+        fetched_ts=int(fetched_ts),
+        source_mode=str(source_mode),
+        fallback_used=bool(fallback_used),
+        fallback_reason_code=str(fallback_reason_code or ""),
+        fallback_reason_summary=str(fallback_reason_summary or ""),
+        rule_signature=rule_signature,
+        rules_json=rules_json,
+        source_json=source_json,
+    )
+
+
+def fetch_latest_order_rule_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    market: str | None = None,
+) -> OrderRuleSnapshotRecord | None:
+    if market:
+        row = conn.execute(
+            """
+            SELECT market, fetched_ts, source_mode, fallback_used, fallback_reason_code,
+                   fallback_reason_summary, rule_signature, rules_json, source_json
+            FROM order_rule_snapshots
+            WHERE market=?
+            ORDER BY fetched_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (str(market),),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT market, fetched_ts, source_mode, fallback_used, fallback_reason_code,
+                   fallback_reason_summary, rule_signature, rules_json, source_json
+            FROM order_rule_snapshots
+            ORDER BY fetched_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    return OrderRuleSnapshotRecord(
+        market=str(row["market"]),
+        fetched_ts=int(row["fetched_ts"]),
+        source_mode=str(row["source_mode"]),
+        fallback_used=bool(int(row["fallback_used"])),
+        fallback_reason_code=str(row["fallback_reason_code"] or ""),
+        fallback_reason_summary=str(row["fallback_reason_summary"] or ""),
+        rule_signature=str(row["rule_signature"]),
+        rules_json=str(row["rules_json"]),
+        source_json=str(row["source_json"]),
+    )
+
+
+def record_private_stream_event(
+    conn: sqlite3.Connection,
+    *,
+    stream_name: str,
+    dedupe_key: str,
+    event_ts: int,
+    client_order_id: str | None,
+    exchange_order_id: str | None,
+    order_status: str | None,
+    fill_id: str | None,
+    qty: float | None,
+    price: float | None,
+    payload: dict[str, Any],
+) -> bool:
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO private_stream_events(
+            stream_name,
+            dedupe_key,
+            event_ts,
+            client_order_id,
+            exchange_order_id,
+            order_status,
+            fill_id,
+            qty,
+            price,
+            payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(stream_name),
+            str(dedupe_key),
+            int(event_ts),
+            (str(client_order_id) if client_order_id else None),
+            (str(exchange_order_id) if exchange_order_id else None),
+            (str(order_status) if order_status else None),
+            (str(fill_id) if fill_id else None),
+            (float(qty) if qty is not None else None),
+            (float(price) if price is not None else None),
+            payload_json,
+        ),
+    )
+    return bool(cursor.rowcount)
+
+
+def mark_private_stream_event_applied(
+    conn: sqlite3.Connection,
+    *,
+    dedupe_key: str,
+    applied: bool,
+    applied_status: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE private_stream_events
+        SET applied=?, applied_status=?
+        WHERE dedupe_key=?
+        """,
+        (
+            1 if applied else 0,
+            str(applied_status),
+            str(dedupe_key),
+        ),
+    )

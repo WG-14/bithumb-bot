@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from dataclasses import dataclass
 from typing import Any
 
 from .config import settings
-from .dust import DUST_POSITION_EPS, build_executable_lot
+from .dust import DUST_POSITION_EPS
 from .broker.order_rules import get_effective_order_rules
+from .lot_model import build_market_lot_rules, lot_count_to_qty
+
+_DECIMAL_ZERO = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -24,15 +28,29 @@ class ExecutionSizingPlan:
     side: str
     allowed: bool
     block_reason: str
+    decision_reason_code: str
     budget_krw: float
     requested_qty: float
     executable_qty: float
+    internal_lot_size: float
+    intended_lot_count: int
+    executable_lot_count: int
     qty_source: str
     effective_min_trade_qty: float
     min_qty: float
     qty_step: float
     min_notional_krw: float
     non_executable_reason: str
+
+
+def _decimal_from_number(value: object) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"invalid numeric value: {value}") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"invalid non-finite numeric value: {value}")
+    return parsed
 
 
 def _build_default_entry_execution_intent(*, pair: str) -> EntryExecutionIntent:
@@ -44,6 +62,38 @@ def _build_default_entry_execution_intent(*, pair: str) -> EntryExecutionIntent:
         max_budget_krw=float(settings.MAX_ORDER_KRW),
         requires_execution_sizing=True,
     )
+
+
+def compute_feasible_entry_lot_count(
+    *,
+    budget_krw: float,
+    market_price: float,
+    lot_rules,
+) -> int:
+    budget = max(0.0, float(budget_krw))
+    price = float(market_price)
+    lot_size = float(getattr(lot_rules, "lot_size", 0.0) or 0.0)
+    if budget <= 0.0 or not math.isfinite(price) or price <= 0.0 or lot_size <= 0.0:
+        return 0
+
+    lot_notional = price * lot_size
+    if not math.isfinite(lot_notional) or lot_notional <= 0.0:
+        return 0
+
+    lot_count = Decimal(str(budget)) / Decimal(str(lot_notional))
+    return max(0, int(lot_count.to_integral_value(rounding=ROUND_FLOOR)))
+
+
+def compute_feasible_exit_lot_count(
+    *,
+    sellable_qty: float,
+    lot_rules,
+) -> int:
+    requested_qty = max(0.0, float(sellable_qty))
+    lot_size = float(getattr(lot_rules, "lot_size", 0.0) or 0.0)
+    if requested_qty <= 0.0 or lot_size <= 0.0:
+        return 0
+    return max(0, int(lot_rules.quantize_to_lot_count(qty=requested_qty, rounding=ROUND_FLOOR)))
 
 
 def _parse_entry_execution_intent(
@@ -102,9 +152,13 @@ def build_buy_execution_sizing(
             side="BUY",
             allowed=False,
             block_reason="non_positive_entry_budget",
+            decision_reason_code="entry_suppressed_by_budget",
             budget_krw=float(gross_budget),
             requested_qty=0.0,
             executable_qty=0.0,
+            internal_lot_size=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
             qty_source="entry.intent_budget_krw",
             effective_min_trade_qty=0.0,
             min_qty=0.0,
@@ -113,32 +167,40 @@ def build_buy_execution_sizing(
             non_executable_reason="non_positive_entry_budget",
         )
     rules = get_effective_order_rules(pair).rules
-    requested_qty = gross_budget / float(market_price)
-    executable_lot = build_executable_lot(
-        qty=requested_qty,
+    lot_rules = build_market_lot_rules(
+        market_id=pair,
         market_price=float(market_price),
-        min_qty=float(rules.min_qty),
-        qty_step=float(rules.qty_step),
-        min_notional_krw=float(rules.min_notional_krw),
-        max_qty_decimals=int(rules.max_qty_decimals),
+        rules=rules,
         exit_fee_ratio=0.0,
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
-    allowed = executable_lot.executable_qty > DUST_POSITION_EPS
+    requested_qty = float(_decimal_from_number(gross_budget) / _decimal_from_number(market_price))
+    intended_lot_count = compute_feasible_entry_lot_count(
+        budget_krw=float(gross_budget),
+        market_price=float(market_price),
+        lot_rules=lot_rules,
+    )
+    executable_qty = lot_count_to_qty(lot_count=intended_lot_count, lot_size=lot_rules.lot_size)
+    allowed = bool(intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS)
+    entry_reason = "none" if allowed else "no_executable_entry_lot"
     return ExecutionSizingPlan(
         side="BUY",
         allowed=allowed,
-        block_reason="none" if allowed else str(executable_lot.exit_non_executable_reason),
+        block_reason="none" if allowed else entry_reason,
+        decision_reason_code="none" if allowed else entry_reason,
         budget_krw=float(gross_budget),
         requested_qty=float(requested_qty),
-        executable_qty=float(executable_lot.executable_qty),
-        qty_source="entry.intent_budget_krw",
-        effective_min_trade_qty=float(executable_lot.effective_min_trade_qty),
-        min_qty=float(rules.min_qty),
-        qty_step=float(rules.qty_step),
-        min_notional_krw=float(rules.min_notional_krw),
-        non_executable_reason=str(executable_lot.exit_non_executable_reason),
+        executable_qty=float(executable_qty if allowed else 0.0),
+        internal_lot_size=float(lot_rules.lot_size),
+        intended_lot_count=int(intended_lot_count),
+        executable_lot_count=int(intended_lot_count if allowed else 0),
+        qty_source="entry.intent_lot_count",
+        effective_min_trade_qty=float(lot_rules.executable_min_qty),
+        min_qty=float(lot_rules.min_qty),
+        qty_step=float(lot_rules.qty_step),
+        min_notional_krw=float(lot_rules.min_notional_krw),
+        non_executable_reason="executable" if allowed else "no_executable_entry_lot",
     )
 
 
@@ -152,30 +214,38 @@ def build_sell_execution_sizing(
 ) -> ExecutionSizingPlan:
     rules = get_effective_order_rules(pair).rules
     requested_qty = max(0.0, float(sellable_qty))
-    executable_lot = build_executable_lot(
-        qty=requested_qty,
+    lot_rules = build_market_lot_rules(
+        market_id=pair,
         market_price=float(market_price),
-        min_qty=float(rules.min_qty),
-        qty_step=float(rules.qty_step),
-        min_notional_krw=float(rules.min_notional_krw),
-        max_qty_decimals=int(rules.max_qty_decimals),
+        rules=rules,
         exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
-    allowed = bool(exit_allowed) and executable_lot.executable_qty > DUST_POSITION_EPS
-    block_reason = "none" if allowed else str(exit_block_reason or executable_lot.exit_non_executable_reason)
+    intended_lot_count = compute_feasible_exit_lot_count(
+        sellable_qty=float(requested_qty),
+        lot_rules=lot_rules,
+    )
+    executable_qty = lot_count_to_qty(lot_count=intended_lot_count, lot_size=lot_rules.lot_size)
+    allowed = bool(exit_allowed) and intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS
+    block_reason = "none" if allowed else str(exit_block_reason or "no_executable_exit_lot")
+    if not allowed and block_reason in {"", "none"}:
+        block_reason = "no_executable_exit_lot"
     return ExecutionSizingPlan(
         side="SELL",
         allowed=allowed,
         block_reason=block_reason,
+        decision_reason_code="none" if allowed else block_reason,
         budget_krw=0.0,
         requested_qty=float(requested_qty),
-        executable_qty=float(executable_lot.executable_qty),
-        qty_source="position_state.normalized_exposure.sellable_executable_qty",
-        effective_min_trade_qty=float(executable_lot.effective_min_trade_qty),
-        min_qty=float(rules.min_qty),
-        qty_step=float(rules.qty_step),
-        min_notional_krw=float(rules.min_notional_krw),
-        non_executable_reason=str(executable_lot.exit_non_executable_reason),
+        executable_qty=float(executable_qty if allowed else 0.0),
+        internal_lot_size=float(lot_rules.lot_size),
+        intended_lot_count=int(intended_lot_count),
+        executable_lot_count=int(intended_lot_count if allowed else 0),
+        qty_source="position_state.normalized_exposure.executable_exit_lot_count",
+        effective_min_trade_qty=float(lot_rules.executable_min_qty),
+        min_qty=float(lot_rules.min_qty),
+        qty_step=float(lot_rules.qty_step),
+        min_notional_krw=float(lot_rules.min_notional_krw),
+        non_executable_reason="executable" if allowed else block_reason,
     )
