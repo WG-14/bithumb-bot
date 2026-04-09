@@ -97,8 +97,6 @@ def build_buy_execution_sizing(
     gross_budget = max(0.0, float(cash_krw)) * float(resolved_intent.budget_fraction_of_cash)
     if float(resolved_intent.max_budget_krw) > 0:
         gross_budget = min(gross_budget, float(resolved_intent.max_budget_krw))
-    normalized_fee_rate = max(0.0, float(settings.LIVE_FEE_RATE_ESTIMATE if fee_rate is None else fee_rate))
-    net_budget = gross_budget / (1.0 + normalized_fee_rate) if gross_budget > 0.0 else 0.0
     if gross_budget <= 0.0 or not math.isfinite(float(market_price)) or float(market_price) <= 0.0:
         return ExecutionSizingPlan(
             side="BUY",
@@ -115,7 +113,7 @@ def build_buy_execution_sizing(
             non_executable_reason="non_positive_entry_budget",
         )
     rules = get_effective_order_rules(pair).rules
-    requested_qty = net_budget / float(market_price)
+    requested_qty = gross_budget / float(market_price)
     executable_lot = build_executable_lot(
         qty=requested_qty,
         market_price=float(market_price),
@@ -123,7 +121,7 @@ def build_buy_execution_sizing(
         qty_step=float(rules.qty_step),
         min_notional_krw=float(rules.min_notional_krw),
         max_qty_decimals=int(rules.max_qty_decimals),
-        exit_fee_ratio=normalized_fee_rate,
+        exit_fee_ratio=0.0,
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )

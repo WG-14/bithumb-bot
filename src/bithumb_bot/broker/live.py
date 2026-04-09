@@ -3148,10 +3148,8 @@ def live_execute_signal(
         try:
             if pretrade_needs_live_reference:
                 reference_quote = _load_live_reference_quote(pair=settings.PAIR)
-            # BUY entry qty is adjusted against SELL quantity rules so we do not
-            # open a position that can only be partially liquidated later.
             if side == "BUY":
-                normalized_qty = adjust_buy_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)
+                normalized_qty = float(order_qty)
             else:
                 normalized_qty = adjust_sell_order_qty_for_dust_safety(qty=order_qty, market_price=market_price)
                 order_qty = normalized_qty

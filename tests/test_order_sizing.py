@@ -74,7 +74,7 @@ def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_s
     assert plan.block_reason == "no_executable_exit_lot"
 
 
-def test_buy_execution_sizing_reserves_fee_budget_before_qty_rounding(sizing_rule_overrides) -> None:
+def test_buy_execution_sizing_does_not_reserve_fee_budget_before_qty_rounding(sizing_rule_overrides) -> None:
     plan = build_buy_execution_sizing(
         pair="BTC_KRW",
         cash_krw=20000.0,
@@ -85,9 +85,9 @@ def test_buy_execution_sizing_reserves_fee_budget_before_qty_rounding(sizing_rul
     assert plan.side == "BUY"
     assert plan.allowed is True
     assert plan.budget_krw == pytest.approx(10000.0)
-    assert plan.requested_qty == pytest.approx(10000.0 / 1.1 / 10_000.0)
+    assert plan.requested_qty == pytest.approx(10000.0 / 10_000.0)
     assert plan.executable_qty <= plan.requested_qty
-    assert (plan.executable_qty * 10_000.0 * 1.1) <= plan.budget_krw + 1e-12
+    assert plan.executable_qty == pytest.approx(plan.requested_qty)
 
 
 def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizing_rule_overrides) -> None:

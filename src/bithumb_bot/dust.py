@@ -1402,12 +1402,8 @@ def build_normalized_exposure(
     normalized_qty = float(effective_open_exposure_qty if normalized_active else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
-    elif effective_open_exposure_qty > DUST_POSITION_EPS:
-        entry_block_reason = "position_has_executable_exposure"
-    elif normalized_dust_tracking_qty > DUST_POSITION_EPS:
-        entry_block_reason = "dust_residual_blocks_entry"
     elif normalized_total_asset_qty > DUST_POSITION_EPS:
-        entry_block_reason = "position_not_flat"
+        entry_block_reason = "position_has_executable_exposure"
     else:
         entry_block_reason = "none"
     if sellable_executable_qty > DUST_POSITION_EPS:

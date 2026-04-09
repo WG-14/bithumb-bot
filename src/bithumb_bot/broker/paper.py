@@ -64,6 +64,72 @@ def _get_fill_price(signal: str, *, market: str) -> float | None:
     return None
 
 
+def _floor_qty_for_paper_buy(*, qty: float, qty_step: float, max_qty_decimals: int) -> float:
+    normalized_qty = max(0.0, float(qty))
+    step = max(0.0, float(qty_step))
+    if step > 0:
+        normalized_qty = math.floor((normalized_qty / step) + 1e-12) * step
+    decimals = max(0, int(max_qty_decimals))
+    if decimals > 0:
+        scale = 10**decimals
+        normalized_qty = math.floor((normalized_qty * scale) + 1e-12) / scale
+    return max(0.0, normalized_qty)
+
+
+def _adjust_buy_qty_for_paper_cash_safety(
+    *,
+    qty: float,
+    market_price: float,
+    cash_available: float,
+    fee_rate: float,
+    qty_step: float,
+    max_qty_decimals: int,
+) -> float:
+    if not math.isfinite(float(qty)) or float(qty) <= 0:
+        return 0.0
+    if not math.isfinite(float(market_price)) or float(market_price) <= 0:
+        return 0.0
+    if not math.isfinite(float(cash_available)) or float(cash_available) <= 0:
+        return 0.0
+
+    normalized_fee_rate = max(0.0, float(fee_rate))
+    safe_qty = min(float(qty), float(cash_available) / (float(market_price) * (1.0 + normalized_fee_rate)))
+    safe_qty = _floor_qty_for_paper_buy(
+        qty=safe_qty,
+        qty_step=qty_step,
+        max_qty_decimals=max_qty_decimals,
+    )
+    if safe_qty <= 0:
+        return 0.0
+
+    total_cost = (safe_qty * float(market_price)) * (1.0 + normalized_fee_rate)
+    if total_cost <= float(cash_available) + 1e-12:
+        return safe_qty
+
+    step = max(0.0, float(qty_step))
+    if step > 0:
+        adjusted_qty = max(0.0, safe_qty)
+        for _ in range(8):
+            if adjusted_qty <= 0:
+                return 0.0
+            adjusted_cost = (adjusted_qty * float(market_price)) * (1.0 + normalized_fee_rate)
+            if adjusted_cost <= float(cash_available) + 1e-12:
+                return adjusted_qty
+            adjusted_qty = _floor_qty_for_paper_buy(
+                qty=max(0.0, adjusted_qty - step),
+                qty_step=qty_step,
+                max_qty_decimals=max_qty_decimals,
+            )
+        return 0.0
+
+    adjusted_qty = math.nextafter(safe_qty, 0.0)
+    if adjusted_qty > 0:
+        adjusted_cost = (adjusted_qty * float(market_price)) * (1.0 + normalized_fee_rate)
+        if adjusted_cost <= float(cash_available) + 1e-12:
+            return adjusted_qty
+    return 0.0
+
+
 def paper_execute(
     signal: str,
     ts: int,
@@ -177,7 +243,16 @@ def paper_execute(
             if not entry_sizing.allowed:
                 return None
 
-            trade_qty = float(entry_sizing.executable_qty)
+            trade_qty = _adjust_buy_qty_for_paper_cash_safety(
+                qty=float(entry_sizing.executable_qty),
+                market_price=float(fill_price),
+                cash_available=float(cash),
+                fee_rate=fee_rate,
+                qty_step=float(rules.qty_step),
+                max_qty_decimals=int(rules.max_qty_decimals),
+            )
+            if trade_qty <= 0:
+                return None
             fee = (trade_qty * float(fill_price)) * fee_rate
             side = "BUY"
 
