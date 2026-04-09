@@ -116,3 +116,19 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
     assert plan.intended_lot_count == 308
     assert plan.executable_lot_count == 308
     assert plan.decision_reason_code == "none"
+
+
+def test_sell_execution_sizing_uses_suppression_reason_code_when_quantity_rule_blocks_exit(sizing_rule_overrides) -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        sellable_qty=0.00005,
+        exit_allowed=False,
+        exit_block_reason="no_executable_exit_lot",
+    )
+
+    assert plan.side == "SELL"
+    assert plan.allowed is False
+    assert plan.block_reason == "no_executable_exit_lot"
+    assert plan.decision_reason_code == "exit_suppressed_by_quantity_rule"
+    assert plan.non_executable_reason == "no_executable_exit_lot"

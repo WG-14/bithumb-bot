@@ -36,6 +36,8 @@ ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED = "degraded_recovery_unatt
 
 @dataclass(frozen=True)
 class PositionLotSnapshot:
+    """Recovery-facing lot summary with explicit raw/executable/dust quantities."""
+
     raw_open_exposure_qty: float
     executable_open_exposure_qty: float
     dust_tracking_qty: float
@@ -44,6 +46,33 @@ class PositionLotSnapshot:
     dust_tracking_lot_count: int
     effective_min_trade_qty: float
     exit_non_executable_reason: str
+
+    @property
+    def total_holdings_qty(self) -> float:
+        return float(self.raw_total_asset_qty)
+
+    @property
+    def executable_exposure_qty(self) -> float:
+        return float(self.executable_open_exposure_qty)
+
+    @property
+    def tracked_dust_qty(self) -> float:
+        return float(self.dust_tracking_qty)
+
+    def as_dict(self) -> dict[str, float | int | str]:
+        return {
+            "raw_open_exposure_qty": float(self.raw_open_exposure_qty),
+            "raw_total_asset_qty": float(self.raw_total_asset_qty),
+            "total_holdings_qty": float(self.total_holdings_qty),
+            "executable_open_exposure_qty": float(self.executable_open_exposure_qty),
+            "executable_exposure_qty": float(self.executable_exposure_qty),
+            "dust_tracking_qty": float(self.dust_tracking_qty),
+            "tracked_dust_qty": float(self.tracked_dust_qty),
+            "open_lot_count": int(self.open_lot_count),
+            "dust_tracking_lot_count": int(self.dust_tracking_lot_count),
+            "effective_min_trade_qty": float(self.effective_min_trade_qty),
+            "exit_non_executable_reason": self.exit_non_executable_reason,
+        }
 
 
 def _row_value(row: object, key: str, index: int) -> object | None:
@@ -625,3 +654,4 @@ def _fetch_sellable_open_exposure_lots(
         """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE),
     ).fetchall()
+

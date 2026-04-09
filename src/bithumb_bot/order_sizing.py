@@ -43,6 +43,20 @@ class ExecutionSizingPlan:
     non_executable_reason: str
 
 
+def _sell_decision_reason_code(*, exit_block_reason: str) -> str:
+    """Return the canonical sell decision outcome code.
+
+    The lot-derived executable quantity remains the source of truth. This helper
+    only names the reason execution was suppressed after lot sizing already
+    finished.
+    """
+
+    normalized = str(exit_block_reason or "").strip()
+    if normalized in {"", "none", "no_executable_exit_lot"}:
+        return "exit_suppressed_by_quantity_rule"
+    return normalized
+
+
 def _decimal_from_number(value: object) -> Decimal:
     try:
         parsed = Decimal(str(value))
@@ -235,7 +249,7 @@ def build_sell_execution_sizing(
         side="SELL",
         allowed=allowed,
         block_reason=block_reason,
-        decision_reason_code="none" if allowed else block_reason,
+        decision_reason_code="none" if allowed else _sell_decision_reason_code(exit_block_reason=block_reason),
         budget_krw=0.0,
         requested_qty=float(requested_qty),
         executable_qty=float(executable_qty if allowed else 0.0),

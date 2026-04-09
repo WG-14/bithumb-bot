@@ -53,6 +53,8 @@ def resolve_identifiers(
 
 
 def build_lookup_params(*, client_order_id: str | None, exchange_order_id: str | None) -> dict[str, str]:
+    """Build /v1/order lookup params using Bithumb's documented uuid/client_order_id contract."""
+
     requested_exchange_order_id = clean_identifier(exchange_order_id)
     requested_client_order_id = clean_identifier(client_order_id)
     if requested_client_order_id:
@@ -62,6 +64,22 @@ def build_lookup_params(*, client_order_id: str | None, exchange_order_id: str |
     if requested_client_order_id:
         return {"client_order_id": requested_client_order_id}
     raise ValueError("order lookup requires exchange_order_id(uuid) or client_order_id")
+
+
+def build_cancel_order_params(*, order_id: str | None, client_order_id: str | None) -> dict[str, str]:
+    """Build /v2/order cancel params with the documented order_id/client_order_id field names."""
+
+    requested_order_id = clean_identifier(order_id)
+    requested_client_order_id = clean_identifier(client_order_id)
+    if requested_client_order_id:
+        requested_client_order_id = validate_client_order_id(requested_client_order_id)
+    if requested_order_id and requested_client_order_id:
+        return {"order_id": requested_order_id, "client_order_id": requested_client_order_id}
+    if requested_order_id:
+        return {"order_id": requested_order_id}
+    if requested_client_order_id:
+        return {"client_order_id": requested_client_order_id}
+    raise ValueError("cancel requires order_id or client_order_id")
 
 
 def require_known_state(state: object, *, context: str) -> str:
@@ -113,3 +131,4 @@ def status_from_state(*, state: str, qty_req: float, qty_filled: float) -> str:
     if state == "done":
         return "FILLED"
     return "FILLED" if qty_req > 0 and qty_filled >= qty_req else "CANCELED"
+

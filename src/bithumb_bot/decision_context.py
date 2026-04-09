@@ -13,7 +13,7 @@ from .reason_codes import (
 )
 
 
-_CANONICAL_CONTEXT_VERSION = 10
+_CANONICAL_CONTEXT_VERSION = 11
 
 
 def load_recorded_strategy_decision_context(
@@ -479,6 +479,66 @@ def normalize_strategy_decision_context(
     if effective_flat_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
         effective_flat = True
         effective_flat_truth_source = "fallback:flat_zero_holdings"
+    has_executable_exposure, has_executable_exposure_truth_source = _resolve_with_source(
+        ("position_state.has_executable_exposure", position_state.get("has_executable_exposure")),
+        (
+            "position_state.normalized_exposure.has_executable_exposure",
+            position_normalized.get("has_executable_exposure"),
+        ),
+        ("context.has_executable_exposure", payload.get("has_executable_exposure")),
+        ("position_gate.has_executable_exposure", position_gate.get("has_executable_exposure")),
+        default_value=bool(open_lot_count > 0 and sellable_executable_qty > 1e-12),
+        default_source=(
+            "fallback:executable_open_lot_count"
+            if open_lot_count > 0 and sellable_executable_qty > 1e-12
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    has_any_position_residue, has_any_position_residue_truth_source = _resolve_with_source(
+        ("position_state.has_any_position_residue", position_state.get("has_any_position_residue")),
+        (
+            "position_state.normalized_exposure.has_any_position_residue",
+            position_normalized.get("has_any_position_residue"),
+        ),
+        ("context.has_any_position_residue", payload.get("has_any_position_residue")),
+        ("position_gate.has_any_position_residue", position_gate.get("has_any_position_residue")),
+        default_value=bool(raw_total_asset_qty > 1e-12),
+        default_source=("fallback:raw_total_asset_qty" if raw_total_asset_qty > 1e-12 else "default:false"),
+        value_kind="bool",
+    )
+    has_non_executable_residue, has_non_executable_residue_truth_source = _resolve_with_source(
+        ("position_state.has_non_executable_residue", position_state.get("has_non_executable_residue")),
+        (
+            "position_state.normalized_exposure.has_non_executable_residue",
+            position_normalized.get("has_non_executable_residue"),
+        ),
+        ("context.has_non_executable_residue", payload.get("has_non_executable_residue")),
+        ("position_gate.has_non_executable_residue", position_gate.get("has_non_executable_residue")),
+        default_value=bool(has_any_position_residue and not has_executable_exposure),
+        default_source=(
+            "fallback:non_executable_residue"
+            if has_any_position_residue and not has_executable_exposure
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    has_dust_only_remainder, has_dust_only_remainder_truth_source = _resolve_with_source(
+        ("position_state.has_dust_only_remainder", position_state.get("has_dust_only_remainder")),
+        (
+            "position_state.normalized_exposure.has_dust_only_remainder",
+            position_normalized.get("has_dust_only_remainder"),
+        ),
+        ("context.has_dust_only_remainder", payload.get("has_dust_only_remainder")),
+        ("position_gate.has_dust_only_remainder", position_gate.get("has_dust_only_remainder")),
+        default_value=bool(dust_tracking_qty > 1e-12 and open_lot_count <= 0),
+        default_source=(
+            "fallback:dust_only_remainder"
+            if dust_tracking_qty > 1e-12 and open_lot_count <= 0
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
     normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
         ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
         (
@@ -487,17 +547,22 @@ def normalize_strategy_decision_context(
         ),
         ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
         ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
-        default_value=(open_exposure_qty if open_lot_count > 0 else 0.0),
-        default_source=("fallback:open_exposure_lot_count" if open_lot_count > 0 else "default:0.0"),
+        default_value=(open_exposure_qty if has_executable_exposure else 0.0),
+        default_source=("fallback:open_exposure_qty" if has_executable_exposure else "default:0.0"),
         value_kind="float",
     )
     if normalized_exposure_qty_truth_source == "default:0.0":
-        if open_lot_count > 0 and open_exposure_qty_truth_source not in {"default:0.0"}:
+        if has_executable_exposure and open_exposure_qty_truth_source not in {"default:0.0"}:
             normalized_exposure_qty = float(open_exposure_qty)
             normalized_exposure_qty_truth_source = "fallback:open_exposure_qty"
         else:
             normalized_exposure_qty = 0.0
-    if open_lot_count <= 0:
+    if not has_executable_exposure and normalized_exposure_qty_truth_source not in {
+        "position_state.normalized_exposure_qty",
+        "position_state.normalized_exposure.normalized_exposure_qty",
+        "context.normalized_exposure_qty",
+        "position_gate.normalized_exposure_qty",
+    }:
         normalized_exposure_qty = 0.0
         normalized_exposure_qty_truth_source = "fallback:no_executable_open_lots"
     normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
@@ -521,7 +586,12 @@ def normalize_strategy_decision_context(
     )
     if normalized_exposure_active_truth_source == normalized_exposure_qty_truth_source:
         normalized_exposure_active = bool(open_lot_count > 0 or reserved_exit_lot_count > 0)
-    if open_lot_count <= 0 and reserved_exit_lot_count <= 0:
+    if open_lot_count <= 0 and reserved_exit_lot_count <= 0 and normalized_exposure_active_truth_source not in {
+        "position_state.normalized_exposure_active",
+        "position_state.normalized_exposure.normalized_exposure_active",
+        "context.normalized_exposure_active",
+        "position_gate.normalized_exposure_active",
+    }:
         normalized_exposure_active = False
         normalized_exposure_active_truth_source = "fallback:no_executable_open_lots"
     position_qty = float(open_exposure_qty)
@@ -582,6 +652,10 @@ def normalize_strategy_decision_context(
         "submit_payload_qty": submit_payload_qty_truth_source,
         "normalized_exposure_active": normalized_exposure_active_truth_source,
         "normalized_exposure_qty": normalized_exposure_qty_truth_source,
+        "has_executable_exposure": has_executable_exposure_truth_source,
+        "has_any_position_residue": has_any_position_residue_truth_source,
+        "has_non_executable_residue": has_non_executable_residue_truth_source,
+        "has_dust_only_remainder": has_dust_only_remainder_truth_source,
         "open_exposure_qty": open_exposure_qty_truth_source,
         "dust_tracking_qty": dust_tracking_qty_truth_source,
         "open_lot_count": open_lot_count_truth_source,
@@ -619,6 +693,10 @@ def normalize_strategy_decision_context(
         "submit_payload_qty": float(submit_payload_qty),
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
+        "has_executable_exposure": bool(has_executable_exposure),
+        "has_any_position_residue": bool(has_any_position_residue),
+        "has_non_executable_residue": bool(has_non_executable_residue),
+        "has_dust_only_remainder": bool(has_dust_only_remainder),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
         "open_lot_count": int(open_lot_count),
@@ -674,6 +752,10 @@ def normalize_strategy_decision_context(
     payload["submit_payload_qty"] = float(submit_payload_qty)
     payload["normalized_exposure_active"] = bool(normalized_exposure_active)
     payload["normalized_exposure_qty"] = float(normalized_exposure_qty)
+    payload["has_executable_exposure"] = bool(has_executable_exposure)
+    payload["has_any_position_residue"] = bool(has_any_position_residue)
+    payload["has_non_executable_residue"] = bool(has_non_executable_residue)
+    payload["has_dust_only_remainder"] = bool(has_dust_only_remainder)
     payload["open_exposure_qty"] = float(open_exposure_qty)
     payload["dust_tracking_qty"] = float(dust_tracking_qty)
     payload["open_lot_count"] = int(open_lot_count)
@@ -770,6 +852,10 @@ def normalize_strategy_decision_context(
         "effective_flat_due_to_harmless_dust": bool(entry_allowed and dust_classification == "harmless_dust"),
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
+        "has_executable_exposure": bool(has_executable_exposure),
+        "has_any_position_residue": bool(has_any_position_residue),
+        "has_non_executable_residue": bool(has_non_executable_residue),
+        "has_dust_only_remainder": bool(has_dust_only_remainder),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
         "open_lot_count": int(open_lot_count),

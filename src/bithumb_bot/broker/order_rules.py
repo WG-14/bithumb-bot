@@ -356,6 +356,31 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
     )
 
 
+def _exchange_rule_source_map(exchange: ExchangeDerivedConstraints) -> dict[str, str]:
+    return {
+        "market_id": "chance_doc",
+        "bid_min_total_krw": "chance_doc",
+        "ask_min_total_krw": "chance_doc",
+        "bid_price_unit": "chance_doc" if exchange.bid_price_unit > 0 else "missing",
+        "ask_price_unit": "chance_doc" if exchange.ask_price_unit > 0 else "missing",
+        "order_types": "chance_doc",
+        "order_sides": "chance_doc",
+        "bid_fee": "chance_doc",
+        "ask_fee": "chance_doc",
+        "maker_bid_fee": "chance_doc",
+        "maker_ask_fee": "chance_doc",
+    }
+
+
+def _fallback_rule_source_map() -> dict[str, str]:
+    return {
+        "min_qty": "local_fallback",
+        "qty_step": "local_fallback",
+        "min_notional_krw": "local_fallback",
+        "max_qty_decimals": "local_fallback",
+    }
+
+
 def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDerivedConstraints:
     return ExchangeDerivedConstraints(
         market_id=response.market_id,
@@ -429,10 +454,7 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
         )
         source = {
-            "min_qty": "local_fallback",
-            "qty_step": "local_fallback",
-            "min_notional_krw": "local_fallback",
-            "max_qty_decimals": "local_fallback",
+            **_fallback_rule_source_map(),
             "market_id": "unsupported_by_doc",
             "bid_min_total_krw": "unsupported_by_doc",
             "ask_min_total_krw": "unsupported_by_doc",
@@ -496,21 +518,8 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         max_qty_decimals=fallback.max_qty_decimals,
     )
     source = {
-        "market_id": "chance_doc",
-        "bid_min_total_krw": "chance_doc",
-        "ask_min_total_krw": "chance_doc",
-        "bid_price_unit": "chance_doc" if exchange.bid_price_unit > 0 else "missing",
-        "ask_price_unit": "chance_doc" if exchange.ask_price_unit > 0 else "missing",
-        "order_types": "chance_doc",
-        "order_sides": "chance_doc",
-        "bid_fee": "chance_doc",
-        "ask_fee": "chance_doc",
-        "maker_bid_fee": "chance_doc",
-        "maker_ask_fee": "chance_doc",
-        "min_qty": "local_fallback",
-        "qty_step": "local_fallback",
-        "min_notional_krw": "local_fallback",
-        "max_qty_decimals": "local_fallback",
+        **_exchange_rule_source_map(exchange),
+        **_fallback_rule_source_map(),
         "ruleset": "merged",
     }
     resolution = RuleResolution(

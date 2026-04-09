@@ -413,6 +413,13 @@ def build_order_list_params(
     limit: int | None = None,
     allow_broad_scan: bool = False,
 ) -> dict[str, object]:
+    """Build /v1/orders params.
+
+    The public broker methods intentionally keep the normal lookup path
+    identifier-scoped for safety. Setting ``allow_broad_scan=True`` is an
+    explicit recovery-only choice that unlocks the documented market/state
+    scan shape for restart reconciliation.
+    """
     uuid_values = _validate_identifier_list(list(uuids or []), field_name="uuids")
     client_values = _validate_identifier_list(
         [validate_client_order_id(value) for value in list(client_order_ids or [])],
@@ -425,7 +432,7 @@ def build_order_list_params(
 
     if not uuid_values and not client_values:
         if not allow_broad_scan:
-            raise ValueError("order list lookup requires uuids or client_order_ids")
+            raise ValueError("order list lookup requires uuids or client_order_ids; broad market/state scans are intentionally disabled unless allow_broad_scan=True")
         if not clean_identifier(market):
             raise ValueError("recovery order list lookup requires market when identifiers are omitted")
         if normalized_state is None and not normalized_states:
@@ -461,3 +468,4 @@ def build_order_list_params(
         order_by=normalized_order_by,
         limit=normalized_limit,
     ).to_params()
+

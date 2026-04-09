@@ -616,6 +616,10 @@ class NormalizedExposure:
     exit_block_reason: str
     terminal_state: str
     normalized_exposure_active: bool
+    has_executable_exposure: bool
+    has_any_position_residue: bool
+    has_non_executable_residue: bool
+    has_dust_only_remainder: bool
     normalized_exposure_qty: float
 
     @property
@@ -691,6 +695,10 @@ class NormalizedExposure:
             "harmless_dust_effective_flat": bool(self.harmless_dust_effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.harmless_dust_effective_flat),
             "normalized_exposure_active": bool(self.normalized_exposure_active),
+            "has_executable_exposure": bool(self.has_executable_exposure),
+            "has_any_position_residue": bool(self.has_any_position_residue),
+            "has_non_executable_residue": bool(self.has_non_executable_residue),
+            "has_dust_only_remainder": bool(self.has_dust_only_remainder),
             "normalized_exposure_qty": float(self.normalized_exposure_qty),
             "executable_exposure_qty": float(self.normalized_exposure_qty),
             "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),
@@ -1514,21 +1522,12 @@ def build_normalized_exposure(
         normalized_dust_tracking_qty = max(normalized_dust_tracking_qty, normalized_total_asset_qty)
         normalized_dust_lot_count = int(qty_to_executable_lot_count(qty=normalized_dust_tracking_qty, lot_rules=lot_rules))
         normalized_sellable_lot_count = 0
+    has_any_position_residue = bool(normalized_total_asset_qty > DUST_POSITION_EPS)
     entry_allowed = bool(
         normalized_total_asset_qty <= DUST_POSITION_EPS
         or should_treat_as_flat_for_entry_gate(display_context)
     )
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
-    # `normalized_exposure_active` now tracks executable open exposure only.
-    # Dust-only residue is intentionally not a normal strategy-managed position.
-    normalized_active = bool(normalized_open_lot_count > 0 or normalized_reserved_exit_lot_count > 0)
-    normalized_qty = float(effective_open_exposure_qty if normalized_open_lot_count > 0 else 0.0)
-    if entry_allowed:
-        entry_block_reason = "none"
-    elif normalized_total_asset_qty > DUST_POSITION_EPS:
-        entry_block_reason = "position_has_executable_exposure"
-    else:
-        entry_block_reason = "none"
     executable_sell_qty = max(0.0, float(sellable_executable_qty))
     executable_sell_ready = bool(
         normalized_open_lot_count > 0
@@ -1538,6 +1537,21 @@ def build_normalized_exposure(
             or executable_sell_qty >= normalized_min_qty
         )
     )
+    # `normalized_exposure_active` remains the broader lifecycle flag used by
+    # restart/reconcile and operator-facing state summaries. It stays true for
+    # active open lots or reserved exit inventory, while the explicit
+    # executable-exposure flags below distinguish what can be traded normally.
+    normalized_active = bool(normalized_open_lot_count > 0 or normalized_reserved_exit_lot_count > 0)
+    has_executable_exposure = bool(executable_sell_ready)
+    has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
+    has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
+    normalized_qty = float(sellable_executable_qty if has_executable_exposure else 0.0)
+    if entry_allowed:
+        entry_block_reason = "none"
+    elif normalized_total_asset_qty > DUST_POSITION_EPS:
+        entry_block_reason = "position_has_executable_exposure"
+    else:
+        entry_block_reason = "none"
     if executable_sell_ready:
         exit_allowed = True
         exit_block_reason = "none"
@@ -1546,7 +1560,7 @@ def build_normalized_exposure(
         exit_allowed = False
         exit_block_reason = "reserved_for_open_sell_orders"
         terminal_state = "reserved_exit_pending"
-    elif normalized_dust_tracking_qty > DUST_POSITION_EPS:
+    elif normalized_open_lot_count <= 0 and normalized_dust_tracking_qty > DUST_POSITION_EPS:
         exit_allowed = False
         exit_block_reason = "dust_only_remainder"
         terminal_state = "dust_only"
@@ -1582,6 +1596,10 @@ def build_normalized_exposure(
         exit_block_reason=exit_block_reason,
         terminal_state=terminal_state,
         normalized_exposure_active=normalized_active,
+        has_executable_exposure=has_executable_exposure,
+        has_any_position_residue=has_any_position_residue,
+        has_non_executable_residue=has_non_executable_residue,
+        has_dust_only_remainder=has_dust_only_remainder,
         normalized_exposure_qty=normalized_qty,
     )
 

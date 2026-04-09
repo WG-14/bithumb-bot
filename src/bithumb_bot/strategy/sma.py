@@ -199,6 +199,10 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
         "terminal_state": str(exposure.terminal_state),
         "normalized_exposure_active": bool(exposure.normalized_exposure_active),
         "normalized_exposure_qty": float(exposure.normalized_exposure_qty),
+        "has_executable_exposure": bool(exposure.has_executable_exposure),
+        "has_any_position_residue": bool(exposure.has_any_position_residue),
+        "has_non_executable_residue": bool(exposure.has_non_executable_residue),
+        "has_dust_only_remainder": bool(exposure.has_dust_only_remainder),
         "dust_new_orders_allowed": bool(exposure.dust_operator_view.new_orders_allowed),
         "dust_resume_allowed": bool(exposure.dust_operator_view.resume_allowed),
         "dust_treat_as_flat": bool(exposure.dust_operator_view.treat_as_flat),
@@ -206,7 +210,7 @@ def _build_position_gate_context(exposure: NormalizedExposure) -> dict[str, Any]
 
 
 def _has_tracked_open_exposure(exposure: NormalizedExposure) -> bool:
-    return bool(int(exposure.open_lot_count) > 0)
+    return bool(exposure.normalized_exposure_active)
 
 
 def _evaluate_entry_edge_filter(
@@ -446,6 +450,10 @@ def _apply_entry_exit_policy(
         context["raw_qty_open"] = float(normalized_state["raw_qty_open"])
         context["raw_total_asset_qty"] = float(normalized_state["raw_total_asset_qty"])
         context["normalized_exposure_active"] = bool(normalized_state["normalized_exposure_active"])
+        context["has_executable_exposure"] = bool(normalized_state.get("has_executable_exposure", False))
+        context["has_any_position_residue"] = bool(normalized_state.get("has_any_position_residue", False))
+        context["has_non_executable_residue"] = bool(normalized_state.get("has_non_executable_residue", False))
+        context["has_dust_only_remainder"] = bool(normalized_state.get("has_dust_only_remainder", False))
         context["exit_allowed"] = bool(normalized_state["exit_allowed"])
         context["exit_block_reason"] = str(normalized_state["exit_block_reason"])
         context["terminal_state"] = str(normalized_state["terminal_state"])

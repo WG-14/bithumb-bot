@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +20,7 @@ from bithumb_bot.broker.live import (
     validate_pretrade,
 )
 from bithumb_bot.oms import payload_fingerprint
-from bithumb_bot.db_core import ensure_db, record_strategy_decision, set_portfolio_breakdown
+from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision, set_portfolio_breakdown
 from bithumb_bot.reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
     DUST_RESIDUAL_UNSELLABLE,
@@ -744,7 +745,7 @@ def test_live_duplicate_intent_after_cancel_is_skipped_by_submit_dedup(monkeypat
             """
             SELECT client_order_id, submit_attempt_id, status
             FROM orders
-            WHERE client_order_id LIKE 'live_1000_buy_%'
+            WHERE client_order_id LIKE 'live_1700000000000_buy_%'
             ORDER BY id
             """
         ).fetchall()
@@ -789,7 +790,7 @@ def test_live_failed_before_send_releases_dedup_for_same_intent_retry(monkeypatc
             """
             SELECT client_order_id, submit_attempt_id, status
             FROM orders
-            WHERE client_order_id LIKE 'live_1000_buy_%'
+            WHERE client_order_id LIKE 'live_1700000000000_buy_%'
             ORDER BY id
             """
         ).fetchall()
@@ -830,6 +831,48 @@ def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, 
     conn.commit()
     conn.close()
 
+    monkeypatch.setattr(
+        "bithumb_bot.order_sizing.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=(),
+                order_sides=(),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.order_sizing.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=(),
+                order_sides=(),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+            )
+        ),
+    )
     broker = _FakeBroker()
     trade = live_execute_signal(broker, "BUY", 2000, 100000000.0)
 
@@ -1048,7 +1091,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
 
     conn = ensure_db(str(tmp_path / "submit_success.sqlite"))
     row = conn.execute(
-        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     submit_attempt = conn.execute(
         """
@@ -1130,7 +1173,7 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert trade is None
 
     conn = ensure_db(str(tmp_path / "submit_unknown.sqlite"))
-    row = conn.execute("SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1").fetchone()
+    row = conn.execute("SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1").fetchone()
     submit_attempt = conn.execute(
         """
         SELECT submit_attempt_id, symbol, side, qty, price, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, submit_evidence, exchange_order_id_obtained, order_status
@@ -1209,7 +1252,7 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
 
     conn = ensure_db(str(tmp_path / "submit_failed.sqlite"))
     row = conn.execute(
-        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     started_event = conn.execute(
         "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
@@ -1309,7 +1352,7 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
 
     conn = ensure_db(str(tmp_path / "missing_exchange_id.sqlite"))
     row = conn.execute(
-        "SELECT client_order_id, status, exchange_order_id, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+        "SELECT client_order_id, status, exchange_order_id, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     submit_attempt = conn.execute(
         """
@@ -1354,7 +1397,7 @@ def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks
 
     conn = ensure_db(str(tmp_path / "strict_fee_block.sqlite"))
     row = conn.execute(
-        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+        "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
 
@@ -1381,7 +1424,7 @@ def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_pa
 
     conn = ensure_db(str(tmp_path / "submit_evidence_optional.sqlite"))
     row = conn.execute(
-        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1000_buy_%' ORDER BY id DESC LIMIT 1"
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
     submit_attempt = conn.execute(
         """
@@ -2006,8 +2049,7 @@ def test_validate_pretrade_accepts_accounts_snapshot_balance_source(monkeypatch)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
     monkeypatch.setattr(
-        live_module,
-        "get_effective_order_rules",
+        "bithumb_bot.order_sizing.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
             (),
@@ -2384,20 +2426,29 @@ def test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit(
         ).fetchone()
         suppression_row = conn.execute(
             """
-            SELECT reason_code, summary
+            SELECT reason_code, summary, context_json
             FROM order_suppressions
             WHERE reason_code=?
             ORDER BY updated_ts DESC
             LIMIT 1
             """,
-            (DUST_RESIDUAL_UNSELLABLE,),
+            (DUST_RESIDUAL_SUPPRESSED,),
         ).fetchone()
         conn.close()
 
         assert order_row is not None
         assert order_row["n"] == 0
         assert suppression_row is not None
-        assert suppression_row["reason_code"] == DUST_RESIDUAL_UNSELLABLE
+        assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+        assert "decision_suppressed:exit_suppressed_by_quantity_rule" in str(suppression_row["summary"])
+        assert "exit_non_executable_reason=" in str(suppression_row["summary"])
+        assert any(
+            token in str(suppression_row["summary"])
+            for token in ("exit_non_executable_reason=dust_only_remainder", "exit_non_executable_reason=no_executable_exit_lot")
+        )
+        suppression_context = json.loads(str(suppression_row["context_json"]))
+        assert suppression_context["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+        assert suppression_context["exit_non_executable_reason"] in {"dust_only_remainder", "no_executable_exit_lot"}
     finally:
         for key, value in original.items():
             object.__setattr__(settings, key, value)
@@ -2427,19 +2478,102 @@ def test_adjust_sell_order_qty_for_dust_safety_keeps_exact_min_qty_executable():
     assert adjusted == pytest.approx(0.0001)
 
 
-def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path):
+def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
     object.__setattr__(settings, "BUY_FRACTION", 1.0)
-    object.__setattr__(settings, "MAX_ORDER_KRW", 50_000.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr(
+        live_module,
+        "get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=(),
+                order_sides=(),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        live_module,
+        "build_buy_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=20_000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0002,
+            internal_lot_size=0.0001,
+            intended_lot_count=2,
+            executable_lot_count=2,
+            qty_source="test",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+        ),
+    )
+
+    conn = ensure_db(str(tmp_path / "market_buy_qty_step.sqlite"))
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1000,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "effective_flat": True,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "raw_qty_open": 0.0,
+                "raw_total_asset_qty": 0.0,
+                "open_exposure_qty": 0.0,
+                "dust_tracking_qty": 0.0,
+                "has_executable_exposure": False,
+                "has_any_position_residue": False,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     broker = _FakeBroker()
-    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0, decision_id=decision_id, decision_reason="sma golden cross")
 
     assert trade is not None
     assert broker.place_order_calls == 1
@@ -2508,11 +2642,11 @@ def test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_z
 
 
 @pytest.mark.fast_regression
-def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_flat(tmp_path):
+def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_flat(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_harmless_dust.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
     object.__setattr__(settings, "BUY_FRACTION", 1.0)
-    object.__setattr__(settings, "MAX_ORDER_KRW", 50_000.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
@@ -2520,6 +2654,49 @@ def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr(
+        live_module,
+        "get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=0.0,
+                ask_min_total_krw=0.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=(),
+                order_sides=(),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        live_module,
+        "build_buy_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=20_000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0002,
+            internal_lot_size=0.0001,
+            intended_lot_count=2,
+            executable_lot_count=2,
+            qty_source="test",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+        ),
+    )
 
     runtime_state.record_reconcile_result(
         success=True,
@@ -2553,18 +2730,78 @@ def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_
     )
 
     conn = ensure_db(str(tmp_path / "market_buy_harmless_dust.sqlite"))
-    set_portfolio_breakdown(
-        conn,
-        cash_available=1_000_000.0,
-        cash_locked=0.0,
-        asset_available=0.00009193,
-        asset_locked=0.0,
-    )
-    conn.commit()
-    conn.close()
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.00009193,
+            asset_locked=0.0,
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1_700_000_000_000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1_699_999_940_000,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "effective_flat": True,
+                "normalized_exposure_active": True,
+                "has_executable_exposure": False,
+                "has_any_position_residue": True,
+                "has_non_executable_residue": True,
+                "has_dust_only_remainder": True,
+                "normalized_exposure_qty": 0.00009629,
+                "raw_qty_open": 0.00009629,
+                "open_exposure_qty": 0.00009629,
+                "dust_tracking_qty": 0.00009629,
+                "position_gate": {
+                    "entry_allowed": True,
+                    "effective_flat_due_to_harmless_dust": True,
+                    "normalized_exposure_active": True,
+                    "has_executable_exposure": False,
+                    "has_any_position_residue": True,
+                    "has_non_executable_residue": True,
+                    "has_dust_only_remainder": True,
+                    "raw_qty_open": 0.00009629,
+                },
+                "position_state": {
+                    "normalized_exposure": {
+                        "entry_allowed": True,
+                        "effective_flat": True,
+                        "normalized_exposure_active": True,
+                        "has_executable_exposure": False,
+                        "has_any_position_residue": True,
+                        "has_non_executable_residue": True,
+                        "has_dust_only_remainder": True,
+                        "normalized_exposure_qty": 0.00009629,
+                        "raw_qty_open": 0.00009629,
+                        "open_exposure_qty": 0.00009629,
+                        "dust_tracking_qty": 0.00009629,
+                    }
+                },
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     broker = _FakeBroker()
-    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+    trade = live_execute_signal(
+        broker,
+        "BUY",
+        1_700_000_000_000,
+        100_000_000.0,
+        decision_id=decision_id,
+        decision_reason="sma golden cross",
+    )
 
     assert trade is not None
     assert broker.place_order_calls == 1
@@ -2576,7 +2813,7 @@ def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_
         """
         SELECT client_order_id, side, status, qty_req
         FROM orders
-        WHERE client_order_id LIKE 'live_1000_buy_%'
+        WHERE client_order_id LIKE 'live_1700000000000_buy_%'
         ORDER BY id DESC
         LIMIT 1
         """
@@ -4275,8 +4512,7 @@ def test_validate_pretrade_applies_side_specific_min_total():
     broker = _BalanceOnlyBroker()
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
-        live_module,
-        "get_effective_order_rules",
+        "bithumb_bot.order_sizing.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.OrderRules(
                 bid_min_total_krw=5100.0,
@@ -4335,8 +4571,7 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path, monkey
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "bootstrap_live_state.sqlite"))
     runtime_state.enable_trading()
     monkeypatch.setattr(
-        live_module,
-        "get_effective_order_rules",
+        "bithumb_bot.order_sizing.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
             rules=order_rules.OrderRules(
                 bid_min_total_krw=0.0,

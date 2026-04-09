@@ -4292,6 +4292,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"exit_allowed={1 if position_state.normalized_exposure.exit_allowed else 0} "
         f"exit_block_reason={position_state.normalized_exposure.exit_block_reason} "
         f"normalized_exposure_active={1 if position_state.normalized_exposure.normalized_exposure_active else 0} "
+        f"has_executable_exposure={1 if position_state.normalized_exposure.has_executable_exposure else 0} "
+        f"has_dust_only_remainder={1 if position_state.normalized_exposure.has_dust_only_remainder else 0} "
         f"normalized_exposure_qty={position_state.normalized_exposure.normalized_exposure_qty:.8f}"
     )
     print(
@@ -4529,6 +4531,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
+                f"has_executable_exposure={1 if bool(getattr(row, 'has_executable_exposure', False)) else 0} "
+                f"has_dust_only_remainder={1 if bool(getattr(row, 'has_dust_only_remainder', False)) else 0} "
                 f"position_qty={_fmt_float(float(row.position_qty), 8)} "
                 f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"submit_qty_source={row.submit_qty_source} "

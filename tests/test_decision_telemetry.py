@@ -139,6 +139,10 @@ def test_decision_telemetry_cli_exposes_sell_failure_category_fields(tmp_path, m
                 "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
+                "has_executable_exposure": True,
+                "has_any_position_residue": True,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
                 "normalized_exposure_qty": 0.0002,
                 "effective_flat": False,
                 "dust_classification": "blocking_dust",
@@ -192,6 +196,10 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
                 "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 "position_state_source": "context.raw_qty_open",
                 "normalized_exposure_active": True,
+                "has_executable_exposure": False,
+                "has_any_position_residue": True,
+                "has_non_executable_residue": True,
+                "has_dust_only_remainder": True,
                 "normalized_exposure_qty": 0.00009629,
                 "effective_flat": False,
                 "dust_classification": "harmless_dust",
@@ -270,6 +278,10 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["entry_allowed"] is True
     assert ctx["effective_flat"] is True
     assert ctx["normalized_exposure_active"] is False
+    assert ctx["has_executable_exposure"] is False
+    assert ctx["has_any_position_residue"] is True
+    assert ctx["has_non_executable_residue"] is True
+    assert ctx["has_dust_only_remainder"] is True
     assert ctx["raw_total_asset_qty"] == 0.00019192
     assert ctx["position_qty"] == 0.0
     assert ctx["submit_payload_qty"] == pytest.approx(0.0)
@@ -325,6 +337,10 @@ def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_
                 "sellable_executable_lot_count": 1,
                 "submit_qty_source": "position_state.raw_total_asset_qty",
                 "position_state_source": "context.raw_qty_open",
+                "has_executable_exposure": True,
+                "has_any_position_residue": True,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
                 "position_gate": {
                     "dust_state": "harmless_dust",
                     "effective_flat_due_to_harmless_dust": False,
@@ -445,6 +461,10 @@ def test_decision_telemetry_prefers_normalized_position_state_over_shadow_top_le
                         "entry_allowed": False,
                         "effective_flat": False,
                         "normalized_exposure_active": True,
+                        "has_executable_exposure": True,
+                        "has_any_position_residue": True,
+                        "has_non_executable_residue": False,
+                        "has_dust_only_remainder": False,
                         "sellable_executable_qty": 0.25,
                         "exit_allowed": True,
                         "exit_block_reason": "none",

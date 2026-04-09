@@ -201,6 +201,15 @@ def paper_execute(
                     decision_context.get("normalized_exposure_active"),
                 )
             )
+            has_executable_exposure = bool(
+                normalized_state.get(
+                    "has_executable_exposure",
+                    decision_context.get(
+                        "has_executable_exposure",
+                        normalized_state.get("normalized_exposure_qty", decision_context.get("normalized_exposure_qty", 0.0)) > 1e-12,
+                    ),
+                )
+            )
             open_exposure_qty = float(
                 normalized_state.get("open_exposure_qty", decision_context.get("open_exposure_qty", qty))
             )
@@ -217,7 +226,7 @@ def paper_execute(
             # Harmless dust is operationally flat for re-entry. Do not let the
             # residual dust quantity re-trigger the duplicate-entry guardrail.
             guardrail_qty = 0.0 if entry_allowed else float(
-                open_exposure_qty if normalized_exposure_active else qty
+                open_exposure_qty if has_executable_exposure else qty
             )
             blocked, _ = evaluate_buy_guardrails(
                 conn=conn,

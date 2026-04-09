@@ -24,7 +24,7 @@ from bithumb_bot.broker.base import (
     BrokerSchemaError,
     BrokerTemporaryError,
 )
-from bithumb_bot.broker.order_list_v1 import parse_v1_order_list_row
+from bithumb_bot.broker.order_list_v1 import build_order_list_params, parse_v1_order_list_row
 from bithumb_bot.broker.order_payloads import build_order_payload, validate_order_submit_payload
 from bithumb_bot.config import settings
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
@@ -315,17 +315,32 @@ def test_classify_private_api_error_categories_cover_v1_orders_contract_failures
     assert code == "DUPLICATE_CLIENT_ORDER_ID"
     assert "duplicate client order" in summary
 
+    code, summary = classify_private_api_error(BrokerRejectError("status=400 error_name=bank_account_required body={}"))
+    assert code == "ACCOUNT_SETUP_REQUIRED"
+
+    code, summary = classify_private_api_error(BrokerRejectError("status=500 error_name=server_error body={}"))
+    assert code == "SERVER_INTERNAL_FAILURE"
+    assert "server/internal failure" in summary
+
+    code, summary = classify_private_api_error(BrokerRejectError("status=403 error_name=blocked_member_id body={}"))
+    assert code == "ACCOUNT_RESTRICTED"
+
     code, summary = classify_private_api_error(BrokerRejectError("unexpected broker response shape for private request"))
     assert code == "AUTH_RESPONSE_UNEXPECTED"
 
     code, summary = classify_private_api_error(BrokerTemporaryError("bithumb private /v1/orders transport error"))
     assert code == "TEMPORARY"
 
+    code, summary = classify_private_api_error(BrokerTemporaryError("bithumb private /v1/orders server error status=503 body={}"))
+    assert code == "SERVER_INTERNAL_FAILURE"
+    assert "server/internal failure" in summary
+
 
 def test_classify_private_api_error_uses_documented_error_names() -> None:
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=jwt_verification body={}"))[0] == "AUTH_JWT_VERIFICATION"
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=expired_jwt body={}"))[0] == "AUTH_JWT_EXPIRED"
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=NotAllowIP body={}"))[0] == "AUTH_IP_DENIED"
+    assert classify_private_api_error(BrokerRejectError("status=500 error_name=server_error body={}"))[0] == "SERVER_INTERNAL_FAILURE"
     assert classify_private_api_error(BrokerRejectError("status=404 error_name=order_not_found body={}"))[0] == "ORDER_NOT_FOUND"
     assert classify_private_api_error(BrokerRejectError("status=400 error_name=cross_trading body={}"))[0] == "CROSS_TRADING"
 
@@ -339,7 +354,7 @@ def test_classify_private_api_error_uses_documented_error_names() -> None:
 
 def test_classify_private_api_failure_new_buckets() -> None:
     classification = classify_private_api_failure(BrokerRejectError("invalid_parameter: malformed market"))
-    assert classification.category == "PERMANENT_REJECT"
+    assert classification.category == "INVALID_REQUEST"
     assert classification.summary
 
     classification = classify_private_api_failure(BithumbRateLimitError("bithumb private /v1/orders throttled with http status=429"))
@@ -354,6 +369,14 @@ def test_classify_private_api_failure_new_buckets() -> None:
     assert classification.category == "RETRYABLE_TRANSIENT"
     assert classification.should_retry is True
 
+    classification = classify_private_api_failure(BrokerTemporaryError("bithumb private /v1/orders server error status=500 body={}"))
+    assert classification.category == "SERVER_INTERNAL_FAILURE"
+    assert classification.should_retry is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=500 error_name=server_error body={}"))
+    assert classification.category == "SERVER_INTERNAL_FAILURE"
+    assert classification.should_retry is True
+
     classification = classify_private_api_failure(BrokerRejectError("order_not_found"))
     assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
     assert classification.needs_reconcile is True
@@ -362,7 +385,19 @@ def test_classify_private_api_failure_new_buckets() -> None:
     assert classification.category == "CANCEL_NOT_ALLOWED"
 
     classification = classify_private_api_failure(BrokerRejectError("invalid_query_payload"))
-    assert classification.category == "AUTH_OR_CONFIG_ERROR"
+    assert classification.category == "INVALID_REQUEST"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=bank_account_required body={}"))
+    assert classification.category == "PREFLIGHT_BLOCKED"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=403 error_name=blocked_member_id body={}"))
+    assert classification.category == "PERMISSION_SCOPE"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=403 error_name=out_of_scope body={}"))
+    assert classification.category == "PERMISSION_SCOPE"
     assert classification.disable_trading is True
 
 
@@ -716,6 +751,11 @@ def test_private_request_classifies_rate_limit_and_order_not_ready_errors(monkey
     assert "not ready" in ready_summary
 
 
+def test_private_request_bucket_limit_defaults_match_official_documented_limits(monkeypatch):
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.settings", SimpleNamespace())
+
+    assert BithumbPrivateAPI._request_bucket_limit("order") == pytest.approx(10.0)
+    assert BithumbPrivateAPI._request_bucket_limit("private") == pytest.approx(140.0)
 
 def test_private_api_dry_run_allows_read_only_get_requests(monkeypatch):
     _SequencedClient.actions = [_mk_response(200, [{"currency": "KRW", "balance": "1000", "locked": "0"}])]
@@ -1256,6 +1296,47 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
     }
 
 
+def test_build_order_list_params_preserves_supported_documented_contract_fields() -> None:
+    params = build_order_list_params(
+        market="KRW-BTC",
+        uuids=("open-1",),
+        client_order_ids=("cid-1",),
+        state="wait",
+        page=3,
+        order_by="asc",
+        limit=25,
+    )
+
+    assert params == {
+        "market": "KRW-BTC",
+        "uuids": ["open-1"],
+        "client_order_ids": ["cid-1"],
+        "state": "wait",
+        "page": 3,
+        "order_by": "asc",
+        "limit": 25,
+    }
+
+
+def test_build_order_list_params_keeps_watch_separate_from_recovery_states() -> None:
+    params = build_order_list_params(
+        market="KRW-BTC",
+        states=("watch",),
+        page=1,
+        order_by="desc",
+        limit=10,
+        allow_broad_scan=True,
+    )
+
+    assert params == {
+        "market": "KRW-BTC",
+        "states": ["watch"],
+        "page": 1,
+        "order_by": "desc",
+        "limit": 10,
+    }
+
+
 def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -1646,6 +1727,28 @@ def test_v1_orders_broad_scan_is_rejected_without_identifiers() -> None:
         broker.get_recent_orders(limit=5)
 
 
+def test_build_order_list_params_requires_explicit_broad_scan_for_recovery_queries() -> None:
+    with pytest.raises(ValueError, match="intentionally disabled"):
+        build_order_list_params(market="KRW-BTC", states=("wait", "done", "cancel"))
+
+    params = build_order_list_params(
+        market="KRW-BTC",
+        states=("wait", "done", "cancel"),
+        page=2,
+        order_by="desc",
+        limit=25,
+        allow_broad_scan=True,
+    )
+
+    assert params == {
+        "market": "KRW-BTC",
+        "states": ["wait", "done", "cancel"],
+        "page": 2,
+        "order_by": "desc",
+        "limit": 25,
+    }
+
+
 def test_get_fills_rejects_broad_scan_without_identifiers() -> None:
     _configure_live()
     broker = BithumbBroker()
@@ -1700,6 +1803,35 @@ def test_cancel_order_uses_v2_orders_cancel_with_order_id_and_client_order_id(mo
         "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
         "retry_safe": False,
     }
+
+
+def test_request_cancel_order_uses_documented_order_id_field(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        broker,
+        "_delete_private",
+        lambda endpoint, params, retry_safe=False: call.update({"endpoint": endpoint, "payload": params, "retry_safe": retry_safe}) or {"order_id": params["order_id"], "client_order_id": params["client_order_id"]},
+    )
+
+    order = broker.request_cancel_order(client_order_id="cid-cancel", order_id="cancel-1")
+
+    assert order.exchange_order_id == "cancel-1"
+    assert call == {
+        "endpoint": "/v2/order",
+        "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
+        "retry_safe": False,
+    }
+
+
+def test_request_cancel_order_rejects_conflicting_aliases(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+
+    with pytest.raises(BrokerRejectError, match="cancel identifier mismatch"):
+        broker.request_cancel_order(client_order_id="cid-cancel", order_id="cancel-1", exchange_order_id="cancel-2")
 
 
 def test_cancel_order_accepts_client_order_id_only_response(monkeypatch):

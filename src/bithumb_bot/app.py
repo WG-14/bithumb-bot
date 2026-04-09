@@ -268,6 +268,8 @@ def cmd_status():
         "    "
         f"effective_flat={1 if position_state.effective_flat else 0} "
         f"normalized_exposure_active={1 if position_state.normalized_exposure.normalized_exposure_active else 0} "
+        f"has_executable_exposure={1 if position_state.normalized_exposure.has_executable_exposure else 0} "
+        f"has_dust_only_remainder={1 if position_state.normalized_exposure.has_dust_only_remainder else 0} "
         f"normalized_exposure_qty={position_state.normalized_exposure.normalized_exposure_qty:.8f}"
     )
     print("  [OPERATOR-DIAGNOSTICS]")
@@ -1409,7 +1411,7 @@ def cmd_broker_diagnose() -> None:
         code, summary = classify_private_api_error(e)
         if code in {"AUTH_SIGN", "PERMISSION"}:
             account_validation_reason = "auth failure"
-        elif code == "TEMPORARY":
+        elif code in {"TEMPORARY", "SERVER_INTERNAL_FAILURE"}:
             account_validation_reason = "transport failure"
         elif "missing quote currency row" in str(e).lower() or "missing base currency row" in str(e).lower():
             account_validation_reason = "required currency missing"

@@ -10,11 +10,14 @@ from bithumb_bot.dust import classify_dust_residual, dust_qty_gap_tolerance
 def test_paper_execute_buy_survives_harmless_dust_strategy_decision(tmp_path, monkeypatch):
     db_path = str(tmp_path / "paper-harmless-dust.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
+    previous_db_path = settings.DB_PATH
+    previous_mode = settings.MODE
+    previous_pair = settings.PAIR
     object.__setattr__(settings, "DB_PATH", db_path)
     object.__setattr__(settings, "MODE", "paper")
-    object.__setattr__(settings, "PAIR", "BTC_KRW")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
     object.__setattr__(settings, "BUY_FRACTION", 1.0)
-    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 50_000.0)
     object.__setattr__(settings, "PAPER_FEE_RATE", 0.0)
     object.__setattr__(settings, "SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 1_000.0)
@@ -56,6 +59,10 @@ def test_paper_execute_buy_survives_harmless_dust_strategy_decision(tmp_path, mo
                 "entry_allowed": True,
                 "effective_flat": True,
                 "normalized_exposure_active": True,
+                "has_executable_exposure": False,
+                "has_any_position_residue": True,
+                "has_non_executable_residue": True,
+                "has_dust_only_remainder": True,
                 "normalized_exposure_qty": 0.00009629,
                 "raw_qty_open": 0.00009629,
                 "open_exposure_qty": 0.00009629,
@@ -64,6 +71,10 @@ def test_paper_execute_buy_survives_harmless_dust_strategy_decision(tmp_path, mo
                     "entry_allowed": True,
                     "effective_flat_due_to_harmless_dust": True,
                     "normalized_exposure_active": True,
+                    "has_executable_exposure": False,
+                    "has_any_position_residue": True,
+                    "has_non_executable_residue": True,
+                    "has_dust_only_remainder": True,
                     "raw_qty_open": 0.00009629,
                 },
                 "position_state": {
@@ -71,6 +82,10 @@ def test_paper_execute_buy_survives_harmless_dust_strategy_decision(tmp_path, mo
                         "entry_allowed": True,
                         "effective_flat": True,
                         "normalized_exposure_active": True,
+                        "has_executable_exposure": False,
+                        "has_any_position_residue": True,
+                        "has_non_executable_residue": True,
+                        "has_dust_only_remainder": True,
                         "normalized_exposure_qty": 0.00009629,
                         "raw_qty_open": 0.00009629,
                         "open_exposure_qty": 0.00009629,
@@ -80,18 +95,21 @@ def test_paper_execute_buy_survives_harmless_dust_strategy_decision(tmp_path, mo
             },
         )
         conn.commit()
+
+        trade = paper.paper_execute(
+            "BUY",
+            1_700_000_000_000,
+            100_000_000.0,
+            strategy_name="sma_with_filter",
+            decision_id=decision_id,
+            decision_reason="sma golden cross",
+        )
+
+        assert trade is not None
+        assert trade["side"] == "BUY"
+        assert trade["qty"] > 0.0
     finally:
         conn.close()
-
-    trade = paper.paper_execute(
-        "BUY",
-        1_700_000_000_000,
-        100_000_000.0,
-        strategy_name="sma_with_filter",
-        decision_id=decision_id,
-        decision_reason="sma golden cross",
-    )
-
-    assert trade is not None
-    assert trade["side"] == "BUY"
-    assert trade["qty"] > 0.0
+        object.__setattr__(settings, "DB_PATH", previous_db_path)
+        object.__setattr__(settings, "MODE", previous_mode)
+        object.__setattr__(settings, "PAIR", previous_pair)

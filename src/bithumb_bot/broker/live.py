@@ -627,6 +627,51 @@ def _load_strategy_decision_observability(
         )
         or 0.0
     )
+    has_executable_exposure = bool(
+        position_normalized.get(
+            "has_executable_exposure",
+            context.get(
+                "has_executable_exposure",
+                position_gate.get(
+                    "has_executable_exposure",
+                    bool(open_exposure_qty > 1e-12 and (position_normalized.get("exit_allowed", context.get("exit_allowed", True))))
+                ),
+            ),
+        )
+    )
+    has_any_position_residue = bool(
+        position_normalized.get(
+            "has_any_position_residue",
+            context.get(
+                "has_any_position_residue",
+                position_gate.get("has_any_position_residue", raw_total_asset_qty > 1e-12),
+            ),
+        )
+    )
+    has_non_executable_residue = bool(
+        position_normalized.get(
+            "has_non_executable_residue",
+            context.get(
+                "has_non_executable_residue",
+                position_gate.get(
+                    "has_non_executable_residue",
+                    bool(has_any_position_residue and not has_executable_exposure),
+                ),
+            ),
+        )
+    )
+    has_dust_only_remainder = bool(
+        position_normalized.get(
+            "has_dust_only_remainder",
+            context.get(
+                "has_dust_only_remainder",
+                position_gate.get(
+                    "has_dust_only_remainder",
+                    bool(dust_tracking_qty > 1e-12 and open_exposure_qty <= 1e-12),
+                ),
+            ),
+        )
+    )
     normalized_exposure_active = bool(
         position_normalized.get(
             "normalized_exposure_active",
@@ -643,7 +688,7 @@ def _load_strategy_decision_observability(
                 "normalized_exposure_qty",
                 position_gate.get(
                     "normalized_exposure_qty",
-                    open_exposure_qty if normalized_exposure_active else 0.0,
+                    open_exposure_qty if has_executable_exposure else 0.0,
                 ),
             ),
         )
@@ -695,6 +740,10 @@ def _load_strategy_decision_observability(
             "submit_payload_qty": submit_payload_qty,
             "normalized_exposure_active": normalized_exposure_active,
             "normalized_exposure_qty": normalized_exposure_qty,
+            "has_executable_exposure": has_executable_exposure,
+            "has_any_position_residue": has_any_position_residue,
+            "has_non_executable_residue": has_non_executable_residue,
+            "has_dust_only_remainder": has_dust_only_remainder,
             "open_exposure_qty": open_exposure_qty,
             "dust_tracking_qty": dust_tracking_qty,
             "submit_qty_source": submit_qty_source,
@@ -1338,8 +1387,28 @@ def _record_sell_dust_unsellable(
         return False
     dust_details = _normalize_sell_dust_details(details=dust_details, market_price=market_price)
 
+    exit_non_executable_reason = str(
+        decision_observability.get("exit_non_executable_reason")
+        or decision_observability.get("exit_block_reason")
+        or (
+            decision_observability.get("position_state", {})
+            if isinstance(decision_observability.get("position_state"), dict)
+            else {}
+        ).get("normalized_exposure", {})
+        if isinstance(
+            (
+                decision_observability.get("position_state", {})
+                if isinstance(decision_observability.get("position_state"), dict)
+                else {}
+            ).get("normalized_exposure", {}),
+            dict,
+        )
+        else ""
+    ).strip()
+    suppress_as_decision = exit_non_executable_reason in {"dust_only_remainder", "no_executable_exit_lot"}
+    reason_code = DUST_RESIDUAL_SUPPRESSED if suppress_as_decision else DUST_RESIDUAL_UNSELLABLE
     sell_failure_category = _classify_sell_failure_category(
-        reason_code=DUST_RESIDUAL_UNSELLABLE,
+        reason_code=reason_code,
         dust_details=dust_details,
     )
     sell_failure_detail = _sell_failure_detail_from_observability(
@@ -1351,6 +1420,8 @@ def _record_sell_dust_unsellable(
     if dust_details.get("dust_scope") == "remainder_after_sell":
         guard_action = "block_sell_remainder_dust"
     dust_message = (
+        f"{'decision_suppressed:exit_suppressed_by_quantity_rule;' if suppress_as_decision else ''}"
+        f"exit_non_executable_reason={exit_non_executable_reason or 'none'};"
         f"category={sell_failure_category};detail={sell_failure_detail};"
         f"state={dust_details['state']};"
         f"terminal_state={str(decision_observability.get('terminal_state') or '-')};"
@@ -1372,7 +1443,7 @@ def _record_sell_dust_unsellable(
         strategy_name=strategy_name_value,
         signal="SELL",
         side="SELL",
-        reason_code=DUST_RESIDUAL_UNSELLABLE,
+        reason_code=reason_code,
         dust_signature=str(dust_details["dust_signature"]),
         requested_qty=float(position_qty),
         normalized_qty=float(dust_details["normalized_qty"]),
@@ -1400,7 +1471,7 @@ def _record_sell_dust_unsellable(
         "signal": "SELL",
         "side": "SELL",
         "market_price": float(market_price),
-        "reason_code": DUST_RESIDUAL_UNSELLABLE,
+        "reason_code": reason_code,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
         "sell_submit_qty_source": resolved_sell_submit_qty_source,
@@ -1458,8 +1529,8 @@ def _record_sell_dust_unsellable(
         strategy_name=strategy_name_value,
         signal="SELL",
         side="SELL",
-        reason_code=DUST_RESIDUAL_UNSELLABLE,
-        reason="decision_suppressed:no_executable_exit_lot",
+        reason_code=reason_code,
+        reason="decision_suppressed:exit_suppressed_by_quantity_rule",
         requested_qty=float(position_qty),
         normalized_qty=float(dust_details["normalized_qty"]),
         market_price=float(market_price),
@@ -1481,10 +1552,10 @@ def _record_sell_dust_unsellable(
     )
     RUN_LOG.info(
         format_log_kv(
-            "[ORDER_SKIP] dust residual unsellable",
+            "[ORDER_SKIP] exit quantity suppressed" if suppress_as_decision else "[ORDER_SKIP] dust residual unsellable",
             side="SELL",
             signal="SELL",
-            reason_code=DUST_RESIDUAL_UNSELLABLE,
+            reason_code=reason_code,
             signal_ts=int(ts),
             decision_ts=int(ts),
             decision_id=str(decision_id) if decision_id is not None else "-",
@@ -1508,7 +1579,7 @@ def _record_sell_dust_unsellable(
             client_order_id=UNSET_EVENT_FIELD,
             submit_attempt_id=UNSET_EVENT_FIELD,
             exchange_order_id=UNSET_EVENT_FIELD,
-            reason_code=DUST_RESIDUAL_UNSELLABLE,
+            reason_code=reason_code,
             side="SELL",
             status="SUPPRESSED",
             dust_state=str(dust_details["notify_dust_state"]),
@@ -1521,6 +1592,204 @@ def _record_sell_dust_unsellable(
             dust_qty_below_min=str(dust_details["qty_below_min"]),
             dust_notional_below_min=str(dust_details["notional_below_min"]),
             reason=dust_message,
+        )
+    )
+    return True
+
+
+def _record_sell_no_executable_exit_suppression(
+    *,
+    conn,
+    state,
+    ts: int,
+    market_price: float,
+    position_qty: float,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+    decision_observability: dict[str, object],
+    submit_qty_source: str | None = None,
+    position_state_source: str | None = None,
+    raw_total_asset_qty: float | None = None,
+    open_exposure_qty: float | None = None,
+    dust_tracking_qty: float | None = None,
+    exit_sizing: object | None = None,
+) -> bool:
+    nested_exit_block_reason = ""
+    position_state = decision_observability.get("position_state")
+    if isinstance(position_state, dict):
+        normalized_exposure = position_state.get("normalized_exposure")
+        if isinstance(normalized_exposure, dict):
+            nested_exit_block_reason = str(normalized_exposure.get("exit_block_reason") or "").strip()
+    exit_non_executable_reason = str(
+        getattr(exit_sizing, "block_reason", "")
+        if exit_sizing is not None
+        else decision_observability.get("exit_non_executable_reason")
+        or decision_observability.get("exit_block_reason")
+        or nested_exit_block_reason
+        or ""
+    ).strip()
+    if exit_non_executable_reason not in {"no_executable_exit_lot", "dust_only_remainder"}:
+        return False
+
+    strategy_name_value = strategy_name or settings.STRATEGY_NAME
+    strategy_context = f"{settings.MODE}:{strategy_name_value}:{settings.INTERVAL}"
+    reason_code = DUST_RESIDUAL_SUPPRESSED
+    sell_failure_category = _classify_sell_failure_category(reason_code=reason_code)
+    sell_failure_detail = _sell_failure_detail_from_observability(sell_failure_category=sell_failure_category)
+    truth_sources = _decision_truth_sources_payload(decision_observability)
+    sell_truth_source_fields = _sell_truth_source_fields(
+        decision_observability=decision_observability,
+        submit_qty_source=submit_qty_source,
+    )
+    exit_sizing_allowed = bool(getattr(exit_sizing, "allowed", False)) if exit_sizing is not None else False
+    exit_sizing_block_reason = str(getattr(exit_sizing, "block_reason", exit_non_executable_reason) if exit_sizing is not None else exit_non_executable_reason)
+    exit_sizing_decision_reason_code = str(
+        getattr(exit_sizing, "decision_reason_code", "exit_suppressed_by_quantity_rule") if exit_sizing is not None else "exit_suppressed_by_quantity_rule"
+    )
+    intended_lot_count = int(getattr(exit_sizing, "intended_lot_count", 0) if exit_sizing is not None else 0)
+    executable_lot_count = int(getattr(exit_sizing, "executable_lot_count", 0) if exit_sizing is not None else 0)
+    executable_qty = float(getattr(exit_sizing, "executable_qty", 0.0) if exit_sizing is not None else 0.0)
+    internal_lot_size = float(getattr(exit_sizing, "internal_lot_size", 0.0) if exit_sizing is not None else 0.0)
+    effective_min_trade_qty = float(getattr(exit_sizing, "effective_min_trade_qty", 0.0) if exit_sizing is not None else 0.0)
+    min_qty = float(getattr(exit_sizing, "min_qty", 0.0) if exit_sizing is not None else 0.0)
+    min_notional_krw = float(getattr(exit_sizing, "min_notional_krw", 0.0) if exit_sizing is not None else 0.0)
+    requested_qty = float(position_qty)
+    normalized_qty = 0.0
+    suppression_key = build_order_suppression_key(
+        mode=settings.MODE,
+        strategy_context=strategy_context,
+        strategy_name=strategy_name_value,
+        signal="SELL",
+        side="SELL",
+        reason_code=reason_code,
+        dust_signature=exit_non_executable_reason,
+        requested_qty=requested_qty,
+        normalized_qty=normalized_qty,
+        market_price=float(market_price),
+    )
+    suppression_context = {
+        "signal": "SELL",
+        "side": "SELL",
+        "market_price": float(market_price),
+        "reason_code": reason_code,
+        "sell_failure_category": sell_failure_category,
+        "sell_failure_detail": sell_failure_detail,
+        "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
+        "sell_qty_basis_qty": float(
+            decision_observability.get("sell_qty_basis_qty")
+            or decision_observability.get("open_exposure_qty")
+            or open_exposure_qty
+            or requested_qty
+        ),
+        "sell_qty_basis_source": str(
+            decision_observability.get("sell_qty_basis_source")
+            or submit_qty_source
+            or "position_state.normalized_exposure.sellable_executable_qty"
+        ),
+        "sell_qty_boundary_kind": str(decision_observability.get("sell_qty_boundary_kind") or "none"),
+        "exit_non_executable_reason": exit_non_executable_reason,
+        "exit_sizing_allowed": exit_sizing_allowed,
+        "exit_sizing_block_reason": exit_sizing_block_reason,
+        "exit_sizing_decision_reason_code": exit_sizing_decision_reason_code,
+        "internal_lot_size": internal_lot_size,
+        "intended_lot_count": intended_lot_count,
+        "executable_lot_count": executable_lot_count,
+        "sell_normalized_exposure_qty": 0.0,
+        "raw_total_asset_qty": float(raw_total_asset_qty if raw_total_asset_qty is not None else decision_observability.get("raw_total_asset_qty") or 0.0),
+        "sell_open_exposure_qty": float(open_exposure_qty if open_exposure_qty is not None else decision_observability.get("open_exposure_qty") or 0.0),
+        "sell_dust_tracking_qty": float(dust_tracking_qty if dust_tracking_qty is not None else decision_observability.get("dust_tracking_qty") or 0.0),
+        "position_qty": requested_qty,
+        "submit_payload_qty": 0.0,
+        "normalized_qty": normalized_qty,
+        "effective_min_trade_qty": effective_min_trade_qty,
+        "min_qty": min_qty,
+        "sell_notional_krw": requested_qty * float(market_price),
+        "min_notional_krw": min_notional_krw,
+        "decision_truth_sources": truth_sources,
+        **{f"{key}_truth_source": value for key, value in truth_sources.items()},
+        **sell_truth_source_fields,
+        "strategy_name": strategy_name_value,
+        "strategy_context": strategy_context,
+        "decision_id": decision_id,
+        "decision_reason": decision_reason,
+        "exit_rule_name": exit_rule_name,
+        "suppression_reason_code": reason_code,
+        "suppression_reason": "decision_suppressed:exit_suppressed_by_quantity_rule",
+        "suppression_summary": (
+            "decision_suppressed:exit_suppressed_by_quantity_rule;"
+            f"exit_non_executable_reason={exit_non_executable_reason};"
+            f"sellable_executable_lot_count={executable_lot_count};"
+            f"sellable_executable_qty={executable_qty:.12f}"
+        ),
+        "suppression_key": suppression_key,
+    }
+    record_order_suppression(
+        conn=conn,
+        suppression_key=suppression_key,
+        event_kind="decision_suppressed",
+        mode=settings.MODE,
+        strategy_context=strategy_context,
+        strategy_name=strategy_name_value,
+        signal="SELL",
+        side="SELL",
+        reason_code=reason_code,
+        reason="decision_suppressed:exit_suppressed_by_quantity_rule",
+        requested_qty=requested_qty,
+        normalized_qty=normalized_qty,
+        market_price=float(market_price),
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        dust_present=True,
+        dust_allow_resume=False,
+        dust_effective_flat=False,
+        dust_state=str(decision_observability.get("dust_classification") or decision_observability.get("dust_state") or "-"),
+        dust_action="manual_review_before_resume",
+        dust_signature=exit_non_executable_reason,
+        summary=(
+            "decision_suppressed:exit_suppressed_by_quantity_rule;"
+            f"exit_non_executable_reason={exit_non_executable_reason};"
+            f"sellable_executable_qty={executable_qty:.12f}"
+        ),
+        context=suppression_context,
+    )
+    RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_SKIP] exit quantity suppressed",
+            side="SELL",
+            signal="SELL",
+            reason_code=reason_code,
+            signal_ts=int(ts),
+            decision_ts=int(ts),
+            decision_id=str(decision_id) if decision_id is not None else "-",
+            sell_failure_category=sell_failure_category,
+            sell_failure_detail=sell_failure_detail,
+            exit_non_executable_reason=exit_non_executable_reason,
+            sellable_executable_lot_count=executable_lot_count,
+            sellable_executable_qty=executable_qty,
+        )
+    )
+    notify(
+        safety_event(
+            "decision_suppressed",
+            client_order_id=UNSET_EVENT_FIELD,
+            submit_attempt_id=UNSET_EVENT_FIELD,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            reason_code=reason_code,
+            side="SELL",
+            status="SUPPRESSED",
+            dust_state=str(decision_observability.get("dust_classification") or decision_observability.get("dust_state") or "-"),
+            dust_action="manual_review_before_resume",
+            dust_new_orders_allowed="0",
+            dust_resume_allowed="0",
+            dust_treat_as_flat="0",
+            dust_event_state=exit_non_executable_reason,
+            operator_action="manual_review_before_resume",
+            dust_qty_below_min="0",
+            dust_notional_below_min="0",
+            reason=f"decision_suppressed:exit_suppressed_by_quantity_rule;exit_non_executable_reason={exit_non_executable_reason}",
         )
     )
     return True
@@ -3045,6 +3314,9 @@ def live_execute_signal(
                         effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
                         normalized_exposure_active=1 if bool(decision_observability["normalized_exposure_active"]) else 0,
                         normalized_exposure_qty=float(decision_observability["normalized_exposure_qty"]),
+                        has_executable_exposure=1 if bool(decision_observability.get("has_executable_exposure")) else 0,
+                        has_any_position_residue=1 if bool(decision_observability.get("has_any_position_residue")) else 0,
+                        has_dust_only_remainder=1 if bool(decision_observability.get("has_dust_only_remainder")) else 0,
                         raw_qty_open=float(decision_observability["raw_qty_open"]),
                         entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
                     )
@@ -3054,7 +3326,7 @@ def live_execute_signal(
 
             # Harmless dust is entry-allowed flatness, not a live position count.
             guardrail_qty = 0.0 if bool(decision_observability["entry_allowed"]) else float(
-                normalized_exposure.normalized_exposure_qty
+                normalized_exposure.open_exposure_qty if bool(decision_observability.get("has_executable_exposure")) else qty
             )
             blocked, guardrail_reason = evaluate_buy_guardrails(
                 conn=conn,
@@ -3189,7 +3461,7 @@ def live_execute_signal(
                             signal=signal,
                             side="SELL",
                             reason=skip_reason,
-                            decision_reason_code="no_executable_exit_lot",
+                            decision_reason_code="no_position",
                             position_qty=float(open_exposure_qty),
                             submit_payload_qty=0.0,
                             open_exposure_qty=float(open_exposure_qty),
@@ -3273,6 +3545,26 @@ def live_execute_signal(
                     exit_block_reason=str(normalized_exposure.exit_block_reason),
                 )
                 if not exit_sizing.allowed:
+                    if _record_sell_no_executable_exit_suppression(
+                        conn=conn,
+                        state=state,
+                        ts=int(ts),
+                        market_price=float(market_price),
+                        position_qty=float(order_qty),
+                        decision_observability=decision_observability,
+                        submit_qty_source=submit_qty_source,
+                        position_state_source=str(decision_observability["position_state_source"]),
+                        raw_total_asset_qty=float(raw_total_asset_qty),
+                        open_exposure_qty=float(normalized_exposure.open_exposure_qty),
+                        dust_tracking_qty=float(normalized_exposure.dust_tracking_qty),
+                        strategy_name=strategy_name,
+                        decision_id=decision_id,
+                        decision_reason=decision_reason,
+                        exit_rule_name=exit_rule_name,
+                        exit_sizing=exit_sizing,
+                    ):
+                        conn.commit()
+                        return None
                     RUN_LOG.info(
                         format_log_kv(
                             "[ORDER_SKIP] exit sizing blocked",

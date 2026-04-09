@@ -20,6 +20,7 @@ from bithumb_bot.dust import (
     lot_state_strategy_qty_source,
     should_treat_as_flat_for_entry_gate,
 )
+from bithumb_bot.lifecycle import PositionLotSnapshot
 
 
 pytestmark = pytest.mark.fast_regression
@@ -427,9 +428,15 @@ def test_normalized_exposure_reuses_shared_dust_truth_for_harmless_dust() -> Non
     assert exposure.effective_flat is True
     assert exposure.entry_allowed is True
     assert exposure.normalized_exposure_active is False
+    assert exposure.has_executable_exposure is False
+    assert exposure.has_any_position_residue is True
+    assert exposure.has_non_executable_residue is True
+    assert exposure.has_dust_only_remainder is True
     assert exposure.normalized_exposure_qty == pytest.approx(0.0)
     assert exposure.sellable_executable_qty == pytest.approx(0.0)
     assert exposure.as_dict()["normalized_exposure_active"] is False
+    assert exposure.as_dict()["has_executable_exposure"] is False
+    assert exposure.as_dict()["has_dust_only_remainder"] is True
 
 
 def test_normalized_exposure_routes_sub_min_residual_to_dust_only() -> None:
@@ -478,6 +485,10 @@ def test_normalized_exposure_keeps_blocking_dust_active_and_entry_blocked() -> N
     assert exposure.effective_flat is False
     assert exposure.entry_allowed is False
     assert exposure.normalized_exposure_active is False
+    assert exposure.has_executable_exposure is False
+    assert exposure.has_any_position_residue is True
+    assert exposure.has_non_executable_residue is True
+    assert exposure.has_dust_only_remainder is True
     assert exposure.normalized_exposure_qty == pytest.approx(0.0)
     assert exposure.sellable_executable_qty == pytest.approx(0.0)
 
@@ -549,6 +560,10 @@ def test_position_state_model_preserves_mixed_executable_open_exposure_and_dust_
     assert model.normalized_exposure.dust_tracking_qty == pytest.approx(0.00009193)
     assert model.normalized_exposure.sellable_executable_qty == pytest.approx(0.0004)
     assert model.normalized_exposure.normalized_exposure_active is True
+    assert model.normalized_exposure.has_executable_exposure is True
+    assert model.normalized_exposure.has_any_position_residue is True
+    assert model.normalized_exposure.has_non_executable_residue is False
+    assert model.normalized_exposure.has_dust_only_remainder is False
     assert model.normalized_exposure.exit_allowed is True
     assert model.normalized_exposure.exit_block_reason == "none"
     assert model.state_interpretation.operator_outcome == "executable_open_exposure"
@@ -581,6 +596,66 @@ def test_position_state_model_interprets_dust_only_as_state_layer_no_submit_outc
     assert model.state_interpretation.operator_outcome == "tracked_unsellable_residual"
     assert model.state_interpretation.exit_submit_expected is False
     assert "HOLD/no-submit outcome" in model.state_interpretation.operator_message
+
+
+def test_position_state_model_interprets_non_executable_open_exposure_as_active_residue() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00009997,
+        local_qty=0.00009997,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=False,
+    )
+
+    model = build_position_state_model(
+        raw_qty_open=0.00009997,
+        metadata_raw=dust,
+        raw_total_asset_qty=0.00009997,
+        open_exposure_qty=0.00009997,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0,
+        open_lot_count=1,
+        dust_tracking_lot_count=0,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    assert model.normalized_exposure.terminal_state == "non_executable_position"
+    assert model.normalized_exposure.normalized_exposure_active is True
+    assert model.normalized_exposure.has_executable_exposure is False
+    assert model.normalized_exposure.has_any_position_residue is True
+    assert model.normalized_exposure.has_non_executable_residue is True
+    assert model.normalized_exposure.has_dust_only_remainder is False
+    assert model.state_interpretation.operator_outcome == "non_executable_open_exposure"
+    assert model.state_interpretation.exit_submit_expected is False
+    assert "operator review" in model.state_interpretation.operator_message.lower()
+
+
+def test_position_lot_snapshot_exposes_explicit_quantities_for_recovery_and_ops() -> None:
+    snapshot = PositionLotSnapshot(
+        raw_open_exposure_qty=0.0004,
+        executable_open_exposure_qty=0.0003,
+        dust_tracking_qty=0.0001,
+        raw_total_asset_qty=0.0005,
+        open_lot_count=1,
+        dust_tracking_lot_count=1,
+        effective_min_trade_qty=0.0001,
+        exit_non_executable_reason="none",
+    )
+
+    assert snapshot.total_holdings_qty == pytest.approx(0.0005)
+    assert snapshot.executable_exposure_qty == pytest.approx(0.0003)
+    assert snapshot.tracked_dust_qty == pytest.approx(0.0001)
+    assert snapshot.as_dict()["raw_total_asset_qty"] == pytest.approx(0.0005)
+    assert snapshot.as_dict()["executable_exposure_qty"] == pytest.approx(0.0003)
+    assert snapshot.as_dict()["tracked_dust_qty"] == pytest.approx(0.0001)
 
 
 def test_lot_state_quantity_contract_exposes_boundary_and_sell_submission_rules() -> None:
