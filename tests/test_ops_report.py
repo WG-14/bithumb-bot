@@ -29,6 +29,30 @@ from bithumb_bot.reason_codes import (
 )
 
 
+def _collect_residue_paths(value, path: str = "") -> list[str]:
+    if isinstance(value, dict):
+        found: list[str] = []
+        for key, item in value.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            if (
+                key_text == "decision_compatibility_residue"
+                or key_text.endswith("_source")
+                or key_text.endswith("_truth_source")
+                or key_text.endswith("_compatibility_residue")
+            ):
+                found.append(next_path)
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    if isinstance(value, list):
+        found: list[str] = []
+        for index, item in enumerate(value):
+            next_path = f"{path}[{index}]" if path else f"[{index}]"
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    return []
+
+
 def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "ops-report.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
@@ -769,19 +793,23 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "[RECENT-STRATEGY-DECISION-FLOW]" in out
     assert "flow=BUY_SUBMIT" in out
     assert "flow=BUY_BLOCKED" in out
-    assert "submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
-    assert "sell_submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
     assert "sellable_executable_qty" in out
     assert "has_executable_exposure=0" in out
     assert "sell_normalized_exposure_qty=0.00000000" in out
     assert "position_qty=" in out
     assert "submit_payload_qty=" in out
-    assert "position_state_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
     assert "raw_total_asset_qty=0.00019192" in out
     assert "open_exposure_qty=" in out
     assert "dust_tracking_qty=0.00009563" in out
-    assert "entry_allowed_truth_source=position_state.normalized_exposure.entry_allowed" in out
-    assert "effective_flat_truth_source=context.effective_flat" in out or "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
+    assert "submit_qty_source=" not in out
+    assert "sell_submit_qty_source=" not in out
+    assert "sell_submit_lot_source=" not in out
+    assert "position_state_source=" not in out
+    assert "_truth_source" not in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    assert payload["recent_decision_flow"][0]["sell_submit_lot_count"] == 0
+    assert _collect_residue_paths(payload["recent_decision_flow"]) == []
 
 
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):
@@ -824,11 +852,13 @@ def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, mo
     cmd_ops_report(limit=5)
     out = capsys.readouterr().out
 
-    assert "raw_qty_open_truth_source=position_state.raw_qty_open" in out
-    assert "raw_total_asset_qty_truth_source=position_state.raw_total_asset_qty" in out
-    assert "open_exposure_qty_truth_source=" in out
-    assert "dust_tracking_qty_truth_source=" in out
-    assert "position_state_source_truth_source=derived:sellable_executable_lot_count" in out
+    assert "submit_qty_source=" not in out
+    assert "sell_submit_qty_source=" not in out
+    assert "position_state_source=" not in out
+    assert "_truth_source" not in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    assert _collect_residue_paths(payload["recent_decision_flow"]) == []
 
 
 
@@ -1039,30 +1069,23 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "reason=DUST_RESIDUAL_SUPPRESSED" in out
     assert "sell_failure_category=dust_suppression" in out
     assert "sell_failure_detail=dust_suppression" in out
-    assert "submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
-    assert "submit_qty_source_truth_source=context.submit_qty_source" in out
-    assert "sell_submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
-    assert "sell_submit_qty_source_truth_source=context.submit_qty_source" in out
-    assert "sell_submit_lot_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
     assert "sell_qty_basis_qty=0.00009629" in out
-    assert "sell_qty_basis_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
-    assert "sell_qty_basis_source_truth_source=derived:sellable_executable_lot_count" in out
     assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=" in out
-    assert "open_exposure_qty_truth_source=" in out
     assert "dust_tracking_qty=0.00009563" in out
-    assert "dust_tracking_qty_truth_source=" in out
     assert "harmless_dust_tracked_resume_allowed" in out
-    assert "entry_allowed_truth_source=position_gate.entry_allowed" in out
-    assert "effective_flat_truth_source=position_gate.effective_flat_due_to_harmless_dust" in out
+    assert "submit_qty_source=" not in out
+    assert "sell_submit_qty_source=" not in out
+    assert "sell_submit_lot_source=" not in out
+    assert "position_state_source=" not in out
+    assert "_truth_source" not in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     sell_suppression = payload["recent_sell_suppressions"][0]
     assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
-    assert sell_suppression["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
-    assert sell_suppression["sell_submit_lot_source_truth_source"] == "-"
     assert sell_suppression["sell_qty_basis_qty"] == pytest.approx(0.00009629)
-    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert sell_suppression["sell_submit_lot_count"] == 0
+    assert _collect_residue_paths(sell_suppression) == []
 
 
 def test_ops_report_prefers_boundary_below_min_over_unsafe_dust_mismatch_in_recent_flow(

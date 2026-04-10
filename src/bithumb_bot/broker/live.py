@@ -886,7 +886,7 @@ def _load_strategy_decision_observability(
             "position_state_source_truth_source": str(
                 context.get("position_state_source_truth_source")
                 or decision_truth_sources.get("position_state_source")
-                or "context.position_state_source"
+                or "derived:sellable_executable_lot_count"
             ),
             "entry_intent": dict(entry_intent),
         }

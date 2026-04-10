@@ -12,7 +12,10 @@ from typing import Any, Callable
 from .config import prepare_db_path_for_connection, settings
 from .dust import OPEN_EXPOSURE_LOT_STATE, lot_state_quantity_contract
 from .sqlite_resilience import configure_connection
-from .decision_context import normalize_strategy_decision_context
+from .decision_context import (
+    materialize_strategy_decision_context,
+    normalize_strategy_decision_context,
+)
 
 
 # The lot-state contract is intentionally tiny and safety-critical:
@@ -1240,7 +1243,11 @@ def record_strategy_decision(
             None if candle_ts is None else int(candle_ts),
             None if market_price is None else float(market_price),
             None if confidence is None else float(confidence),
-            json.dumps(normalized_context, ensure_ascii=False, sort_keys=True),
+            json.dumps(
+                materialize_strategy_decision_context(normalized_context),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         ),
     )
     return int(row.lastrowid)

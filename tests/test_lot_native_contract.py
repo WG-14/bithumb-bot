@@ -1,4 +1,4 @@
-"""Contract-gate tests for lot-native baseline and downstream residue."""
+"""Contract-gate tests for the current PASS baseline and full declaration closure."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from bithumb_bot.order_sizing import build_sell_execution_sizing
 
 
 pytestmark = pytest.mark.fast_regression
+
+
+# Current contract PASS baseline.
 
 
 def test_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_count() -> None:
@@ -171,7 +174,10 @@ def test_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without
     assert "legacy_lot_metadata_missing" not in snapshot.as_dict().values()
 
 
-def test_decision_context_fallback_truth_sources_remain_compatibility_indicators() -> None:
+# Full lot-native declaration closure.
+
+
+def test_decision_context_no_longer_emits_compatibility_fallback_or_provenance_layer() -> None:
     ctx = normalize_strategy_decision_context(
         context={
             "base_signal": "SELL",
@@ -212,24 +218,19 @@ def test_decision_context_fallback_truth_sources_remain_compatibility_indicators
     assert ctx["sellable_executable_lot_count"] == 0
     assert ctx["submit_lot_count"] == 0
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
-    assert ctx["open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
-    assert ctx["sell_open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
-    assert ctx["normalized_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
-    assert (
-        ctx["decision_truth_sources"]["open_exposure_qty"]
-        == "compatibility:fallback:legacy_lot_metadata_missing"
+    residue_keys = sorted(
+        key
+        for key in ctx
+        if key == "decision_compatibility_residue"
+        or key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
     )
-    assert (
-        ctx["decision_truth_sources"]["normalized_exposure_qty"]
-        == "compatibility:fallback:no_executable_open_lots"
-    )
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
+
+    assert residue_keys == []
 
 
-def test_reporting_provenance_fields_remain_derived_compatibility_not_authority() -> None:
+def test_reporting_no_longer_preserves_truth_source_or_provenance_primary_fields() -> None:
     ctx = normalize_strategy_decision_context(
         context={
             "base_signal": "SELL",
@@ -267,19 +268,20 @@ def test_reporting_provenance_fields_remain_derived_compatibility_not_authority(
         market_price=100_000_000.0,
     )
 
-    assert ctx["position_state_source"] == "context.raw_qty_open"
-    assert ctx["position_state_source_truth_source"] == "compatibility:context.position_state_source"
     assert ctx["submit_lot_count"] == 0
     assert ctx["sell_submit_lot_count"] == 0
-    assert ctx["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["sell_submit_lot_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
+    primary_provenance_keys = sorted(
+        key
+        for key in ctx
+        if key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
+    )
+
+    assert primary_provenance_keys == []
 
 
-def test_full_lot_native_declaration_is_not_blocked_by_compatibility_attribution_once_lifecycle_residue_is_closed() -> None:
+def test_full_declaration_closure_keeps_current_pass_baseline_and_removes_residue_layers() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -340,21 +342,75 @@ def test_full_lot_native_declaration_is_not_blocked_by_compatibility_attribution
         market_price=100_000_000.0,
     )
 
-    compatibility_only_sources = {
-        ctx["position_state_source_truth_source"],
-        ctx["decision_truth_sources"]["position_state_source"],
-    }
-    full_lot_native_ready = not any(
-        source.startswith("fallback:") or source.startswith("compatibility:fallback:")
-        for source in compatibility_only_sources
+    residue_keys = sorted(
+        key
+        for key in ctx
+        if key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
     )
 
     assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
     assert snapshot.position_semantic_basis == "lot-native"
-    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
-    assert ctx["sell_open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
-    assert ctx["normalized_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
-    assert compatibility_only_sources == {"compatibility:context.position_state_source"}
-    assert full_lot_native_ready is True
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["sellable_executable_lot_count"] == 0
+    assert ctx["submit_lot_count"] == 0
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
+    assert residue_keys == []
+
+
+def test_current_contract_pass_still_holds_once_the_declaration_residue_is_gone() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "base_reason": "explicit residue bucket closed",
+            "entry_reason": "explicit residue bucket closed",
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0,
+            "dust_tracking_qty": 0.0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_lot_count": 0,
+            "position_state_source": "context.raw_qty_open",
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        },
+        signal="SELL",
+        reason="explicit residue bucket closed",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=4,
+        candle_ts=4,
+        market_price=100_000_000.0,
+    )
+
+    current_contract_pass = (
+        ctx["open_exposure_qty"] == pytest.approx(0.0)
+        and ctx["sellable_executable_lot_count"] == 0
+        and ctx["submit_lot_count"] == 0
+        and ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
+    )
+    strict_final_closure_complete = bool(
+        not any(
+            key.endswith("_source")
+            or key.endswith("_truth_source")
+            or key.endswith("_compatibility_residue")
+            for key in ctx
+        )
+    )
+
+    assert current_contract_pass is True
+    assert strict_final_closure_complete is True

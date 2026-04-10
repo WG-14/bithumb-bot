@@ -10,6 +10,30 @@ from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.reporting import fetch_decision_telemetry_summary
 
 
+def _collect_residue_paths(value, path: str = "") -> list[str]:
+    if isinstance(value, dict):
+        found: list[str] = []
+        for key, item in value.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            if (
+                key_text == "decision_compatibility_residue"
+                or key_text.endswith("_source")
+                or key_text.endswith("_truth_source")
+                or key_text.endswith("_compatibility_residue")
+            ):
+                found.append(next_path)
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    if isinstance(value, list):
+        found: list[str] = []
+        for index, item in enumerate(value):
+            next_path = f"{path}[{index}]" if path else f"[{index}]"
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    return []
+
+
 def test_record_strategy_decision_normalizes_blocked_entry_context(tmp_path, monkeypatch):
     db_path = str(tmp_path / "decision-normalize.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
@@ -64,10 +88,7 @@ def test_record_strategy_decision_normalizes_blocked_entry_context(tmp_path, mon
     assert ctx["strategy_name"] == "sma_with_filter"
     assert ctx["pair"] == "KRW-BTC"
     assert ctx["interval"] == "1m"
-    assert ctx["entry_allowed_truth_source"] == "fallback:flat_zero_holdings"
-    assert ctx["effective_flat_truth_source"] == "fallback:flat_zero_holdings"
-    assert ctx["decision_truth_sources"]["entry_allowed"] == "fallback:flat_zero_holdings"
-    assert ctx["decision_truth_sources"]["raw_qty_open"] == "default:0.0"
+    assert _collect_residue_paths(ctx) == []
 
 
 def test_record_strategy_decision_normalizes_hold_context_without_filter_block(tmp_path, monkeypatch):
@@ -225,15 +246,14 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert "submit_payload_qty" in out
     assert "open_exposure_qty" in out
     assert "dust_tracking_qty" in out
-    assert "submit_qty_source" in out
-    assert "sell_submit_qty_source" in out
     assert "sell_normalized_exposure_qty" in out
     assert "sell_open_exposure_qty" in out
     assert "sell_dust_tracking_qty" in out
     assert "BUY,HOLD,BUY,HOLD,BUY_BLOCKED,1,0,position held: no exit rule triggered" in out
     assert "harmless_dust" in out
     assert "0.00009629" in out
-    assert "position_gate.effective_flat_due_to_harmless_dust" in out
+    assert "_source" not in out
+    assert "_truth_source" not in out
 
 
 def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, monkeypatch):
@@ -290,31 +310,14 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["open_lot_count"] == 0
     assert ctx["sellable_executable_lot_count"] == 0
     assert ctx["submit_lot_count"] == 0
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_qty_truth_source"] == "derived:sellable_executable_lot_count"
     assert ctx["sell_qty_boundary_kind"] == "none"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.0)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_normalized_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
-    assert ctx["sell_open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
-    assert ctx["sell_dust_tracking_qty_truth_source"] == "context.dust_tracking_qty"
-    assert ctx["submit_lot_count_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["position_state_source"] == "context.raw_qty_open"
-    assert ctx["position_state_source_truth_source"] == "compatibility:context.position_state_source"
-    assert ctx["entry_allowed_truth_source"] == "position_gate.entry_allowed"
-    assert ctx["effective_flat_truth_source"] == "position_gate.effective_flat_due_to_harmless_dust"
-    assert (
-        ctx["decision_truth_sources"]["normalized_exposure_active"]
-        == "compatibility:fallback:no_executable_open_lots"
-    )
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert _collect_residue_paths(ctx) == []
 
 
 def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_path, monkeypatch):
@@ -372,15 +375,9 @@ def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_
 
     assert row is not None
     ctx = json.loads(str(row["context_json"]))
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["submit_lot_count"] == 1
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009999)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_qty_basis_qty_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
-    assert ctx["submit_lot_count_truth_source"] == "derived:sellable_executable_lot_count"
+    assert _collect_residue_paths(ctx) == []
 
 
 def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_path, monkeypatch):
@@ -422,14 +419,10 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
     assert ctx["open_exposure_qty"] == 0.0
     assert ctx["dust_tracking_qty"] == 0.0
     assert ctx["submit_lot_count"] == 0
-    assert ctx["raw_total_asset_qty_truth_source"] == "position_state.raw_total_asset_qty"
-    assert ctx["open_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
-    assert ctx["dust_tracking_qty_truth_source"] == "position_state.dust_tracking_qty"
-    assert ctx["position_state_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert ctx["position_state_source_truth_source"] == "derived:sellable_executable_lot_count"
     assert ctx["position_state"]["normalized_exposure"]["raw_total_asset_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["open_exposure_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["dust_tracking_qty"] == 0.0
+    assert _collect_residue_paths(ctx) == []
 
 
 def test_decision_telemetry_prefers_normalized_position_state_over_shadow_top_level_values(

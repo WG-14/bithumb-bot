@@ -131,38 +131,21 @@ class DecisionTelemetrySummary:
     dust_classification: str
     effective_flat: bool
     raw_qty_open: float
-    raw_qty_open_truth_source: str
     raw_total_asset_qty: float
-    raw_total_asset_qty_truth_source: str
     position_qty: float
-    position_qty_truth_source: str
     submit_payload_qty: float
-    submit_payload_qty_truth_source: str
     normalized_exposure_active: bool
-    normalized_exposure_active_truth_source: str
     normalized_exposure_qty: float
-    normalized_exposure_qty_truth_source: str
     open_exposure_qty: float
-    open_exposure_qty_truth_source: str
     dust_tracking_qty: float
-    dust_tracking_qty_truth_source: str
     sell_open_exposure_qty: float
     sell_dust_tracking_qty: float
     sell_qty_basis_qty: float
-    sell_qty_basis_source: str
     sell_qty_boundary_kind: str
-    submit_qty_source: str
-    submit_qty_source_truth_source: str
-    sell_submit_qty_source: str
-    sell_submit_lot_source: str
     sell_submit_lot_count: int
     sell_normalized_exposure_qty: float
     sell_failure_category: str
     sell_failure_detail: str
-    position_state_source: str
-    position_state_source_truth_source: str
-    entry_allowed_truth_source: str
-    effective_flat_truth_source: str
     strategy_name: str
     pair: str
     interval: str
@@ -599,31 +582,12 @@ class RecentDecisionFlowSummary:
     dust_tracking_qty: float
     sell_open_exposure_qty: float
     sell_dust_tracking_qty: float
-    submit_qty_source: str
-    sell_submit_qty_source: str
-    sell_submit_lot_source: str
     sell_submit_lot_count: int
-    sell_submit_lot_source_truth_source: str | None
-    sell_submit_lot_count_truth_source: str | None
     sell_qty_basis_qty: float
-    sell_qty_basis_source: str
     sell_qty_boundary_kind: str
     sell_normalized_exposure_qty: float
     sell_failure_category: str
     sell_failure_detail: str
-    position_state_source: str
-    raw_qty_open_truth_source: str
-    raw_total_asset_qty_truth_source: str
-    position_qty_truth_source: str
-    submit_payload_qty_truth_source: str
-    normalized_exposure_active_truth_source: str
-    normalized_exposure_qty_truth_source: str
-    open_exposure_qty_truth_source: str
-    dust_tracking_qty_truth_source: str
-    submit_qty_source_truth_source: str
-    position_state_source_truth_source: str
-    entry_allowed_truth_source: str
-    effective_flat_truth_source: str
     block_reason: str
     reason: str
 
@@ -636,36 +600,15 @@ class SellSuppressionSummary:
     side: str
     reason_code: str
     suppression_category: str
-    submit_qty_source: str
-    sell_submit_qty_source: str
-    sell_submit_lot_source: str
     sell_submit_lot_count: int
-    sell_submit_lot_source_truth_source: str | None
-    sell_submit_lot_count_truth_source: str | None
     sell_qty_basis_qty: float | None
-    sell_qty_basis_source: str | None
     sell_qty_boundary_kind: str | None
-    sell_qty_basis_qty_truth_source: str | None
-    sell_qty_basis_source_truth_source: str | None
-    sell_qty_boundary_kind_truth_source: str | None
     requested_qty: float | None
     normalized_qty: float | None
     market_price: float | None
     open_exposure_qty: float | None
     dust_tracking_qty: float | None
     sell_failure_detail: str | None
-    entry_allowed_truth_source: str | None
-    effective_flat_truth_source: str | None
-    submit_qty_source_truth_source: str | None
-    position_state_source_truth_source: str | None
-    raw_qty_open_truth_source: str | None
-    raw_total_asset_qty_truth_source: str | None
-    open_exposure_qty_truth_source: str | None
-    dust_tracking_qty_truth_source: str | None
-    sell_submit_qty_source_truth_source: str | None
-    sell_normalized_exposure_qty_truth_source: str | None
-    sell_open_exposure_qty_truth_source: str | None
-    sell_dust_tracking_qty_truth_source: str | None
     dust_state: str | None
     dust_action: str | None
     operator_action: str | None
@@ -1396,32 +1339,9 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                         "summary": row["summary"],
                     },
                 ),
-                submit_qty_source=str(row["submit_qty_source"] or "-"),
-                sell_submit_qty_source=str(row["sell_submit_qty_source"] or "-"),
-                sell_submit_lot_source=str(row["sell_submit_lot_source"] or "-"),
                 sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
-                sell_submit_lot_source_truth_source=(
-                    str(row["sell_submit_lot_source_truth_source"]) if row["sell_submit_lot_source_truth_source"] is not None else None
-                ),
-                sell_submit_lot_count_truth_source=(
-                    str(row["sell_submit_lot_count_truth_source"]) if row["sell_submit_lot_count_truth_source"] is not None else None
-                ),
                 sell_qty_basis_qty=(float(row["sell_qty_basis_qty"]) if row["sell_qty_basis_qty"] is not None else None),
-                sell_qty_basis_source=(str(row["sell_qty_basis_source"]) if row["sell_qty_basis_source"] is not None else None),
                 sell_qty_boundary_kind=(str(row["sell_qty_boundary_kind"]) if row["sell_qty_boundary_kind"] is not None else None),
-                sell_qty_basis_qty_truth_source=(
-                    str(row["sell_qty_basis_qty_truth_source"]) if row["sell_qty_basis_qty_truth_source"] is not None else None
-                ),
-                sell_qty_basis_source_truth_source=(
-                    str(row["sell_qty_basis_source_truth_source"])
-                    if row["sell_qty_basis_source_truth_source"] is not None
-                    else None
-                ),
-                sell_qty_boundary_kind_truth_source=(
-                    str(row["sell_qty_boundary_kind_truth_source"])
-                    if row["sell_qty_boundary_kind_truth_source"] is not None
-                    else None
-                ),
                 requested_qty=(float(row["requested_qty"]) if row["requested_qty"] is not None else None),
                 normalized_qty=(float(row["normalized_qty"]) if row["normalized_qty"] is not None else None),
                 market_price=(float(row["market_price"]) if row["market_price"] is not None else None),
@@ -1429,18 +1349,6 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 dust_tracking_qty=(float(row["dust_tracking_qty"]) if row["dust_tracking_qty"] is not None else None),
                 sell_failure_detail=str(row["sell_failure_detail"] or "-"),
                 operator_action=(str(row["operator_action"]) if row["operator_action"] is not None else None),
-                entry_allowed_truth_source=(str(row["entry_allowed_truth_source"]) if row["entry_allowed_truth_source"] is not None else None),
-                effective_flat_truth_source=(str(row["effective_flat_truth_source"]) if row["effective_flat_truth_source"] is not None else None),
-                submit_qty_source_truth_source=(str(row["submit_qty_source_truth_source"]) if row["submit_qty_source_truth_source"] is not None else None),
-                sell_submit_qty_source_truth_source=(str(row["sell_submit_qty_source_truth_source"]) if row["sell_submit_qty_source_truth_source"] is not None else None),
-                sell_normalized_exposure_qty_truth_source=(str(row["sell_normalized_exposure_qty_truth_source"]) if row["sell_normalized_exposure_qty_truth_source"] is not None else None),
-                sell_open_exposure_qty_truth_source=(str(row["sell_open_exposure_qty_truth_source"]) if row["sell_open_exposure_qty_truth_source"] is not None else None),
-                sell_dust_tracking_qty_truth_source=(str(row["sell_dust_tracking_qty_truth_source"]) if row["sell_dust_tracking_qty_truth_source"] is not None else None),
-                position_state_source_truth_source=(str(row["position_state_source_truth_source"]) if row["position_state_source_truth_source"] is not None else None),
-                raw_qty_open_truth_source=(str(row["raw_qty_open_truth_source"]) if row["raw_qty_open_truth_source"] is not None else None),
-                raw_total_asset_qty_truth_source=(str(row["raw_total_asset_qty_truth_source"]) if row["raw_total_asset_qty_truth_source"] is not None else None),
-                open_exposure_qty_truth_source=(str(row["open_exposure_qty_truth_source"]) if row["open_exposure_qty_truth_source"] is not None else None),
-                dust_tracking_qty_truth_source=(str(row["dust_tracking_qty_truth_source"]) if row["dust_tracking_qty_truth_source"] is not None else None),
                 dust_state=(str(row["dust_state"]) if row["dust_state"] is not None else None),
                 dust_action=(str(row["dust_action"]) if row["dust_action"] is not None else None),
                 summary=(str(row["summary"]) if row["summary"] is not None else None),
@@ -1882,7 +1790,7 @@ def fetch_recent_decision_flow(
             COALESCE(
                 json_extract(context_json, '$.position_state_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.position_state_source'),
-                'context.position_state_source'
+                'derived:sellable_executable_lot_count'
             ) AS position_state_source_truth_source,
             COALESCE(
                 json_extract(context_json, '$.entry_allowed_truth_source'),
@@ -1932,34 +1840,11 @@ def fetch_recent_decision_flow(
             sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
             sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
             sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
-            sell_qty_basis_source=str(row["sell_qty_basis_source"]),
             sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
-            submit_qty_source=str(row["submit_qty_source"]),
-                sell_submit_qty_source=str(row["sell_submit_qty_source"]),
-                sell_submit_lot_source=str(row["sell_submit_lot_source"]),
-                sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
-                sell_submit_lot_source_truth_source=(
-                    str(row["sell_submit_lot_source_truth_source"]) if row["sell_submit_lot_source_truth_source"] is not None else None
-                ),
-                sell_submit_lot_count_truth_source=(
-                    str(row["sell_submit_lot_count_truth_source"]) if row["sell_submit_lot_count_truth_source"] is not None else None
-                ),
-                sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
+            sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
+            sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
             sell_failure_category=str(row["sell_failure_category"]),
             sell_failure_detail=str(row["sell_failure_detail"]),
-            position_state_source=str(row["position_state_source"]),
-            raw_qty_open_truth_source=str(row["raw_qty_open_truth_source"]),
-            raw_total_asset_qty_truth_source=str(row["raw_total_asset_qty_truth_source"]),
-            position_qty_truth_source=str(row["position_qty_truth_source"]),
-            submit_payload_qty_truth_source=str(row["submit_payload_qty_truth_source"]),
-            normalized_exposure_active_truth_source=str(row["normalized_exposure_active_truth_source"]),
-            normalized_exposure_qty_truth_source=str(row["normalized_exposure_qty_truth_source"]),
-            open_exposure_qty_truth_source=str(row["open_exposure_qty_truth_source"]),
-            dust_tracking_qty_truth_source=str(row["dust_tracking_qty_truth_source"]),
-            submit_qty_source_truth_source=str(row["submit_qty_source_truth_source"]),
-            position_state_source_truth_source=str(row["position_state_source_truth_source"]),
-            entry_allowed_truth_source=str(row["entry_allowed_truth_source"]),
-            effective_flat_truth_source=str(row["effective_flat_truth_source"]),
             block_reason=str(row["block_reason"]),
             reason=str(row["block_reason"]),
         )
@@ -2346,7 +2231,7 @@ def fetch_decision_telemetry_summary(
             COALESCE(
                 json_extract(context_json, '$.position_state_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.position_state_source'),
-                'context.position_state_source'
+                'derived:sellable_executable_lot_count'
             ) AS position_state_source_truth_source,
             COALESCE(
                 json_extract(context_json, '$.entry_allowed_truth_source'),
@@ -2432,38 +2317,21 @@ def fetch_decision_telemetry_summary(
             dust_classification=str(row["dust_classification"]),
             effective_flat=bool(row["effective_flat"]),
             raw_qty_open=float(row["raw_qty_open"] or 0.0),
-            raw_qty_open_truth_source=str(row["raw_qty_open_truth_source"]),
             raw_total_asset_qty=float(row["raw_total_asset_qty"] or 0.0),
-            raw_total_asset_qty_truth_source=str(row["raw_total_asset_qty_truth_source"]),
             position_qty=float(row["position_qty"] or 0.0),
-            position_qty_truth_source=str(row["position_qty_truth_source"]),
             submit_payload_qty=float(row["submit_payload_qty"] or 0.0),
-            submit_payload_qty_truth_source=str(row["submit_payload_qty_truth_source"]),
             normalized_exposure_active=bool(row["normalized_exposure_active"]),
-            normalized_exposure_active_truth_source=str(row["normalized_exposure_active_truth_source"]),
             normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
-            normalized_exposure_qty_truth_source=str(row["normalized_exposure_qty_truth_source"]),
             open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
-            open_exposure_qty_truth_source=str(row["open_exposure_qty_truth_source"]),
             dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
-            dust_tracking_qty_truth_source=str(row["dust_tracking_qty_truth_source"]),
             sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
             sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
             sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
-            sell_qty_basis_source=str(row["sell_qty_basis_source"]),
             sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
-            submit_qty_source=str(row["submit_qty_source"]),
-            submit_qty_source_truth_source=str(row["submit_qty_source_truth_source"]),
-            sell_submit_qty_source=str(row["sell_submit_qty_source"]),
-            sell_submit_lot_source=str(row["sell_submit_lot_source"]),
             sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
             sell_failure_category=str(row["sell_failure_category"]),
             sell_failure_detail=str(row["sell_failure_detail"]),
-            position_state_source=str(row["position_state_source"]),
-            position_state_source_truth_source=str(row["position_state_source_truth_source"]),
-            entry_allowed_truth_source=str(row["entry_allowed_truth_source"]),
-            effective_flat_truth_source=str(row["effective_flat_truth_source"]),
             strategy_name=str(row["strategy_name"]),
             pair=str(row["pair"]),
             interval=str(row["interval"]),
@@ -4216,28 +4084,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "requested_qty": row.requested_qty,
                 "normalized_qty": row.normalized_qty,
                 "market_price": row.market_price,
-                "entry_allowed_truth_source": row.entry_allowed_truth_source,
-                "effective_flat_truth_source": row.effective_flat_truth_source,
-                "submit_qty_source_truth_source": row.submit_qty_source_truth_source,
-                "sell_submit_qty_source_truth_source": row.sell_submit_qty_source_truth_source,
                 "sell_qty_basis_qty": row.sell_qty_basis_qty,
-                "sell_qty_basis_source": row.sell_qty_basis_source,
                 "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
-                "sell_qty_basis_qty_truth_source": row.sell_qty_basis_qty_truth_source,
-                "sell_qty_basis_source_truth_source": row.sell_qty_basis_source_truth_source,
-                "sell_qty_boundary_kind_truth_source": row.sell_qty_boundary_kind_truth_source,
-                "sell_normalized_exposure_qty_truth_source": row.sell_normalized_exposure_qty_truth_source,
-                "sell_open_exposure_qty_truth_source": row.sell_open_exposure_qty_truth_source,
-                "sell_dust_tracking_qty_truth_source": row.sell_dust_tracking_qty_truth_source,
-                "sell_submit_lot_source": row.sell_submit_lot_source,
                 "sell_submit_lot_count": row.sell_submit_lot_count,
-                "sell_submit_lot_source_truth_source": row.sell_submit_lot_source_truth_source,
-                "sell_submit_lot_count_truth_source": row.sell_submit_lot_count_truth_source,
-                "position_state_source_truth_source": row.position_state_source_truth_source,
-                "raw_qty_open_truth_source": row.raw_qty_open_truth_source,
-                "raw_total_asset_qty_truth_source": row.raw_total_asset_qty_truth_source,
-                "open_exposure_qty_truth_source": row.open_exposure_qty_truth_source,
-                "dust_tracking_qty_truth_source": row.dust_tracking_qty_truth_source,
                 "dust_state": row.dust_state,
                 "dust_action": row.dust_action,
                 "operator_action": row.operator_action,
@@ -4269,18 +4118,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "sell_open_exposure_qty": row.sell_open_exposure_qty,
                 "sell_dust_tracking_qty": row.sell_dust_tracking_qty,
                 "sell_qty_basis_qty": row.sell_qty_basis_qty,
-                "sell_qty_basis_source": row.sell_qty_basis_source,
                 "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
-                "submit_qty_source": row.submit_qty_source,
-                "sell_submit_qty_source": row.sell_submit_qty_source,
-                "sell_submit_lot_source": row.sell_submit_lot_source,
                 "sell_submit_lot_count": row.sell_submit_lot_count,
-                "sell_submit_lot_source_truth_source": row.sell_submit_lot_source_truth_source,
-                "sell_submit_lot_count_truth_source": row.sell_submit_lot_count_truth_source,
                 "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
-                "position_state_source": row.position_state_source,
-                "entry_allowed_truth_source": row.entry_allowed_truth_source,
-                "effective_flat_truth_source": row.effective_flat_truth_source,
                 "block_reason": row.block_reason,
                 "reason": row.reason,
             }
@@ -4541,12 +4381,6 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 sell_failure_category = str(row["sell_failure_category"] or "").strip()
             if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
                 sell_failure_category = "unknown"
-            sell_submit_qty_source = str(
-                evidence_payload.get("sell_submit_qty_source")
-                or evidence_payload.get("submit_qty_source")
-                or row["submit_qty_source"]
-                or "-"
-            )
             sell_failure_detail = str(evidence_payload.get("sell_failure_detail") or "").strip()
             if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
                 sell_failure_detail = str(decision_summary_payload.get("sell_failure_detail") or "").strip()
@@ -4576,24 +4410,15 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
                 f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
-                f"submit_qty_source={row['submit_qty_source'] or '-'} "
-                f"sell_submit_qty_source={sell_submit_qty_source} "
                 f"sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
-                f"sell_qty_basis_source={row['sell_qty_basis_source'] or '-'} "
                 f"sell_qty_boundary_kind={row['sell_qty_boundary_kind'] or '-'} "
                 f"sell_failure_category={sell_failure_category} "
                 f"sell_failure_detail={sell_failure_detail} "
                 f"operator_action={operator_action} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(sell_normalized_exposure_qty), 8)} "
-                f"position_state_source={row['position_state_source'] or '-'} "
-                f"position_state_source_truth_source={row['position_state_source_truth_source'] or '-'} "
-                f"raw_qty_open_truth_source={row['raw_qty_open_truth_source'] or '-'} "
                 f"raw_total_asset_qty={_fmt_float(float(row['raw_total_asset_qty'] or 0.0), 8)} "
-                f"raw_total_asset_qty_truth_source={row['raw_total_asset_qty_truth_source'] or '-'} "
                 f"open_exposure_qty={_fmt_float(float(row['open_exposure_qty'] or 0.0), 8)} "
-                f"open_exposure_qty_truth_source={row['open_exposure_qty_truth_source'] or '-'} "
                 f"dust_tracking_qty={_fmt_float(float(row['dust_tracking_qty'] or 0.0), 8)} "
-                f"dust_tracking_qty_truth_source={row['dust_tracking_qty_truth_source'] or '-'} "
                 f"sell_open_exposure_qty={_fmt_float(float(row['sell_open_exposure_qty'] or 0.0), 8)} "
                 f"sell_dust_tracking_qty={_fmt_float(float(row['sell_dust_tracking_qty'] or 0.0), 8)} "
                 f"price={_fmt_float(float(row['price'] or 0.0), 0)} "
@@ -4610,33 +4435,16 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"{kst_str(int(row.event_ts))} strategy={row.strategy_name} signal={row.signal} side={row.side} "
                 f"reason={row.reason_code} sell_failure_category={row.suppression_category} "
                 f"sell_failure_detail={row.sell_failure_detail or '-'} "
-                f"submit_qty_source={row.submit_qty_source} "
-                f"submit_qty_source_truth_source={row.submit_qty_source_truth_source or '-'} "
-                f"sell_submit_qty_source={row.sell_submit_qty_source} "
-                f"sell_submit_lot_source={row.sell_submit_lot_source} "
                 f"sell_submit_lot_count={row.sell_submit_lot_count} "
-                f"sell_submit_qty_source_truth_source={row.sell_submit_qty_source_truth_source or '-'} "
                 f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
-                f"sell_qty_basis_source={row.sell_qty_basis_source or '-'} "
-                f"sell_qty_basis_source_truth_source={row.sell_qty_basis_source_truth_source or '-'} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind or '-'} "
-                f"sell_normalized_exposure_qty_truth_source={row.sell_normalized_exposure_qty_truth_source or '-'} "
-                f"sell_open_exposure_qty_truth_source={row.sell_open_exposure_qty_truth_source or '-'} "
-                f"sell_dust_tracking_qty_truth_source={row.sell_dust_tracking_qty_truth_source or '-'} "
                 f"requested_qty={_fmt_float(float(row.requested_qty or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row.normalized_qty or 0.0), 8)} "
-                f"position_state_source_truth_source={row.position_state_source_truth_source or '-'} "
-                f"raw_qty_open_truth_source={row.raw_qty_open_truth_source or '-'} "
-                f"raw_total_asset_qty_truth_source={row.raw_total_asset_qty_truth_source or '-'} "
                 f"open_exposure_qty={_fmt_float(float(row.open_exposure_qty or 0.0), 8)} "
-                f"open_exposure_qty_truth_source={row.open_exposure_qty_truth_source or '-'} "
                 f"dust_tracking_qty={_fmt_float(float(row.dust_tracking_qty or 0.0), 8)} "
-                f"dust_tracking_qty_truth_source={row.dust_tracking_qty_truth_source or '-'} "
                 f"market_price={_fmt_float(float(row.market_price or 0.0), 0)} "
                 f"dust_state={row.dust_state or '-'} dust_action={row.dust_action or '-'} "
                 f"operator_action={row.operator_action or '-'} "
-                f"entry_allowed_truth_source={row.entry_allowed_truth_source or '-'} "
-                f"effective_flat_truth_source={row.effective_flat_truth_source or '-'} "
                 f"summary={row.summary or '-'}"
             )
 
@@ -4656,29 +4464,17 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"has_dust_only_remainder={1 if bool(getattr(row, 'has_dust_only_remainder', False)) else 0} "
                 f"position_qty={_fmt_float(float(row.position_qty), 8)} "
                 f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
-                f"submit_qty_source={row.submit_qty_source} "
-                f"sell_submit_qty_source={row.sell_submit_qty_source} "
-                f"sell_submit_lot_source={row.sell_submit_lot_source} "
                 f"sell_submit_lot_count={row.sell_submit_lot_count} "
                 f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
-                f"sell_qty_basis_source={row.sell_qty_basis_source} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(row.sell_normalized_exposure_qty), 8)} "
                 f"sell_failure_category={row.sell_failure_category} "
                 f"sell_failure_detail={row.sell_failure_detail} "
-                f"position_state_source={row.position_state_source} "
-                f"position_state_source_truth_source={row.position_state_source_truth_source} "
                 f"normalized_exposure_qty={_fmt_float(float(row.normalized_exposure_qty), 8)} "
                 f"raw_qty_open={_fmt_float(float(row.raw_qty_open), 8)} "
-                f"raw_qty_open_truth_source={row.raw_qty_open_truth_source} "
                 f"raw_total_asset_qty={_fmt_float(float(row.raw_total_asset_qty), 8)} "
-                f"raw_total_asset_qty_truth_source={row.raw_total_asset_qty_truth_source} "
                 f"open_exposure_qty={_fmt_float(float(row.open_exposure_qty), 8)} "
-                f"open_exposure_qty_truth_source={row.open_exposure_qty_truth_source} "
                 f"dust_tracking_qty={_fmt_float(float(row.dust_tracking_qty), 8)} "
-                f"dust_tracking_qty_truth_source={row.dust_tracking_qty_truth_source} "
-                f"entry_allowed_truth_source={row.entry_allowed_truth_source} "
-                f"effective_flat_truth_source={row.effective_flat_truth_source} "
                 f"reason={row.reason}"
             )
 
@@ -4736,27 +4532,24 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         return
     print(
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
-        "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,raw_qty_open_truth_source,"
-        "raw_total_asset_qty,raw_total_asset_qty_truth_source,position_qty,position_qty_truth_source,"
-        "submit_payload_qty,submit_payload_qty_truth_source,normalized_exposure_active,normalized_exposure_active_truth_source,"
-        "normalized_exposure_qty,normalized_exposure_qty_truth_source,open_exposure_qty,open_exposure_qty_truth_source,"
-        "dust_tracking_qty,dust_tracking_qty_truth_source,sell_open_exposure_qty,sell_dust_tracking_qty,"
-        "sell_qty_basis_qty,sell_qty_basis_source,sell_qty_boundary_kind,"
-        "submit_qty_source,submit_qty_source_truth_source,sell_submit_qty_source,"
-        "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,position_state_source,position_state_source_truth_source,entry_allowed_truth_source,"
-        "effective_flat_truth_source,strategy_name,pair,interval,count"
+        "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
+        "raw_total_asset_qty,position_qty,submit_payload_qty,normalized_exposure_active,"
+        "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
+        "sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
+        "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"
+        "strategy_name,pair,interval,count"
     )
     for row in rows:
         print(
             "  "
             f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
             f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
-            f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},{row.raw_qty_open_truth_source},"
-            f"{row.raw_total_asset_qty:.8f},{row.raw_total_asset_qty_truth_source},{row.position_qty:.8f},{row.position_qty_truth_source},"
-            f"{row.submit_payload_qty:.8f},{row.submit_payload_qty_truth_source},{1 if row.normalized_exposure_active else 0},{row.normalized_exposure_active_truth_source},"
-            f"{row.normalized_exposure_qty:.8f},{row.normalized_exposure_qty_truth_source},{row.open_exposure_qty:.8f},{row.open_exposure_qty_truth_source},"
-            f"{row.dust_tracking_qty:.8f},{row.dust_tracking_qty_truth_source},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},{row.sell_qty_basis_qty:.8f},{row.sell_qty_basis_source},{row.sell_qty_boundary_kind},{row.submit_qty_source},{row.submit_qty_source_truth_source},{row.sell_submit_qty_source},"
-            f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},{row.position_state_source},{row.position_state_source_truth_source},"
-            f"{row.entry_allowed_truth_source},{row.effective_flat_truth_source},"
+            f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
+            f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},"
+            f"{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},"
+            f"{row.normalized_exposure_qty:.8f},{row.open_exposure_qty:.8f},"
+            f"{row.dust_tracking_qty:.8f},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},"
+            f"{row.sell_qty_basis_qty:.8f},{row.sell_qty_boundary_kind},{row.sell_submit_lot_count},"
+            f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},"
             f"{row.strategy_name},{row.pair},{row.interval},{row.count}"
         )

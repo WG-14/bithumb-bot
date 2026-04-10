@@ -14,6 +14,13 @@ Optimize every change for:
 Profitability is always secondary to execution safety and state integrity.
 Treat this file as a binding repository-level operating contract.
 
+## Environment Contract
+
+- Production reference environment is AWS Linux.
+- Linux runtime behavior is the source of truth for paths, shell commands, locking, process behavior, and operational validation.
+- On Windows developer machines, the preferred local workspace is VS Code opened in WSL against a WSL-hosted repository.
+- Native Windows execution may be used for convenience, but it is not the reference environment for runtime or deployment correctness.
+
 ## Mandatory Reading
 
 Before making any patch, read and follow:
@@ -296,16 +303,35 @@ Canonical executable position semantics must remain lot-native.
 
 ### Lot-Native Batch Contract
 
-Practical live-operation target PASS is already baseline for the current lot-native work.
+Practical live-operation target PASS is already baseline for the current lot-native work, but it is not the finish line for this batch.
+
+- The direct goal of this batch is full lot-native declaration completion.
+- Current contract PASS is only the starting point for that work.
+- The remaining `decision_context` compatibility fallback / provenance must be removed.
+- The remaining `reporting` truth-source / provenance primary layer must be removed.
+- Improvements outside this goal are prohibited.
 
 - When modifying lot-native-related logic, do not restore semantic authority to qty.
 - Do not reopen SELL boundary authority work unless a contract test proves regression.
 - At the SELL boundary, the canonical sellable lot count is the final authority.
 - `dust_only_remainder`, `boundary_below_min`, and `no_executable_exit_lot` remain suppression outcomes, not submit failures.
 - Do not mix `open_exposure` and `dust_tracking` into executable inventory.
-- Current target: downstream full-lot-native closure in recovery, decision_context, and reporting residue.
-- Legacy or qty-first fallback in recovery, decision_context, and reporting must be treated as residue to classify or eliminate as semantic authority.
+- Do not make changes that break PASS under `docs/lot_native_contract.md`.
+- Do not describe current contract PASS and full declaration PASS as the same milestone.
+- Treat `decision_context` compatibility fallback / provenance residue as a direct closure target, not a later problem.
+- Treat `reporting` truth-source / provenance residue as a direct closure target, not a later problem.
+- Legacy or qty-first fallback in recovery, `decision_context`, and `reporting` must be treated as residue to classify or eliminate as semantic authority.
 - Compatibility fields may remain only if they are clearly derived and non-authoritative.
+- When touching `decision_context`, `reporting`, recovery, or lifecycle, also verify:
+  - SELL authority still remains at canonical sellable lot count
+  - a qty-only legacy row does not regain executable authority
+  - `legacy_lot_metadata_missing` is not reintroduced into lifecycle semantic state
+  - no legacy compatibility fallback authority or provenance remains in `decision_context`
+  - no truth-source or provenance primary layer remains in `reporting`
+- During implementation and review, ask:
+  - Does this change merely preserve current PASS, or does it remove the reasons full declaration is still FAIL?
+  - Does any legacy compatibility authority or provenance remain in `decision_context`?
+  - Does any truth-source or provenance primary layer remain in `reporting`?
 - Use document -> tests -> implementation order.
 - Keep the order document, test contract, and implementation aligned, and do not expand beyond lot-native declaration scope.
 

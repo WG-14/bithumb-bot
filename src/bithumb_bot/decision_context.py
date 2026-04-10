@@ -13,12 +13,48 @@ from .reason_codes import (
 )
 
 
-_CANONICAL_CONTEXT_VERSION = 11
+_CANONICAL_CONTEXT_VERSION = 12
 _COMPATIBILITY_ONLY_TRUTH_SOURCES = {
     "fallback:legacy_lot_metadata_missing",
     "fallback:no_executable_open_lots",
-    "context.position_state_source",
 }
+_CANONICAL_COMPATIBILITY_TRUTH_SOURCES = {
+    "fallback:legacy_lot_metadata_missing": "derived:lot_native_fail_closed",
+    "fallback:no_executable_open_lots": "derived:no_executable_open_lots",
+}
+_DECLARATION_RESIDUE_SUFFIXES = ("_source", "_truth_source", "_compatibility_residue")
+_DECLARATION_RESIDUE_KEYS = {"decision_compatibility_residue"}
+
+
+def materialize_strategy_decision_context(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: materialize_strategy_decision_context(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [materialize_strategy_decision_context(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(materialize_strategy_decision_context(item) for item in value)
+    return value
+
+
+def _strip_declaration_residue(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and (
+                key in _DECLARATION_RESIDUE_KEYS
+                or key.endswith(_DECLARATION_RESIDUE_SUFFIXES)
+            ):
+                continue
+            cleaned[key] = _strip_declaration_residue(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_strip_declaration_residue(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_strip_declaration_residue(item) for item in value)
+    return value
 
 
 def load_recorded_strategy_decision_context(
@@ -160,6 +196,16 @@ def _as_compatibility_truth_source(source: str) -> str:
     if normalized in _COMPATIBILITY_ONLY_TRUTH_SOURCES:
         return f"compatibility:{normalized}"
     return normalized
+
+
+def _split_compatibility_truth_source(source: str) -> tuple[str, str | None]:
+    normalized = str(source or "").strip()
+    if normalized in _COMPATIBILITY_ONLY_TRUTH_SOURCES:
+        return (
+            _CANONICAL_COMPATIBILITY_TRUTH_SOURCES.get(normalized, normalized),
+            _as_compatibility_truth_source(normalized),
+        )
+    return normalized, None
 
 
 def _derive_sell_failure_observability(
@@ -657,68 +703,21 @@ def normalize_strategy_decision_context(
         effective_flat=bool(effective_flat),
         payload=payload,
     )
-    raw_position_state_source = position_state.get("position_state_source")
-    if raw_position_state_source is None:
-        raw_position_state_source = position_normalized.get("position_state_source")
-    if raw_position_state_source is None:
-        raw_position_state_source = payload.get("position_state_source")
+    position_state_source = submit_lot_source
+    position_state_source_truth_source = submit_lot_source_truth_source
 
-    position_state_source = _as_text(raw_position_state_source, default="")
-    if position_state_source:
-        position_state_source_truth_source = "context.position_state_source"
-    else:
-        position_state_source = submit_lot_source
-        position_state_source_truth_source = submit_lot_source_truth_source
-
-    open_exposure_qty_truth_source = _as_compatibility_truth_source(open_exposure_qty_truth_source)
-    sellable_executable_qty_truth_source = _as_compatibility_truth_source(sellable_executable_qty_truth_source)
-    normalized_exposure_qty_truth_source = _as_compatibility_truth_source(normalized_exposure_qty_truth_source)
-    normalized_exposure_active_truth_source = _as_compatibility_truth_source(
+    open_exposure_qty_truth_source, _ = _split_compatibility_truth_source(
+        open_exposure_qty_truth_source
+    )
+    sellable_executable_qty_truth_source, _ = _split_compatibility_truth_source(
+        sellable_executable_qty_truth_source
+    )
+    normalized_exposure_qty_truth_source, _ = _split_compatibility_truth_source(
+        normalized_exposure_qty_truth_source
+    )
+    normalized_exposure_active_truth_source, _ = _split_compatibility_truth_source(
         normalized_exposure_active_truth_source
     )
-    position_state_source_truth_source = _as_compatibility_truth_source(position_state_source_truth_source)
-
-    decision_truth_sources = {
-        "entry_allowed": entry_allowed_truth_source,
-        "effective_flat": effective_flat_truth_source,
-        "raw_qty_open": raw_qty_open_truth_source,
-        "raw_total_asset_qty": raw_total_asset_qty_truth_source,
-        "position_qty": position_qty_truth_source,
-        "submit_payload_qty": submit_payload_qty_truth_source,
-        "submit_lot_count": submit_lot_count_truth_source,
-        "position_state_lot_count": submit_lot_count_truth_source,
-        "submit_lot_source": submit_lot_source_truth_source,
-        "position_state_lot_source": submit_lot_source_truth_source,
-        "normalized_exposure_active": normalized_exposure_active_truth_source,
-        "normalized_exposure_qty": normalized_exposure_qty_truth_source,
-        "has_executable_exposure": has_executable_exposure_truth_source,
-        "has_any_position_residue": has_any_position_residue_truth_source,
-        "has_non_executable_residue": has_non_executable_residue_truth_source,
-        "has_dust_only_remainder": has_dust_only_remainder_truth_source,
-        "open_exposure_qty": open_exposure_qty_truth_source,
-        "dust_tracking_qty": dust_tracking_qty_truth_source,
-        "open_lot_count": open_lot_count_truth_source,
-        "dust_tracking_lot_count": dust_tracking_lot_count_truth_source,
-        "reserved_exit_lot_count": reserved_exit_lot_count_truth_source,
-        "sellable_executable_lot_count": sellable_executable_lot_count_truth_source,
-        "reserved_exit_qty": reserved_exit_qty_truth_source,
-        "sellable_executable_qty": sellable_executable_qty_truth_source,
-        "submit_lot_count": submit_lot_count_truth_source,
-        "submit_lot_source": submit_lot_source_truth_source,
-        "sell_submit_lot_source": submit_lot_source_truth_source,
-        "exit_allowed": exit_allowed_truth_source,
-        "submit_qty_source": submit_qty_source_truth_source,
-        "sell_submit_qty_source": submit_qty_source_truth_source,
-        "sell_qty_basis_qty": sell_qty_basis_qty_truth_source,
-        "sell_qty_basis_source": sell_qty_basis_qty_truth_source,
-        "sell_qty_boundary_kind": sell_qty_boundary_kind_truth_source,
-        "sell_normalized_exposure_qty": normalized_exposure_qty_truth_source,
-        "sell_open_exposure_qty": open_exposure_qty_truth_source,
-        "sell_dust_tracking_qty": dust_tracking_qty_truth_source,
-        "sell_failure_category": sell_failure_truth_source,
-        "sell_failure_detail": sell_failure_truth_source,
-        "position_state_source": position_state_source_truth_source,
-    }
 
     decision_summary = {
         "raw_signal": raw_signal,
@@ -734,9 +733,7 @@ def normalize_strategy_decision_context(
         "position_qty": float(position_qty),
         "submit_payload_qty": float(submit_payload_qty),
         "submit_lot_count": int(submit_lot_count),
-        "submit_lot_source": submit_lot_source,
         "position_state_lot_count": int(submit_lot_count),
-        "position_state_lot_source": submit_lot_source,
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
         "has_executable_exposure": bool(has_executable_exposure),
@@ -751,33 +748,16 @@ def normalize_strategy_decision_context(
         "sellable_executable_lot_count": int(sellable_executable_lot_count),
         "reserved_exit_qty": float(reserved_exit_qty),
         "sellable_executable_qty": float(sellable_executable_qty),
-        "sell_submit_lot_source": sell_submit_lot_source,
         "sell_submit_lot_count": int(sell_submit_lot_count),
         "exit_allowed": bool(exit_allowed),
         "exit_block_reason": exit_block_reason,
-        "submit_qty_source": submit_qty_source,
-        "sell_submit_qty_source": sell_submit_qty_source,
         "sell_qty_basis_qty": float(sell_qty_basis_qty),
-        "sell_qty_basis_source": sell_qty_basis_source,
         "sell_qty_boundary_kind": sell_qty_boundary_kind,
         "sell_normalized_exposure_qty": float(sell_normalized_exposure_qty),
         "sell_open_exposure_qty": float(sell_open_exposure_qty),
         "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
-        "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
-        "sell_submit_lot_source_truth_source": submit_lot_source_truth_source,
-        "sell_submit_lot_count_truth_source": submit_lot_source_truth_source,
-        "sell_qty_basis_qty_truth_source": sell_qty_basis_qty_truth_source,
-        "sell_qty_basis_source_truth_source": sell_qty_basis_qty_truth_source,
-        "sell_qty_boundary_kind_truth_source": sell_qty_boundary_kind_truth_source,
-        "sell_normalized_exposure_qty_truth_source": normalized_exposure_qty_truth_source,
-        "sell_open_exposure_qty_truth_source": open_exposure_qty_truth_source,
-        "sell_dust_tracking_qty_truth_source": dust_tracking_qty_truth_source,
-        "sell_failure_category_truth_source": sell_failure_truth_source,
-        "sell_failure_detail_truth_source": sell_failure_truth_source,
-        "position_state_source": position_state_source,
-        "decision_truth_sources": decision_truth_sources,
     }
 
     payload["decision_context_version"] = _CANONICAL_CONTEXT_VERSION
@@ -801,9 +781,7 @@ def normalize_strategy_decision_context(
     payload["position_qty"] = float(position_qty)
     payload["submit_payload_qty"] = float(submit_payload_qty)
     payload["submit_lot_count"] = int(submit_lot_count)
-    payload["submit_lot_source"] = submit_lot_source
     payload["position_state_lot_count"] = int(submit_lot_count)
-    payload["position_state_lot_source"] = submit_lot_source
     payload["normalized_exposure_active"] = bool(normalized_exposure_active)
     payload["normalized_exposure_qty"] = float(normalized_exposure_qty)
     payload["has_executable_exposure"] = bool(has_executable_exposure)
@@ -818,51 +796,16 @@ def normalize_strategy_decision_context(
     payload["sellable_executable_lot_count"] = int(sellable_executable_lot_count)
     payload["reserved_exit_qty"] = float(reserved_exit_qty)
     payload["sellable_executable_qty"] = float(sellable_executable_qty)
-    payload["sell_submit_lot_source"] = sell_submit_lot_source
     payload["sell_submit_lot_count"] = int(sell_submit_lot_count)
     payload["exit_allowed"] = bool(exit_allowed)
     payload["exit_block_reason"] = exit_block_reason
-    payload["submit_qty_source"] = submit_qty_source
-    payload["sell_submit_qty_source"] = sell_submit_qty_source
     payload["sell_qty_basis_qty"] = float(sell_qty_basis_qty)
-    payload["sell_qty_basis_source"] = sell_qty_basis_source
     payload["sell_qty_boundary_kind"] = sell_qty_boundary_kind
     payload["sell_normalized_exposure_qty"] = float(sell_normalized_exposure_qty)
     payload["sell_open_exposure_qty"] = float(sell_open_exposure_qty)
     payload["sell_dust_tracking_qty"] = float(sell_dust_tracking_qty)
     payload["sell_failure_category"] = sell_failure_category
     payload["sell_failure_detail"] = sell_failure_detail
-    payload["position_state_source"] = position_state_source
-    payload["decision_truth_sources"] = decision_truth_sources
-    payload["entry_allowed_truth_source"] = entry_allowed_truth_source
-    payload["effective_flat_truth_source"] = effective_flat_truth_source
-    payload["raw_qty_open_truth_source"] = raw_qty_open_truth_source
-    payload["raw_total_asset_qty_truth_source"] = raw_total_asset_qty_truth_source
-    payload["position_qty_truth_source"] = position_qty_truth_source
-    payload["submit_payload_qty_truth_source"] = submit_payload_qty_truth_source
-    payload["submit_lot_count_truth_source"] = submit_lot_count_truth_source
-    payload["position_state_lot_count_truth_source"] = submit_lot_count_truth_source
-    payload["position_state_lot_source_truth_source"] = submit_lot_source_truth_source
-    payload["normalized_exposure_active_truth_source"] = normalized_exposure_active_truth_source
-    payload["normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
-    payload["open_exposure_qty_truth_source"] = open_exposure_qty_truth_source
-    payload["dust_tracking_qty_truth_source"] = dust_tracking_qty_truth_source
-    payload["reserved_exit_qty_truth_source"] = reserved_exit_qty_truth_source
-    payload["sellable_executable_qty_truth_source"] = sellable_executable_qty_truth_source
-    payload["exit_allowed_truth_source"] = exit_allowed_truth_source
-    payload["submit_qty_source_truth_source"] = submit_qty_source_truth_source
-    payload["sell_submit_qty_source_truth_source"] = submit_qty_source_truth_source
-    payload["sell_submit_lot_source_truth_source"] = submit_lot_source_truth_source
-    payload["sell_submit_lot_count_truth_source"] = submit_lot_source_truth_source
-    payload["sell_qty_basis_qty_truth_source"] = sell_qty_basis_qty_truth_source
-    payload["sell_qty_basis_source_truth_source"] = sell_qty_basis_qty_truth_source
-    payload["sell_qty_boundary_kind_truth_source"] = sell_qty_boundary_kind_truth_source
-    payload["sell_normalized_exposure_qty_truth_source"] = normalized_exposure_qty_truth_source
-    payload["sell_open_exposure_qty_truth_source"] = open_exposure_qty_truth_source
-    payload["sell_dust_tracking_qty_truth_source"] = dust_tracking_qty_truth_source
-    payload["sell_failure_category_truth_source"] = sell_failure_truth_source
-    payload["sell_failure_detail_truth_source"] = sell_failure_truth_source
-    payload["position_state_source_truth_source"] = position_state_source_truth_source
     payload["decision_summary"] = decision_summary
 
     payload["strategy_name"] = _as_text(payload.get("strategy_name", strategy_name), default=strategy_name)
@@ -925,13 +868,11 @@ def normalize_strategy_decision_context(
         "sellable_executable_lot_count": int(sellable_executable_lot_count),
         "submit_lot_count": int(submit_lot_count),
         "position_state_lot_count": int(submit_lot_count),
-        "position_state_lot_source": submit_lot_source,
         "reserved_exit_qty": float(reserved_exit_qty),
         "sellable_executable_qty": float(sellable_executable_qty),
         "exit_allowed": bool(exit_allowed),
         "exit_block_reason": exit_block_reason,
         "entry_block_reason": entry_block_reason,
-        "position_state_source": position_state_source,
     }
     normalized_position_state["operator_diagnostics"] = {
         **(
@@ -956,4 +897,4 @@ def normalize_strategy_decision_context(
     }
     payload["position_state"] = normalized_position_state
 
-    return payload
+    return _strip_declaration_residue(payload)

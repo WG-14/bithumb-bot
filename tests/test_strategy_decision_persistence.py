@@ -7,6 +7,30 @@ import pytest
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 
 
+def _collect_residue_paths(value, path: str = "") -> list[str]:
+    if isinstance(value, dict):
+        found: list[str] = []
+        for key, item in value.items():
+            key_text = str(key)
+            next_path = f"{path}.{key_text}" if path else key_text
+            if (
+                key_text == "decision_compatibility_residue"
+                or key_text.endswith("_source")
+                or key_text.endswith("_truth_source")
+                or key_text.endswith("_compatibility_residue")
+            ):
+                found.append(next_path)
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    if isinstance(value, list):
+        found: list[str] = []
+        for index, item in enumerate(value):
+            next_path = f"{path}[{index}]" if path else f"[{index}]"
+            found.extend(_collect_residue_paths(item, next_path))
+        return found
+    return []
+
+
 def test_strategy_decision_schema_bootstrap(tmp_path):
     conn = ensure_db(str(tmp_path / "decision_schema.sqlite"))
     cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(strategy_decisions)").fetchall()}
@@ -228,9 +252,6 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["sellable_executable_qty"] == pytest.approx(0.0)
     assert ctx["exit_allowed"] is False
     assert ctx["exit_block_reason"] == "dust_only_remainder"
-    assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
-    assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
-    assert ctx["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert ctx["sell_submit_lot_count"] == 0
     assert ctx["submit_lot_count"] == 0
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
@@ -238,5 +259,4 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["open_lot_count"] == 0
     assert ctx["sellable_executable_lot_count"] == 0
     assert "submit_payload_qty" not in ctx["position_state"]["normalized_exposure"]
-    assert "sell_submit_qty_source" not in ctx["position_state"]["normalized_exposure"]
-    assert "sell_submit_lot_source" not in ctx["position_state"]["normalized_exposure"]
+    assert _collect_residue_paths(ctx) == []
