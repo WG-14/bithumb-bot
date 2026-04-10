@@ -1628,7 +1628,11 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
         try:
             from .broker.bithumb import BithumbBroker
 
-            return BithumbBroker().get_recent_orders_for_recovery(
+            broker = BithumbBroker()
+            get_recent_orders_for_recovery = getattr(broker, "get_recent_orders_for_recovery", None)
+            if not callable(get_recent_orders_for_recovery):
+                return [], "no local unresolved identifiers available for broker snapshot"
+            return get_recent_orders_for_recovery(
                 limit=limit,
                 market=settings.PAIR,
             ), None
@@ -2389,6 +2393,32 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return
     dust_context = build_dust_display_context(report)
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        _cash_available, _cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        portfolio_asset_qty = portfolio_asset_total(
+            asset_available=float(asset_available),
+            asset_locked=float(asset_locked),
+        )
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+    position_state = build_position_state_model(
+        raw_qty_open=portfolio_asset_qty,
+        metadata_raw=report,
+        raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
+        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    lot_exposure = position_state.normalized_exposure
+    dust_tracking_lot_count = int(lot_exposure.dust_tracking_lot_count)
+    if (
+        dust_tracking_lot_count <= 0
+        and float(lot_exposure.dust_tracking_qty) > 0.0
+        and float(lot_exposure.open_exposure_qty) <= 0.0
+    ):
+        dust_tracking_lot_count = 1
 
     print("[RECOVERY-REPORT]")
     _print_operator_command_contract(
@@ -2487,19 +2517,19 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P3.1] lot_exposure")
     print(
         "    "
-        f"raw_total_asset_qty={float(report.get('raw_total_asset_qty') or 0.0):.8f} "
-        f"open_exposure_qty={float(report.get('open_exposure_qty') or 0.0):.8f} "
-        f"dust_tracking_qty={float(report.get('dust_tracking_qty') or 0.0):.8f}"
+        f"raw_total_asset_qty={float(lot_exposure.raw_total_asset_qty):.8f} "
+        f"open_exposure_qty={float(lot_exposure.open_exposure_qty):.8f} "
+        f"dust_tracking_qty={float(lot_exposure.dust_tracking_qty):.8f}"
     )
     print(
         "    "
-        f"open_lot_count={int(report.get('open_lot_count') or 0)} "
-        f"dust_tracking_lot_count={int(report.get('dust_tracking_lot_count') or 0)} "
-        f"reserved_exit_lot_count={int(report.get('reserved_exit_lot_count') or 0)} "
-        f"sellable_executable_lot_count={int(report.get('sellable_executable_lot_count') or 0)} "
-        f"sellable_executable_qty={float(report.get('sellable_executable_qty') or 0.0):.8f} "
-        f"terminal_state={report.get('terminal_state') or 'none'} "
-        f"exit_block_reason={report.get('exit_block_reason') or 'none'}"
+        f"open_lot_count={int(lot_exposure.open_lot_count)} "
+        f"dust_tracking_lot_count={dust_tracking_lot_count} "
+        f"reserved_exit_lot_count={int(lot_exposure.reserved_exit_lot_count)} "
+        f"sellable_executable_lot_count={int(lot_exposure.sellable_executable_lot_count)} "
+        f"sellable_executable_qty={float(lot_exposure.sellable_executable_qty):.8f} "
+        f"terminal_state={lot_exposure.terminal_state or 'none'} "
+        f"exit_block_reason={lot_exposure.exit_block_reason or 'none'}"
     )
     print(f"    summary={report.get('dust_residual_summary') or 'none'}")
     recent_dust_unsellable_event = report.get("recent_dust_unsellable_event")
@@ -2733,11 +2763,14 @@ def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
     recovery_required_count = int(report.get("recovery_required_count") or 0)
     open_order_count = int(open_row["open_count"] if open_row else 0)
     asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
+    open_exposure_qty = asset_qty if asset_qty > 1e-12 and float(dust_context.raw_holdings.broker_qty) <= 1e-12 else 0.0
     position_state = build_position_state_model(
         raw_qty_open=asset_qty,
         metadata_raw=state.last_reconcile_metadata,
         raw_total_asset_qty=max(asset_qty, float(dust_context.raw_holdings.broker_qty)),
+        open_exposure_qty=open_exposure_qty,
         dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        open_lot_count=(1 if open_exposure_qty > 1e-12 else 0),
     )
     normalized_exposure = position_state.normalized_exposure
     position_state_clear = bool(

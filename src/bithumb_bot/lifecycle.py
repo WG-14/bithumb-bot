@@ -717,24 +717,93 @@ def summarize_position_lots(
         open_row = conn.execute(
             """
             SELECT
-                COALESCE(SUM(qty_open), 0.0),
-                COALESCE(SUM(CASE WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count ELSE 1 END), 0)
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(executable_lot_count, 0) > 0 THEN qty_open
+                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND COALESCE(executable_lot_count, 0) = 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
+                            ELSE 0.0
+                        END
+                    ),
+                    0.0
+                ),
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count
+                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND COALESCE(executable_lot_count, 0) = 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                )
             FROM open_position_lots
-            WHERE pair=? AND position_state=? AND COALESCE(executable_lot_count, 0) > 0
+            WHERE pair=? AND position_state=?
             """,
             (str(pair), OPEN_EXPOSURE_LOT_STATE),
         ).fetchone()
         dust_row = conn.execute(
             """
             SELECT
-                COALESCE(SUM(qty_open), 0.0),
-                COALESCE(SUM(CASE WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN dust_tracking_lot_count ELSE 1 END), 0)
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN qty_open
+                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND COALESCE(executable_lot_count, 0) = 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
+                            ELSE 0.0
+                        END
+                    ),
+                    0.0
+                ),
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN dust_tracking_lot_count
+                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND COALESCE(executable_lot_count, 0) = 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                )
             FROM open_position_lots
-            WHERE pair=? AND position_state=? AND COALESCE(dust_tracking_lot_count, 0) > 0
+            WHERE pair=? AND position_state=?
             """,
             (str(pair), DUST_TRACKING_LOT_STATE),
         ).fetchone()
     except sqlite3.OperationalError:
+        try:
+            open_row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(qty_open), 0.0),
+                    COALESCE(SUM(CASE WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count ELSE 0 END), 0)
+                FROM open_position_lots
+                WHERE pair=? AND position_state=? AND COALESCE(executable_lot_count, 0) > 0
+                """,
+                (str(pair), OPEN_EXPOSURE_LOT_STATE),
+            ).fetchone()
+            dust_row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(qty_open), 0.0),
+                    COALESCE(SUM(CASE WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN dust_tracking_lot_count ELSE 0 END), 0)
+                FROM open_position_lots
+                WHERE pair=? AND position_state=? AND COALESCE(dust_tracking_lot_count, 0) > 0
+                """,
+                (str(pair), DUST_TRACKING_LOT_STATE),
+            ).fetchone()
+        except (sqlite3.OperationalError, AssertionError):
+            open_row = (0.0, 0)
+            dust_row = (0.0, 0)
+    except AssertionError:
         open_row = (0.0, 0)
         dust_row = (0.0, 0)
     raw_open_qty = max(0.0, float(open_row[0] if open_row is not None else 0.0))

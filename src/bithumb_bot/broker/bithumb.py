@@ -2102,6 +2102,13 @@ class BithumbBroker:
         rules = order_rules_resolution.rules
         order_side = "BUY" if normalized_side == "bid" else "SELL"
         validate_order_chance_support(rules=rules, side=side, order_type=("price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")))
+        if price is None and normalized_side == "ask":
+            broker_precision_qty = self._truncate_volume(float(qty))
+            if abs(float(qty) - broker_precision_qty) > DUST_POSITION_EPS:
+                raise BrokerRejectError(
+                    "qty requires explicit lot normalization before submit: "
+                    f"raw_qty={format(float(qty), 'f')} broker_precision_qty={format(broker_precision_qty, 'f')}"
+                )
         effective_market_price: float | None = price
         if price is None and normalized_side == "bid":
             try:
@@ -2122,24 +2129,32 @@ class BithumbBroker:
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
             source_mode="exchange",
         )
+        has_explicit_qty_controls = any(
+            hasattr(rules, field_name)
+            for field_name in ("min_qty", "qty_step", "max_qty_decimals")
+        )
         qty_split = lot_rules.split_qty(float(qty))
         # Defensive invariant only: upstream live SELL gating should suppress
         # no-executable and dust-only cases before we reach broker submission.
-        if qty_split.executable is False:
+        if has_explicit_qty_controls and qty_split.executable is False:
             raise BrokerRejectError(
                 f"{normalized_side.lower()} qty suppressed by quantity rule: "
                 f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
                 f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
                 f"lot_count={qty_split.lot_count} client_order_id={validated_client_order_id}"
             )
-        if qty_split.dust_qty > DUST_POSITION_EPS:
+        if has_explicit_qty_controls and qty_split.dust_qty > DUST_POSITION_EPS:
             raise BrokerRejectError(
                 f"qty requires explicit lot normalization before submit: "
                 f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
                 f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
             )
 
-        internal_lot_qty = lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+        internal_lot_qty = (
+            lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+            if has_explicit_qty_controls
+            else float(qty)
+        )
         exchange_submit_qty = internal_lot_qty
         exchange_submit_notional_krw: float | None = None
         exchange_submit_field = "volume"

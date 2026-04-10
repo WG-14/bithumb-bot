@@ -4196,6 +4196,20 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "treat_as_flat": bool(position_state.operator_diagnostics.treat_as_flat),
         },
     }
+    payload.update(
+        {
+            "raw_total_asset_qty": float(position_state.normalized_exposure.raw_total_asset_qty),
+            "open_exposure_qty": float(position_state.normalized_exposure.open_exposure_qty),
+            "dust_tracking_qty": float(position_state.normalized_exposure.dust_tracking_qty),
+            "open_lot_count": int(position_state.normalized_exposure.open_lot_count),
+            "dust_tracking_lot_count": int(position_state.normalized_exposure.dust_tracking_lot_count),
+            "reserved_exit_lot_count": int(position_state.normalized_exposure.reserved_exit_lot_count),
+            "sellable_executable_lot_count": int(position_state.normalized_exposure.sellable_executable_lot_count),
+            "sellable_executable_qty": float(position_state.normalized_exposure.sellable_executable_qty),
+            "terminal_state": str(position_state.normalized_exposure.terminal_state),
+            "exit_block_reason": str(position_state.normalized_exposure.exit_block_reason),
+        }
+    )
     balance_source_diag: dict[str, object] = {
         "source": "unavailable",
         "reason": "not_checked",

@@ -15,7 +15,7 @@ from ..observability import format_log_kv
 from ..decision_context import load_recorded_strategy_decision_context
 from .. import runtime_state
 from ..dust import build_normalized_exposure
-from ..lifecycle import summarize_reserved_exit_qty
+from ..lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from ..order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
 from .order_rules import get_effective_order_rules
 from ..oms import (
@@ -158,6 +158,15 @@ def paper_execute(
         init_portfolio(conn)
         cash, qty = get_portfolio(conn)
         rules = get_effective_order_rules(settings.PAIR).rules
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        open_lot_count = int(lot_snapshot.open_lot_count)
+        dust_tracking_lot_count = int(lot_snapshot.dust_tracking_lot_count)
+        if (
+            open_lot_count <= 0
+            and dust_tracking_lot_count <= 0
+            and float(qty) > POSITION_EPSILON
+        ):
+            open_lot_count = 1
         normalized_exposure = build_normalized_exposure(
             raw_qty_open=float(qty),
             dust_context=runtime_state.snapshot().last_reconcile_metadata,
@@ -165,6 +174,8 @@ def paper_execute(
             open_exposure_qty=float(qty),
             dust_tracking_qty=0.0,
             reserved_exit_qty=summarize_reserved_exit_qty(conn, pair=settings.PAIR),
+            open_lot_count=open_lot_count,
+            dust_tracking_lot_count=dust_tracking_lot_count,
             market_price=float(fill_price),
             min_qty=float(rules.min_qty),
             qty_step=float(rules.qty_step),

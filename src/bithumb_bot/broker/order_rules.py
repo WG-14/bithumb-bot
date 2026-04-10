@@ -8,7 +8,7 @@ from typing import Any
 
 from ..config import settings
 from ..db_core import ensure_db, record_order_rule_snapshot
-from ..markets import ExchangeMarketCodeError, canonical_market_id, parse_documented_market_code
+from ..markets import ExchangeMarketCodeError, canonical_market_id, canonical_market_with_raw, parse_documented_market_code
 from ..notifier import notify
 from .base import BrokerRejectError
 from .bithumb import BithumbBroker, classify_private_api_error
@@ -417,10 +417,11 @@ def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
 
 
 def get_effective_order_rules(pair: str) -> RuleResolution:
+    normalized_pair, _raw_pair = canonical_market_with_raw(pair)
     now = time.time()
     fallback = _local_fallback_rules()
 
-    cached = _cached_rules.get(pair)
+    cached = _cached_rules.get(normalized_pair)
     if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
         cached_resolution = cached[1]
         if (
@@ -434,7 +435,7 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             )
         return cached_resolution
     try:
-        exchange = fetch_exchange_order_rules(pair)
+        exchange = fetch_exchange_order_rules(normalized_pair)
     except Exception as exc:
         fallback_issues = required_rule_issues(fallback)
         code, summary = classify_private_api_error(exc)
@@ -509,7 +510,7 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
                 resolution.source.get("max_qty_decimals", "missing"),
             )
         resolution = _persist_rule_snapshot_if_possible(resolution)
-        _cached_rules[pair] = (now, resolution, fallback)
+        _cached_rules[normalized_pair] = (now, resolution, fallback)
         return resolution
 
     merged = DerivedOrderConstraints(
@@ -572,7 +573,7 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             resolution.source.get("max_qty_decimals", "missing"),
         )
     resolution = _persist_rule_snapshot_if_possible(resolution)
-    _cached_rules[pair] = (now, resolution, fallback)
+    _cached_rules[normalized_pair] = (now, resolution, fallback)
     return resolution
 
 
@@ -584,7 +585,8 @@ def get_cached_order_rule_snapshot(pair: str) -> RuleResolution | None:
 
 
 def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolution:
-    market = str(getattr(resolution.rules, "market_id", "") or parse_documented_market_code(settings.PAIR))
+    fallback_market, _raw_market = canonical_market_with_raw(settings.PAIR)
+    market = str(getattr(resolution.rules, "market_id", "") or parse_documented_market_code(fallback_market))
     rules_payload = {
         field: getattr(resolution.rules, field)
         for field in resolution.rules.__dataclass_fields__.keys()
