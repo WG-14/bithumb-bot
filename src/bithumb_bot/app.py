@@ -572,8 +572,6 @@ def cmd_health() -> None:
             "SELECT asset_qty FROM portfolio WHERE id=1"
         ).fetchone()
         reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
-        if portfolio_row is not None and abs(float(portfolio_row["asset_qty"] or 0.0)) > 1e-12:
-            position_summary = f"long_qty={float(portfolio_row['asset_qty']):.8f}"
     finally:
         portfolio_conn.close()
 
@@ -605,6 +603,15 @@ def cmd_health() -> None:
         dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
         reserved_exit_qty=reserved_exit_qty,
     )
+    normalized_exposure = position_state.normalized_exposure
+    if normalized_exposure.terminal_state == "flat":
+        position_summary = "flat"
+    elif normalized_exposure.has_executable_exposure:
+        position_summary = f"open_exposure_qty={normalized_exposure.open_exposure_qty:.8f}"
+    elif normalized_exposure.has_dust_only_remainder:
+        position_summary = f"dust_only_qty={normalized_exposure.dust_tracking_qty:.8f}"
+    else:
+        position_summary = f"non_executable_position_state={normalized_exposure.terminal_state}"
     dust = position_state.raw_holdings
     dust_view = position_state.operator_diagnostics
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
@@ -1641,7 +1648,14 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
 
 def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_orders: list[object]) -> list[dict[str, str | float | int]]:
     side = str(local_order["side"])
-    qty_req = float(local_order["qty_req"])
+    requested_qty = float(local_order["qty_req"])
+    lot_basis_qty = float(
+        local_order.get("final_submitted_qty")
+        if float(local_order.get("final_submitted_qty") or 0.0) > 0.0
+        else local_order.get("final_intended_qty")
+        if float(local_order.get("final_intended_qty") or 0.0) > 0.0
+        else local_order["qty_req"]
+    )
     local_price_raw = local_order.get("price")
     local_price = float(local_price_raw) if local_price_raw is not None else None
     created_ts = int(local_order["created_ts"])
@@ -1672,10 +1686,10 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
         else:
             reasons.append("side mismatch")
 
-        qty_gap = abs(remote_qty_req - qty_req)
-        qty_gap_pct = (qty_gap / max(qty_req, 1e-12)) * 100.0
-        qty_tolerance = max(1e-12, max(qty_req, remote_qty_req) * 0.03)
-        if qty_gap <= max(1e-12, max(qty_req, remote_qty_req) * 0.01):
+        qty_gap = abs(remote_qty_req - lot_basis_qty)
+        qty_gap_pct = (qty_gap / max(lot_basis_qty, 1e-12)) * 100.0
+        qty_tolerance = max(1e-12, max(lot_basis_qty, remote_qty_req) * 0.03)
+        if qty_gap <= max(1e-12, max(lot_basis_qty, remote_qty_req) * 0.01):
             score += 3
             reasons.append("very close qty")
         elif qty_gap <= qty_tolerance:
@@ -1733,6 +1747,8 @@ def _build_recovery_candidates(*, local_order: dict[str, str | float], recent_or
                     "exchange_order_id": exchange_order_id,
                     "side": remote_side or "-",
                     "qty": remote_qty_req,
+                    "lot_basis_qty": lot_basis_qty,
+                    "requested_qty": requested_qty,
                     "filled_qty": float(getattr(remote, "qty_filled", 0.0) or 0.0),
                     "status": remote_status,
                     "price": remote_price,
@@ -1856,7 +1872,22 @@ def _load_recovery_report(
         ).fetchone()
         oldest_rows = conn.execute(
             f"""
-            SELECT client_order_id, submit_attempt_id, status, exchange_order_id, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            SELECT
+                client_order_id,
+                submit_attempt_id,
+                status,
+                exchange_order_id,
+                side,
+                price,
+                qty_req,
+                qty_filled,
+                intended_lot_count,
+                executable_lot_count,
+                final_intended_qty,
+                final_submitted_qty,
+                created_ts,
+                updated_ts,
+                last_error
             FROM orders
             WHERE status IN ({placeholders})
             ORDER BY created_ts ASC
@@ -1926,6 +1957,10 @@ def _load_recovery_report(
             "price": (float(row["price"]) if row["price"] is not None else None),
             "qty_req": float(row["qty_req"] or 0.0),
             "qty_filled": float(row["qty_filled"] or 0.0),
+            "requested_lot_count": int(row["intended_lot_count"] or 0),
+            "executable_lot_count": int(row["executable_lot_count"] or 0),
+            "final_intended_qty": float(row["final_intended_qty"] or 0.0) if row["final_intended_qty"] is not None else 0.0,
+            "final_submitted_qty": float(row["final_submitted_qty"] or 0.0) if row["final_submitted_qty"] is not None else 0.0,
             "created_ts": int(row["created_ts"]),
             "updated_ts": int(row["updated_ts"]),
             "age_sec": max(0.0, (now_ms - float(row["created_ts"])) / 1000),
@@ -2230,6 +2265,20 @@ def _load_recovery_report(
         candidates = _build_recovery_candidates(local_order=local_order, recent_orders=recent_orders_snapshot)
         plausible_candidates = [c for c in candidates if int(c.get("high_confidence") or 0) == 1]
         likely_candidate = plausible_candidates[0] if len(plausible_candidates) == 1 else None
+        local_qty_basis = float(
+            local_order["final_submitted_qty"]
+            if float(local_order["final_submitted_qty"]) > 0.0
+            else local_order["final_intended_qty"]
+            if float(local_order["final_intended_qty"]) > 0.0
+            else local_order["qty_req"]
+        )
+        local_qty_source = (
+            "final_submitted_qty"
+            if float(local_order["final_submitted_qty"]) > 0.0
+            else "final_intended_qty"
+            if float(local_order["final_intended_qty"]) > 0.0
+            else "qty_req"
+        )
         if not candidates:
             outcome = "no_candidate"
             next_action = "No likely broker match found. Keep order unresolved, run reconcile, and verify exchange history manually before recover-order."
@@ -2248,7 +2297,13 @@ def _load_recovery_report(
                 "client_order_id": local_order["client_order_id"],
                 "local_status": local_order["status"],
                 "local_side": local_order["side"],
-                "local_qty": local_order["qty_req"],
+                "local_qty": local_qty_basis,
+                "local_qty_source": local_qty_source,
+                "requested_qty": local_order["qty_req"],
+                "requested_lot_count": local_order["requested_lot_count"],
+                "executable_lot_count": local_order["executable_lot_count"],
+                "final_intended_qty": local_order["final_intended_qty"],
+                "final_submitted_qty": local_order["final_submitted_qty"],
                 "local_created_ts": local_order["created_ts"],
                 "attempted_locally": bool(local_order["submit_evidence_attempted_locally"]),
                 "attempted_ts": int(local_order["submit_evidence_attempted_ts"]),
@@ -2428,6 +2483,23 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(
         "    "
         f"effective_flat_due_to_harmless_dust={1 if dust_context.effective_flat_due_to_harmless_dust else 0}"
+    )
+    print("  [P3.1] lot_exposure")
+    print(
+        "    "
+        f"raw_total_asset_qty={float(report.get('raw_total_asset_qty') or 0.0):.8f} "
+        f"open_exposure_qty={float(report.get('open_exposure_qty') or 0.0):.8f} "
+        f"dust_tracking_qty={float(report.get('dust_tracking_qty') or 0.0):.8f}"
+    )
+    print(
+        "    "
+        f"open_lot_count={int(report.get('open_lot_count') or 0)} "
+        f"dust_tracking_lot_count={int(report.get('dust_tracking_lot_count') or 0)} "
+        f"reserved_exit_lot_count={int(report.get('reserved_exit_lot_count') or 0)} "
+        f"sellable_executable_lot_count={int(report.get('sellable_executable_lot_count') or 0)} "
+        f"sellable_executable_qty={float(report.get('sellable_executable_qty') or 0.0):.8f} "
+        f"terminal_state={report.get('terminal_state') or 'none'} "
+        f"exit_block_reason={report.get('exit_block_reason') or 'none'}"
     )
     print(f"    summary={report.get('dust_residual_summary') or 'none'}")
     recent_dust_unsellable_event = report.get("recent_dust_unsellable_event")
@@ -2640,6 +2712,7 @@ def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
     maybe_clear_stale_initial_reconcile_halt()
     report = _load_recovery_report()
     state = runtime_state.snapshot()
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
 
     conn = ensure_db()
     try:
@@ -2660,6 +2733,20 @@ def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
     recovery_required_count = int(report.get("recovery_required_count") or 0)
     open_order_count = int(open_row["open_count"] if open_row else 0)
     asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
+    position_state = build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(asset_qty, float(dust_context.raw_holdings.broker_qty)),
+        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+    )
+    normalized_exposure = position_state.normalized_exposure
+    position_state_clear = bool(
+        not normalized_exposure.has_executable_exposure
+        and (
+            str(normalized_exposure.terminal_state) == "flat"
+            or (str(normalized_exposure.terminal_state) == "dust_only" and bool(dust_context.operator_view.resume_allowed))
+        )
+    )
 
     last_reconcile_summary = str(report.get("last_reconcile_summary") or "none")
     last_reconcile_ok = (
@@ -2688,9 +2775,14 @@ def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
             f"open_orders={open_order_count}",
         ),
         (
-            "open position",
-            asset_qty <= 1e-12,
-            f"asset_qty={asset_qty:.12f}",
+            "normalized position state",
+            position_state_clear,
+            (
+                f"terminal_state={normalized_exposure.terminal_state} "
+                f"has_executable_exposure={1 if normalized_exposure.has_executable_exposure else 0} "
+                f"has_dust_only_remainder={1 if normalized_exposure.has_dust_only_remainder else 0} "
+                f"dust_resume_allowed={1 if dust_context.operator_view.resume_allowed else 0}"
+            ),
         ),
         (
             "halt state",

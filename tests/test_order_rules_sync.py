@@ -453,10 +453,49 @@ def test_get_effective_order_rules_persists_durable_snapshot(monkeypatch, tmp_pa
     assert resolved.snapshot_persisted is True
     assert snapshot is not None
     assert snapshot.market == "KRW-BTC"
-    assert snapshot.source_mode == "exchange"
+    assert snapshot.source_mode == "merged"
     assert snapshot.fallback_used is False
     assert '"bid_min_total_krw":7000.0' in snapshot.rules_json
     assert '"min_qty":"local_fallback"' in snapshot.source_json
+    assert '"source_mode":"merged"' in snapshot.source_json
+
+
+def test_get_effective_order_rules_separates_exchange_and_local_fallback_provenance(monkeypatch, tmp_path):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
+            market_id="KRW-BTC",
+            bid_min_total_krw=7000.0,
+            ask_min_total_krw=7100.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            order_types=("limit", "price", "market"),
+            order_sides=("ask", "bid"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
+        ),
+    )
+
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved.source_mode == "merged"
+    assert resolved.exchange_source["bid_min_total_krw"] == "chance_doc"
+    assert resolved.exchange_source["ask_price_unit"] == "chance_doc"
+    assert resolved.local_fallback_source["min_qty"] == "local_fallback"
+    assert resolved.local_fallback_source["qty_step"] == "local_fallback"
+    assert resolved.source["ruleset"] == "merged"
+    assert "exchange_source_json" in resolved.source
+    assert "local_fallback_source_json" in resolved.source
 
 
 def test_side_min_total_krw_prefers_bid_ask_from_doc() -> None:

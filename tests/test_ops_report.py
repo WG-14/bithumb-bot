@@ -776,7 +776,7 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "sell_normalized_exposure_qty=0.00000000" in out
     assert "position_qty=" in out
     assert "submit_payload_qty=" in out
-    assert "position_state_source=context.raw_qty_open" in out
+    assert "position_state_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
     assert "raw_total_asset_qty=0.00019192" in out
     assert "open_exposure_qty=" in out
     assert "dust_tracking_qty=0.00009563" in out
@@ -828,7 +828,7 @@ def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, mo
     assert "raw_total_asset_qty_truth_source=position_state.raw_total_asset_qty" in out
     assert "open_exposure_qty_truth_source=" in out
     assert "dust_tracking_qty_truth_source=" in out
-    assert "position_state_source_truth_source=context.position_state_source" in out
+    assert "position_state_source_truth_source=derived:sellable_executable_lot_count" in out
 
 
 
@@ -960,7 +960,7 @@ def test_ops_report_classifies_unresolved_risk_gate_in_recent_flow(tmp_path, mon
                         "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                         "sell_qty_boundary_kind": "none",
                         "sell_qty_basis_qty": 0.0002,
-                        "sell_qty_basis_source": "position_state.normalized_exposure.sellable_executable_qty",
+                        "sell_qty_basis_source": "position_state.normalized_exposure.sellable_executable_lot_count",
                     }
                 ),
             ),
@@ -1043,8 +1043,10 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "submit_qty_source_truth_source=context.submit_qty_source" in out
     assert "sell_submit_qty_source=position_state.normalized_exposure.sellable_executable_qty" in out
     assert "sell_submit_qty_source_truth_source=context.submit_qty_source" in out
+    assert "sell_submit_lot_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
     assert "sell_qty_basis_qty=0.00009629" in out
-    assert "sell_qty_basis_source=position_state.normalized_exposure.sellable_executable_qty" in out
+    assert "sell_qty_basis_source=position_state.normalized_exposure.sellable_executable_lot_count" in out
+    assert "sell_qty_basis_source_truth_source=derived:sellable_executable_lot_count" in out
     assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=" in out
     assert "open_exposure_qty_truth_source=" in out
@@ -1058,8 +1060,9 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     sell_suppression = payload["recent_sell_suppressions"][0]
     assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
     assert sell_suppression["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert sell_suppression["sell_submit_lot_source_truth_source"] == "-"
     assert sell_suppression["sell_qty_basis_qty"] == pytest.approx(0.00009629)
-    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert sell_suppression["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
 def test_ops_report_prefers_boundary_below_min_over_unsafe_dust_mismatch_in_recent_flow(

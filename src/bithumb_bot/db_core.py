@@ -802,6 +802,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             fee REAL NOT NULL DEFAULT 0,
             reference_price REAL,
             slippage_bps REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            internal_lot_size REAL,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
@@ -810,6 +813,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "fills", "fill_id", "fill_id TEXT")
     _ensure_column(conn, "fills", "reference_price", "reference_price REAL")
     _ensure_column(conn, "fills", "slippage_bps", "slippage_bps REAL")
+    _ensure_column(conn, "fills", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "fills", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "fills", "internal_lot_size", "internal_lot_size REAL")
 
     conn.execute(
         """
@@ -901,6 +907,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             intent_type TEXT NOT NULL,
             intent_ts INTEGER NOT NULL,
             qty REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
             client_order_id TEXT NOT NULL,
             order_status TEXT NOT NULL,
             created_ts INTEGER NOT NULL,
@@ -911,6 +919,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "order_intent_dedup", "qty", "qty REAL")
+    _ensure_column(conn, "order_intent_dedup", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_intent_dedup", "executable_lot_count", "executable_lot_count INTEGER")
     _ensure_column(conn, "order_intent_dedup", "last_error", "last_error TEXT")
 
     conn.execute(
@@ -1041,6 +1051,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native',
             position_state TEXT NOT NULL DEFAULT '{open_state}' CHECK (position_state IN ({allowed_states})),
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
@@ -1062,9 +1075,34 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "open_position_lots", "entry_fill_id", "entry_fill_id TEXT")
     _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "executable_lot_count",
+        "executable_lot_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "dust_tracking_lot_count",
+        "dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "position_semantic_basis",
+        "position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native'",
+    )
     _ensure_column(conn, "open_position_lots", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "open_position_lots", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "open_position_lots", "entry_decision_linkage", "entry_decision_linkage TEXT")
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_semantic_basis='lot-native'
+        WHERE position_semantic_basis IS NULL OR TRIM(position_semantic_basis)=''
+        """
+    )
     conn.execute(
         """
         UPDATE open_position_lots
@@ -1073,6 +1111,26 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         ,
         (OPEN_EXPOSURE_LOT_STATE,),
+    )
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET
+            executable_lot_count = CASE
+                WHEN position_state = ? AND qty_open > 1e-12 AND COALESCE(executable_lot_count, 0) <= 0
+                    THEN 1
+                ELSE COALESCE(executable_lot_count, 0)
+            END,
+            dust_tracking_lot_count = CASE
+                WHEN position_state = ? AND qty_open > 1e-12 AND COALESCE(dust_tracking_lot_count, 0) <= 0
+                    THEN 1
+                ELSE COALESCE(dust_tracking_lot_count, 0)
+            END
+        """,
+        (
+            OPEN_EXPOSURE_LOT_STATE,
+            "dust_tracking",
+        ),
     )
 
     conn.execute(

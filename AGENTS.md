@@ -284,6 +284,31 @@ Do not simplify code in ways that remove recovery evidence or reduce the ability
 
 When uncertain, choose explicit stop, halt, or recovery-required behavior over silent continuation.
 
+### Lot-Native State Semantics
+
+Canonical executable position semantics must remain lot-native.
+
+- Treat executable exposure as lot-based state, not arbitrary qty-first state.
+- Keep dust or sub-lot remainder explicitly separated from executable exposure.
+- Recovery, lifecycle, and risk logic must preserve the same lot-native meaning used by live execution.
+- Qty values may be used for broker API interfacing, reporting, and compatibility, but they must not replace lot-native canonical meaning.
+- Do not reintroduce qty-native executable state in new patches.
+
+### Lot-Native Batch Contract
+
+Practical live-operation target PASS is already baseline for the current lot-native work.
+
+- When modifying lot-native-related logic, do not restore semantic authority to qty.
+- Do not reopen SELL boundary authority work unless a contract test proves regression.
+- At the SELL boundary, the canonical sellable lot count is the final authority.
+- `dust_only_remainder`, `boundary_below_min`, and `no_executable_exit_lot` remain suppression outcomes, not submit failures.
+- Do not mix `open_exposure` and `dust_tracking` into executable inventory.
+- Current target: downstream full-lot-native closure in recovery, decision_context, and reporting residue.
+- Legacy or qty-first fallback in recovery, decision_context, and reporting must be treated as residue to classify or eliminate as semantic authority.
+- Compatibility fields may remain only if they are clearly derived and non-authoritative.
+- Use document -> tests -> implementation order.
+- Keep the order document, test contract, and implementation aligned, and do not expand beyond lot-native declaration scope.
+
 ## Strategy and Research
 
 Strategies are replaceable rules.
@@ -461,4 +486,3 @@ Default preference order:
 6. improve profitability
 
 If a requested change appears to conflict with `docs/storage-layout.md` or `docs/runtime-data-policy.md`, follow the docs and keep the storage contract intact unless those docs are explicitly updated as part of the same task.
-

@@ -57,6 +57,9 @@ def _seed_position_and_dust_state(
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native',
             position_state TEXT NOT NULL DEFAULT 'open_exposure'
         )
         """

@@ -154,6 +154,8 @@ class DecisionTelemetrySummary:
     submit_qty_source: str
     submit_qty_source_truth_source: str
     sell_submit_qty_source: str
+    sell_submit_lot_source: str
+    sell_submit_lot_count: int
     sell_normalized_exposure_qty: float
     sell_failure_category: str
     sell_failure_detail: str
@@ -545,6 +547,10 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
     sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_submit_lot_source: str
+    sell_submit_lot_count: int
+    sell_submit_lot_source_truth_source: str | None
+    sell_submit_lot_count_truth_source: str | None
     sell_qty_basis_qty: float
     sell_qty_basis_source: str
     sell_qty_boundary_kind: str
@@ -595,6 +601,10 @@ class RecentDecisionFlowSummary:
     sell_dust_tracking_qty: float
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_submit_lot_source: str
+    sell_submit_lot_count: int
+    sell_submit_lot_source_truth_source: str | None
+    sell_submit_lot_count_truth_source: str | None
     sell_qty_basis_qty: float
     sell_qty_basis_source: str
     sell_qty_boundary_kind: str
@@ -628,6 +638,10 @@ class SellSuppressionSummary:
     suppression_category: str
     submit_qty_source: str
     sell_submit_qty_source: str
+    sell_submit_lot_source: str
+    sell_submit_lot_count: int
+    sell_submit_lot_source_truth_source: str | None
+    sell_submit_lot_count_truth_source: str | None
     sell_qty_basis_qty: float | None
     sell_qty_basis_source: str | None
     sell_qty_boundary_kind: str | None
@@ -1234,6 +1248,29 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 'position_state.normalized_exposure.open_exposure_qty'
             ) AS sell_submit_qty_source,
             COALESCE(
+                json_extract(context_json, '$.sell_submit_lot_source'),
+                json_extract(context_json, '$.submit_lot_source'),
+                'position_state.normalized_exposure.sellable_executable_lot_count'
+            ) AS sell_submit_lot_source,
+            COALESCE(
+                CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.sellable_executable_lot_count') AS INTEGER),
+                0
+            ) AS sell_submit_lot_count,
+            COALESCE(
+                json_extract(context_json, '$.sell_submit_lot_source_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_submit_lot_source'),
+                json_extract(context_json, '$.submit_lot_source_truth_source'),
+                '-'
+            ) AS sell_submit_lot_source_truth_source,
+            COALESCE(
+                json_extract(context_json, '$.sell_submit_lot_count_truth_source'),
+                json_extract(context_json, '$.decision_truth_sources.sell_submit_lot_count'),
+                json_extract(context_json, '$.submit_lot_source_truth_source'),
+                '-'
+            ) AS sell_submit_lot_count_truth_source,
+            COALESCE(
                 json_extract(context_json, '$.sell_qty_basis_qty'),
                 json_extract(context_json, '$.sell_open_exposure_qty'),
                 json_extract(context_json, '$.sell_normalized_exposure_qty'),
@@ -1247,15 +1284,16 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
             ) AS sell_qty_basis_qty_truth_source,
             COALESCE(
                 json_extract(context_json, '$.sell_qty_basis_source'),
-                json_extract(context_json, '$.sell_submit_qty_source'),
-                json_extract(context_json, '$.submit_qty_source'),
-                'position_state.normalized_exposure.open_exposure_qty'
+                json_extract(context_json, '$.sell_submit_lot_source'),
+                json_extract(context_json, '$.submit_lot_source'),
+                'position_state.normalized_exposure.sellable_executable_lot_count'
             ) AS sell_qty_basis_source,
             COALESCE(
                 json_extract(context_json, '$.sell_qty_basis_source_truth_source'),
                 json_extract(context_json, '$.decision_truth_sources.sell_qty_basis_source'),
-                json_extract(context_json, '$.submit_qty_source_truth_source'),
-                '-'
+                json_extract(context_json, '$.sell_submit_lot_source_truth_source'),
+                json_extract(context_json, '$.submit_lot_source_truth_source'),
+                'derived:sellable_executable_lot_count'
             ) AS sell_qty_basis_source_truth_source,
             COALESCE(
                 json_extract(context_json, '$.sell_qty_boundary_kind'),
@@ -1360,6 +1398,14 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 ),
                 submit_qty_source=str(row["submit_qty_source"] or "-"),
                 sell_submit_qty_source=str(row["sell_submit_qty_source"] or "-"),
+                sell_submit_lot_source=str(row["sell_submit_lot_source"] or "-"),
+                sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
+                sell_submit_lot_source_truth_source=(
+                    str(row["sell_submit_lot_source_truth_source"]) if row["sell_submit_lot_source_truth_source"] is not None else None
+                ),
+                sell_submit_lot_count_truth_source=(
+                    str(row["sell_submit_lot_count_truth_source"]) if row["sell_submit_lot_count_truth_source"] is not None else None
+                ),
                 sell_qty_basis_qty=(float(row["sell_qty_basis_qty"]) if row["sell_qty_basis_qty"] is not None else None),
                 sell_qty_basis_source=(str(row["sell_qty_basis_source"]) if row["sell_qty_basis_source"] is not None else None),
                 sell_qty_boundary_kind=(str(row["sell_qty_boundary_kind"]) if row["sell_qty_boundary_kind"] is not None else None),
@@ -1728,8 +1774,40 @@ def fetch_recent_decision_flow(
                 'position_state.normalized_exposure.open_exposure_qty'
             ) AS sell_submit_qty_source,
             COALESCE(
-                json_extract(context_json, '$.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.sell_submit_lot_source'),
+                json_extract(context_json, '$.submit_lot_source'),
+                json_extract(context_json, '$.position_state.sell_submit_lot_source'),
+                json_extract(context_json, '$.position_state.submit_lot_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_source'),
+                json_extract(context_json, '$.position_gate.submit_lot_source'),
+                'position_state.normalized_exposure.sellable_executable_lot_count'
+            ) AS sell_submit_lot_source,
+                COALESCE(
+                    CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.position_state.sell_submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.position_state.submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_count') AS INTEGER),
+                    CAST(json_extract(context_json, '$.position_gate.submit_lot_count') AS INTEGER),
+                    0
+                ) AS sell_submit_lot_count,
+                COALESCE(
+                    json_extract(context_json, '$.sell_submit_lot_source_truth_source'),
+                    json_extract(context_json, '$.decision_truth_sources.sell_submit_lot_source'),
+                    json_extract(context_json, '$.submit_lot_source_truth_source'),
+                    '-'
+                ) AS sell_submit_lot_source_truth_source,
+                COALESCE(
+                    json_extract(context_json, '$.sell_submit_lot_count_truth_source'),
+                    json_extract(context_json, '$.decision_truth_sources.sell_submit_lot_count'),
+                    json_extract(context_json, '$.submit_lot_source_truth_source'),
+                    '-'
+                ) AS sell_submit_lot_count_truth_source,
+                COALESCE(
+                    json_extract(context_json, '$.sell_normalized_exposure_qty'),
+                    json_extract(context_json, '$.position_state.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
                 json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
@@ -1799,7 +1877,7 @@ def fetch_recent_decision_flow(
                 json_extract(context_json, '$.position_state.position_state_source'),
                 json_extract(context_json, '$.position_state.normalized_exposure.position_state_source'),
                 json_extract(context_json, '$.position_gate.position_state_source'),
-                'context.raw_qty_open'
+                'position_state.normalized_exposure.sellable_executable_lot_count'
             ) AS position_state_source,
             COALESCE(
                 json_extract(context_json, '$.position_state_source_truth_source'),
@@ -1857,8 +1935,16 @@ def fetch_recent_decision_flow(
             sell_qty_basis_source=str(row["sell_qty_basis_source"]),
             sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
             submit_qty_source=str(row["submit_qty_source"]),
-            sell_submit_qty_source=str(row["sell_submit_qty_source"]),
-            sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
+                sell_submit_qty_source=str(row["sell_submit_qty_source"]),
+                sell_submit_lot_source=str(row["sell_submit_lot_source"]),
+                sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
+                sell_submit_lot_source_truth_source=(
+                    str(row["sell_submit_lot_source_truth_source"]) if row["sell_submit_lot_source_truth_source"] is not None else None
+                ),
+                sell_submit_lot_count_truth_source=(
+                    str(row["sell_submit_lot_count_truth_source"]) if row["sell_submit_lot_count_truth_source"] is not None else None
+                ),
+                sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
             sell_failure_category=str(row["sell_failure_category"]),
             sell_failure_detail=str(row["sell_failure_detail"]),
             position_state_source=str(row["position_state_source"]),
@@ -2164,6 +2250,26 @@ def fetch_decision_telemetry_summary(
                 'position_state.normalized_exposure.open_exposure_qty'
             ) AS sell_submit_qty_source,
             COALESCE(
+                json_extract(context_json, '$.sell_submit_lot_source'),
+                json_extract(context_json, '$.submit_lot_source'),
+                json_extract(context_json, '$.position_state.sell_submit_lot_source'),
+                json_extract(context_json, '$.position_state.submit_lot_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_source'),
+                json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_source'),
+                json_extract(context_json, '$.position_gate.submit_lot_source'),
+                'position_state.normalized_exposure.sellable_executable_lot_count'
+            ) AS sell_submit_lot_source,
+            COALESCE(
+                CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.submit_lot_count') AS INTEGER),
+                0
+            ) AS sell_submit_lot_count,
+            COALESCE(
                 json_extract(context_json, '$.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.sell_normalized_exposure_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
@@ -2235,7 +2341,7 @@ def fetch_decision_telemetry_summary(
                 json_extract(context_json, '$.position_state.position_state_source'),
                 json_extract(context_json, '$.position_state.normalized_exposure.position_state_source'),
                 json_extract(context_json, '$.position_gate.position_state_source'),
-                'context.raw_qty_open'
+                'position_state.normalized_exposure.sellable_executable_lot_count'
             ) AS position_state_source,
             COALESCE(
                 json_extract(context_json, '$.position_state_source_truth_source'),
@@ -2295,12 +2401,14 @@ def fetch_decision_telemetry_summary(
             sell_qty_boundary_kind,
             sell_failure_category,
             sell_failure_detail,
-            submit_qty_source,
-            submit_qty_source_truth_source,
-            sell_submit_qty_source,
-            sell_normalized_exposure_qty,
-            position_state_source,
-            position_state_source_truth_source,
+                submit_qty_source,
+                submit_qty_source_truth_source,
+                sell_submit_qty_source,
+                sell_submit_lot_source,
+                sell_submit_lot_count,
+                sell_normalized_exposure_qty,
+                position_state_source,
+                position_state_source_truth_source,
             entry_allowed_truth_source,
             effective_flat_truth_source
         ORDER BY decision_count DESC, decision_type ASC, base_signal ASC, raw_signal ASC, final_signal ASC, strategy_name ASC, pair ASC, interval ASC
@@ -2347,6 +2455,8 @@ def fetch_decision_telemetry_summary(
             submit_qty_source=str(row["submit_qty_source"]),
             submit_qty_source_truth_source=str(row["submit_qty_source_truth_source"]),
             sell_submit_qty_source=str(row["sell_submit_qty_source"]),
+            sell_submit_lot_source=str(row["sell_submit_lot_source"]),
+            sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
             sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
             sell_failure_category=str(row["sell_failure_category"]),
             sell_failure_detail=str(row["sell_failure_detail"]),
@@ -4119,6 +4229,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "sell_normalized_exposure_qty_truth_source": row.sell_normalized_exposure_qty_truth_source,
                 "sell_open_exposure_qty_truth_source": row.sell_open_exposure_qty_truth_source,
                 "sell_dust_tracking_qty_truth_source": row.sell_dust_tracking_qty_truth_source,
+                "sell_submit_lot_source": row.sell_submit_lot_source,
+                "sell_submit_lot_count": row.sell_submit_lot_count,
+                "sell_submit_lot_source_truth_source": row.sell_submit_lot_source_truth_source,
+                "sell_submit_lot_count_truth_source": row.sell_submit_lot_count_truth_source,
                 "position_state_source_truth_source": row.position_state_source_truth_source,
                 "raw_qty_open_truth_source": row.raw_qty_open_truth_source,
                 "raw_total_asset_qty_truth_source": row.raw_total_asset_qty_truth_source,
@@ -4159,6 +4273,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
                 "submit_qty_source": row.submit_qty_source,
                 "sell_submit_qty_source": row.sell_submit_qty_source,
+                "sell_submit_lot_source": row.sell_submit_lot_source,
+                "sell_submit_lot_count": row.sell_submit_lot_count,
+                "sell_submit_lot_source_truth_source": row.sell_submit_lot_source_truth_source,
+                "sell_submit_lot_count_truth_source": row.sell_submit_lot_count_truth_source,
                 "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
                 "position_state_source": row.position_state_source,
                 "entry_allowed_truth_source": row.entry_allowed_truth_source,
@@ -4495,9 +4613,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_qty_source={row.submit_qty_source} "
                 f"submit_qty_source_truth_source={row.submit_qty_source_truth_source or '-'} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
+                f"sell_submit_lot_source={row.sell_submit_lot_source} "
+                f"sell_submit_lot_count={row.sell_submit_lot_count} "
                 f"sell_submit_qty_source_truth_source={row.sell_submit_qty_source_truth_source or '-'} "
                 f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
                 f"sell_qty_basis_source={row.sell_qty_basis_source or '-'} "
+                f"sell_qty_basis_source_truth_source={row.sell_qty_basis_source_truth_source or '-'} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind or '-'} "
                 f"sell_normalized_exposure_qty_truth_source={row.sell_normalized_exposure_qty_truth_source or '-'} "
                 f"sell_open_exposure_qty_truth_source={row.sell_open_exposure_qty_truth_source or '-'} "
@@ -4537,6 +4658,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"submit_qty_source={row.submit_qty_source} "
                 f"sell_submit_qty_source={row.sell_submit_qty_source} "
+                f"sell_submit_lot_source={row.sell_submit_lot_source} "
+                f"sell_submit_lot_count={row.sell_submit_lot_count} "
                 f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
                 f"sell_qty_basis_source={row.sell_qty_basis_source} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "

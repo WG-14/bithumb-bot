@@ -29,9 +29,9 @@ from .db_core import (
     record_external_cash_adjustment,
     set_portfolio_breakdown,
 )
-from .dust import classify_dust_residual, dust_qty_gap_tolerance
+from .dust import build_dust_display_context, build_position_state_model, classify_dust_residual, dust_qty_gap_tolerance
 from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
-from .lifecycle import mark_harmless_dust_positions
+from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
 from .notifier import format_event, notify
@@ -126,10 +126,21 @@ def classify_recovery_outcome(
     )
 
 
-def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int]]:
+def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int | float]]:
     rows = conn.execute(
         """
-        SELECT client_order_id, submit_attempt_id, exchange_order_id, status, side, qty_req, created_ts
+        SELECT
+            client_order_id,
+            submit_attempt_id,
+            exchange_order_id,
+            status,
+            side,
+            qty_req,
+            intended_lot_count,
+            executable_lot_count,
+            final_intended_qty,
+            final_submitted_qty,
+            created_ts
         FROM orders
         ORDER BY created_ts DESC
         LIMIT ?
@@ -137,10 +148,11 @@ def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str |
         (max(1, int(limit)),),
     ).fetchall()
 
-    lifecycle: list[dict[str, str | int]] = []
+    lifecycle: list[dict[str, str | int | float]] = []
     for row in rows:
         context = _load_submit_attempt_context(conn, row=row)
         submit_attempt_id = str(context.get("submit_attempt_id") or "")
+        lot_basis_qty, lot_basis_source = _order_lot_basis_qty(row=row)
         submit_event = None
         intent_event = conn.execute(
             """
@@ -209,6 +221,13 @@ def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str |
                 "mapping_status": mapping_status,
                 "state": status,
                 "unresolved": 1 if status in UNRESOLVED_ORDER_STATUSES else 0,
+                "requested_qty": float(row["qty_req"] or 0.0),
+                "requested_lot_count": int(row["intended_lot_count"] or 0),
+                "executable_lot_count": int(row["executable_lot_count"] or 0),
+                "final_intended_qty": float(row["final_intended_qty"] or 0.0) if row["final_intended_qty"] is not None else 0.0,
+                "final_submitted_qty": float(row["final_submitted_qty"] or 0.0) if row["final_submitted_qty"] is not None else 0.0,
+                "lot_basis_qty": lot_basis_qty,
+                "lot_basis_source": lot_basis_source,
             }
         )
 
@@ -400,6 +419,36 @@ def _classify_lookup_error(exc: Exception) -> str:
             return "lookup_not_found"
         return "broker_reject"
     return "unexpected_error"
+
+
+def _order_lot_basis_qty(*, row) -> tuple[float, str]:
+    def _read_value(key: str, index: int) -> object | None:
+        if row is None:
+            return None
+        if hasattr(row, "keys"):
+            try:
+                return row[key]  # type: ignore[index]
+            except (KeyError, IndexError, TypeError):
+                pass
+        try:
+            return row[index]  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            return None
+
+    for key, source in (
+        ("final_submitted_qty", "final_submitted_qty"),
+        ("final_intended_qty", "final_intended_qty"),
+        ("qty_req", "qty_req"),
+    ):
+        value = _read_value(key, 0)
+        if value is None:
+            continue
+        try:
+            qty = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+        return qty, source
+    return 0.0, "qty_req"
 
 
 CASH_SPLIT_ABS_TOL = 1e-6
@@ -976,8 +1025,8 @@ def _interpret_submit_unknown_recent_activity(
         )
 
     total_fill_qty = sum(max(0.0, float(fill.qty)) for fill in candidate_fills)
-    local_qty_req = max(0.0, float(local_row["qty_req"]))
-    has_partial_fill_evidence = bool(total_fill_qty > 1e-12 and local_qty_req > total_fill_qty + 1e-12)
+    local_qty_basis, _ = _order_lot_basis_qty(row=local_row)
+    has_partial_fill_evidence = bool(total_fill_qty > 1e-12 and local_qty_basis > total_fill_qty + 1e-12)
 
     candidate_count = 1
     if candidate_exchange_ids:
@@ -1277,14 +1326,42 @@ def _clear_reconcile_halt_if_safe(
     unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
     recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
     position_qty = float(portfolio_row["asset_qty"] or 0.0) if portfolio_row else 0.0
-    position_flat = abs(position_qty) <= 1e-12
     dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
+    dust_context = build_dust_display_context(metadata)
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    position_state = build_position_state_model(
+        raw_qty_open=position_qty,
+        metadata_raw=metadata,
+        raw_total_asset_qty=max(
+            position_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+    )
+    normalized_exposure = position_state.normalized_exposure
+    position_flat = str(normalized_exposure.terminal_state) == "flat"
+    position_dust_only = bool(normalized_exposure.has_dust_only_remainder)
+    position_has_executable_exposure = bool(normalized_exposure.has_executable_exposure)
     _LOG.info(
-        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s dust_resume_allowed=%s halt_reason_code=%s",
+        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_terminal_state=%s raw_total_asset_qty=%.8f executable_exposure_qty=%.8f dust_tracking_qty=%.8f open_lot_count=%s dust_tracking_lot_count=%s sellable_executable_lot_count=%s sellable_executable_qty=%.8f exit_block_reason=%s position_has_executable_exposure=%s position_dust_only=%s dust_resume_allowed=%s halt_reason_code=%s",
         unresolved_count,
         recovery_required_count,
         broker_open_order_count,
-        int(position_flat),
+        normalized_exposure.terminal_state,
+        float(normalized_exposure.raw_total_asset_qty),
+        float(normalized_exposure.open_exposure_qty),
+        float(normalized_exposure.dust_tracking_qty),
+        int(normalized_exposure.open_lot_count),
+        int(normalized_exposure.dust_tracking_lot_count),
+        int(normalized_exposure.sellable_executable_lot_count),
+        float(normalized_exposure.sellable_executable_qty),
+        normalized_exposure.exit_block_reason,
+        int(position_has_executable_exposure),
+        int(position_dust_only),
         int(dust_resume_allowed),
         state.halt_reason_code or "-",
     )
@@ -1292,15 +1369,25 @@ def _clear_reconcile_halt_if_safe(
         unresolved_count == 0
         and recovery_required_count == 0
         and broker_open_order_count == 0
-        and (position_flat or dust_resume_allowed)
+        and not position_has_executable_exposure
+        and (position_flat or (position_dust_only and dust_resume_allowed))
     ):
         _LOG.info(
-            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_qty=%s position_flat=%s dust_resume_allowed=%s",
+            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s raw_total_asset_qty=%.8f executable_exposure_qty=%.8f dust_tracking_qty=%.8f open_lot_count=%s dust_tracking_lot_count=%s sellable_executable_lot_count=%s sellable_executable_qty=%.8f exit_block_reason=%s position_terminal_state=%s position_has_executable_exposure=%s position_dust_only=%s dust_resume_allowed=%s",
             unresolved_count,
             recovery_required_count,
             broker_open_order_count,
-            position_qty,
-            int(position_flat),
+            float(normalized_exposure.raw_total_asset_qty),
+            float(normalized_exposure.open_exposure_qty),
+            float(normalized_exposure.dust_tracking_qty),
+            int(normalized_exposure.open_lot_count),
+            int(normalized_exposure.dust_tracking_lot_count),
+            int(normalized_exposure.sellable_executable_lot_count),
+            float(normalized_exposure.sellable_executable_qty),
+            normalized_exposure.exit_block_reason,
+            normalized_exposure.terminal_state,
+            int(position_has_executable_exposure),
+            int(position_dust_only),
             int(dust_resume_allowed),
         )
         return

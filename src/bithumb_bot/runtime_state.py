@@ -5,11 +5,14 @@ import logging
 from dataclasses import dataclass
 from threading import Lock
 
+from .config import settings
 from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
 from .reason_codes import HALT_ENTERED, STARTUP_BLOCKED
 from .observability import safety_event
 from .sqlite_resilience import run_with_locked_db_retry
+from .dust import build_dust_display_context, build_position_state_model
+from .lifecycle import summarize_position_lots
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
 
@@ -847,14 +850,32 @@ def disable_trading_until(
                     OPEN_ORDER_STATUSES,
                 ).fetchone()
                 portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+                lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
             finally:
                 conn.close()
             open_count = int(open_row["open_count"] if open_row else 0)
             asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+            dust_context = build_dust_display_context(_STATE.last_reconcile_metadata)
+            position_state = build_position_state_model(
+                raw_qty_open=asset_qty,
+                metadata_raw=_STATE.last_reconcile_metadata,
+                raw_total_asset_qty=max(
+                    asset_qty,
+                    float(lot_snapshot.raw_total_asset_qty),
+                    float(dust_context.raw_holdings.broker_qty),
+                ),
+                open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+                dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+                open_lot_count=int(lot_snapshot.open_lot_count),
+                dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+            )
             _STATE.halt_open_orders_present = open_count > 0
-            _STATE.halt_position_present = asset_qty > 1e-12
+            _STATE.halt_position_present = bool(position_state.normalized_exposure.has_any_position_residue)
             _STATE.halt_operator_action_required = bool(
-                unresolved or _STATE.halt_open_orders_present or _STATE.halt_position_present
+                unresolved
+                or _STATE.halt_open_orders_present
+                or _STATE.halt_position_present
+                or bool(position_state.normalized_exposure.has_dust_only_remainder)
             )
         _persist_state(_STATE)
 
@@ -901,4 +922,3 @@ def enable_trading() -> None:
         _STATE.resume_gate_blocked = False
         _STATE.resume_gate_reason = None
         _persist_state(_STATE)
-

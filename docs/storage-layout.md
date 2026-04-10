@@ -332,9 +332,11 @@ The current codebase expects:
 
 `open_position_lots.position_state` is part of the storage contract and must keep the following meaning stable:
 
-- `raw_total_asset_qty`: broker-visible total remainder for the asset. This is useful for reconciliation and reporting, but it is not the base quantity for normal SELL submission.
-- `open_exposure_qty`: the real strategy-visible position and the default SELL submission base. Normal SELL logic should read this quantity and exclude `dust_tracking_qty`.
-- `dust_tracking_qty`: operator-only residual tracking. It records harmless dust evidence, represents unsellable dust for normal execution, and is excluded from normal SELL submission by default.
+- `open_lot_count`: canonical executable exposure authority for the position row.
+- `dust_tracking_lot_count`: canonical operator-only residual authority for the position row.
+- `raw_total_asset_qty`: broker-visible total remainder for the asset. This is useful for reconciliation and reporting, but it is derived / compatibility-oriented rather than the semantic authority.
+- `open_exposure_qty`: derived executable quantity materialized from the lot-native open exposure state for broker payloads, reporting, and compatibility.
+- `dust_tracking_qty`: derived operator-only residual quantity materialized from the dust-tracking lot state for evidence and reporting.
 - `open_exposure`: real strategy exposure that may be sold normally.
 - `dust_tracking`: operator-only residual tracking for harmless dust evidence.
 
@@ -345,11 +347,11 @@ Practical routing rules:
 - `dust_tracking` lots are not sellable inventory and must not be counted as the basis for a normal SELL order.
 - Harmless dust suppression is defined around the `dust_tracking` path, not the `open_exposure` path.
 - Suppression behavior must avoid creating a normal SELL order, SELL event, or fresh client order ID for dust-only exits unless an operator explicitly clears the dust state.
-- Reporting must surface `raw_total_asset_qty`, `open_exposure_qty`, and `dust_tracking_qty` together so operators can explain the gap between broker-visible holdings and the sellable position base.
+- Reporting must surface `open_lot_count`, `dust_tracking_lot_count`, `open_exposure_qty`, `dust_tracking_qty`, and `raw_total_asset_qty` together so operators can explain the gap between broker-visible holdings and the sellable position base.
 - Boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty` stays `open_exposure`.
 - If a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as operator evidence and remains excluded from normal SELL submission until an operator clears the inconsistency.
 - Routing summary:
   - BUY creates or refreshes `open_exposure` lots.
-  - SELL lifecycle and real-order submission read `open_exposure_qty` only, with `position_state.normalized_exposure.open_exposure_qty` as the canonical submit source.
+  - SELL lifecycle and real-order submission use lot-native exposure counts as the canonical state authority, with `open_exposure_qty` materialized from that state for the final broker payload.
   - `dust_tracking_qty` is operator-tracking evidence only and is excluded from normal SELL submission.
   - Harmless dust suppression is anchored to the `dust_tracking` path, not the `open_exposure` path.

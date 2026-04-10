@@ -289,22 +289,30 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["dust_tracking_qty"] == 0.00009563
     assert ctx["open_lot_count"] == 0
     assert ctx["sellable_executable_lot_count"] == 0
+    assert ctx["submit_lot_count"] == 0
     assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert ctx["sell_qty_basis_qty_truth_source"] == "derived:sellable_executable_lot_count"
     assert ctx["sell_qty_boundary_kind"] == "none"
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.0)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
     assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_normalized_exposure_qty_truth_source"] == "fallback:no_executable_open_lots"
-    assert ctx["sell_open_exposure_qty_truth_source"] == "fallback:no_executable_open_lots"
+    assert ctx["sell_normalized_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
+    assert ctx["sell_open_exposure_qty_truth_source"] == "compatibility:fallback:legacy_lot_metadata_missing"
     assert ctx["sell_dust_tracking_qty_truth_source"] == "context.dust_tracking_qty"
+    assert ctx["submit_lot_count_truth_source"] == "derived:sellable_executable_lot_count"
+    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
     assert ctx["position_state_source"] == "context.raw_qty_open"
+    assert ctx["position_state_source_truth_source"] == "compatibility:context.position_state_source"
     assert ctx["entry_allowed_truth_source"] == "position_gate.entry_allowed"
     assert ctx["effective_flat_truth_source"] == "position_gate.effective_flat_due_to_harmless_dust"
-    assert ctx["decision_truth_sources"]["normalized_exposure_active"] == "fallback:no_executable_open_lots"
+    assert (
+        ctx["decision_truth_sources"]["normalized_exposure_active"]
+        == "compatibility:fallback:no_executable_open_lots"
+    )
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
 
@@ -335,6 +343,7 @@ def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_
                 "dust_tracking_lot_count": 1,
                 "reserved_exit_lot_count": 0,
                 "sellable_executable_lot_count": 1,
+                "submit_lot_count": 1,
                 "submit_qty_source": "position_state.raw_total_asset_qty",
                 "position_state_source": "context.raw_qty_open",
                 "has_executable_exposure": True,
@@ -365,10 +374,13 @@ def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_
     ctx = json.loads(str(row["context_json"]))
     assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["submit_lot_count"] == 1
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.00009999)
-    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert ctx["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert ctx["sell_qty_basis_qty_truth_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_qty_basis_qty_truth_source"] == "derived:sellable_executable_lot_count"
+    assert ctx["sell_qty_basis_source_truth_source"] == "derived:sellable_executable_lot_count"
+    assert ctx["submit_lot_count_truth_source"] == "derived:sellable_executable_lot_count"
 
 
 def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_path, monkeypatch):
@@ -395,7 +407,6 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
                     "raw_total_asset_qty": 0.0,
                     "open_exposure_qty": 0.0,
                     "dust_tracking_qty": 0.0,
-                    "position_state_source": "position_state.raw_qty_open",
                     "submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
                 },
             },
@@ -410,11 +421,12 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
     assert ctx["raw_total_asset_qty"] == 0.0
     assert ctx["open_exposure_qty"] == 0.0
     assert ctx["dust_tracking_qty"] == 0.0
+    assert ctx["submit_lot_count"] == 0
     assert ctx["raw_total_asset_qty_truth_source"] == "position_state.raw_total_asset_qty"
-    assert ctx["open_exposure_qty_truth_source"] == "fallback:no_executable_open_lots"
+    assert ctx["open_exposure_qty_truth_source"] == "compatibility:fallback:no_executable_open_lots"
     assert ctx["dust_tracking_qty_truth_source"] == "position_state.dust_tracking_qty"
-    assert ctx["position_state_source"] == "position_state.raw_qty_open"
-    assert ctx["position_state_source_truth_source"] == "context.position_state_source"
+    assert ctx["position_state_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert ctx["position_state_source_truth_source"] == "derived:sellable_executable_lot_count"
     assert ctx["position_state"]["normalized_exposure"]["raw_total_asset_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["open_exposure_qty"] == 0.0
     assert ctx["position_state"]["normalized_exposure"]["dust_tracking_qty"] == 0.0

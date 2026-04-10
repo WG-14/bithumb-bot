@@ -1115,6 +1115,46 @@ def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
     assert flatten_calls["n"] == 1
 
 
+def test_run_loop_position_loss_breach_uses_executable_exposure_qty(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00009629)
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_classification": "harmless_dust",
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "dust_broker_qty": 0.00009629,
+            "dust_local_qty": 0.00009629,
+            "dust_effective_flat": 1,
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+        },
+    )
+
+    captured_qty: list[float] = []
+
+    def _capture_position_loss_breach(_conn, *, qty: float, price: float):
+        captured_qty.append(qty)
+        return False, "ok"
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.evaluate_position_loss_breach", _capture_position_loss_breach)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    assert captured_qty
+    assert captured_qty[0] == 0.0
+
+
 def test_run_loop_daily_loss_breach_with_no_position_records_no_position_flatten(monkeypatch):
     _prepare_run_loop(monkeypatch, asset_qty=0.0)
 

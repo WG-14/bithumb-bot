@@ -230,9 +230,13 @@ def test_record_strategy_decision_prefers_position_state_normalized_exposure_tru
     assert ctx["exit_block_reason"] == "dust_only_remainder"
     assert ctx["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert ctx["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert ctx["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert ctx["sell_submit_lot_count"] == 0
+    assert ctx["submit_lot_count"] == 0
     assert ctx["sell_normalized_exposure_qty"] == pytest.approx(0.0)
     assert ctx["position_state"]["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
     assert ctx["open_lot_count"] == 0
     assert ctx["sellable_executable_lot_count"] == 0
     assert "submit_payload_qty" not in ctx["position_state"]["normalized_exposure"]
     assert "sell_submit_qty_source" not in ctx["position_state"]["normalized_exposure"]
+    assert "sell_submit_lot_source" not in ctx["position_state"]["normalized_exposure"]

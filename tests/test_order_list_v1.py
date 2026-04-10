@@ -4,7 +4,11 @@ import pytest
 
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.broker.bithumb import BithumbPrivateAPI
-from bithumb_bot.broker.order_list_v1 import build_order_list_params, parse_v1_order_list_row
+from bithumb_bot.broker.order_list_v1 import (
+    build_order_list_params,
+    build_recovery_order_list_params,
+    parse_v1_order_list_row,
+)
 
 
 def test_build_order_list_params_accepts_uuids_only() -> None:
@@ -74,10 +78,9 @@ def test_build_order_list_params_rejects_invalid_order_by() -> None:
 
 
 def test_build_order_list_params_accepts_broad_recovery_scan_with_market_and_states() -> None:
-    params = build_order_list_params(
+    params = build_recovery_order_list_params(
         market="KRW-BTC",
         states=["wait", "done"],
-        allow_broad_scan=True,
         limit=10,
     )
 
@@ -110,16 +113,20 @@ def test_build_order_list_params_rejects_watch_mixed_with_general_states() -> No
 
 
 def test_build_order_list_params_accepts_watch_only_recovery_scan() -> None:
-    params = build_order_list_params(
+    params = build_recovery_order_list_params(
         market="KRW-BTC",
         states=["watch"],
-        allow_broad_scan=True,
         page=2,
     )
 
     assert params["states"] == ["watch"]
     assert params["market"] == "KRW-BTC"
     assert params["page"] == 2
+
+
+def test_build_recovery_order_list_params_keeps_general_lookup_identifier_scoped() -> None:
+    with pytest.raises(ValueError, match="use build_recovery_order_list_params"):
+        build_order_list_params(market="KRW-BTC", state="wait")
 
 
 def test_build_order_list_params_rejects_out_of_range_limit() -> None:

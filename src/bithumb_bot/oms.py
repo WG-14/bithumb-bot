@@ -247,15 +247,22 @@ def build_order_intent_key(
     intent_ts: int,
     intent_type: str,
     qty: float | None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
 ) -> str:
     payload = {
         "intent_ts": int(intent_ts),
         "intent_type": str(intent_type),
-        "qty": (round(float(qty), 12) if qty is not None and math.isfinite(float(qty)) else None),
         "side": str(side).upper(),
         "strategy_context": str(strategy_context),
         "symbol": str(symbol),
     }
+    if intended_lot_count is not None or executable_lot_count is not None:
+        payload["intended_lot_count"] = int(intended_lot_count or 0)
+        payload["executable_lot_count"] = int(executable_lot_count or 0)
+        payload["lot_key_basis"] = "lot-native"
+    else:
+        payload["qty"] = (round(float(qty), 12) if qty is not None and math.isfinite(float(qty)) else None)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -312,6 +319,8 @@ def claim_order_intent_dedup(
     intent_type: str,
     intent_ts: int,
     qty: float | None,
+    intended_lot_count: int | None = None,
+    executable_lot_count: int | None = None,
     order_status: str,
 ) -> tuple[bool, sqlite3.Row | None]:
     now_ms = int(time.time() * 1000)
@@ -326,12 +335,14 @@ def claim_order_intent_dedup(
                 intent_type,
                 intent_ts,
                 qty,
+                intended_lot_count,
+                executable_lot_count,
                 client_order_id,
                 order_status,
                 created_ts,
                 updated_ts,
                 last_error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 intent_key,
@@ -341,6 +352,8 @@ def claim_order_intent_dedup(
                 intent_type,
                 int(intent_ts),
                 (float(qty) if qty is not None else None),
+                (int(intended_lot_count) if intended_lot_count is not None else None),
+                (int(executable_lot_count) if executable_lot_count is not None else None),
                 client_order_id,
                 order_status,
                 now_ms,
@@ -352,6 +365,7 @@ def claim_order_intent_dedup(
         row = conn.execute(
             """
             SELECT intent_key, symbol, side, strategy_context, intent_type, intent_ts, qty,
+                   intended_lot_count, executable_lot_count,
                    client_order_id, order_status, created_ts, updated_ts, last_error
             FROM order_intent_dedup
             WHERE intent_key=?
@@ -584,19 +598,21 @@ def create_order(
         )
         _record_order_event(
             conn,
-            client_order_id=client_order_id,
-            event_type="intent_created",
-            event_ts=ts,
-            order_status=status,
-            qty=qty_req,
-            price=price,
-            symbol=symbol or settings.PAIR,
-            side=side,
-            order_type=order_type,
-            submit_attempt_id=submit_attempt_id,
-            mode=mode or settings.MODE,
-            intent_ts=ts,
-        )
+                client_order_id=client_order_id,
+                event_type="intent_created",
+                event_ts=ts,
+                order_status=status,
+                qty=qty_req,
+                price=price,
+                symbol=symbol or settings.PAIR,
+                side=side,
+                order_type=order_type,
+                submit_attempt_id=submit_attempt_id,
+                mode=mode or settings.MODE,
+                intent_ts=ts,
+                intended_lot_count=intended_lot_count,
+                executable_lot_count=executable_lot_count,
+            )
         if own_conn:
             conn.commit()
     except Exception:
@@ -1018,10 +1034,19 @@ def add_fill(
     conn = conn or ensure_db()
     try:
         order_row = conn.execute(
-            "SELECT side FROM orders WHERE client_order_id=?",
+            "SELECT side, intended_lot_count, executable_lot_count, internal_lot_size FROM orders WHERE client_order_id=?",
             (client_order_id,),
         ).fetchone()
         side = str(order_row["side"]) if order_row and order_row["side"] else ""
+        intended_lot_count = (
+            int(order_row["intended_lot_count"]) if order_row and order_row["intended_lot_count"] is not None else None
+        )
+        executable_lot_count = (
+            int(order_row["executable_lot_count"]) if order_row and order_row["executable_lot_count"] is not None else None
+        )
+        internal_lot_size = (
+            float(order_row["internal_lot_size"]) if order_row and order_row["internal_lot_size"] is not None else None
+        )
 
         submit_row = conn.execute(
             """
@@ -1058,8 +1083,20 @@ def add_fill(
 
         conn.execute(
             """
-            INSERT INTO fills(client_order_id, fill_id, fill_ts, price, qty, fee, reference_price, slippage_bps)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO fills(
+                client_order_id,
+                fill_id,
+                fill_ts,
+                price,
+                qty,
+                fee,
+                reference_price,
+                slippage_bps,
+                intended_lot_count,
+                executable_lot_count,
+                internal_lot_size
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -1070,6 +1107,9 @@ def add_fill(
                 float(fee),
                 (float(reference_price) if reference_price is not None else None),
                 (float(slippage_bps) if slippage_bps is not None else None),
+                intended_lot_count,
+                executable_lot_count,
+                internal_lot_size,
             ),
         )
         updated_ts = int(time.time() * 1000)
@@ -1085,6 +1125,9 @@ def add_fill(
             fill_id=fill_id,
             qty=qty,
             price=price,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            internal_lot_size=internal_lot_size,
             message=(
                 f"fee={float(fee)};reference_price={reference_price};slippage_bps={slippage_bps}"
                 if fee or reference_price is not None or slippage_bps is not None

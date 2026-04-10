@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from .lot_model import build_market_lot_rules, qty_to_executable_lot_count
+from .lot_model import build_market_lot_rules, lot_count_to_qty, qty_to_executable_lot_count
 
 
 DUST_POSITION_EPS = 1e-12
@@ -665,22 +665,41 @@ class NormalizedExposure:
         return float(self.sellable_executable_qty)
 
     @property
+    def submit_lot_count(self) -> int:
+        """Return the canonical lot-count basis for order submission."""
+
+        return int(self.sellable_executable_lot_count)
+
+    @property
     def sell_submit_qty_source(self) -> str:
         return lot_state_sell_submit_qty_source(OPEN_EXPOSURE_LOT_STATE)
 
+    @property
+    def sell_submit_lot_source(self) -> str:
+        return lot_state_sell_submit_lot_source(OPEN_EXPOSURE_LOT_STATE)
+
+    @property
+    def semantic_basis(self) -> str:
+        return "lot-native"
+
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
+            "semantic_basis": self.semantic_basis,
             "raw_qty_open": float(self.raw_qty_open),
             "raw_total_asset_qty": float(self.raw_total_asset_qty),
             "total_holdings_qty": float(self.raw_total_asset_qty),
             "open_exposure_qty": float(self.open_exposure_qty),
             "executable_exposure_qty": float(self.open_exposure_qty),
+            "open_exposure_lot_count": int(self.open_lot_count),
             "dust_tracking_qty": float(self.dust_tracking_qty),
+            "dust_remainder_lot_count": int(self.dust_tracking_lot_count),
             "reserved_exit_qty": float(self.reserved_exit_qty),
             "open_lot_count": int(self.open_lot_count),
             "dust_tracking_lot_count": int(self.dust_tracking_lot_count),
             "reserved_exit_lot_count": int(self.reserved_exit_lot_count),
             "sellable_executable_lot_count": int(self.sellable_executable_lot_count),
+            "submit_lot_count": int(self.submit_lot_count),
+            "position_state_lot_count": int(self.submit_lot_count),
             "sellable_executable_qty": float(self.sellable_executable_qty),
             "effective_min_trade_qty": float(self.effective_min_trade_qty),
             "exit_non_executable_reason": self.exit_non_executable_reason,
@@ -701,11 +720,14 @@ class NormalizedExposure:
             "has_dust_only_remainder": bool(self.has_dust_only_remainder),
             "normalized_exposure_qty": float(self.normalized_exposure_qty),
             "executable_exposure_qty": float(self.normalized_exposure_qty),
+            "submit_lot_source": self.sell_submit_lot_source,
+            "position_state_lot_source": self.sell_submit_lot_source,
             "dust_new_orders_allowed": bool(self.dust_operator_view.new_orders_allowed),
             "dust_resume_allowed": bool(self.dust_operator_view.resume_allowed),
             "dust_treat_as_flat": bool(self.dust_operator_view.treat_as_flat),
             "sell_submit_qty": float(self.sell_submit_qty),
             "sell_submit_qty_source": self.sell_submit_qty_source,
+            "sell_submit_lot_source": self.sell_submit_lot_source,
         }
 
 
@@ -729,8 +751,13 @@ class PositionStateModel:
     def effective_flat_due_to_harmless_dust(self) -> bool:
         return bool(self.normalized_exposure.harmless_dust_effective_flat)
 
+    @property
+    def semantic_basis(self) -> str:
+        return "lot-native"
+
     def as_dict(self) -> dict[str, object]:
         return {
+            "semantic_basis": self.semantic_basis,
             "raw_holdings": self.raw_holdings.as_dict(),
             "normalized_exposure": self.normalized_exposure.as_dict(),
             "operator_diagnostics": {
@@ -747,6 +774,13 @@ class PositionStateModel:
             "state_interpretation": self.state_interpretation.as_dict(),
             "raw_qty_open": float(self.raw_qty_open),
             "raw_total_asset_qty": float(self.normalized_exposure.raw_total_asset_qty),
+            "open_exposure_lot_count": int(self.normalized_exposure.open_lot_count),
+            "dust_remainder_lot_count": int(self.normalized_exposure.dust_tracking_lot_count),
+            "sellable_executable_lot_count": int(self.normalized_exposure.sellable_executable_lot_count),
+            "submit_lot_count": int(self.normalized_exposure.submit_lot_count),
+            "position_state_lot_count": int(self.normalized_exposure.submit_lot_count),
+            "submit_lot_source": self.normalized_exposure.sell_submit_lot_source,
+            "position_state_lot_source": self.normalized_exposure.sell_submit_lot_source,
             "effective_flat": bool(self.effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.effective_flat_due_to_harmless_dust),
             "fields": dict(self.fields),
@@ -1449,30 +1483,6 @@ def build_normalized_exposure(
         if isinstance(dust_context, DustDisplayContext)
         else build_dust_display_context(dust_context)
     )
-    inventory = _normalize_position_inventory(
-        raw_qty_open=raw_qty_open,
-        raw_total_asset_qty=raw_total_asset_qty,
-        open_exposure_qty=open_exposure_qty,
-        dust_tracking_qty=dust_tracking_qty,
-        reserved_exit_qty=reserved_exit_qty,
-    )
-    normalized_min_qty = 0.0 if min_qty is None else max(0.0, float(min_qty))
-    executable_exposure = _derive_executable_open_exposure(
-        inventory=inventory,
-        market_price=market_price,
-        min_qty=normalized_min_qty,
-        qty_step=0.0 if qty_step is None else float(qty_step),
-        min_notional_krw=0.0 if min_notional_krw is None else float(min_notional_krw),
-        max_qty_decimals=max_qty_decimals,
-        exit_fee_ratio=exit_fee_ratio,
-        exit_slippage_bps=exit_slippage_bps,
-        exit_buffer_ratio=exit_buffer_ratio,
-    )
-    normalized_total_asset_qty = inventory.raw_total_asset_qty
-    normalized_dust_tracking_qty = executable_exposure.normalized_dust_tracking_qty
-    effective_open_exposure_qty = executable_exposure.effective_open_exposure_qty
-    effective_reserved_exit_qty = executable_exposure.effective_reserved_exit_qty
-    sellable_executable_qty = executable_exposure.sellable_executable_qty
     lot_rules = build_market_lot_rules(
         market_id="unknown",
         market_price=market_price,
@@ -1502,57 +1512,89 @@ def build_normalized_exposure(
         exit_buffer_ratio=exit_buffer_ratio,
         source_mode="derived",
     )
-    normalized_open_lot_count = int(
-        open_lot_count
-        if open_lot_count is not None
-        else qty_to_executable_lot_count(qty=effective_open_exposure_qty, lot_rules=lot_rules)
+    inventory = _normalize_position_inventory(
+        raw_qty_open=raw_qty_open,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
+        reserved_exit_qty=reserved_exit_qty,
     )
-    normalized_dust_lot_count = int(
-        dust_tracking_lot_count
-        if dust_tracking_lot_count is not None
-        else qty_to_executable_lot_count(qty=normalized_dust_tracking_qty, lot_rules=lot_rules)
+    normalized_min_qty = 0.0 if min_qty is None else max(0.0, float(min_qty))
+    executable_exposure = _derive_executable_open_exposure(
+        inventory=inventory,
+        market_price=market_price,
+        min_qty=normalized_min_qty,
+        qty_step=0.0 if qty_step is None else float(qty_step),
+        min_notional_krw=0.0 if min_notional_krw is None else float(min_notional_krw),
+        max_qty_decimals=max_qty_decimals,
+        exit_fee_ratio=exit_fee_ratio,
+        exit_slippage_bps=exit_slippage_bps,
+        exit_buffer_ratio=exit_buffer_ratio,
     )
-    normalized_reserved_exit_lot_count = int(
-        qty_to_executable_lot_count(qty=effective_reserved_exit_qty, lot_rules=lot_rules)
+    normalized_open_lot_count = max(0, int(open_lot_count or 0))
+    normalized_dust_lot_count = max(0, int(dust_tracking_lot_count or 0))
+    lot_open_exposure_qty = lot_count_to_qty(
+        lot_count=normalized_open_lot_count,
+        lot_size=float(lot_rules.lot_size),
     )
-    normalized_sellable_lot_count = int(qty_to_executable_lot_count(qty=sellable_executable_qty, lot_rules=lot_rules))
-    if normalized_open_lot_count <= 0:
-        effective_open_exposure_qty = 0.0
-        sellable_executable_qty = 0.0
-        normalized_dust_tracking_qty = max(normalized_dust_tracking_qty, normalized_total_asset_qty)
-        normalized_dust_lot_count = int(qty_to_executable_lot_count(qty=normalized_dust_tracking_qty, lot_rules=lot_rules))
-        normalized_sellable_lot_count = 0
+    lot_dust_tracking_qty = lot_count_to_qty(
+        lot_count=normalized_dust_lot_count,
+        lot_size=float(lot_rules.lot_size),
+    )
+    effective_open_exposure_qty = max(0.0, float(executable_exposure.effective_open_exposure_qty))
+    if effective_open_exposure_qty <= DUST_POSITION_EPS and normalized_open_lot_count > 0:
+        effective_open_exposure_qty = lot_open_exposure_qty
+    normalized_dust_tracking_qty = max(0.0, float(executable_exposure.normalized_dust_tracking_qty))
+    if normalized_dust_tracking_qty <= DUST_POSITION_EPS and normalized_dust_lot_count > 0:
+        normalized_dust_tracking_qty = lot_dust_tracking_qty
+    if (
+        normalized_dust_tracking_qty <= DUST_POSITION_EPS
+        and normalized_open_lot_count <= 0
+        and float(inventory.raw_total_asset_qty) > DUST_POSITION_EPS
+    ):
+        normalized_dust_tracking_qty = float(inventory.raw_total_asset_qty)
+    normalized_total_asset_qty = max(
+        0.0,
+        float(inventory.raw_total_asset_qty)
+        if float(inventory.raw_total_asset_qty) > DUST_POSITION_EPS
+        else effective_open_exposure_qty + normalized_dust_tracking_qty,
+    )
+    effective_reserved_exit_qty = min(
+        effective_open_exposure_qty,
+        max(0.0, float(inventory.reserved_exit_qty)),
+    )
+    normalized_reserved_exit_lot_count = max(
+        0,
+        int(qty_to_executable_lot_count(qty=effective_reserved_exit_qty, lot_rules=lot_rules)),
+    )
+    normalized_sellable_lot_count = max(0, normalized_open_lot_count - normalized_reserved_exit_lot_count)
+    sellable_executable_qty = max(0.0, effective_open_exposure_qty - effective_reserved_exit_qty)
     has_any_position_residue = bool(normalized_total_asset_qty > DUST_POSITION_EPS)
     entry_allowed = bool(
         normalized_total_asset_qty <= DUST_POSITION_EPS
         or should_treat_as_flat_for_entry_gate(display_context)
     )
     effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
-    executable_sell_qty = max(0.0, float(sellable_executable_qty))
-    executable_sell_ready = bool(
-        normalized_open_lot_count > 0
-        and executable_sell_qty > DUST_POSITION_EPS
-        and (
-            normalized_min_qty <= DUST_POSITION_EPS
-            or executable_sell_qty >= normalized_min_qty
-        )
-    )
     # `normalized_exposure_active` remains the broader lifecycle flag used by
     # restart/reconcile and operator-facing state summaries. It stays true for
     # active open lots or reserved exit inventory, while the explicit
     # executable-exposure flags below distinguish what can be traded normally.
     normalized_active = bool(normalized_open_lot_count > 0 or normalized_reserved_exit_lot_count > 0)
-    has_executable_exposure = bool(executable_sell_ready)
+    has_executable_exposure = bool(normalized_sellable_lot_count > 0)
     has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
     has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
     normalized_qty = float(sellable_executable_qty if has_executable_exposure else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
     elif normalized_total_asset_qty > DUST_POSITION_EPS:
-        entry_block_reason = "position_has_executable_exposure"
+        entry_block_reason = (
+            "legacy_lot_metadata_missing"
+            if normalized_open_lot_count <= 0 and not has_executable_exposure
+            else "position_has_executable_exposure"
+        )
     else:
         entry_block_reason = "none"
-    if executable_sell_ready:
+    if has_executable_exposure:
         exit_allowed = True
         exit_block_reason = "none"
         terminal_state = "open_exposure"
@@ -1570,9 +1612,10 @@ def build_normalized_exposure(
         terminal_state = "flat"
     else:
         exit_allowed = False
-        exit_block_reason = str(
-            executable_exposure.executable_lot.exit_non_executable_reason
-            or "no_executable_exit_lot"
+        exit_block_reason = (
+            "legacy_lot_metadata_missing"
+            if normalized_open_lot_count <= 0
+            else str(executable_exposure.executable_lot.exit_non_executable_reason or "no_executable_exit_lot")
         )
         terminal_state = "non_executable_position"
     return NormalizedExposure(
@@ -1625,10 +1668,10 @@ def build_position_state_interpretation(
     }
     operator_message_map = {
         "flat": "No position remains in the shared state model.",
-        "open_exposure": "Executable open exposure remains available for a normal SELL path.",
-        "reserved_exit_pending": "Executable exposure exists, but current sellable inventory is already reserved by open SELL orders.",
-        "dust_only": "Residual holdings are tracked as dust at the state layer, so exit is a HOLD/no-submit outcome rather than a submit failure.",
-        "non_executable_position": "Residual open exposure remains in state, but exchange constraints make it non-executable until operator review or state changes.",
+        "open_exposure": "Executable open exposure remains available as sellable lots for a normal SELL path.",
+        "reserved_exit_pending": "Executable exposure exists, but the sellable lots are already reserved by open SELL orders.",
+        "dust_only": "Residual holdings are tracked as dust lots at the state layer, so exit is a HOLD/no-submit outcome rather than a submit failure.",
+        "non_executable_position": "Residual open exposure remains in state, but exchange constraints make the lots non-executable until operator review or state changes.",
     }
     entry_status = (
         "allowed"
@@ -1663,23 +1706,25 @@ def _normalize_position_inventory(
     reserved_exit_qty: float | None,
 ) -> _NormalizedPositionInventory:
     normalized_raw_qty = max(0.0, float(raw_qty_open))
+    normalized_total_asset_qty = (
+        max(0.0, float(raw_total_asset_qty))
+        if raw_total_asset_qty is not None
+        else normalized_raw_qty
+    )
+    normalized_dust_tracking_qty = (
+        max(0.0, float(dust_tracking_qty))
+        if dust_tracking_qty is not None
+        else 0.0
+    )
     return _NormalizedPositionInventory(
         raw_qty_open=normalized_raw_qty,
-        raw_total_asset_qty=(
-            max(0.0, float(raw_total_asset_qty))
-            if raw_total_asset_qty is not None
-            else normalized_raw_qty
-        ),
+        raw_total_asset_qty=normalized_total_asset_qty,
         open_exposure_qty=(
             max(0.0, float(open_exposure_qty))
             if open_exposure_qty is not None
-            else normalized_raw_qty
-        ),
-        dust_tracking_qty=(
-            max(0.0, float(dust_tracking_qty))
-            if dust_tracking_qty is not None
             else 0.0
         ),
+        dust_tracking_qty=normalized_dust_tracking_qty,
         reserved_exit_qty=(
             max(0.0, float(reserved_exit_qty))
             if reserved_exit_qty is not None

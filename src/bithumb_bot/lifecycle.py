@@ -4,6 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 
+from .config import settings
 from .dust import (
     DUST_TRACKING_LOT_STATE,
     OPEN_EXPOSURE_LOT_STATE,
@@ -15,6 +16,7 @@ from .dust import (
     build_executable_lot,
     is_strictly_below_min_qty,
 )
+from .lot_model import build_market_lot_rules, lot_count_to_qty, qty_to_executable_lot_count
 from .markets import parse_user_market_input
 
 OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
@@ -36,7 +38,12 @@ ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED = "degraded_recovery_unatt
 
 @dataclass(frozen=True)
 class PositionLotSnapshot:
-    """Recovery-facing lot summary with explicit raw/executable/dust quantities."""
+    """Recovery-facing lot summary with explicit lot-native exposure counts.
+
+    The executable semantic authority is the lot state/count layer. The qty
+    fields remain available as raw or compatibility quantities for accounting,
+    reporting, and broker reconciliation.
+    """
 
     raw_open_exposure_qty: float
     executable_open_exposure_qty: float
@@ -46,6 +53,7 @@ class PositionLotSnapshot:
     dust_tracking_lot_count: int
     effective_min_trade_qty: float
     exit_non_executable_reason: str
+    position_semantic_basis: str
 
     @property
     def total_holdings_qty(self) -> float:
@@ -59,8 +67,14 @@ class PositionLotSnapshot:
     def tracked_dust_qty(self) -> float:
         return float(self.dust_tracking_qty)
 
+    @property
+    def semantic_basis(self) -> str:
+        return str(self.position_semantic_basis or "lot-native")
+
     def as_dict(self) -> dict[str, float | int | str]:
         return {
+            "semantic_basis": self.semantic_basis,
+            "position_semantic_basis": self.semantic_basis,
             "raw_open_exposure_qty": float(self.raw_open_exposure_qty),
             "raw_total_asset_qty": float(self.raw_total_asset_qty),
             "total_holdings_qty": float(self.total_holdings_qty),
@@ -68,11 +82,57 @@ class PositionLotSnapshot:
             "executable_exposure_qty": float(self.executable_exposure_qty),
             "dust_tracking_qty": float(self.dust_tracking_qty),
             "tracked_dust_qty": float(self.tracked_dust_qty),
+            "open_exposure_lot_count": int(self.open_lot_count),
             "open_lot_count": int(self.open_lot_count),
             "dust_tracking_lot_count": int(self.dust_tracking_lot_count),
             "effective_min_trade_qty": float(self.effective_min_trade_qty),
             "exit_non_executable_reason": self.exit_non_executable_reason,
         }
+
+
+def _build_fill_lot_rules(*, pair: str, market_price: float) -> object:
+    """Build deterministic lot rules for fill lifecycle accounting.
+
+    The lifecycle layer must not depend on a live order-rules fetch to split or
+    consume lot-native exposure. Use the local configuration fallback inputs so
+    ledger semantics stay stable even in offline tests and recovery flows.
+    """
+
+    fallback_rules = type(
+        "_LifecycleLotRules",
+        (object,),
+        {
+            "min_qty": float(settings.LIVE_MIN_ORDER_QTY),
+            "qty_step": float(settings.LIVE_ORDER_QTY_STEP),
+            "min_notional_krw": float(settings.MIN_ORDER_NOTIONAL_KRW),
+            "max_qty_decimals": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        },
+    )()
+    return build_market_lot_rules(
+        market_id=str(pair),
+        market_price=float(market_price),
+        rules=fallback_rules,
+        source_mode="ledger",
+    )
+
+
+def _row_executable_lot_count(row: object, *, qty_open: float, lot_rules: object) -> int:
+    raw_count = int(_row_value(row, "executable_lot_count", 7) or 0)
+    if raw_count > 0:
+        return raw_count
+    # Do not infer executable-lot authority from qty alone. Legacy rows that
+    # lack an executable lot count must fail closed rather than silently
+    # recreating executable exposure semantics.
+    return 0
+
+
+def _row_dust_tracking_lot_count(row: object, *, qty_open: float) -> int:
+    raw_count = int(_row_value(row, "dust_tracking_lot_count", 8) or 0)
+    if raw_count > 0:
+        return raw_count
+    # Dust tracking is operator evidence only; qty without explicit dust state
+    # is not authoritative enough to recreate dust semantics.
+    return 0
 
 
 def _row_value(row: object, key: str, index: int) -> object | None:
@@ -239,9 +299,22 @@ def apply_fill_lifecycle(
     allow_entry_decision_fallback: bool = True,
 ) -> None:
     if side == "BUY":
-        # BUY fills always create the real position lot; dust_tracking is a
-        # downstream operator-only state used only when harmless dust is later
-        # reclassified.
+        # BUY fills are persisted as lot-native exposure plus explicit dust.
+        # The stored executable quantity is the exact executable lot multiple;
+        # the non-executable remainder is tracked separately as dust evidence.
+        lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
+        fill_lot = build_executable_lot(
+            qty=float(qty),
+            market_price=float(price),
+            min_qty=float(lot_rules.lot_size),
+            qty_step=float(lot_rules.lot_size),
+            min_notional_krw=float(lot_rules.min_notional_krw),
+            max_qty_decimals=int(lot_rules.max_qty_decimals),
+        )
+        executable_lot_count = int(
+            qty_to_executable_lot_count(qty=float(fill_lot.executable_qty), lot_rules=lot_rules)
+        )
+        dust_lot_count = 1 if fill_lot.dust_qty > 1e-12 else 0
         resolved_entry_decision_id = entry_decision_id
         resolved_strategy_name = strategy_name
         resolved_entry_decision_linkage = (
@@ -264,38 +337,128 @@ def apply_fill_lifecycle(
             resolved_entry_decision_linkage = lookup_linkage
         elif resolved_entry_decision_id is None and not allow_entry_decision_fallback:
             resolved_entry_decision_linkage = ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED
-        conn.execute(
-            """
-            INSERT INTO open_position_lots(
-                pair,
-                entry_trade_id,
-                entry_client_order_id,
-                entry_fill_id,
-                entry_ts,
-                entry_price,
-                qty_open,
-                position_state,
-                entry_fee_total,
-                strategy_name,
-                entry_decision_id,
-                entry_decision_linkage
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(pair),
-                int(trade_id),
-                str(client_order_id),
-                fill_id,
-                int(fill_ts),
-                float(price),
-                float(qty),
-                OPEN_EXPOSURE_LOT_STATE,
-                float(fee),
-                resolved_strategy_name,
-                resolved_entry_decision_id,
-                resolved_entry_decision_linkage,
-            ),
-        )
+        total_fill_qty = max(0.0, float(qty))
+        executable_qty = max(0.0, float(fill_lot.executable_qty))
+        dust_qty = max(0.0, float(fill_lot.dust_qty))
+        if executable_qty > 1e-12:
+            executable_fee = float(fee) * (executable_qty / total_fill_qty) if total_fill_qty > 1e-12 else float(fee)
+            conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair,
+                    entry_trade_id,
+                    entry_client_order_id,
+                    entry_fill_id,
+                    entry_ts,
+                    entry_price,
+                    qty_open,
+                    executable_lot_count,
+                    dust_tracking_lot_count,
+                    position_semantic_basis,
+                    position_state,
+                    entry_fee_total,
+                    strategy_name,
+                    entry_decision_id,
+                    entry_decision_linkage
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(pair),
+                    int(trade_id),
+                    str(client_order_id),
+                    fill_id,
+                    int(fill_ts),
+                    float(price),
+                    executable_qty,
+                    executable_lot_count,
+                    0,
+                    "lot-native",
+                    OPEN_EXPOSURE_LOT_STATE,
+                    float(executable_fee),
+                    resolved_strategy_name,
+                    resolved_entry_decision_id,
+                    resolved_entry_decision_linkage,
+                ),
+            )
+        if dust_qty > 1e-12:
+            dust_fee = float(fee) - (float(fee) * (executable_qty / total_fill_qty) if total_fill_qty > 1e-12 else float(fee))
+            conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair,
+                    entry_trade_id,
+                    entry_client_order_id,
+                    entry_fill_id,
+                    entry_ts,
+                    entry_price,
+                    qty_open,
+                    executable_lot_count,
+                    dust_tracking_lot_count,
+                    position_semantic_basis,
+                    position_state,
+                    entry_fee_total,
+                    strategy_name,
+                    entry_decision_id,
+                    entry_decision_linkage
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(pair),
+                    int(trade_id),
+                    str(client_order_id),
+                    fill_id,
+                    int(fill_ts),
+                    float(price),
+                    dust_qty,
+                    0,
+                    dust_lot_count or 1,
+                    "lot-native",
+                    DUST_TRACKING_LOT_STATE,
+                    float(dust_fee),
+                    resolved_strategy_name,
+                    resolved_entry_decision_id,
+                    resolved_entry_decision_linkage,
+                ),
+            )
+        if executable_qty <= 1e-12 and dust_qty <= 1e-12:
+            conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair,
+                    entry_trade_id,
+                    entry_client_order_id,
+                    entry_fill_id,
+                    entry_ts,
+                    entry_price,
+                    qty_open,
+                    executable_lot_count,
+                    dust_tracking_lot_count,
+                    position_semantic_basis,
+                    position_state,
+                    entry_fee_total,
+                    strategy_name,
+                    entry_decision_id,
+                    entry_decision_linkage
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(pair),
+                    int(trade_id),
+                    str(client_order_id),
+                    fill_id,
+                    int(fill_ts),
+                    float(price),
+                    0.0,
+                    0,
+                    1,
+                    "lot-native",
+                    DUST_TRACKING_LOT_STATE,
+                    float(fee),
+                    resolved_strategy_name,
+                    resolved_entry_decision_id,
+                    resolved_entry_decision_linkage,
+                ),
+            )
         return
 
     if side != "SELL":
@@ -303,25 +466,30 @@ def apply_fill_lifecycle(
 
     # SELL lifecycle consumes only the sellable open_exposure path.
     # dust_tracking lots remain operator evidence and are never matched here.
+    lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
     rows = _fetch_sellable_open_exposure_lots(conn, pair=str(pair))
 
-    remaining = float(qty)
-    if remaining <= 0:
+    remaining_lots = int(qty_to_executable_lot_count(qty=float(qty), lot_rules=lot_rules))
+    if remaining_lots <= 0:
         return
 
-    total_exit_qty = float(qty)
+    total_exit_qty = lot_count_to_qty(lot_count=remaining_lots, lot_size=float(lot_rules.lot_size))
     eps = 1e-12
     for row in rows:
-        if remaining <= eps:
+        if remaining_lots <= 0:
             break
 
         lot = row
         lot_qty = float(_row_value(lot, "qty_open", 6) or 0.0)
-        matched_qty = min(lot_qty, remaining)
-        if matched_qty <= eps:
+        lot_count = _row_executable_lot_count(lot, qty_open=lot_qty, lot_rules=lot_rules)
+        if lot_count <= 0:
             continue
+        matched_lots = min(lot_count, remaining_lots)
+        if matched_lots <= 0:
+            continue
+        matched_qty = lot_count_to_qty(lot_count=matched_lots, lot_size=float(lot_rules.lot_size))
 
-        entry_fee_total = float(_row_value(lot, "entry_fee_total", 8) or 0.0)
+        entry_fee_total = float(_row_value(lot, "entry_fee_total", 10) or 0.0)
         entry_fee_alloc = (entry_fee_total * (matched_qty / lot_qty)) if lot_qty > eps else 0.0
         exit_fee_alloc = float(fee) * (matched_qty / total_exit_qty)
 
@@ -374,12 +542,12 @@ def apply_fill_lifecycle(
                 float(fee_total),
                 float(net_pnl),
                 float(holding_time_seconds),
-                strategy_name or _row_value(lot, "strategy_name", 9),
-                entry_decision_id if entry_decision_id is not None else _row_value(lot, "entry_decision_id", 10),
+                strategy_name or _row_value(lot, "strategy_name", 11),
+                entry_decision_id if entry_decision_id is not None else _row_value(lot, "entry_decision_id", 12),
                 (
                     ENTRY_DECISION_LINKAGE_DIRECT
                     if entry_decision_id is not None
-                    else str(_row_value(lot, "entry_decision_linkage", 11) or "")
+                    else str(_row_value(lot, "entry_decision_linkage", 13) or "")
                 ),
                 exit_decision_id,
                 exit_reason,
@@ -387,21 +555,28 @@ def apply_fill_lifecycle(
             ),
         )
 
-        qty_open_after = max(0.0, lot_qty - matched_qty)
+        remaining_lot_count = max(0, lot_count - matched_lots)
+        qty_open_after = lot_count_to_qty(lot_count=remaining_lot_count, lot_size=float(lot_rules.lot_size))
         fee_remaining = max(0.0, entry_fee_total - entry_fee_alloc)
         conn.execute(
             """
             UPDATE open_position_lots
-            SET qty_open=?, entry_fee_total=?
+            SET qty_open=?, executable_lot_count=?, entry_fee_total=?
             WHERE id=?
             """,
-            (qty_open_after, fee_remaining, int(_row_value(lot, "id", 0) or 0)),
+            (
+                qty_open_after,
+                remaining_lot_count,
+                fee_remaining,
+                int(_row_value(lot, "id", 0) or 0),
+            ),
         )
 
-        remaining -= matched_qty
+        remaining_lots -= matched_lots
 
-    if remaining > 1e-9:
-        fallback_exit_fee = float(fee) * (remaining / total_exit_qty)
+    if remaining_lots > 0:
+        remaining_qty = lot_count_to_qty(lot_count=remaining_lots, lot_size=float(lot_rules.lot_size))
+        fallback_exit_fee = float(fee) * (remaining_qty / total_exit_qty) if total_exit_qty > eps else 0.0
         conn.execute(
             """
             INSERT INTO trade_lifecycles(
@@ -439,7 +614,7 @@ def apply_fill_lifecycle(
                 fill_id,
                 int(fill_ts),
                 int(fill_ts),
-                float(remaining),
+                float(remaining_qty),
                 float(price),
                 float(price),
                 0.0,
@@ -456,7 +631,13 @@ def apply_fill_lifecycle(
         )
 
     conn.execute(
-        "DELETE FROM open_position_lots WHERE pair=? AND position_state=? AND qty_open <= ?",
+        """
+        DELETE FROM open_position_lots
+        WHERE pair=?
+          AND position_state=?
+          AND qty_open <= ?
+          AND COALESCE(executable_lot_count, 0) <= 0
+        """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE, eps),
     )
 
@@ -508,7 +689,13 @@ def mark_harmless_dust_positions(
         conn.execute(
             """
             UPDATE open_position_lots
-            SET position_state=?
+            SET position_state=?,
+                position_semantic_basis='lot-native',
+                executable_lot_count=0,
+                dust_tracking_lot_count=CASE
+                    WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count
+                    ELSE 1
+                END
             WHERE id=?
             """,
             (
@@ -529,17 +716,21 @@ def summarize_position_lots(
     try:
         open_row = conn.execute(
             """
-            SELECT COALESCE(SUM(qty_open), 0.0), COUNT(*)
+            SELECT
+                COALESCE(SUM(qty_open), 0.0),
+                COALESCE(SUM(CASE WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count ELSE 1 END), 0)
             FROM open_position_lots
-            WHERE pair=? AND position_state=? AND qty_open > 1e-12
+            WHERE pair=? AND position_state=? AND COALESCE(executable_lot_count, 0) > 0
             """,
             (str(pair), OPEN_EXPOSURE_LOT_STATE),
         ).fetchone()
         dust_row = conn.execute(
             """
-            SELECT COALESCE(SUM(qty_open), 0.0), COUNT(*)
+            SELECT
+                COALESCE(SUM(qty_open), 0.0),
+                COALESCE(SUM(CASE WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN dust_tracking_lot_count ELSE 1 END), 0)
             FROM open_position_lots
-            WHERE pair=? AND position_state=? AND qty_open > 1e-12
+            WHERE pair=? AND position_state=? AND COALESCE(dust_tracking_lot_count, 0) > 0
             """,
             (str(pair), DUST_TRACKING_LOT_STATE),
         ).fetchone()
@@ -551,22 +742,28 @@ def summarize_position_lots(
     open_lot_count = max(0, int(open_row[1] if open_row is not None else 0))
     dust_lot_count = max(0, int(dust_row[1] if dust_row is not None else 0))
     if executable_lot is None:
-        executable_lot = build_executable_lot(
-            qty=raw_open_qty,
-            market_price=None,
-            min_qty=0.0,
-            qty_step=0.0,
-            min_notional_krw=0.0,
-        )
+        executable_qty = 0.0
+        effective_min_trade_qty = 0.0
+        if open_lot_count > 0:
+            exit_non_executable_reason = "none"
+        elif dust_lot_count > 0:
+            exit_non_executable_reason = "dust_only_remainder"
+        else:
+            exit_non_executable_reason = "no_executable_open_lots"
+    else:
+        executable_qty = float(executable_lot.executable_qty)
+        effective_min_trade_qty = float(executable_lot.effective_min_trade_qty)
+        exit_non_executable_reason = str(executable_lot.exit_non_executable_reason)
     return PositionLotSnapshot(
         raw_open_exposure_qty=raw_open_qty,
-        executable_open_exposure_qty=float(executable_lot.executable_qty),
-        dust_tracking_qty=max(0.0, tracked_dust_qty + float(executable_lot.dust_qty)),
+        executable_open_exposure_qty=float(executable_qty),
+        dust_tracking_qty=max(0.0, tracked_dust_qty + (0.0 if executable_lot is None else float(executable_lot.dust_qty))),
         raw_total_asset_qty=max(0.0, raw_open_qty + tracked_dust_qty),
-        open_lot_count=open_lot_count,
-        dust_tracking_lot_count=dust_lot_count,
-        effective_min_trade_qty=float(executable_lot.effective_min_trade_qty),
-        exit_non_executable_reason=str(executable_lot.exit_non_executable_reason),
+        open_lot_count=max(0, open_lot_count),
+        dust_tracking_lot_count=max(0, dust_lot_count),
+        effective_min_trade_qty=float(effective_min_trade_qty),
+        exit_non_executable_reason=exit_non_executable_reason,
+        position_semantic_basis="lot-native",
     )
 
 
@@ -612,7 +809,13 @@ def reclassify_non_executable_open_exposure(
     result = conn.execute(
         """
         UPDATE open_position_lots
-        SET position_state=?
+        SET position_state=?,
+            position_semantic_basis='lot-native',
+            dust_tracking_lot_count=CASE
+                WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count
+                ELSE 1
+            END,
+            executable_lot_count=0
         WHERE pair=?
           AND position_state=?
           AND qty_open > 1e-12
@@ -643,15 +846,16 @@ def _fetch_sellable_open_exposure_lots(
             entry_ts,
             entry_price,
             qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
             position_state,
             entry_fee_total,
             strategy_name,
             entry_decision_id,
             entry_decision_linkage
         FROM open_position_lots
-        WHERE pair=? AND position_state=? AND qty_open > 0
+        WHERE pair=? AND position_state=? AND COALESCE(executable_lot_count, 0) > 0
         ORDER BY entry_ts ASC, id ASC
         """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE),
     ).fetchall()
-

@@ -54,6 +54,7 @@ from .order_lookup_v1 import (
     status_from_state as v1_status_from_state,
 )
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
+from .order_list_v1 import build_recovery_order_list_params
 from .order_list_v1 import V1ListNormalizedOrder
 from .order_payloads import (
     build_order_payload,
@@ -91,8 +92,18 @@ _RATE_LIMIT_ERROR_NAMES = frozenset({"too_many_requests"})
 _SERVER_ERROR_ERROR_NAMES = frozenset({"server_error", "internal_server_error", "service_unavailable", "gateway_timeout"})
 _PARAM_ERROR_NAMES = frozenset({"invalid_parameter", "invalid_price", "invalid_price_ask", "invalid_price_bid", "under_price_limit_ask", "under_price_limit_bid"})
 _ORDER_RULE_ERROR_NAMES = frozenset({"cross_trading", "under_min_total", "too_many_orders"})
-_NOT_FOUND_ERROR_NAMES = frozenset({"order_not_found"})
+_NOT_FOUND_ERROR_NAMES = frozenset({"order_not_found", "deposit_not_found", "withdraw_not_found"})
 _ORDER_NOT_READY_ERROR_NAMES = frozenset({"order_not_ready"})
+_DOCUMENTED_PRIVATE_ERROR_MESSAGES: dict[str, tuple[str, str, str, bool, bool, bool]] = {
+    "currency does not have a valid value": (
+        "INVALID_PARAMETER",
+        "unsupported currency or market code supplied",
+        "INVALID_REQUEST",
+        False,
+        True,
+        False,
+    ),
+}
 
 
 class BithumbAuthError(BrokerRejectError):
@@ -166,23 +177,32 @@ _DOCUMENTED_PRIVATE_ERROR_CODES: dict[str, tuple[str, str, str, bool, bool, bool
     "invalid_access_key": ("AUTH_INVALID_ACCESS_KEY", "API access key rejected by broker", "AUTHENTICATION", False, True, False),
     "notallowip": ("AUTH_IP_DENIED", "client IP is not allowed for this API key", "PERMISSION_SCOPE", False, True, False),
     "out_of_scope": ("PERMISSION", "API key scope/permission denied", "PERMISSION_SCOPE", False, True, False),
+    "invalid_parameter": ("INVALID_PARAMETER", "invalid parameter provided to broker request", "INVALID_REQUEST", False, True, False),
+    "invalid_price": ("INVALID_PRICE", "order price is invalid for the requested side or tick", "INVALID_REQUEST", False, True, False),
+    "invalid_price_ask": ("INVALID_PRICE", "order price is invalid for the requested side or tick", "INVALID_REQUEST", False, True, False),
+    "invalid_price_bid": ("INVALID_PRICE", "order price is invalid for the requested side or tick", "INVALID_REQUEST", False, True, False),
+    "under_price_limit_ask": ("UNDER_PRICE_LIMIT", "ask price is below the documented side minimum", "PRETRADE_GUARD", False, True, False),
+    "under_price_limit_bid": ("UNDER_PRICE_LIMIT", "bid price is below the documented side minimum", "PRETRADE_GUARD", False, True, False),
+    "under_min_total": ("UNDER_MIN_TOTAL", "order notional is below the documented minimum", "PRETRADE_GUARD", False, False, False),
+    "too_many_orders": ("TOO_MANY_ORDERS", "order limit has been reached", "PRETRADE_GUARD", False, False, False),
+    "too_many_requests": ("RATE_LIMITED", "private API rate limit or overload encountered", "THROTTLED_BACKOFF", True, False, False),
     "bank_account_required": ("ACCOUNT_SETUP_REQUIRED", "real-name deposit/withdrawal account registration is required", "PREFLIGHT_BLOCKED", False, True, False),
     "two_factor_auth_required": ("AUTH_CHANNEL_REQUIRED", "valid authentication channel is required", "AUTHENTICATION", False, True, False),
     "blocked_member_id": ("ACCOUNT_RESTRICTED", "service usage restricted by operational policy", "PERMISSION_SCOPE", False, True, False),
     "withdraw_insufficient_balance": ("WITHDRAW_LIMIT_BLOCKED", "withdrawal limit exceeded", "PREFLIGHT_BLOCKED", False, True, False),
     "server_error": ("SERVER_INTERNAL_FAILURE", "server/internal failure reported by broker", "SERVER_INTERNAL_FAILURE", True, False, False),
-    "too_many_requests": ("RATE_LIMITED", "private API rate limit or overload encountered", "THROTTLED_BACKOFF", True, False, False),
     "order_not_found": ("ORDER_NOT_FOUND", "order lookup/cancel target not found", "NOT_FOUND_NEEDS_RECONCILE", False, False, True),
+    "deposit_not_found": ("LOOKUP_NOT_FOUND", "deposit lookup target not found", "NOT_FOUND_NEEDS_RECONCILE", False, False, True),
+    "withdraw_not_found": ("LOOKUP_NOT_FOUND", "withdraw lookup target not found", "NOT_FOUND_NEEDS_RECONCILE", False, False, True),
     "order_not_ready": ("ORDER_NOT_READY", "order not ready yet; refresh and retry later", "ORDER_NOT_READY", True, False, False),
     "cross_trading": ("CROSS_TRADING", "exchange rejected self-crossing order", "EXCHANGE_RULE_VIOLATION", False, False, False),
-    "under_min_total": ("FUNDS", "balance or orderable-funds check failed", "PRETRADE_GUARD", False, False, False),
-    "too_many_orders": ("FUNDS", "balance or orderable-funds check failed", "PRETRADE_GUARD", False, False, False),
-    "invalid_parameter": ("PARAM", "market/order parameter validation failed", "INVALID_REQUEST", False, False, False),
-    "invalid_price": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
-    "invalid_price_ask": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
-    "invalid_price_bid": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
-    "under_price_limit_ask": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
-    "under_price_limit_bid": ("PARAM", "market/order parameter validation failed", "EXCHANGE_RULE_VIOLATION", False, False, False),
+}
+
+_FALLBACK_PRIVATE_ERROR_CODES: dict[str, tuple[str, str, str, bool, bool, bool]] = {
+    "too_many_requests": ("RATE_LIMITED", "private API rate limit or overload encountered", "THROTTLED_BACKOFF", True, False, False),
+    "duplicate_client_order_id": ("DUPLICATE_CLIENT_ORDER_ID", "duplicate client order id or identifier conflict", "DUPLICATE_CLIENT_ORDER_ID", False, False, False),
+    "id_conflict": ("DUPLICATE_CLIENT_ORDER_ID", "duplicate client order id or identifier conflict", "DUPLICATE_CLIENT_ORDER_ID", False, False, False),
+    "cancel_not_allowed": ("CANCEL_NOT_ALLOWED", "cancel not allowed in current state", "CANCEL_NOT_ALLOWED", False, False, False),
 }
 
 
@@ -231,6 +251,25 @@ def _documented_private_error_descriptor(error_name: str) -> tuple[str, str, str
     return _DOCUMENTED_PRIVATE_ERROR_CODES.get(str(error_name or "").strip().lower())
 
 
+def _documented_private_error_descriptor_from_detail(
+    *,
+    error_name: str,
+    detail: str,
+) -> tuple[str, str, str, bool, bool, bool] | None:
+    descriptor = _documented_private_error_descriptor(error_name)
+    if descriptor is not None:
+        return descriptor
+    normalized_detail = str(detail or "").strip().lower()
+    for message, candidate in _DOCUMENTED_PRIVATE_ERROR_MESSAGES.items():
+        if message in normalized_detail:
+            return candidate
+    return None
+
+
+def _fallback_private_error_descriptor(error_name: str) -> tuple[str, str, str, bool, bool, bool] | None:
+    return _FALLBACK_PRIVATE_ERROR_CODES.get(str(error_name or "").strip().lower())
+
+
 def _retry_backoff_delay(*, attempt: int, bucket: str, reason: str) -> float:
     normalized_attempt = max(0, int(attempt))
     if reason == "rate_limit":
@@ -243,7 +282,8 @@ def _retry_backoff_delay(*, attempt: int, bucket: str, reason: str) -> float:
 def classify_private_api_failure(exc: Exception) -> PrivateApiFailureClassification:
     detail = str(exc).lower()
     error_name = _private_error_name(detail)
-    documented = _documented_private_error_descriptor(error_name)
+    documented = _documented_private_error_descriptor_from_detail(error_name=error_name, detail=detail)
+    fallback = _fallback_private_error_descriptor(error_name)
     if isinstance(exc, BithumbAuthError):
         return PrivateApiFailureClassification(
             category="AUTH_OR_CONFIG_ERROR",
@@ -252,6 +292,15 @@ def classify_private_api_failure(exc: Exception) -> PrivateApiFailureClassificat
         )
     if documented is not None:
         _code, summary, category, should_retry, disable_trading, needs_reconcile = documented
+        return PrivateApiFailureClassification(
+            category=category,
+            summary=summary,
+            should_retry=should_retry,
+            disable_trading=disable_trading,
+            needs_reconcile=needs_reconcile,
+        )
+    if fallback is not None:
+        _code, summary, category, should_retry, disable_trading, needs_reconcile = fallback
         return PrivateApiFailureClassification(
             category=category,
             summary=summary,
@@ -359,17 +408,26 @@ def classify_private_api_failure(exc: Exception) -> PrivateApiFailureClassificat
             summary="order is not ready for the requested transition yet",
             should_retry=True,
         )
-    if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
+    if any(
+        token in detail
+        for token in (
+            "broad /v1/orders",
+            "requires identifiers",
+            "fallback is disabled",
+            "identifier-scoped by bot policy",
+            "recovery-only market/state scans",
+        )
+    ):
         return PrivateApiFailureClassification(
             category="RECOVERY_REQUIRED",
             summary="startup/recovery path requires identifier-based lookup only",
             disable_trading=True,
             needs_reconcile=True,
         )
-    if error_name in {"under_min_total", "too_many_orders"} or any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
+    if error_name in {"under_min_total", "too_many_orders"}:
         return PrivateApiFailureClassification(
-            category="PREFLIGHT_BLOCKED",
-            summary="balance or orderable-funds check failed",
+            category="PRETRADE_GUARD",
+            summary="order notional or order-count guard failed",
         )
     if error_name in _PARAM_ERROR_NAMES or any(token in detail for token in ("invalid_parameter", "validation", "currency does not have a valid value")):
         return PrivateApiFailureClassification(
@@ -378,10 +436,16 @@ def classify_private_api_failure(exc: Exception) -> PrivateApiFailureClassificat
         )
     if error_name in {"invalid_price", "invalid_price_ask", "invalid_price_bid", "under_price_limit_ask", "under_price_limit_bid"} or any(token in detail for token in ("invalid_price", "price out of range", "price unit", "under_price_limit")):
         return PrivateApiFailureClassification(
-            category="EXCHANGE_RULE_VIOLATION",
-            summary="price rule violated",
+            category="INVALID_REQUEST",
+            summary="price rule validation failed",
         )
-    if error_name in _NOT_FOUND_ERROR_NAMES or any(token in detail for token in ("not found", "order_not_found", "no such order", "unknown order")):
+    if error_name in {"deposit_not_found", "withdraw_not_found"}:
+        return PrivateApiFailureClassification(
+            category="NOT_FOUND_NEEDS_RECONCILE",
+            summary="lookup target not found",
+            needs_reconcile=True,
+        )
+    if error_name == "order_not_found" or any(token in detail for token in ("not found", "order_not_found", "no such order", "unknown order")):
         return PrivateApiFailureClassification(
             category="NOT_FOUND_NEEDS_RECONCILE",
             summary="order lookup or cancel returned not found",
@@ -903,23 +967,25 @@ class BithumbPrivateAPI:
 
 def _classify_cancel_reject(exc: BrokerRejectError) -> tuple[str, str]:
     detail = str(exc).lower()
-    if "order_not_ready" in detail or "not ready yet" in detail:
+    code, summary = classify_private_api_error(exc)
+    if "order_not_ready" in detail or "not ready yet" in detail or code == "ORDER_NOT_READY":
         return "ORDER_NOT_READY", "order not ready yet"
-    if any(token in detail for token in ("already canceled", "already cancelled", "already cancel", "state=cancel", "痍⑥냼")):
+    if any(token in detail for token in ("already canceled", "already cancelled", "already cancel", "state=cancel")):
         return "ALREADY_CANCELED", "order already canceled"
-    if any(token in detail for token in ("already filled", "already executed", "fully executed", "state=done", "泥닿껐")):
+    if any(token in detail for token in ("already filled", "already executed", "fully executed", "state=done")):
         return "ALREADY_FILLED", "order already filled"
-    if any(token in detail for token in ("not found", "no such order", "unknown order", "二쇰Ц??議댁옱?섏?")):
+    if code in {"ORDER_NOT_FOUND", "LOOKUP_NOT_FOUND"} or any(token in detail for token in ("not found", "no such order", "unknown order")):
         return "NOT_FOUND", "order not found"
     if any(token in detail for token in ("cannot cancel", "not cancelable", "pending")):
         return "PENDING_NOT_CANCELABLE", "order not cancelable in current state"
-    return "REJECTED", "unclassified cancel rejection"
+    return code, summary
 
 
 def classify_private_api_error(exc: Exception) -> tuple[str, str]:
     detail = str(exc).lower()
     error_name = _private_error_name(detail)
-    documented = _documented_private_error_descriptor(error_name)
+    documented = _documented_private_error_descriptor_from_detail(error_name=error_name, detail=detail)
+    fallback = _fallback_private_error_descriptor(error_name)
     if isinstance(exc, BithumbAuthError):
         if exc.reason_code == "AUTH_KEY_MISSING":
             return "AUTH_KEY_MISSING", "API key missing before JWT signing"
@@ -932,6 +998,9 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "ORDER_NOT_READY", "order not ready yet; refresh and retry later"
     if documented is not None:
         code, summary, _category, _should_retry, _disable_trading, _needs_reconcile = documented
+        return code, summary
+    if fallback is not None:
+        code, summary, _category, _should_retry, _disable_trading, _needs_reconcile = fallback
         return code, summary
     if error_name in _RATE_LIMIT_ERROR_NAMES or any(token in detail for token in ("too many requests", "rate limit", "throttl", "throttle", "overload", "overloaded")):
         return "RATE_LIMITED", "private API rate limit or overload encountered"
@@ -979,15 +1048,26 @@ def classify_private_api_error(exc: Exception) -> tuple[str, str]:
         return "PERMISSION", "API key scope/permission denied"
     if any(token in detail for token in ("unexpected broker response", "unexpected /v1/orders/chance payload type", "unexpected /v1/accounts payload type")):
         return "AUTH_RESPONSE_UNEXPECTED", "private broker returned an unexpected response shape"
-    if any(token in detail for token in ("broad /v1/orders", "requires identifiers", "fallback is disabled")):
+    if any(
+        token in detail
+        for token in (
+            "broad /v1/orders",
+            "requires identifiers",
+            "fallback is disabled",
+            "identifier-scoped by bot policy",
+            "recovery-only market/state scans",
+        )
+    ):
         return "RECOVERY_REQUIRED", "startup/recovery path requires identifier-based lookup only"
     if error_name == "cross_trading":
         return "CROSS_TRADING", "exchange rejected self-crossing order"
-    if error_name in {"under_min_total", "too_many_orders"} or any(token in detail for token in ("insufficient", "under_min_total", "too_many_orders", "balance")):
-        return "FUNDS", "balance or orderable-funds check failed"
-    if error_name in _PARAM_ERROR_NAMES or any(token in detail for token in ("market", "price", "volume", "ord_type", "validation", "currency does not have a valid value")):
-        return "PARAM", "market/order parameter validation failed"
-    if error_name in _NOT_FOUND_ERROR_NAMES:
+    if error_name in {"under_min_total", "too_many_orders"} or any(token in detail for token in ("under_min_total", "too_many_orders")):
+        return "PRETRADE_GUARD", "order notional or order-count guard failed"
+    if error_name in _PARAM_ERROR_NAMES or any(token in detail for token in ("market", "price", "volume", "ord_type", "validation", "currency does not have a valid value", "invalid_parameter")):
+        return "INVALID_REQUEST", "market/order parameter validation failed"
+    if error_name in {"deposit_not_found", "withdraw_not_found"}:
+        return "LOOKUP_NOT_FOUND", "deposit/withdraw lookup target not found"
+    if error_name == "order_not_found":
         return "ORDER_NOT_FOUND", "order lookup/cancel target not found"
     return "UNRECOVERABLE", "unclassified private API failure; operator investigation required"
 
@@ -2043,6 +2123,8 @@ class BithumbBroker:
             source_mode="exchange",
         )
         qty_split = lot_rules.split_qty(float(qty))
+        # Defensive invariant only: upstream live SELL gating should suppress
+        # no-executable and dust-only cases before we reach broker submission.
         if qty_split.executable is False:
             raise BrokerRejectError(
                 f"{normalized_side.lower()} qty suppressed by quantity rule: "
@@ -2190,13 +2272,8 @@ class BithumbBroker:
         )
         requested_order_id_raw = str(order_id or "").strip()
         requested_exchange_order_id_raw = str(exchange_order_id or "").strip()
-        if requested_order_id_raw and requested_exchange_order_id_raw and requested_order_id_raw != requested_exchange_order_id_raw:
-            raise BrokerRejectError(
-                "cancel identifier mismatch: order_id and exchange_order_id refer to different values "
-                f"order_id={requested_order_id_raw} exchange_order_id={requested_exchange_order_id_raw}"
-            )
         requested_order_id = requested_order_id_raw or requested_exchange_order_id_raw
-        requested_exchange_order_id = requested_order_id
+        requested_exchange_order_id = requested_order_id_raw or requested_exchange_order_id_raw
         now = int(time.time() * 1000)
         if self.dry_run:
             return BrokerOrder(
@@ -2506,7 +2583,7 @@ class BithumbBroker:
             return []
         if not exchange_order_ids and not client_order_ids:
             raise BrokerRejectError(
-                "open order lookup requires identifiers; broad /v1/orders market/state scans are intentionally disabled; use get_recent_orders_for_recovery for recovery scans"
+                "open order lookup is identifier-scoped by bot policy; /v1/orders broad market/state scans are reserved for recovery via get_recent_orders_for_recovery"
             )
         data = self._get_private(
             "/v1/orders",
@@ -2733,7 +2810,7 @@ class BithumbBroker:
             return []
         if not exchange_order_ids and not client_order_ids:
             raise BrokerRejectError(
-                "recent order lookup requires identifiers; broad /v1/orders market/state scans are intentionally disabled; use get_recent_orders_for_recovery for recovery scans"
+                "recent order lookup is identifier-scoped by bot policy; /v1/orders broad market/state scans are reserved for recovery via get_recent_orders_for_recovery"
             )
 
         snapshots: dict[str, BrokerOrder] = {}
@@ -2821,13 +2898,12 @@ class BithumbBroker:
         for states in recovery_states:
             page = 1
             while len(snapshots) < lim:
-                params = build_order_list_params(
+                params = build_recovery_order_list_params(
                     market=requested_market,
                     states=states,
                     page=page,
                     order_by="desc",
                     limit=conservative_page_size,
-                    allow_broad_scan=True,
                 )
                 data = self._get_private("/v1/orders", params, retry_safe=True)
                 self._journal_read_summary(path=f"/v1/orders(recovery:{'+'.join(states)})", data=data)
@@ -2888,4 +2964,3 @@ class BithumbBroker:
         raise BrokerRejectError(
             "recent fill broad scan is unsupported: Bithumb MyOrder contract requires uuid/client_order_id lookups"
         )
-

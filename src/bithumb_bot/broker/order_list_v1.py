@@ -416,9 +416,9 @@ def build_order_list_params(
     """Build /v1/orders params.
 
     The public broker methods intentionally keep the normal lookup path
-    identifier-scoped for safety. Setting ``allow_broad_scan=True`` is an
-    explicit recovery-only choice that unlocks the documented market/state
-    scan shape for restart reconciliation.
+    identifier-scoped for safety. Recovery-only broad scans are exposed
+    through :func:`build_recovery_order_list_params` so the safety restriction
+    remains explicit at the call site.
     """
     uuid_values = _validate_identifier_list(list(uuids or []), field_name="uuids")
     client_values = _validate_identifier_list(
@@ -432,7 +432,10 @@ def build_order_list_params(
 
     if not uuid_values and not client_values:
         if not allow_broad_scan:
-            raise ValueError("order list lookup requires uuids or client_order_ids; broad market/state scans are intentionally disabled unless allow_broad_scan=True")
+            raise ValueError(
+                "order list lookup requires uuids or client_order_ids; "
+                "use build_recovery_order_list_params for recovery-only market/state scans"
+            )
         if not clean_identifier(market):
             raise ValueError("recovery order list lookup requires market when identifiers are omitted")
         if normalized_state is None and not normalized_states:
@@ -469,3 +472,29 @@ def build_order_list_params(
         limit=normalized_limit,
     ).to_params()
 
+
+def build_recovery_order_list_params(
+    *,
+    market: str | None = None,
+    state: str | None = None,
+    states: list[str] | tuple[str, ...] | None = None,
+    page: int = 1,
+    order_by: str = "desc",
+    limit: int | None = None,
+) -> dict[str, object]:
+    """Build an explicit recovery-scoped /v1/orders market/state scan.
+
+    This is the intentionally broadened path used for restart reconciliation.
+    General broker lookups should stay identifier-scoped via
+    :func:`build_order_list_params`.
+    """
+
+    return build_order_list_params(
+        market=market,
+        state=state,
+        states=states,
+        page=page,
+        order_by=order_by,
+        limit=limit,
+        allow_broad_scan=True,
+    )

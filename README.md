@@ -10,6 +10,16 @@ The repository is optimized for:
 - Loss limits and emergency-stop behavior
 - Operational observability and recoverability
 
+## Position State Model
+
+This bot uses lot-native executable position semantics.
+
+- Executable exposure is tracked as lot-aligned state.
+- Dust and sub-lot remainder are tracked separately from executable exposure.
+- If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order.
+- Lot counts are the canonical executable state meaning.
+- Qty remains an exchange-interface and reporting value, derived from the lot-native state.
+
 ## Quick Start
 
 ```bash

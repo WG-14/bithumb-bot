@@ -3708,6 +3708,67 @@ def test_recovery_report_can_resume_true_again_after_risk_halt_is_flat(tmp_path)
     assert report["resume_blockers"] == []
 
 
+def test_recovery_report_and_restart_checklist_distinguish_harmless_dust_only_from_open_exposure(
+    tmp_path,
+):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="kill switch engaged",
+        reason_code="KILL_SWITCH",
+        halt_new_orders_blocked=True,
+        unresolved=False,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_classification": "harmless_dust",
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "dust_broker_qty": 0.00009629,
+            "dust_local_qty": 0.00009629,
+            "dust_effective_flat": 1,
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+        },
+    )
+
+    report = _load_recovery_report()
+    checklist = app_module._load_restart_safety_checklist()
+    normalized_position_item = next(item for item in checklist if item[0] == "normalized position state")
+
+    assert report["can_resume"] is True
+    assert report["resume_blockers"] == []
+    assert report["dust_state"] == "harmless_dust"
+    assert normalized_position_item[1] is True
+    assert "terminal_state=dust_only" in normalized_position_item[2]
+    assert "has_executable_exposure=0" in normalized_position_item[2]
+    assert "has_dust_only_remainder=1" in normalized_position_item[2]
+    assert "dust_resume_allowed=1" in normalized_position_item[2]
+
+
 def test_resume_eligibility_allows_matched_harmless_dust_when_policy_marks_it_tracked_only(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.enable_trading()
@@ -4711,7 +4772,8 @@ def test_restart_checklist_blocks_when_restart_risks_exist(tmp_path, capsys):
     assert "[RESTART-SAFETY-CHECKLIST]" in out
     assert "BLOCKED unresolved/recovery-required orders" in out
     assert "BLOCKED open orders" in out
-    assert "BLOCKED open position" in out
+    assert "BLOCKED normalized position state" in out
+    assert "terminal_state=open_exposure" in out
     assert "BLOCKED halt state" in out
     assert "BLOCKED last reconcile" in out
     assert "safe_to_resume=0" in out
@@ -4737,7 +4799,7 @@ def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
 
     assert "PASS    unresolved/recovery-required orders" in out
     assert "PASS    open orders" in out
-    assert "PASS    open position" in out
+    assert "PASS    normalized position state" in out
     assert "PASS    halt state" in out
     assert "PASS    last reconcile" in out
     assert "safe_to_resume=1" in out
@@ -4775,6 +4837,73 @@ def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
     assert state.last_flatten_position_status == "no_position"
     assert state.last_flatten_position_summary is not None
     assert '"status": "no_position"' in state.last_flatten_position_summary
+
+
+def test_flatten_position_dust_only_remainder_is_not_treated_as_executable_position(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_classification": "harmless_dust",
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "dust_broker_qty": 0.00009629,
+            "dust_local_qty": 0.00009629,
+            "dust_effective_flat": 1,
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+        },
+    )
+
+    broker = _FlattenBrokerSuccess()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr("bithumb_bot.flatten.fetch_orderbook_top", lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0))
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
+
+    cmd_flatten_position(dry_run=False)
+    out = capsys.readouterr().out
+
+    assert "no position to flatten" in out
+    assert broker.calls == []
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "no_position"
+    assert state.last_flatten_position_summary is not None
+    assert '"terminal_state": "dust_only"' in state.last_flatten_position_summary
+    assert '"raw_total_asset_qty": 9.629e-05' in state.last_flatten_position_summary or '"raw_total_asset_qty": 0.00009629' in state.last_flatten_position_summary
+    assert '"executable_exposure_qty": 0.0' in state.last_flatten_position_summary
+    assert '"tracked_dust_qty": 9.629e-05' in state.last_flatten_position_summary or '"tracked_dust_qty": 0.00009629' in state.last_flatten_position_summary
 
 
 def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_path, capsys):
@@ -5087,7 +5216,7 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_broker_local_match=1" in health_out
     assert "dust_qty_below_min=broker=1 local=1" in health_out
     assert "dust_notional_below_min=broker=0 local=0" in health_out
-    assert "position=flat entry_allowed=1" in health_out
+    assert "position=dust_only_qty=0.00009629 entry_allowed=1" in health_out
     assert "effective_flat_due_to_harmless_dust=1" in health_out
     assert "tracked_dust_qty=0.00009629" in health_out
     assert "dust_effective_flat=1" in health_out
@@ -5113,6 +5242,45 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     ) in report_out
     assert "qty_below_min=broker=1 local=1 notional_below_min=broker=0 local=0" in report_out
     assert "broker_local_match=1" in report_out
+    assert "[P3.1] lot_exposure" in report_out
+    assert "raw_total_asset_qty=0.00009629 open_exposure_qty=0.00000000 dust_tracking_qty=0.00009629" in report_out
+    assert "open_lot_count=0" in report_out
+    assert "dust_tracking_lot_count=1" in report_out
+    assert "sellable_executable_lot_count=0" in report_out
+    assert "sellable_executable_qty=0.00000000" in report_out
+    assert "terminal_state=dust_only" in report_out
+    assert "exit_block_reason=dust_only_remainder" in report_out
+
+
+def test_recovery_report_uses_lot_basis_for_order_summary(tmp_path):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="lot-basis-1",
+            side="BUY",
+            qty_req=0.001,
+            price=100000000.0,
+            ts_ms=10,
+            status="NEW",
+            intended_lot_count=1,
+            executable_lot_count=1,
+            final_intended_qty=0.001,
+            final_submitted_qty=0.0004,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = _load_recovery_report()
+    item = next(entry for entry in report["recovery_candidates"] if entry["client_order_id"] == "lot-basis-1")
+
+    assert item["requested_qty"] == pytest.approx(0.001)
+    assert item["local_qty"] == pytest.approx(0.0004)
+    assert item["local_qty_source"] == "final_submitted_qty"
+    assert item["requested_lot_count"] == 1
+    assert item["executable_lot_count"] == 1
 
 
 def test_recovery_report_includes_recent_dust_unsellable_sell_event(tmp_path, capsys):

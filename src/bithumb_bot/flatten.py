@@ -6,13 +6,16 @@ from . import runtime_state
 from .broker.live import normalize_order_qty, validate_order, validate_pretrade
 from .config import settings
 from .db_core import ensure_db, init_portfolio
+from .dust import build_dust_display_context, build_position_state_model
 from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
+from .lifecycle import summarize_position_lots
 
 
 def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "operator") -> dict[str, object]:
+    state_snapshot = runtime_state.snapshot()
     conn = ensure_db()
     try:
         init_portfolio(conn)
@@ -21,10 +24,30 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         conn.close()
 
     qty = float(row["asset_qty"] if row is not None else 0.0)
-    if qty <= 1e-12:
+    dust_context = build_dust_display_context(state_snapshot.last_reconcile_metadata)
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    position_state = build_position_state_model(
+        raw_qty_open=qty,
+        metadata_raw=state_snapshot.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+    )
+    normalized_exposure = position_state.normalized_exposure
+    if not normalized_exposure.has_executable_exposure:
         summary = {
             "status": "no_position",
-            "qty": qty,
+            "qty": float(normalized_exposure.open_exposure_qty),
+            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+            "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
+            "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
+            "terminal_state": str(normalized_exposure.terminal_state),
             "dry_run": int(bool(dry_run)),
             "trigger": trigger,
         }
@@ -34,7 +57,11 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     runtime_state.record_flatten_position_result(
         status="started",
         summary={
-            "qty": qty,
+            "qty": float(normalized_exposure.open_exposure_qty),
+            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+            "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
+            "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
+            "terminal_state": str(normalized_exposure.terminal_state),
             "dry_run": int(bool(dry_run)),
             "side": "SELL",
             "symbol": settings.PAIR,
@@ -56,7 +83,11 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     if dry_run:
         summary = {
             "status": "dry_run",
-            "qty": qty,
+            "qty": float(normalized_exposure.open_exposure_qty),
+            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+            "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
+            "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
+            "terminal_state": str(normalized_exposure.terminal_state),
             "dry_run": 1,
             "side": "SELL",
             "symbol": settings.PAIR,
@@ -66,12 +97,13 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         return summary
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
+    normalized_qty = float(normalized_exposure.open_exposure_qty)
     try:
         quote = fetch_orderbook_top(settings.PAIR)
         bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
         market_price = float(bid)
 
-        normalized_qty = normalize_order_qty(qty=qty, market_price=market_price)
+        normalized_qty = normalize_order_qty(qty=normalized_qty, market_price=market_price)
         validate_order(signal="SELL", side="SELL", qty=normalized_qty, market_price=market_price)
         validate_pretrade(broker=broker, side="SELL", qty=normalized_qty, market_price=market_price)
 
@@ -80,7 +112,11 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         err = f"{type(exc).__name__}: {exc}"
         summary = {
             "status": "failed",
-            "qty": qty,
+            "qty": float(normalized_qty),
+            "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+            "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
+            "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
+            "terminal_state": str(normalized_exposure.terminal_state),
             "side": "SELL",
             "symbol": settings.PAIR,
             "error": err,
@@ -103,6 +139,10 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     summary = {
         "status": "submitted",
         "qty": normalized_qty,
+        "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
+        "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
+        "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
+        "terminal_state": str(normalized_exposure.terminal_state),
         "side": "SELL",
         "symbol": settings.PAIR,
         "client_order_id": client_order_id,

@@ -103,6 +103,7 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
         pair="BTC_KRW",
         market_price=20_000_000.0,
         sellable_qty=0.12345678,
+        sellable_lot_count=308,
         exit_allowed=True,
         exit_block_reason="none",
     )
@@ -110,7 +111,7 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
     assert plan.side == "SELL"
     assert plan.allowed is True
     assert plan.qty_source == "position_state.normalized_exposure.executable_exit_lot_count"
-    assert plan.requested_qty == pytest.approx(0.12345678)
+    assert plan.requested_qty == pytest.approx(0.1232)
     assert plan.executable_qty == pytest.approx(0.1232)
     assert plan.internal_lot_size == pytest.approx(0.0004)
     assert plan.intended_lot_count == 308
@@ -123,12 +124,35 @@ def test_sell_execution_sizing_uses_suppression_reason_code_when_quantity_rule_b
         pair="BTC_KRW",
         market_price=20_000_000.0,
         sellable_qty=0.00005,
+        sellable_lot_count=0,
         exit_allowed=False,
         exit_block_reason="no_executable_exit_lot",
     )
 
     assert plan.side == "SELL"
     assert plan.allowed is False
+    assert plan.requested_qty == pytest.approx(0.0)
+    assert plan.executable_qty == pytest.approx(0.0)
     assert plan.block_reason == "no_executable_exit_lot"
     assert plan.decision_reason_code == "exit_suppressed_by_quantity_rule"
     assert plan.non_executable_reason == "no_executable_exit_lot"
+
+
+def test_sell_execution_sizing_uses_canonical_sellable_lot_count_when_qty_rounds_to_zero(sizing_rule_overrides) -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        sellable_qty=0.0002,
+        sellable_lot_count=2,
+        exit_allowed=True,
+        exit_block_reason="none",
+    )
+
+    assert plan.side == "SELL"
+    assert plan.allowed is True
+    assert plan.requested_qty == pytest.approx(0.0008)
+    assert plan.executable_qty == pytest.approx(0.0008)
+    assert plan.intended_lot_count == 2
+    assert plan.executable_lot_count == 2
+    assert plan.block_reason == "none"
+    assert plan.decision_reason_code == "none"

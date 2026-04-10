@@ -270,6 +270,7 @@ def paper_execute(
                 pair=settings.PAIR,
                 market_price=float(fill_price),
                 sellable_qty=float(normalized_exposure.sellable_executable_qty),
+                sellable_lot_count=int(normalized_exposure.sellable_executable_lot_count),
                 exit_allowed=bool(normalized_exposure.exit_allowed),
                 exit_block_reason=str(normalized_exposure.exit_block_reason),
             )
@@ -295,6 +296,8 @@ def paper_execute(
             intent_ts=int(ts),
             intent_type=("market_entry" if side == "BUY" else "market_exit"),
             qty=float(trade_qty),
+            intended_lot_count=int(entry_sizing.intended_lot_count if side == "BUY" else exit_sizing.intended_lot_count),
+            executable_lot_count=int(entry_sizing.executable_lot_count if side == "BUY" else exit_sizing.executable_lot_count),
         )
         claimed, existing_intent = claim_order_intent_dedup(
             conn,
@@ -306,6 +309,8 @@ def paper_execute(
             intent_type=("market_entry" if side == "BUY" else "market_exit"),
             intent_ts=int(ts),
             qty=float(trade_qty),
+            intended_lot_count=int(entry_sizing.intended_lot_count if side == "BUY" else exit_sizing.intended_lot_count),
+            executable_lot_count=int(entry_sizing.executable_lot_count if side == "BUY" else exit_sizing.executable_lot_count),
             order_status="PENDING_SUBMIT",
         )
         if not claimed:

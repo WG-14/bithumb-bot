@@ -15,6 +15,7 @@ from bithumb_bot.broker.bithumb import (
     BithumbPrivateAPI,
     BithumbOrderNotReadyError,
     BithumbRateLimitError,
+    _documented_private_error_descriptor,
     classify_private_api_error,
     classify_private_api_failure,
 )
@@ -295,7 +296,9 @@ def test_classify_private_api_error_categories_cover_v1_orders_contract_failures
     assert "schema mismatch" in summary
 
     code, summary = classify_private_api_error(
-        BrokerRejectError("open order lookup requires identifiers; broad /v1/orders market/state scans are disabled")
+        BrokerRejectError(
+            "open order lookup is identifier-scoped by bot policy; /v1/orders broad market/state scans are reserved for recovery"
+        )
     )
     assert code == "RECOVERY_REQUIRED"
     assert "identifier-based lookup" in summary
@@ -340,9 +343,17 @@ def test_classify_private_api_error_uses_documented_error_names() -> None:
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=jwt_verification body={}"))[0] == "AUTH_JWT_VERIFICATION"
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=expired_jwt body={}"))[0] == "AUTH_JWT_EXPIRED"
     assert classify_private_api_error(BrokerRejectError("status=401 error_name=NotAllowIP body={}"))[0] == "AUTH_IP_DENIED"
+    assert classify_private_api_error(BrokerRejectError("status=400 body=currency does not have a valid value"))[0] == "INVALID_PARAMETER"
+    assert classify_private_api_error(BrokerRejectError("status=400 error_name=invalid_price body={}"))[0] == "INVALID_PRICE"
+    assert classify_private_api_error(BrokerRejectError("status=400 error_name=under_price_limit_ask body={}"))[0] == "UNDER_PRICE_LIMIT"
     assert classify_private_api_error(BrokerRejectError("status=500 error_name=server_error body={}"))[0] == "SERVER_INTERNAL_FAILURE"
     assert classify_private_api_error(BrokerRejectError("status=404 error_name=order_not_found body={}"))[0] == "ORDER_NOT_FOUND"
+    assert classify_private_api_error(BrokerRejectError("status=422 error_name=order_not_ready body={}"))[0] == "ORDER_NOT_READY"
+    assert classify_private_api_error(BrokerRejectError("status=404 error_name=deposit_not_found body={}"))[0] == "LOOKUP_NOT_FOUND"
+    assert classify_private_api_error(BrokerRejectError("status=404 error_name=withdraw_not_found body={}"))[0] == "LOOKUP_NOT_FOUND"
     assert classify_private_api_error(BrokerRejectError("status=400 error_name=cross_trading body={}"))[0] == "CROSS_TRADING"
+    assert _documented_private_error_descriptor("order_not_found") is not None
+    assert _documented_private_error_descriptor("duplicate_client_order_id") is None
 
     code, summary = classify_private_api_error(BrokerIdentifierMismatchError("order lookup response exchange_order_id mismatch"))
     assert code == "IDENTIFIER_MISMATCH"
@@ -356,6 +367,30 @@ def test_classify_private_api_failure_new_buckets() -> None:
     classification = classify_private_api_failure(BrokerRejectError("invalid_parameter: malformed market"))
     assert classification.category == "INVALID_REQUEST"
     assert classification.summary
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=invalid_price body={}"))
+    assert classification.category == "INVALID_REQUEST"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=under_price_limit_ask body={}"))
+    assert classification.category == "PRETRADE_GUARD"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=cross_trading body={}"))
+    assert classification.category == "EXCHANGE_RULE_VIOLATION"
+    assert classification.disable_trading is False
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=under_min_total body={}"))
+    assert classification.category == "PRETRADE_GUARD"
+    assert classification.summary
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=deposit_not_found body={}"))
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 error_name=withdraw_not_found body={}"))
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
 
     classification = classify_private_api_failure(BithumbRateLimitError("bithumb private /v1/orders throttled with http status=429"))
     assert classification.category == "THROTTLED_BACKOFF"
@@ -392,6 +427,22 @@ def test_classify_private_api_failure_new_buckets() -> None:
     assert classification.category == "PREFLIGHT_BLOCKED"
     assert classification.disable_trading is True
 
+    classification = classify_private_api_failure(BrokerRejectError("status=401 error_name=invalid_query_payload body={}"))
+    assert classification.category == "INVALID_REQUEST"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=401 error_name=jwt_verification body={}"))
+    assert classification.category == "AUTHENTICATION"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=401 error_name=expired_jwt body={}"))
+    assert classification.category == "AUTHENTICATION"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=401 error_name=NotAllowIP body={}"))
+    assert classification.category == "PERMISSION_SCOPE"
+    assert classification.disable_trading is True
+
     classification = classify_private_api_failure(BrokerRejectError("status=403 error_name=blocked_member_id body={}"))
     assert classification.category == "PERMISSION_SCOPE"
     assert classification.disable_trading is True
@@ -399,6 +450,22 @@ def test_classify_private_api_failure_new_buckets() -> None:
     classification = classify_private_api_failure(BrokerRejectError("status=403 error_name=out_of_scope body={}"))
     assert classification.category == "PERMISSION_SCOPE"
     assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=400 body=currency does not have a valid value"))
+    assert classification.category == "INVALID_REQUEST"
+    assert classification.disable_trading is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=404 error_name=order_not_found body={}"))
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=422 error_name=order_not_ready body={}"))
+    assert classification.category == "ORDER_NOT_READY"
+    assert classification.should_retry is True
+
+    classification = classify_private_api_failure(BrokerRejectError("status=500 error_name=server_error body={}"))
+    assert classification.category == "SERVER_INTERNAL_FAILURE"
+    assert classification.should_retry is True
 
 
 def test_classify_private_api_failure_uses_documented_error_table() -> None:
@@ -409,6 +476,12 @@ def test_classify_private_api_failure_uses_documented_error_table() -> None:
     assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
     assert classification.needs_reconcile is True
     assert classification.should_retry is False
+
+    classification = classify_private_api_failure(
+        BrokerRejectError("status=404 error_name=deposit_not_found body={}")
+    )
+    assert classification.category == "NOT_FOUND_NEEDS_RECONCILE"
+    assert classification.needs_reconcile is True
 
 
 
@@ -1720,15 +1793,15 @@ def test_v1_orders_broad_scan_is_rejected_without_identifiers() -> None:
     _configure_live()
     broker = BithumbBroker()
 
-    with pytest.raises(BrokerRejectError, match="requires identifiers"):
+    with pytest.raises(BrokerRejectError, match="identifier-scoped by bot policy"):
         broker.get_open_orders()
 
-    with pytest.raises(BrokerRejectError, match="requires identifiers"):
+    with pytest.raises(BrokerRejectError, match="identifier-scoped by bot policy"):
         broker.get_recent_orders(limit=5)
 
 
 def test_build_order_list_params_requires_explicit_broad_scan_for_recovery_queries() -> None:
-    with pytest.raises(ValueError, match="intentionally disabled"):
+    with pytest.raises(ValueError, match="use build_recovery_order_list_params"):
         build_order_list_params(market="KRW-BTC", states=("wait", "done", "cancel"))
 
     params = build_order_list_params(
@@ -1826,12 +1899,32 @@ def test_request_cancel_order_uses_documented_order_id_field(monkeypatch):
     }
 
 
-def test_request_cancel_order_rejects_conflicting_aliases(monkeypatch):
+def test_request_cancel_order_prefers_order_id_when_both_identifiers_are_supplied(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    call: dict[str, object] = {}
 
-    with pytest.raises(BrokerRejectError, match="cancel identifier mismatch"):
-        broker.request_cancel_order(client_order_id="cid-cancel", order_id="cancel-1", exchange_order_id="cancel-2")
+    monkeypatch.setattr(
+        broker,
+        "_delete_private",
+        lambda endpoint, params, retry_safe=False: call.update({"endpoint": endpoint, "payload": params, "retry_safe": retry_safe}) or {
+            "order_id": params["order_id"],
+            "client_order_id": params["client_order_id"],
+        },
+    )
+
+    order = broker.request_cancel_order(
+        client_order_id="cid-cancel",
+        order_id="cancel-1",
+        exchange_order_id="cancel-2",
+    )
+
+    assert order.exchange_order_id == "cancel-1"
+    assert call == {
+        "endpoint": "/v2/order",
+        "payload": {"order_id": "cancel-1", "client_order_id": "cid-cancel"},
+        "retry_safe": False,
+    }
 
 
 def test_cancel_order_accepts_client_order_id_only_response(monkeypatch):
@@ -1899,6 +1992,37 @@ def test_cancel_order_maps_already_canceled_reject_to_canceled(monkeypatch):
     monkeypatch.setattr(broker, "_delete_private", _reject)
     order = broker.cancel_order(client_order_id="cid-cancel", exchange_order_id="cancel-1")
     assert order.status == "CANCELED"
+
+
+def test_cancel_order_maps_order_not_found_reject_to_reconcile_needed(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "get_order",
+        lambda client_order_id, exchange_order_id=None: broker._order_from_v2_row(
+            {
+                "order_id": exchange_order_id or "cancel-404-1",
+                "client_order_id": client_order_id,
+                "side": "bid",
+                "price": "149000000",
+                "volume": "0.05",
+                "remaining_volume": "0.05",
+                "state": "wait",
+            },
+            client_order_id=client_order_id,
+        ),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_delete_private",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            BrokerRejectError("status=404 error_name=order_not_found body={}")
+        ),
+    )
+
+    with pytest.raises(BrokerRejectError, match="NOT_FOUND_NEEDS_RECONCILE"):
+        broker.cancel_order(client_order_id="cid-cancel-404", exchange_order_id="cancel-404-1")
 
 
 def test_cancel_order_raises_on_order_id_mismatch(monkeypatch):

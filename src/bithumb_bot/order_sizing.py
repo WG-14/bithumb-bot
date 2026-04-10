@@ -223,11 +223,11 @@ def build_sell_execution_sizing(
     pair: str,
     market_price: float,
     sellable_qty: float,
+    sellable_lot_count: int,
     exit_allowed: bool,
     exit_block_reason: str,
 ) -> ExecutionSizingPlan:
     rules = get_effective_order_rules(pair).rules
-    requested_qty = max(0.0, float(sellable_qty))
     lot_rules = build_market_lot_rules(
         market_id=pair,
         market_price=float(market_price),
@@ -236,11 +236,12 @@ def build_sell_execution_sizing(
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
-    intended_lot_count = compute_feasible_exit_lot_count(
-        sellable_qty=float(requested_qty),
-        lot_rules=lot_rules,
+    intended_lot_count = max(0, int(sellable_lot_count))
+    requested_qty = lot_count_to_qty(
+        lot_count=intended_lot_count,
+        lot_size=float(lot_rules.lot_size),
     )
-    executable_qty = lot_count_to_qty(lot_count=intended_lot_count, lot_size=lot_rules.lot_size)
+    executable_qty = float(requested_qty)
     allowed = bool(exit_allowed) and intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS
     block_reason = "none" if allowed else str(exit_block_reason or "no_executable_exit_lot")
     if not allowed and block_reason in {"", "none"}:

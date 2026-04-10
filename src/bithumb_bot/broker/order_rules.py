@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import settings
@@ -90,6 +91,8 @@ class LocalFallbackConstraints:
 class RuleResolution:
     rules: DerivedOrderConstraints
     source: dict[str, str]
+    exchange_source: dict[str, str] = field(default_factory=dict)
+    local_fallback_source: dict[str, str] = field(default_factory=dict)
     fallback_used: bool = False
     fallback_reason_code: str = ""
     fallback_reason_summary: str = ""
@@ -467,10 +470,19 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             "maker_bid_fee": "unsupported_by_doc",
             "maker_ask_fee": "unsupported_by_doc",
             "ruleset": "merged",
+            "exchange_source_json": json.dumps({}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "local_fallback_source_json": json.dumps(
+                _fallback_rule_source_map(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         }
         resolution = RuleResolution(
             rules=fallback,
             source=source,
+            exchange_source={},
+            local_fallback_source=_fallback_rule_source_map(),
             fallback_used=True,
             fallback_reason_code=code,
             fallback_reason_summary=summary,
@@ -479,7 +491,7 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             retrieved_at_sec=now,
             expires_at_sec=now + _CACHE_TTL_SEC,
             stale=False,
-            source_mode="fallback",
+            source_mode="local_fallback",
         )
         if settings.MODE == "live":
             import logging
@@ -517,18 +529,34 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         min_notional_krw=fallback.min_notional_krw,
         max_qty_decimals=fallback.max_qty_decimals,
     )
+    exchange_source = _exchange_rule_source_map(exchange)
+    local_fallback_source = _fallback_rule_source_map()
     source = {
-        **_exchange_rule_source_map(exchange),
-        **_fallback_rule_source_map(),
+        **exchange_source,
+        **local_fallback_source,
         "ruleset": "merged",
+        "exchange_source_json": json.dumps(
+            exchange_source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "local_fallback_source_json": json.dumps(
+            local_fallback_source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
     resolution = RuleResolution(
         rules=merged,
         source=source,
+        exchange_source=exchange_source,
+        local_fallback_source=local_fallback_source,
         retrieved_at_sec=now,
         expires_at_sec=now + _CACHE_TTL_SEC,
         stale=False,
-        source_mode="exchange",
+        source_mode="merged",
     )
     if settings.MODE == "live":
         import logging
@@ -561,6 +589,20 @@ def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolu
         field: getattr(resolution.rules, field)
         for field in resolution.rules.__dataclass_fields__.keys()
     }
+    source_payload = dict(resolution.source)
+    source_payload["source_mode"] = str(resolution.source_mode)
+    source_payload["exchange_source_json"] = json.dumps(
+        resolution.exchange_source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    source_payload["local_fallback_source_json"] = json.dumps(
+        resolution.local_fallback_source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     conn = None
     try:
         conn = ensure_db()
@@ -573,12 +615,14 @@ def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolu
             fallback_reason_code=str(resolution.fallback_reason_code or ""),
             fallback_reason_summary=str(resolution.fallback_reason_summary or ""),
             rules_payload=rules_payload,
-            source_payload=dict(resolution.source),
+            source_payload=source_payload,
         )
         conn.commit()
         return RuleResolution(
             rules=resolution.rules,
             source=resolution.source,
+            exchange_source=resolution.exchange_source,
+            local_fallback_source=resolution.local_fallback_source,
             fallback_used=resolution.fallback_used,
             fallback_reason_code=resolution.fallback_reason_code,
             fallback_reason_summary=resolution.fallback_reason_summary,

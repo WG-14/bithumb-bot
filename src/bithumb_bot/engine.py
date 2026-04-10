@@ -24,10 +24,11 @@ from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
-from .lifecycle import summarize_reserved_exit_qty
+from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .dust import (
     DustClassification,
     DustState,
+    build_dust_display_context,
     build_position_state_model,
 )
 from .utils_time import kst_str, parse_interval_sec
@@ -440,17 +441,28 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     try:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
         state = runtime_state.snapshot()
     finally:
         conn.close()
 
     asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
     position_state = build_position_state_model(
         raw_qty_open=asset_qty,
         metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
         reserved_exit_qty=reserved_exit_qty,
     )
-    return open_count > 0, position_state.normalized_exposure.normalized_exposure_active
+    return open_count > 0, position_state.normalized_exposure.has_any_position_residue
 
 
 def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
@@ -1029,13 +1041,36 @@ def _position_summary() -> str:
     conn = ensure_db()
     try:
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        state = runtime_state.snapshot()
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
     finally:
         conn.close()
 
     qty = float(row["asset_qty"] or 0.0) if row is not None else 0.0
-    if abs(qty) <= 1e-12:
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    position_state = build_position_state_model(
+        raw_qty_open=qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    normalized_exposure = position_state.normalized_exposure
+    if normalized_exposure.terminal_state == "flat":
         return "flat"
-    return f"long_qty={qty:.8f}"
+    if normalized_exposure.has_executable_exposure:
+        return f"open_exposure_qty={normalized_exposure.open_exposure_qty:.8f}"
+    if normalized_exposure.has_dust_only_remainder:
+        return f"dust_only_qty={normalized_exposure.dust_tracking_qty:.8f}"
+    return f"non_executable_position_state={normalized_exposure.terminal_state}"
 
 
 def _recommended_operator_commands(
@@ -1657,6 +1692,13 @@ def run_loop(short_n: int, long_n: int) -> None:
                     if portfolio is not None:
                         portfolio_cash = float(portfolio["cash_krw"])
                         portfolio_qty = float(portfolio["asset_qty"])
+                        dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+                        position_state = build_position_state_model(
+                            raw_qty_open=portfolio_qty,
+                            metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+                            raw_total_asset_qty=max(portfolio_qty, float(dust_context.raw_holdings.broker_qty)),
+                            dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+                        )
                         # Use latest candle close as the mark price for daily-loss evaluation.
                         blocked, reason = evaluate_daily_loss_breach(
                             conn,
@@ -1681,7 +1723,7 @@ def run_loop(short_n: int, long_n: int) -> None:
 
                         blocked, reason = evaluate_position_loss_breach(
                             conn,
-                            qty=portfolio_qty,
+                            qty=float(position_state.normalized_exposure.open_exposure_qty),
                             price=float(last_close),
                         )
                         if blocked:
