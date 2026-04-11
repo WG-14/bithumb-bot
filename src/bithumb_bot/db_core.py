@@ -239,6 +239,60 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) 
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def _ensure_open_position_lot_invariant_triggers(conn: sqlite3.Connection) -> None:
+    invariant_check = """
+        SELECT CASE
+            WHEN COALESCE(NEW.executable_lot_count, 0) < 0
+                OR COALESCE(NEW.dust_tracking_lot_count, 0) < 0
+                THEN RAISE(ABORT, 'open_position_lots negative lot counts are not allowed')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND (
+                    (NEW.position_state = 'open_exposure'
+                        AND (
+                            COALESCE(NEW.executable_lot_count, 0) <= 0
+                            OR COALESCE(NEW.dust_tracking_lot_count, 0) != 0
+                        ))
+                    OR
+                    (NEW.position_state = 'dust_tracking'
+                        AND (
+                            COALESCE(NEW.executable_lot_count, 0) != 0
+                            OR COALESCE(NEW.dust_tracking_lot_count, 0) <= 0
+                        ))
+                 )
+                THEN RAISE(ABORT, 'open_position_lots lot-native state/count mismatch')
+            WHEN COALESCE(NEW.qty_open, 0.0) <= 1e-12
+                 AND (
+                    COALESCE(NEW.executable_lot_count, 0) != 0
+                    OR COALESCE(NEW.dust_tracking_lot_count, 0) != 0
+                 )
+                THEN RAISE(ABORT, 'open_position_lots zero qty rows must not keep lot authority')
+        END
+    """
+    conn.execute("DROP TRIGGER IF EXISTS trg_open_position_lots_validate_insert")
+    conn.execute("DROP TRIGGER IF EXISTS trg_open_position_lots_validate_update")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_open_position_lots_validate_insert
+        BEFORE INSERT ON open_position_lots
+        FOR EACH ROW
+        BEGIN
+            {invariant_check};
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_open_position_lots_validate_update
+        BEFORE UPDATE ON open_position_lots
+        FOR EACH ROW
+        BEGIN
+            {invariant_check};
+        END
+        """
+    )
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -1148,6 +1202,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON open_position_lots(pair, position_state, entry_ts, id)
         """
     )
+    _ensure_open_position_lot_invariant_triggers(conn)
 
     conn.execute(
         """

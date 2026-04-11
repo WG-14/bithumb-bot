@@ -2051,6 +2051,41 @@ def test_reconcile_success_auto_clears_stale_initial_reconcile_halt(isolated_db)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 
 
+def test_reconcile_does_not_clear_halt_from_qty_only_holdings_without_lot_native_exposure(isolated_db):
+    original_cash = settings.START_CASH_KRW
+    object.__setattr__(settings, "START_CASH_KRW", 1000.0)
+    try:
+        conn = ensure_db(str(isolated_db))
+        try:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO portfolio(
+                    id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+                ) VALUES (1, 1000.0, 1.0, 1000.0, 0.0, 1.0, 0.0)
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        runtime_state.disable_trading_until(
+            float("inf"),
+            reason="post-trade reconcile halt",
+            reason_code="POST_TRADE_RECONCILE_REQUIRED",
+            halt_new_orders_blocked=True,
+            unresolved=True,
+        )
+
+        reconcile_with_broker(_DustBalanceBroker(asset_available=1.0))
+
+        state = runtime_state.snapshot()
+        assert state.halt_new_orders_blocked is True
+        assert state.halt_state_unresolved is True
+        assert state.halt_reason_code == "POST_TRADE_RECONCILE_REQUIRED"
+    finally:
+        object.__setattr__(settings, "START_CASH_KRW", original_cash)
+
+
 def test_reconcile_recent_fill_success_clears_prior_locked_post_trade_halt(isolated_db):
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "START_CASH_KRW", 1000.0)

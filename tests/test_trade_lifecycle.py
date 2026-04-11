@@ -217,6 +217,78 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "CHECK (position_state IN ('open_exposure', 'dust_tracking'))" in lot_schema_sql
 
 
+def test_open_position_lots_schema_rejects_lot_native_state_count_mismatch(tmp_path):
+    conn = ensure_db(str(tmp_path / "schema_invariant.sqlite"))
+
+    with pytest.raises(sqlite3.IntegrityError, match="lot-native state/count mismatch"):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTC_KRW",
+                1,
+                "mixed_state",
+                1_700_000_000_000,
+                40_000_000.0,
+                0.00009997,
+                0,
+                1,
+                "lot-native",
+                OPEN_EXPOSURE_LOT_STATE,
+            ),
+        )
+
+    conn.close()
+
+
+def test_open_position_lots_schema_rejects_negative_lot_counts(tmp_path):
+    conn = ensure_db(str(tmp_path / "schema_negative_counts.sqlite"))
+
+    with pytest.raises(sqlite3.IntegrityError, match="negative lot counts"):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTC_KRW",
+                1,
+                "negative_state",
+                1_700_000_000_000,
+                40_000_000.0,
+                0.0001,
+                -1,
+                0,
+                "lot-native",
+                OPEN_EXPOSURE_LOT_STATE,
+            ),
+        )
+
+    conn.close()
+
+
 def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_exposure_rows(tmp_path):
     conn = ensure_db(str(tmp_path / "harmless_dust_boundary.sqlite"))
     conn.execute(

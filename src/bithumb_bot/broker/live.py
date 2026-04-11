@@ -3623,21 +3623,9 @@ def live_execute_signal(
                 )
             )
             sellable_qty = float(normalized_exposure.sellable_executable_qty)
-            if sellable_qty <= POSITION_EPSILON and not has_lot_native_sell_state:
-                sellable_qty = float(decision_observability.get("sellable_executable_qty") or 0.0)
             sellable_lot_count = int(normalized_exposure.sellable_executable_lot_count)
-            if sellable_lot_count <= 0 and not has_lot_native_sell_state:
-                sellable_lot_count = int(
-                    decision_observability.get("sell_submit_lot_count")
-                    or decision_observability.get("sellable_executable_lot_count")
-                    or 0
-                )
             exit_allowed = bool(normalized_exposure.exit_allowed)
-            if not exit_allowed and not has_lot_native_sell_state and sellable_qty <= POSITION_EPSILON and sellable_lot_count <= 0:
-                exit_allowed = bool(decision_observability.get("exit_allowed", False))
             exit_block_reason = str(normalized_exposure.exit_block_reason or "").strip()
-            if not exit_block_reason and not has_lot_native_sell_state:
-                exit_block_reason = str(decision_observability.get("exit_block_reason") or "")
             side = "SELL"
             exit_sizing = build_sell_execution_sizing(
                 pair=settings.PAIR,
@@ -3659,6 +3647,30 @@ def live_execute_signal(
                     raw_total_asset_qty=float(raw_total_asset_qty),
                     dust_tracking_qty=float(normalized_exposure.dust_tracking_qty),
                 )
+                if float(dust_analysis_qty) <= POSITION_EPSILON:
+                    if (
+                        decision_id is not None
+                        or has_lot_native_sell_state
+                    ) and _record_sell_no_executable_exit_suppression(
+                        conn=conn,
+                        state=state,
+                        ts=int(ts),
+                        market_price=float(market_price),
+                        position_qty=float(order_qty if order_qty > 0 else sellable_qty),
+                        decision_observability=decision_observability,
+                        submit_qty_source=str(exit_sizing.qty_source),
+                        position_state_source=str(decision_observability["position_state_source"]),
+                        raw_total_asset_qty=float(raw_total_asset_qty),
+                        open_exposure_qty=float(normalized_exposure.open_exposure_qty),
+                        dust_tracking_qty=float(normalized_exposure.dust_tracking_qty),
+                        strategy_name=strategy_name,
+                        decision_id=decision_id,
+                        decision_reason=decision_reason,
+                        exit_rule_name=exit_rule_name,
+                        exit_sizing=exit_sizing,
+                    ):
+                        conn.commit()
+                    return None
                 suppression_preview = _normalize_order_qty_snapshot(qty=dust_analysis_qty)
                 if str(normalized_exposure.exit_block_reason) == "reserved_for_open_sell_orders":
                     if _record_sell_dust_unsellable(

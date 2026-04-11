@@ -2348,7 +2348,7 @@ def test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit(
             position_state
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.00009997, 0, 1, "lot-native", "open_exposure"),
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.00009997, 0, 1, "lot-native", "dust_tracking"),
     )
     decision_id = record_strategy_decision(
         conn,
@@ -3730,7 +3730,7 @@ def test_live_execute_signal_sell_snaps_tiny_open_exposure_boundary_upward_with_
             position_state
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.00009999, 0, 1, "lot-native", "open_exposure"),
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.00009999, 0, 1, "lot-native", "dust_tracking"),
     )
     conn.execute(
         """
@@ -4719,6 +4719,113 @@ def test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_su
     assert suppression_context["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert suppression_context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert any("event=decision_suppressed" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_sell_ignores_stale_recorded_sellable_qty_without_current_lot_state(monkeypatch, tmp_path):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_stale_recorded_qty.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+
+    conn = ensure_db(str(tmp_path / "sell_stale_recorded_qty.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_001_300_000,
+        strategy_name="stale_sell_context",
+        signal="SELL",
+        reason="stale sellable qty",
+        candle_ts=1_700_001_240_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "raw_qty_open": 0.0002,
+            "raw_total_asset_qty": 0.0002,
+            "open_exposure_qty": 0.0002,
+            "dust_tracking_qty": 0.0,
+            "sellable_executable_qty": 0.0002,
+            "sell_submit_lot_count": 2,
+            "exit_allowed": True,
+            "exit_block_reason": "none",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0002,
+                    "raw_total_asset_qty": 0.0002,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": 0.0,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_qty": 0.0002,
+                    "sellable_executable_lot_count": 2,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                    "terminal_state": "open",
+                    "normalized_exposure_qty": 0.0002,
+                    "normalized_exposure_active": True,
+                    "entry_allowed": False,
+                    "effective_flat": False,
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1300,
+        100_000_000.0,
+        strategy_name="stale_sell_context",
+        decision_id=decision_id,
+        decision_reason="stale sellable qty",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "sell_stale_recorded_qty.sqlite"))
+    order_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM orders
+        WHERE side='SELL'
+        """
+    ).fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, context_json
+        FROM order_suppressions
+        WHERE strategy_name='stale_sell_context' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert order_count == 0
+    assert suppression_row is None
 
 
 def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(monkeypatch):

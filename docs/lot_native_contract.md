@@ -59,6 +59,15 @@ semantic authority.
 
 ## Canonical Authority
 
+- Singular shared contract surface:
+  - executable authority: `position_state.normalized_exposure.open_lot_count`
+  - SELL authority: `position_state.normalized_exposure.sellable_executable_lot_count`
+  - BUY authority: `position_state.normalized_exposure.entry_allowed`
+  - flatness authority: `position_state.normalized_exposure.terminal_state`
+  - dust authority: `position_state.normalized_exposure.dust_tracking_lot_count`
+  - reserved exit authority: `position_state.normalized_exposure.reserved_exit_lot_count`
+  - qty semantic authority: none; qty remains derived only
+  - legacy qty-only recovery: fail closed
 - The final authority for executable SELL quantity is the canonical sellable lot count.
 - `requested_qty`, `executable_qty`, and submitted SELL order quantity must be derived from that lot count.
 - `qty` fields are derived values for compatibility, reporting, and broker interfacing only.

@@ -42,6 +42,22 @@ LOT_STATE_QUANTITY_CONTRACT: Final[dict[str, dict[str, object]]] = {
     },
 }
 
+LOT_NATIVE_POSITION_CONTRACT: Final[dict[str, object]] = {
+    "semantic_basis": "lot-native",
+    "executable_authority": "position_state.normalized_exposure.open_lot_count",
+    "sell_authority": "position_state.normalized_exposure.sellable_executable_lot_count",
+    "buy_authority": "position_state.normalized_exposure.entry_allowed",
+    "flatness_authority": "position_state.normalized_exposure.terminal_state",
+    "dust_authority": "position_state.normalized_exposure.dust_tracking_lot_count",
+    "reserved_exit_authority": "position_state.normalized_exposure.reserved_exit_lot_count",
+    "executable_qty_derivation": "open_lot_count -> open_exposure_qty",
+    "sell_qty_derivation": "sellable_executable_lot_count -> sellable_executable_qty",
+    "buy_qty_derivation": "feasible_entry_lot_count -> requested_qty",
+    "qty_semantic_authority": "derived_only",
+    "legacy_qty_only_recovery": "fail_closed",
+    "dust_tracking_sellable": False,
+}
+
 
 class DustState(str, Enum):
     NO_DUST = "no_dust"
@@ -796,6 +812,12 @@ def lot_state_quantity_contract() -> dict[str, dict[str, object]]:
     """
 
     return {state: dict(contract) for state, contract in LOT_STATE_QUANTITY_CONTRACT.items()}
+
+
+def lot_native_position_contract() -> dict[str, object]:
+    """Return the singular lot-native authority surface shared across flows."""
+
+    return dict(LOT_NATIVE_POSITION_CONTRACT)
 
 
 def lot_state_strategy_qty_source(position_state: str) -> str:

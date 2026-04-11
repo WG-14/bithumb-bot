@@ -13,6 +13,7 @@ from bithumb_bot.dust import (
     build_position_state_model,
     classify_dust_residual,
     dust_qty_gap_tolerance,
+    lot_native_position_contract,
     lot_state_quantity_contract,
 )
 from bithumb_bot.lifecycle import summarize_position_lots
@@ -94,6 +95,24 @@ def test_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separ
     assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_lot_source"] == "excluded_from_sell_lot_count"
     assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
     assert contract[DUST_TRACKING_LOT_STATE]["operator_tracking_only"] is True
+
+
+def test_lot_native_position_contract_declares_singular_authority_surface() -> None:
+    contract = lot_native_position_contract()
+
+    assert contract["semantic_basis"] == "lot-native"
+    assert contract["executable_authority"] == "position_state.normalized_exposure.open_lot_count"
+    assert contract["sell_authority"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert contract["buy_authority"] == "position_state.normalized_exposure.entry_allowed"
+    assert contract["flatness_authority"] == "position_state.normalized_exposure.terminal_state"
+    assert contract["dust_authority"] == "position_state.normalized_exposure.dust_tracking_lot_count"
+    assert contract["reserved_exit_authority"] == "position_state.normalized_exposure.reserved_exit_lot_count"
+    assert contract["executable_qty_derivation"] == "open_lot_count -> open_exposure_qty"
+    assert contract["sell_qty_derivation"] == "sellable_executable_lot_count -> sellable_executable_qty"
+    assert contract["buy_qty_derivation"] == "feasible_entry_lot_count -> requested_qty"
+    assert contract["qty_semantic_authority"] == "derived_only"
+    assert contract["legacy_qty_only_recovery"] == "fail_closed"
+    assert contract["dust_tracking_sellable"] is False
 
 
 def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qty_aggregation() -> None:
