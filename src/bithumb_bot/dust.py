@@ -1608,6 +1608,8 @@ def build_normalized_exposure(
     normalized_qty = float(sellable_executable_qty if has_executable_exposure else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
+    elif has_dust_only_remainder:
+        entry_block_reason = "dust_only_remainder"
     elif normalized_total_asset_qty > DUST_POSITION_EPS:
         entry_block_reason = (
             "legacy_lot_metadata_missing"

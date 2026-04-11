@@ -290,6 +290,9 @@ def _load_position_context(
                 SUM(qty_open) AS qty_open
             FROM open_position_lots
             WHERE pair=? AND position_state=? AND qty_open > 1e-12
+              AND COALESCE(position_semantic_basis, '')='lot-native'
+              AND COALESCE(executable_lot_count, 0) > 0
+              AND COALESCE(dust_tracking_lot_count, 0) = 0
             """,
             (pair, OPEN_POSITION_STATE),
         ).fetchone()

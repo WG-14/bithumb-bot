@@ -38,6 +38,9 @@ def _seed_position_and_dust_state(
     *,
     qty_open: float,
     dust_metadata: dict[str, object],
+    position_state: str = "open_exposure",
+    executable_lot_count: int = 0,
+    dust_tracking_lot_count: int = 0,
 ) -> None:
     conn.execute(
         """
@@ -77,10 +80,22 @@ def _seed_position_and_dust_state(
             entry_ts,
             entry_price,
             qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
             position_state
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        ("BTC_KRW", 1, "entry-1", 1_700_000_000_000, 40_000_000.0, qty_open, "open_exposure"),
+        (
+            "BTC_KRW",
+            1,
+            "entry-1",
+            1_700_000_000_000,
+            40_000_000.0,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_state,
+        ),
     )
     conn.commit()
 
@@ -377,7 +392,13 @@ def test_non_executable_exit_stops_at_state_layer_and_does_not_emit_sell() -> No
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
     conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
     try:
-        _seed_position_and_dust_state(conn, qty_open=0.00009629, dust_metadata={})
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.00009629,
+            dust_metadata={},
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
         decision = create_sma_strategy(
             short_n=2,
             long_n=3,
@@ -420,7 +441,12 @@ def test_exit_decision_uses_normalized_shared_state_without_last_buy_request_siz
 ) -> None:
     conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
     try:
-        _seed_position_and_dust_state(conn, qty_open=0.0002, dust_metadata={})
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.0002,
+            dust_metadata={},
+            executable_lot_count=2,
+        )
         decision = create_sma_strategy(
             short_n=2,
             long_n=3,
@@ -459,7 +485,13 @@ def test_harmless_dust_without_resume_keeps_buy_entry_blocked() -> None:
     dust_metadata = dict(dust.to_metadata())
     dust_metadata["unresolved_open_order_count"] = 1
     try:
-        _seed_position_and_dust_state(conn, qty_open=0.00009629, dust_metadata=dust_metadata)
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.00009629,
+            dust_metadata=dust_metadata,
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
         decision = create_sma_strategy(
             short_n=2,
             long_n=3,
@@ -482,21 +514,21 @@ def test_harmless_dust_without_resume_keeps_buy_entry_blocked() -> None:
     assert decision.context["position_gate"]["dust_new_orders_allowed"] is False
     assert decision.context["position_gate"]["dust_resume_allowed"] is False
     assert decision.context["position_gate"]["dust_treat_as_flat"] is True
-    assert decision.context["position_gate"]["has_executable_exposure"] is True
+    assert decision.context["position_gate"]["has_executable_exposure"] is False
     assert decision.context["position_gate"]["has_any_position_residue"] is True
-    assert decision.context["position_gate"]["has_non_executable_residue"] is False
+    assert decision.context["position_gate"]["has_non_executable_residue"] is True
     assert decision.context["raw_signal"] == "BUY"
     assert decision.context["final_signal"] == "HOLD"
     assert decision.context["entry_blocked"] is True
-    assert decision.context["entry_block_reason"] == "position_has_executable_exposure"
+    assert decision.context["entry_block_reason"] == "dust_only_remainder"
     assert decision.context["dust_classification"] == "harmless_dust"
     assert decision.context["effective_flat"] is False
     assert decision.context["raw_qty_open"] == pytest.approx(0.00009629)
-    assert decision.context["normalized_exposure_active"] is True
-    assert decision.context["has_executable_exposure"] is True
+    assert decision.context["normalized_exposure_active"] is False
+    assert decision.context["has_executable_exposure"] is False
     assert decision.context["has_any_position_residue"] is True
-    assert decision.context["has_non_executable_residue"] is False
-    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.00009629)
+    assert decision.context["has_non_executable_residue"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
 
 
 def test_blocking_dust_still_blocks_buy_entry() -> None:
@@ -513,7 +545,13 @@ def test_blocking_dust_still_blocks_buy_entry() -> None:
         matched_harmless_resume_allowed=False,
     )
     try:
-        _seed_position_and_dust_state(conn, qty_open=0.000099, dust_metadata=dust.to_metadata())
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.000099,
+            dust_metadata=dust.to_metadata(),
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
         decision = create_sma_strategy(
             short_n=2,
             long_n=3,

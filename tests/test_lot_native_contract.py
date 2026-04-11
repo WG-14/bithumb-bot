@@ -158,6 +158,43 @@ def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qt
     assert model.state_interpretation.exit_submit_expected is False
 
 
+def test_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0012,
+        metadata_raw={},
+        raw_total_asset_qty=0.0012,
+        open_exposure_qty=0.0012,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.00105,
+        open_lot_count=3,
+        dust_tracking_lot_count=0,
+        market_price=100_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        max_qty_decimals=8,
+    )
+
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=100_000_000.0,
+        sellable_lot_count=model.normalized_exposure.sellable_executable_lot_count,
+        exit_allowed=model.normalized_exposure.exit_allowed,
+        exit_block_reason=model.normalized_exposure.exit_block_reason,
+    )
+
+    assert model.normalized_exposure.open_lot_count == 3
+    assert model.normalized_exposure.reserved_exit_qty == pytest.approx(0.00105)
+    assert model.normalized_exposure.reserved_exit_lot_count == 2
+    assert model.normalized_exposure.sellable_executable_lot_count == 1
+    assert model.normalized_exposure.sellable_executable_qty == pytest.approx(0.00015)
+    assert model.normalized_exposure.terminal_state == "open_exposure"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert plan.intended_lot_count == 1
+    assert plan.requested_qty == pytest.approx(plan.internal_lot_size)
+    assert plan.requested_qty > model.normalized_exposure.sellable_executable_qty
+
+
 def test_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without_legacy_semantic_marker() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
