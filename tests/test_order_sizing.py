@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.config import settings
+from bithumb_bot.lifecycle import LotDefinitionSnapshot, LOT_SEMANTIC_VERSION_V1
 from bithumb_bot.order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
 
 
@@ -102,7 +103,6 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_qty=0.12345678,
         sellable_lot_count=308,
         exit_allowed=True,
         exit_block_reason="none",
@@ -123,7 +123,6 @@ def test_sell_execution_sizing_uses_suppression_reason_code_when_quantity_rule_b
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_qty=0.00005,
         sellable_lot_count=0,
         exit_allowed=False,
         exit_block_reason="no_executable_exit_lot",
@@ -142,7 +141,6 @@ def test_sell_execution_sizing_uses_canonical_sellable_lot_count_when_qty_rounds
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_qty=0.0002,
         sellable_lot_count=2,
         exit_allowed=True,
         exit_block_reason="none",
@@ -156,3 +154,38 @@ def test_sell_execution_sizing_uses_canonical_sellable_lot_count_when_qty_rounds
     assert plan.executable_lot_count == 2
     assert plan.block_reason == "none"
     assert plan.decision_reason_code == "none"
+
+
+def test_sell_execution_sizing_prefers_persisted_lot_definition_over_current_rules(
+    sizing_rule_overrides,
+) -> None:
+    persisted_lot_definition = LotDefinitionSnapshot(
+        semantic_version=LOT_SEMANTIC_VERSION_V1,
+        internal_lot_size=0.0004,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+        source_mode="ledger",
+    )
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 100000.0)
+
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        sellable_lot_count=2,
+        exit_allowed=True,
+        exit_block_reason="none",
+        lot_definition=persisted_lot_definition,
+    )
+
+    assert plan.allowed is True
+    assert plan.requested_qty == pytest.approx(0.0008)
+    assert plan.executable_qty == pytest.approx(0.0008)
+    assert plan.internal_lot_size == pytest.approx(0.0004)
+    assert plan.min_qty == pytest.approx(0.0001)
+    assert plan.qty_step == pytest.approx(0.0001)
+    assert plan.min_notional_krw == pytest.approx(5000.0)

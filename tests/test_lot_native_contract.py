@@ -30,7 +30,6 @@ def test_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_cou
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_qty=0.0,
         sellable_lot_count=2,
         exit_allowed=True,
         exit_block_reason="none",
@@ -63,7 +62,6 @@ def test_sell_suppression_categories_remain_normal_suppression_outcomes(
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_qty=0.0,
         sellable_lot_count=0,
         exit_allowed=False,
         exit_block_reason=exit_block_reason,
@@ -191,6 +189,43 @@ def test_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without
     assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
     assert snapshot.position_semantic_basis == "lot-native"
     assert "legacy_lot_metadata_missing" not in snapshot.as_dict().values()
+
+
+def test_canonical_lot_summary_fails_closed_for_lot_native_rows_missing_explicit_counts() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY,
+            pair TEXT NOT NULL,
+            qty_open REAL NOT NULL,
+            position_state TEXT NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots (
+            pair,
+            qty_open,
+            position_state,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 0.0004, OPEN_EXPOSURE_LOT_STATE, 0, 0, "lot-native"),
+    )
+
+    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
+
+    assert snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.open_lot_count == 0
+    assert snapshot.executable_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
 
 
 # Full lot-native declaration closure.

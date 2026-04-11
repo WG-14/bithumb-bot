@@ -280,10 +280,10 @@ def paper_execute(
             exit_sizing = build_sell_execution_sizing(
                 pair=settings.PAIR,
                 market_price=float(fill_price),
-                sellable_qty=float(normalized_exposure.sellable_executable_qty),
                 sellable_lot_count=int(normalized_exposure.sellable_executable_lot_count),
                 exit_allowed=bool(normalized_exposure.exit_allowed),
                 exit_block_reason=str(normalized_exposure.exit_block_reason),
+                lot_definition=lot_snapshot.lot_definition,
             )
             if not exit_sizing.allowed:
                 return None

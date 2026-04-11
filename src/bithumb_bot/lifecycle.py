@@ -34,6 +34,38 @@ ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE = "ambiguous_multi_candidate"
 ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH = "unattributed_no_strict_match"
 ENTRY_DECISION_LINKAGE_UNATTRIBUTED_MISSING_STRATEGY = "unattributed_missing_strategy"
 ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED = "degraded_recovery_unattributed"
+LOT_SEMANTIC_VERSION_V1 = 1
+
+
+@dataclass(frozen=True)
+class LotDefinitionSnapshot:
+    semantic_version: int | None
+    internal_lot_size: float | None
+    min_qty: float | None
+    qty_step: float | None
+    min_notional_krw: float | None
+    max_qty_decimals: int | None
+    source_mode: str
+
+    @property
+    def is_authoritative(self) -> bool:
+        return (
+            self.semantic_version is not None
+            and self.internal_lot_size is not None
+            and float(self.internal_lot_size) > 0.0
+        )
+
+    def as_dict(self) -> dict[str, float | int | str | bool | None]:
+        return {
+            "semantic_version": None if self.semantic_version is None else int(self.semantic_version),
+            "internal_lot_size": None if self.internal_lot_size is None else float(self.internal_lot_size),
+            "min_qty": None if self.min_qty is None else float(self.min_qty),
+            "qty_step": None if self.qty_step is None else float(self.qty_step),
+            "min_notional_krw": None if self.min_notional_krw is None else float(self.min_notional_krw),
+            "max_qty_decimals": None if self.max_qty_decimals is None else int(self.max_qty_decimals),
+            "source_mode": str(self.source_mode or ""),
+            "is_authoritative": bool(self.is_authoritative),
+        }
 
 
 @dataclass(frozen=True)
@@ -54,6 +86,7 @@ class PositionLotSnapshot:
     effective_min_trade_qty: float
     exit_non_executable_reason: str
     position_semantic_basis: str
+    lot_definition: LotDefinitionSnapshot | None = None
 
     @property
     def total_holdings_qty(self) -> float:
@@ -71,8 +104,8 @@ class PositionLotSnapshot:
     def semantic_basis(self) -> str:
         return str(self.position_semantic_basis or "lot-native")
 
-    def as_dict(self) -> dict[str, float | int | str]:
-        return {
+    def as_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
             "semantic_basis": self.semantic_basis,
             "position_semantic_basis": self.semantic_basis,
             "raw_open_exposure_qty": float(self.raw_open_exposure_qty),
@@ -88,6 +121,23 @@ class PositionLotSnapshot:
             "effective_min_trade_qty": float(self.effective_min_trade_qty),
             "exit_non_executable_reason": self.exit_non_executable_reason,
         }
+        if self.lot_definition is not None:
+            payload["lot_definition"] = self.lot_definition.as_dict()
+            payload["lot_semantic_version"] = self.lot_definition.semantic_version
+            payload["internal_lot_size"] = self.lot_definition.internal_lot_size
+        return payload
+
+
+def _lot_definition_from_rules(*, lot_rules: object) -> LotDefinitionSnapshot:
+    return LotDefinitionSnapshot(
+        semantic_version=LOT_SEMANTIC_VERSION_V1,
+        internal_lot_size=float(getattr(lot_rules, "lot_size", 0.0) or 0.0),
+        min_qty=float(getattr(lot_rules, "min_qty", 0.0) or 0.0),
+        qty_step=float(getattr(lot_rules, "qty_step", 0.0) or 0.0),
+        min_notional_krw=float(getattr(lot_rules, "min_notional_krw", 0.0) or 0.0),
+        max_qty_decimals=int(getattr(lot_rules, "max_qty_decimals", 0) or 0),
+        source_mode=str(getattr(lot_rules, "source_mode", "ledger") or "ledger"),
+    )
 
 
 def _build_fill_lot_rules(*, pair: str, market_price: float) -> object:
@@ -154,6 +204,127 @@ def _row_value(row: object, key: str, index: int) -> object | None:
         return row[index]  # type: ignore[index]
     except (IndexError, KeyError, TypeError):
         return None
+
+
+def _read_authoritative_lot_definition_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+) -> LotDefinitionSnapshot | None:
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT
+                lot_semantic_version,
+                internal_lot_size,
+                lot_min_qty,
+                lot_qty_step,
+                lot_min_notional_krw,
+                lot_max_qty_decimals,
+                lot_rule_source_mode
+            FROM open_position_lots
+            WHERE pair=?
+              AND qty_open > 1e-12
+              AND COALESCE(position_semantic_basis, '')='lot-native'
+              AND (
+                    COALESCE(executable_lot_count, 0) > 0
+                    OR COALESCE(dust_tracking_lot_count, 0) > 0
+                  )
+            """,
+            (str(pair),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+
+    if not rows:
+        return None
+
+    snapshots: list[LotDefinitionSnapshot] = []
+    for row in rows:
+        semantic_version_raw = _row_value(row, "lot_semantic_version", 0)
+        internal_lot_size_raw = _row_value(row, "internal_lot_size", 1)
+        min_qty_raw = _row_value(row, "lot_min_qty", 2)
+        qty_step_raw = _row_value(row, "lot_qty_step", 3)
+        min_notional_krw_raw = _row_value(row, "lot_min_notional_krw", 4)
+        max_qty_decimals_raw = _row_value(row, "lot_max_qty_decimals", 5)
+        source_mode_raw = _row_value(row, "lot_rule_source_mode", 6)
+        snapshot = LotDefinitionSnapshot(
+            semantic_version=None if semantic_version_raw is None else int(semantic_version_raw),
+            internal_lot_size=None if internal_lot_size_raw is None else float(internal_lot_size_raw),
+            min_qty=None if min_qty_raw is None else float(min_qty_raw),
+            qty_step=None if qty_step_raw is None else float(qty_step_raw),
+            min_notional_krw=None if min_notional_krw_raw is None else float(min_notional_krw_raw),
+            max_qty_decimals=None if max_qty_decimals_raw is None else int(max_qty_decimals_raw),
+            source_mode=str(source_mode_raw or ""),
+        )
+        has_any_snapshot_metadata = any(
+            value not in (None, "")
+            for value in (
+                semantic_version_raw,
+                internal_lot_size_raw,
+                min_qty_raw,
+                qty_step_raw,
+                min_notional_krw_raw,
+                max_qty_decimals_raw,
+                source_mode_raw,
+            )
+        )
+        if has_any_snapshot_metadata and not snapshot.is_authoritative:
+            return None
+        if snapshot.is_authoritative:
+            snapshots.append(snapshot)
+
+    if not snapshots:
+        first = None
+    else:
+        first = snapshots[0]
+    if first is not None and any(snapshot != first for snapshot in snapshots[1:]):
+        first = None
+    if first is not None:
+        return first
+
+    try:
+        executable_rows = conn.execute(
+            """
+            SELECT qty_open, executable_lot_count
+            FROM open_position_lots
+            WHERE pair=?
+              AND qty_open > 1e-12
+              AND COALESCE(position_semantic_basis, '')='lot-native'
+              AND COALESCE(executable_lot_count, 0) > 0
+              AND COALESCE(dust_tracking_lot_count, 0) = 0
+            """,
+            (str(pair),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+
+    if not executable_rows:
+        return None
+
+    implied_lot_sizes: list[float] = []
+    for row in executable_rows:
+        qty_open = float(_row_value(row, "qty_open", 0) or 0.0)
+        executable_lot_count = int(_row_value(row, "executable_lot_count", 1) or 0)
+        if qty_open <= 1e-12 or executable_lot_count <= 0:
+            return None
+        implied_lot_sizes.append(qty_open / float(executable_lot_count))
+
+    baseline_lot_size = implied_lot_sizes[0]
+    if baseline_lot_size <= 1e-12:
+        return None
+    if any(abs(lot_size - baseline_lot_size) > 1e-12 for lot_size in implied_lot_sizes[1:]):
+        return None
+
+    return LotDefinitionSnapshot(
+        semantic_version=0,
+        internal_lot_size=float(baseline_lot_size),
+        min_qty=None,
+        qty_step=None,
+        min_notional_krw=None,
+        max_qty_decimals=None,
+        source_mode="derived_from_row_qty",
+    )
 
 
 def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int) -> str | None:
@@ -303,6 +474,7 @@ def apply_fill_lifecycle(
         # The stored executable quantity is the exact executable lot multiple;
         # the non-executable remainder is tracked separately as dust evidence.
         lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
+        lot_definition = _lot_definition_from_rules(lot_rules=lot_rules)
         fill_lot = build_executable_lot(
             qty=float(qty),
             market_price=float(price),
@@ -354,13 +526,20 @@ def apply_fill_lifecycle(
                     qty_open,
                     executable_lot_count,
                     dust_tracking_lot_count,
+                    lot_semantic_version,
+                    internal_lot_size,
+                    lot_min_qty,
+                    lot_qty_step,
+                    lot_min_notional_krw,
+                    lot_max_qty_decimals,
+                    lot_rule_source_mode,
                     position_semantic_basis,
                     position_state,
                     entry_fee_total,
                     strategy_name,
                     entry_decision_id,
                     entry_decision_linkage
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(pair),
@@ -372,6 +551,13 @@ def apply_fill_lifecycle(
                     executable_qty,
                     executable_lot_count,
                     0,
+                    lot_definition.semantic_version,
+                    lot_definition.internal_lot_size,
+                    lot_definition.min_qty,
+                    lot_definition.qty_step,
+                    lot_definition.min_notional_krw,
+                    lot_definition.max_qty_decimals,
+                    lot_definition.source_mode,
                     "lot-native",
                     OPEN_EXPOSURE_LOT_STATE,
                     float(executable_fee),
@@ -394,13 +580,20 @@ def apply_fill_lifecycle(
                     qty_open,
                     executable_lot_count,
                     dust_tracking_lot_count,
+                    lot_semantic_version,
+                    internal_lot_size,
+                    lot_min_qty,
+                    lot_qty_step,
+                    lot_min_notional_krw,
+                    lot_max_qty_decimals,
+                    lot_rule_source_mode,
                     position_semantic_basis,
                     position_state,
                     entry_fee_total,
                     strategy_name,
                     entry_decision_id,
                     entry_decision_linkage
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(pair),
@@ -412,6 +605,13 @@ def apply_fill_lifecycle(
                     dust_qty,
                     0,
                     dust_lot_count or 1,
+                    lot_definition.semantic_version,
+                    lot_definition.internal_lot_size,
+                    lot_definition.min_qty,
+                    lot_definition.qty_step,
+                    lot_definition.min_notional_krw,
+                    lot_definition.max_qty_decimals,
+                    lot_definition.source_mode,
                     "lot-native",
                     DUST_TRACKING_LOT_STATE,
                     float(dust_fee),
@@ -433,13 +633,20 @@ def apply_fill_lifecycle(
                     qty_open,
                     executable_lot_count,
                     dust_tracking_lot_count,
+                    lot_semantic_version,
+                    internal_lot_size,
+                    lot_min_qty,
+                    lot_qty_step,
+                    lot_min_notional_krw,
+                    lot_max_qty_decimals,
+                    lot_rule_source_mode,
                     position_semantic_basis,
                     position_state,
                     entry_fee_total,
                     strategy_name,
                     entry_decision_id,
                     entry_decision_linkage
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(pair),
@@ -451,6 +658,13 @@ def apply_fill_lifecycle(
                     0.0,
                     0,
                     1,
+                    lot_definition.semantic_version,
+                    lot_definition.internal_lot_size,
+                    lot_definition.min_qty,
+                    lot_definition.qty_step,
+                    lot_definition.min_notional_krw,
+                    lot_definition.max_qty_decimals,
+                    lot_definition.source_mode,
                     "lot-native",
                     DUST_TRACKING_LOT_STATE,
                     float(fee),
@@ -722,10 +936,6 @@ def summarize_position_lots(
                         CASE
                             WHEN COALESCE(executable_lot_count, 0) > 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
-                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
-                                 AND position_state = ?
-                                 AND COALESCE(executable_lot_count, 0) = 0
-                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
                             ELSE 0.0
                         END
                     ),
@@ -736,10 +946,6 @@ def summarize_position_lots(
                         CASE
                             WHEN COALESCE(executable_lot_count, 0) > 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN executable_lot_count
-                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
-                                 AND position_state = ?
-                                 AND COALESCE(executable_lot_count, 0) = 0
-                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
                             ELSE 0
                         END
                     ),
@@ -748,7 +954,7 @@ def summarize_position_lots(
             FROM open_position_lots
             WHERE pair=?
             """,
-            (OPEN_EXPOSURE_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, str(pair)),
+            (str(pair),),
         ).fetchone()
         dust_row = conn.execute(
             """
@@ -758,10 +964,6 @@ def summarize_position_lots(
                         CASE
                             WHEN COALESCE(dust_tracking_lot_count, 0) > 0
                                  AND COALESCE(executable_lot_count, 0) = 0 THEN qty_open
-                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
-                                 AND position_state = ?
-                                 AND COALESCE(executable_lot_count, 0) = 0
-                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
                             ELSE 0.0
                         END
                     ),
@@ -772,10 +974,6 @@ def summarize_position_lots(
                         CASE
                             WHEN COALESCE(dust_tracking_lot_count, 0) > 0
                                  AND COALESCE(executable_lot_count, 0) = 0 THEN dust_tracking_lot_count
-                            WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
-                                 AND position_state = ?
-                                 AND COALESCE(executable_lot_count, 0) = 0
-                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
                             ELSE 0
                         END
                     ),
@@ -784,7 +982,7 @@ def summarize_position_lots(
             FROM open_position_lots
             WHERE pair=?
             """,
-            (DUST_TRACKING_LOT_STATE, DUST_TRACKING_LOT_STATE, str(pair)),
+            (str(pair),),
         ).fetchone()
     except sqlite3.OperationalError:
         try:
@@ -818,6 +1016,7 @@ def summarize_position_lots(
     tracked_dust_qty = max(0.0, float(dust_row[0] if dust_row is not None else 0.0))
     open_lot_count = max(0, int(open_row[1] if open_row is not None else 0))
     dust_lot_count = max(0, int(dust_row[1] if dust_row is not None else 0))
+    lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
     if executable_lot is None:
         executable_qty = 0.0
         effective_min_trade_qty = 0.0
@@ -841,6 +1040,7 @@ def summarize_position_lots(
         effective_min_trade_qty=float(effective_min_trade_qty),
         exit_non_executable_reason=exit_non_executable_reason,
         position_semantic_basis="lot-native",
+        lot_definition=lot_definition,
     )
 
 

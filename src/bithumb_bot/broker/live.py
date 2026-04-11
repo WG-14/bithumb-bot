@@ -3622,7 +3622,6 @@ def live_execute_signal(
                     int(normalized_exposure.sellable_executable_lot_count) > 0,
                 )
             )
-            sellable_qty = float(normalized_exposure.sellable_executable_qty)
             sellable_lot_count = int(normalized_exposure.sellable_executable_lot_count)
             exit_allowed = bool(normalized_exposure.exit_allowed)
             exit_block_reason = str(normalized_exposure.exit_block_reason or "").strip()
@@ -3630,12 +3629,12 @@ def live_execute_signal(
             exit_sizing = build_sell_execution_sizing(
                 pair=settings.PAIR,
                 market_price=float(market_price),
-                sellable_qty=float(sellable_qty),
                 sellable_lot_count=int(sellable_lot_count),
                 exit_allowed=exit_allowed,
                 exit_block_reason=exit_block_reason,
+                lot_definition=position_snapshot.lot_definition,
             )
-            order_qty = float(sellable_qty if exit_sizing.allowed else 0.0)
+            order_qty = float(exit_sizing.executable_qty if exit_sizing.allowed else 0.0)
             sellable_threshold = max(POSITION_EPSILON, float(effective_rules.min_qty))
             if (not exit_sizing.allowed) or float(order_qty) < sellable_threshold:
                 dust_analysis_qty = _sell_dust_analysis_qty(
@@ -3656,7 +3655,7 @@ def live_execute_signal(
                         state=state,
                         ts=int(ts),
                         market_price=float(market_price),
-                        position_qty=float(order_qty if order_qty > 0 else sellable_qty),
+                        position_qty=float(order_qty if order_qty > 0 else normalized_exposure.sellable_executable_qty),
                         decision_observability=decision_observability,
                         submit_qty_source=str(exit_sizing.qty_source),
                         position_state_source=str(decision_observability["position_state_source"]),
@@ -3714,7 +3713,7 @@ def live_execute_signal(
                     state=state,
                     ts=int(ts),
                     market_price=float(market_price),
-                    position_qty=float(order_qty if order_qty > 0 else sellable_qty),
+                    position_qty=float(order_qty if order_qty > 0 else normalized_exposure.sellable_executable_qty),
                     decision_observability=decision_observability,
                     submit_qty_source=str(exit_sizing.qty_source),
                     position_state_source=str(decision_observability["position_state_source"]),

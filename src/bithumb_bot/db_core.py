@@ -1110,6 +1110,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             qty_open REAL NOT NULL,
             executable_lot_count INTEGER NOT NULL DEFAULT 0,
             dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            lot_semantic_version INTEGER,
+            internal_lot_size REAL,
+            lot_min_qty REAL,
+            lot_qty_step REAL,
+            lot_min_notional_krw REAL,
+            lot_max_qty_decimals INTEGER,
+            lot_rule_source_mode TEXT,
             position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native',
             position_state TEXT NOT NULL DEFAULT '{open_state}' CHECK (position_state IN ({allowed_states})),
             entry_fee_total REAL NOT NULL DEFAULT 0,
@@ -1144,6 +1151,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "dust_tracking_lot_count",
         "dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0",
     )
+    _ensure_column(conn, "open_position_lots", "lot_semantic_version", "lot_semantic_version INTEGER")
+    _ensure_column(conn, "open_position_lots", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "open_position_lots", "lot_min_qty", "lot_min_qty REAL")
+    _ensure_column(conn, "open_position_lots", "lot_qty_step", "lot_qty_step REAL")
+    _ensure_column(conn, "open_position_lots", "lot_min_notional_krw", "lot_min_notional_krw REAL")
+    _ensure_column(conn, "open_position_lots", "lot_max_qty_decimals", "lot_max_qty_decimals INTEGER")
+    _ensure_column(conn, "open_position_lots", "lot_rule_source_mode", "lot_rule_source_mode TEXT")
     _ensure_column(
         conn,
         "open_position_lots",

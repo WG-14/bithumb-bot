@@ -16,6 +16,7 @@ from bithumb_bot.lifecycle import (
     ENTRY_DECISION_LINKAGE_DIRECT,
     ENTRY_DECISION_LINKAGE_STRICT_SINGLE_FALLBACK,
     ENTRY_DECISION_LINKAGE_UNATTRIBUTED_NO_STRICT_MATCH,
+    LOT_SEMANTIC_VERSION_V1,
     apply_fill_lifecycle,
     mark_harmless_dust_positions,
     summarize_position_lots,
@@ -203,6 +204,13 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "entry_decision_linkage" in lot_cols
     assert "executable_lot_count" in lot_cols
     assert "dust_tracking_lot_count" in lot_cols
+    assert "lot_semantic_version" in lot_cols
+    assert "internal_lot_size" in lot_cols
+    assert "lot_min_qty" in lot_cols
+    assert "lot_qty_step" in lot_cols
+    assert "lot_min_notional_krw" in lot_cols
+    assert "lot_max_qty_decimals" in lot_cols
+    assert "lot_rule_source_mode" in lot_cols
     assert "position_semantic_basis" in lot_cols
     assert "intended_lot_count" in fill_cols
     assert "executable_lot_count" in fill_cols
@@ -215,6 +223,131 @@ def test_schema_bootstrap_creates_lifecycle_tables(tmp_path):
     assert "exit_rule_name" in lifecycle_cols
     assert "position_state" in lot_cols
     assert "CHECK (position_state IN ('open_exposure', 'dust_tracking'))" in lot_schema_sql
+
+
+def test_buy_fill_persists_immutable_lot_definition_snapshot(tmp_path):
+    conn = ensure_db(str(tmp_path / "lot_definition_snapshot.sqlite"))
+
+    apply_fill_lifecycle(
+        conn,
+        side="BUY",
+        pair="BTC_KRW",
+        trade_id=1,
+        client_order_id="entry_1",
+        fill_id="fill_entry_1",
+        fill_ts=1_700_000_000_000,
+        price=40_000_000.0,
+        qty=0.0004,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=11,
+    )
+
+    row = conn.execute(
+        """
+        SELECT
+            lot_semantic_version,
+            internal_lot_size,
+            lot_min_qty,
+            lot_qty_step,
+            lot_min_notional_krw,
+            lot_max_qty_decimals,
+            lot_rule_source_mode
+        FROM open_position_lots
+        WHERE pair='BTC_KRW'
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    assert row is not None
+    assert int(row["lot_semantic_version"]) == LOT_SEMANTIC_VERSION_V1
+    assert float(row["internal_lot_size"]) > 0.0
+    assert float(row["lot_min_qty"]) == pytest.approx(float(settings.LIVE_MIN_ORDER_QTY))
+    assert float(row["lot_qty_step"]) == pytest.approx(float(settings.LIVE_ORDER_QTY_STEP))
+    assert float(row["lot_min_notional_krw"]) == pytest.approx(float(settings.MIN_ORDER_NOTIONAL_KRW))
+    assert int(row["lot_max_qty_decimals"]) == int(settings.LIVE_ORDER_MAX_QTY_DECIMALS)
+    assert row["lot_rule_source_mode"] == "ledger"
+
+
+def test_position_lot_summary_uses_persisted_lot_definition_snapshot_under_rule_drift(tmp_path):
+    conn = ensure_db(str(tmp_path / "lot_definition_drift.sqlite"))
+    original = {
+        "LIVE_MIN_ORDER_QTY": float(settings.LIVE_MIN_ORDER_QTY),
+        "LIVE_ORDER_QTY_STEP": float(settings.LIVE_ORDER_QTY_STEP),
+        "LIVE_ORDER_MAX_QTY_DECIMALS": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        "MIN_ORDER_NOTIONAL_KRW": float(settings.MIN_ORDER_NOTIONAL_KRW),
+    }
+    try:
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+        apply_fill_lifecycle(
+            conn,
+            side="BUY",
+            pair="BTC_KRW",
+            trade_id=1,
+            client_order_id="entry_1",
+            fill_id="fill_entry_1",
+            fill_ts=1_700_000_000_000,
+            price=40_000_000.0,
+            qty=0.0008,
+            fee=0.0,
+            strategy_name="sma_with_filter",
+            entry_decision_id=11,
+        )
+
+        baseline = summarize_position_lots(conn, pair="BTC_KRW")
+        assert baseline.lot_definition is not None
+        assert baseline.lot_definition.is_authoritative is True
+        persisted_lot_size = float(baseline.lot_definition.internal_lot_size or 0.0)
+
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.001)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.001)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 100000.0)
+
+        drifted = summarize_position_lots(conn, pair="BTC_KRW")
+
+        assert drifted.lot_definition is not None
+        assert drifted.lot_definition.is_authoritative is True
+        assert drifted.lot_definition.internal_lot_size == pytest.approx(persisted_lot_size)
+        assert drifted.lot_definition.min_qty == pytest.approx(0.0001)
+        assert drifted.lot_definition.qty_step == pytest.approx(0.0001)
+        assert drifted.lot_definition.min_notional_krw == pytest.approx(5000.0)
+        assert drifted.lot_definition.max_qty_decimals == 8
+    finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
+
+
+def test_position_lot_summary_derives_legacy_lot_size_from_consistent_row_qty_ratios(tmp_path):
+    conn = ensure_db(str(tmp_path / "lot_definition_legacy_ratio.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 1, "entry_open", 1_700_000_000_000, 40_000_000.0, 0.0002, 2, 0, "lot-native", "open_exposure"),
+    )
+
+    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
+
+    assert snapshot.lot_definition is not None
+    assert snapshot.lot_definition.semantic_version == 0
+    assert snapshot.lot_definition.internal_lot_size == pytest.approx(0.0001)
+    assert snapshot.lot_definition.source_mode == "derived_from_row_qty"
 
 
 def test_open_position_lots_schema_rejects_lot_native_state_count_mismatch(tmp_path):
@@ -300,11 +433,12 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
             entry_ts,
             entry_price,
             qty_open,
+            position_semantic_basis,
             position_state
         ) VALUES
-            (?, ?, ?, ?, ?, ?, ?),
-            (?, ?, ?, ?, ?, ?, ?),
-            (?, ?, ?, ?, ?, ?, ?)
+            (?, ?, ?, ?, ?, ?, ?, ?),
+            (?, ?, ?, ?, ?, ?, ?, ?),
+            (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "BTC_KRW",
@@ -313,6 +447,7 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
             1_700_000_000_000,
             40_000_000.0,
             0.00009999,
+            "legacy",
             OPEN_EXPOSURE_LOT_STATE,
             "BTC_KRW",
             2,
@@ -320,6 +455,7 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
             1_700_000_000_500,
             40_000_000.0,
             0.0001,
+            "legacy",
             OPEN_EXPOSURE_LOT_STATE,
             "BTC_KRW",
             3,
@@ -327,6 +463,7 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
             1_700_000_001_000,
             40_000_000.0,
             0.00010001,
+            "legacy",
             OPEN_EXPOSURE_LOT_STATE,
         ),
     )
@@ -363,7 +500,7 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
     assert rows[0]["entry_client_order_id"] == "above_min"
     assert rows[0]["position_state"] == OPEN_EXPOSURE_LOT_STATE
     assert float(rows[0]["qty_open"]) == pytest.approx(0.00010001)
-    assert rows[0]["position_semantic_basis"] == "lot-native"
+    assert rows[0]["position_semantic_basis"] == "legacy"
     assert rows[1]["entry_client_order_id"] == "below_min"
     assert rows[1]["position_state"] == DUST_TRACKING_LOT_STATE
     assert float(rows[1]["qty_open"]) == pytest.approx(0.00009999)
@@ -371,7 +508,7 @@ def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_expo
     assert rows[2]["entry_client_order_id"] == "exact_min"
     assert rows[2]["position_state"] == OPEN_EXPOSURE_LOT_STATE
     assert float(rows[2]["qty_open"]) == pytest.approx(0.0001)
-    assert rows[2]["position_semantic_basis"] == "lot-native"
+    assert rows[2]["position_semantic_basis"] == "legacy"
 
 
 def test_lifecycle_helpers_work_with_raw_tuple_rows(tmp_path):
@@ -431,10 +568,11 @@ def test_lifecycle_helpers_work_with_raw_tuple_rows(tmp_path):
                 entry_ts,
                 entry_price,
                 qty_open,
+                position_semantic_basis,
                 position_state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("BTC_KRW", 2, "raw_dust", fill_ts + 1_000, 40_000_000.0, 0.00009999, OPEN_EXPOSURE_LOT_STATE),
+            ("BTC_KRW", 2, "raw_dust", fill_ts + 1_000, 40_000_000.0, 0.00009999, "legacy", OPEN_EXPOSURE_LOT_STATE),
         )
         conn.commit()
 
@@ -458,46 +596,43 @@ def test_lifecycle_helpers_work_with_raw_tuple_rows(tmp_path):
     assert state_row[0] == DUST_TRACKING_LOT_STATE
 
 
-def test_summarize_position_lots_prefers_lot_counts_over_quantity_presence(tmp_path):
+def test_open_position_lots_rejects_zero_qty_rows_with_lot_authority(tmp_path):
     conn = ensure_db(str(tmp_path / "lot_count_authority.sqlite"))
-    conn.execute(
-        """
-        INSERT INTO open_position_lots(
-            pair,
-            entry_trade_id,
-            entry_client_order_id,
-            entry_ts,
-            entry_price,
-            qty_open,
-            executable_lot_count,
-            dust_tracking_lot_count,
-            position_semantic_basis,
-            position_state
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "BTC_KRW",
-            1,
-            "count_only_exposure",
-            1_700_000_123_000,
-            40_000_000.0,
-            0.0,
-            2,
-            0,
-            "lot-native",
-            OPEN_EXPOSURE_LOT_STATE,
-        ),
-    )
-    conn.commit()
-
-    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
     conn.close()
 
-    assert snapshot.semantic_basis == "lot-native"
-    assert snapshot.open_lot_count == 2
-    assert snapshot.raw_open_exposure_qty == pytest.approx(0.0)
-    assert snapshot.executable_open_exposure_qty == pytest.approx(0.0)
-    assert snapshot.exit_non_executable_reason == "none"
+    with pytest.raises(sqlite3.IntegrityError, match="zero qty rows must not keep lot authority"):
+        conn = ensure_db(str(tmp_path / "lot_count_authority.sqlite"))
+        try:
+            conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair,
+                    entry_trade_id,
+                    entry_client_order_id,
+                    entry_ts,
+                    entry_price,
+                    qty_open,
+                    executable_lot_count,
+                    dust_tracking_lot_count,
+                    position_semantic_basis,
+                    position_state
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "BTC_KRW",
+                    1,
+                    "count_only_exposure",
+                    1_700_000_123_000,
+                    40_000_000.0,
+                    0.0,
+                    2,
+                    0,
+                    "lot-native",
+                    OPEN_EXPOSURE_LOT_STATE,
+                ),
+            )
+        finally:
+            conn.close()
 
 
 def test_buy_lifecycle_writes_executable_lot_counts_and_separates_sub_lot_dust(tmp_path):

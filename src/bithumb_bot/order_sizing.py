@@ -8,6 +8,7 @@ from typing import Any
 from .config import settings
 from .dust import DUST_POSITION_EPS
 from .broker.order_rules import get_effective_order_rules
+from .lifecycle import LotDefinitionSnapshot
 from .lot_model import build_market_lot_rules, lot_count_to_qty
 
 _DECIMAL_ZERO = Decimal("0")
@@ -222,24 +223,36 @@ def build_sell_execution_sizing(
     *,
     pair: str,
     market_price: float,
-    sellable_qty: float,
     sellable_lot_count: int,
     exit_allowed: bool,
     exit_block_reason: str,
+    lot_definition: LotDefinitionSnapshot | None = None,
 ) -> ExecutionSizingPlan:
-    rules = get_effective_order_rules(pair).rules
-    lot_rules = build_market_lot_rules(
-        market_id=pair,
-        market_price=float(market_price),
-        rules=rules,
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
-        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
-    )
+    if lot_definition is not None and lot_definition.is_authoritative:
+        internal_lot_size = float(lot_definition.internal_lot_size or 0.0)
+        effective_min_trade_qty = float(lot_definition.min_qty or 0.0)
+        min_qty = float(lot_definition.min_qty or 0.0)
+        qty_step = float(lot_definition.qty_step or 0.0)
+        min_notional_krw = float(lot_definition.min_notional_krw or 0.0)
+    else:
+        rules = get_effective_order_rules(pair).rules
+        lot_rules = build_market_lot_rules(
+            market_id=pair,
+            market_price=float(market_price),
+            rules=rules,
+            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        )
+        internal_lot_size = float(lot_rules.lot_size)
+        effective_min_trade_qty = float(lot_rules.executable_min_qty)
+        min_qty = float(lot_rules.min_qty)
+        qty_step = float(lot_rules.qty_step)
+        min_notional_krw = float(lot_rules.min_notional_krw)
     intended_lot_count = max(0, int(sellable_lot_count))
     requested_qty = lot_count_to_qty(
         lot_count=intended_lot_count,
-        lot_size=float(lot_rules.lot_size),
+        lot_size=float(internal_lot_size),
     )
     executable_qty = float(requested_qty)
     allowed = bool(exit_allowed) and intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS
@@ -254,13 +267,13 @@ def build_sell_execution_sizing(
         budget_krw=0.0,
         requested_qty=float(requested_qty),
         executable_qty=float(executable_qty if allowed else 0.0),
-        internal_lot_size=float(lot_rules.lot_size),
+        internal_lot_size=float(internal_lot_size),
         intended_lot_count=int(intended_lot_count),
         executable_lot_count=int(intended_lot_count if allowed else 0),
         qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
-        effective_min_trade_qty=float(lot_rules.executable_min_qty),
-        min_qty=float(lot_rules.min_qty),
-        qty_step=float(lot_rules.qty_step),
-        min_notional_krw=float(lot_rules.min_notional_krw),
+        effective_min_trade_qty=float(effective_min_trade_qty),
+        min_qty=float(min_qty),
+        qty_step=float(qty_step),
+        min_notional_krw=float(min_notional_krw),
         non_executable_reason="executable" if allowed else block_reason,
     )
