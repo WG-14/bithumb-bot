@@ -73,6 +73,27 @@ semantic authority.
 - `qty` fields are derived values for compatibility, reporting, and broker interfacing only.
 - `sellable_qty` or any other qty-like snapshot value does not have semantic authority over the SELL boundary.
 
+## Developer Guardrail
+
+When extending the SELL path, keep this implementation boundary explicit:
+
+- Authoritative SELL path:
+  - `src/bithumb_bot/decision_context.py`
+  - canonical lot-native SELL authority is resolved from `position_state.normalized_exposure.sellable_executable_lot_count`
+  - canonical SELL qty remains derived from `position_state.normalized_exposure.sellable_executable_qty`
+- Non-authoritative surfaces:
+  - fail-closed compatibility fallback handling in `decision_context.py` is an adapter boundary only
+  - qty normalization and dust-guard helpers in `src/bithumb_bot/broker/live.py` are observational/support-only and must not become SELL authority inputs
+  - `open_exposure`, `dust_tracking`, and `reserved_exit` remain separate semantics and must not be merged into one executable inventory
+- Prohibited shortcuts in new code:
+  - do not source SELL eligibility or SELL sizing from qty aggregation, `submit_payload_qty`, `position_qty`, or other qty-only snapshots
+  - do not treat compatibility/fallback fields as canonical SELL authority
+  - do not sum `open_exposure` and `dust_tracking` to create executable SELL inventory
+- Focused regression references:
+  - `tests/test_lot_native_contract.py`
+  - `tests/test_trade_lifecycle.py`
+  - `tests/test_live_broker.py`
+
 ## Suppression Semantics
 
 The following outcomes are suppression outcomes, not submit failures:

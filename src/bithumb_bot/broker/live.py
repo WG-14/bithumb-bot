@@ -80,6 +80,8 @@ SELL_MIN_QTY_BOUNDARY_EPSILON = 1.5e-8  # One ledger tick with a small float-cus
 VALID_ORDER_SIDES = {"BUY", "SELL"}
 UNSET_EVENT_FIELD = "-"
 CLIENT_ORDER_ID_EPOCH_FLOOR_MS = 1_700_000_000_000
+_CANONICAL_SELL_SUBMIT_QTY_SOURCE = "position_state.normalized_exposure.sellable_executable_qty"
+_CANONICAL_SELL_SUBMIT_LOT_SOURCE = "position_state.normalized_exposure.sellable_executable_lot_count"
 
 SUBMISSION_REASON_FAILED_BEFORE_SEND = "failed_before_send"
 SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
@@ -365,7 +367,7 @@ def _resolve_submit_qty_source_truth_source(
         return truth_source
 
     normalized_submit_qty_source = str(submit_qty_source or "").strip()
-    if normalized_submit_qty_source == "position_state.normalized_exposure.sellable_executable_qty":
+    if normalized_submit_qty_source == _CANONICAL_SELL_SUBMIT_QTY_SOURCE:
         return "derived:sellable_executable_qty"
     if normalized_submit_qty_source == "position_state.normalized_exposure.open_exposure_qty":
         return "derived:open_exposure_qty"
@@ -762,7 +764,7 @@ def _load_strategy_decision_observability(
         or "-"
     )
     if submit_qty_source == "-":
-        submit_qty_source = "position_state.normalized_exposure.sellable_executable_qty"
+        submit_qty_source = _CANONICAL_SELL_SUBMIT_QTY_SOURCE
     submit_lot_source = str(
         context.get(
             "sell_submit_lot_source",
@@ -771,7 +773,7 @@ def _load_strategy_decision_observability(
         or "-"
     )
     if submit_lot_source == "-":
-        submit_lot_source = "position_state.normalized_exposure.sellable_executable_lot_count"
+        submit_lot_source = _CANONICAL_SELL_SUBMIT_LOT_SOURCE
     sell_submit_lot_count = int(
         context.get(
             "sell_submit_lot_count",
@@ -821,10 +823,10 @@ def _load_strategy_decision_observability(
             "position_state_source",
             position_normalized.get(
                 "position_state_source",
-                "position_state.normalized_exposure.sellable_executable_lot_count",
+                _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
             ),
         )
-        or "position_state.normalized_exposure.sellable_executable_lot_count"
+        or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
         or "-"
     )
 
@@ -1031,7 +1033,7 @@ def _sell_dust_analysis_source(*, raw_total_asset_qty: float, dust_tracking_qty:
 def _harmless_dust_suppression_submit_qty_source(submit_qty_source: str | None) -> str:
     normalized_submit_qty_source = str(submit_qty_source or "").strip()
     if not normalized_submit_qty_source or normalized_submit_qty_source == "-":
-        return "position_state.normalized_exposure.sellable_executable_qty"
+        return _CANONICAL_SELL_SUBMIT_QTY_SOURCE
     return normalized_submit_qty_source
 
 
@@ -1046,7 +1048,9 @@ def validate_order(*, signal: str, side: str, qty: float, market_price: float) -
         raise ValueError(f"invalid order qty: {qty}")
 
 
-def _normalize_order_qty_snapshot(*, qty: float) -> dict[str, float | int]:
+def _build_non_authoritative_qty_normalization_snapshot(*, qty: float) -> dict[str, float | int]:
+    # This snapshot is an observational rounding/validation aid only.
+    # SELL authority must remain on the canonical lot-native path.
     normalized = _decimal_from_number(qty)
     if normalized <= 0:
         raise ValueError(f"invalid order qty: {qty}")
@@ -1072,7 +1076,7 @@ def _normalize_order_qty_snapshot(*, qty: float) -> dict[str, float | int]:
 
 
 def normalize_order_qty(*, qty: float, market_price: float) -> float:
-    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    snapshot = _build_non_authoritative_qty_normalization_snapshot(qty=qty)
     normalized = float(snapshot["normalized_qty"])
 
     if normalized <= 0:
@@ -1086,7 +1090,7 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
 
 
 def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
-    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    snapshot = _build_non_authoritative_qty_normalization_snapshot(qty=qty)
     input_qty = float(snapshot["input_qty"])
     normalized_qty = float(snapshot["normalized_qty"])
     min_qty = float(snapshot["min_qty"])
@@ -1302,7 +1306,7 @@ def _normalize_sell_dust_details(
 
 
 def adjust_sell_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
-    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    snapshot = _build_non_authoritative_qty_normalization_snapshot(qty=qty)
     input_qty = float(snapshot["input_qty"])
     normalized_qty = float(snapshot["normalized_qty"])
     min_qty = float(snapshot["min_qty"])
@@ -1426,7 +1430,7 @@ def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> d
     if not math.isfinite(float(market_price)) or float(market_price) <= 0:
         return None
 
-    snapshot = _normalize_order_qty_snapshot(qty=qty)
+    snapshot = _build_non_authoritative_qty_normalization_snapshot(qty=qty)
     normalized_qty = float(snapshot["normalized_qty"])
     min_qty = float(snapshot["min_qty"])
     input_qty = float(snapshot["input_qty"])
@@ -1575,7 +1579,7 @@ def _record_sell_dust_unsellable(
         decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
     )
-    resolved_sell_submit_qty_source = "position_state.normalized_exposure.sellable_executable_qty"
+    resolved_sell_submit_qty_source = _CANONICAL_SELL_SUBMIT_QTY_SOURCE
     sell_qty_basis_qty = float(
         decision_observability.get("sell_qty_basis_qty")
         or decision_observability.get("open_exposure_qty")
@@ -1584,7 +1588,7 @@ def _record_sell_dust_unsellable(
     )
     sell_qty_basis_source = str(
         decision_observability.get("sell_qty_basis_source")
-        or "position_state.normalized_exposure.sellable_executable_lot_count"
+        or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
         or submit_qty_source
         or "-"
     )
@@ -1798,8 +1802,8 @@ def _record_sell_no_executable_exit_suppression(
         "reason_code": reason_code,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
-        "sell_submit_qty_source": "position_state.normalized_exposure.sellable_executable_qty",
-        "sell_submit_lot_source": "position_state.normalized_exposure.sellable_executable_lot_count",
+        "sell_submit_qty_source": _CANONICAL_SELL_SUBMIT_QTY_SOURCE,
+        "sell_submit_lot_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
         "sell_submit_lot_count": executable_lot_count,
         "sell_submit_lot_source_truth_source": str(
             decision_observability.get("sell_submit_lot_source_truth_source") or "-"
@@ -1816,9 +1820,9 @@ def _record_sell_no_executable_exit_suppression(
         "sell_qty_basis_source": str(
             decision_observability.get("sell_qty_basis_source")
             or submit_qty_source
-            or "position_state.normalized_exposure.sellable_executable_qty"
+            or _CANONICAL_SELL_SUBMIT_QTY_SOURCE
         ),
-        "submit_lot_source": "position_state.normalized_exposure.sellable_executable_lot_count",
+        "submit_lot_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
         "sell_qty_boundary_kind": str(decision_observability.get("sell_qty_boundary_kind") or "none"),
         "exit_non_executable_reason": exit_non_executable_reason,
         "exit_sizing_allowed": exit_sizing_allowed,
@@ -2047,14 +2051,14 @@ def _record_harmless_dust_exit_suppression(
     )
     suppression_sell_qty_basis_source = str(
         decision_observability.get("sell_qty_basis_source")
-        or "position_state.normalized_exposure.sellable_executable_lot_count"
+        or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
         or suppression_submit_qty_source
         or submit_qty_source
         or "-"
     )
     suppression_sell_submit_lot_source = str(
         decision_observability.get("sell_submit_lot_source")
-        or "position_state.normalized_exposure.sellable_executable_lot_count"
+        or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
     )
     suppression_sell_submit_lot_count = int(
         decision_observability.get("sell_submit_lot_count")
@@ -2780,7 +2784,7 @@ def _submit_via_standard_path(
     sell_observability = _sell_submit_observability_fields(
         decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
-        submit_lot_source=str(decision_observability.get("sell_submit_lot_source") or decision_observability.get("submit_lot_source") or "position_state.normalized_exposure.sellable_executable_lot_count"),
+        submit_lot_source=str(decision_observability.get("sell_submit_lot_source") or decision_observability.get("submit_lot_source") or _CANONICAL_SELL_SUBMIT_LOT_SOURCE),
         position_state_source=position_state_source,
         submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
         submit_lot_source_truth_source=sell_truth_source_fields["submit_lot_source_truth_source"],
@@ -3469,7 +3473,7 @@ def live_execute_signal(
                 "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
                 "reserved_exit_qty": float(normalized_exposure.reserved_exit_qty),
                 "sell_submit_lot_count": int(normalized_exposure.sellable_executable_lot_count),
-                "sell_submit_lot_source": "position_state.normalized_exposure.sellable_executable_lot_count",
+                "sell_submit_lot_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
                 "sell_submit_lot_count_truth_source": "derived:sellable_executable_lot_count",
                 "sell_submit_lot_source_truth_source": "derived:sellable_executable_lot_count",
                 "sellable_executable_qty": float(normalized_exposure.sellable_executable_qty),
@@ -3670,7 +3674,7 @@ def live_execute_signal(
                     ):
                         conn.commit()
                     return None
-                suppression_preview = _normalize_order_qty_snapshot(qty=dust_analysis_qty)
+                non_authoritative_qty_preview = _build_non_authoritative_qty_normalization_snapshot(qty=dust_analysis_qty)
                 if str(normalized_exposure.exit_block_reason) == "reserved_for_open_sell_orders":
                     if _record_sell_dust_unsellable(
                         conn=conn,
@@ -3736,7 +3740,7 @@ def live_execute_signal(
                     side=side,
                     requested_qty=float(dust_analysis_qty),
                     market_price=float(market_price),
-                    normalized_qty=float(suppression_preview["normalized_qty"]),
+                        normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                     submit_qty_source=dust_submit_qty_source,
                     position_state_source=dust_submit_qty_source,
                     raw_total_asset_qty=float(raw_total_asset_qty),
@@ -3789,7 +3793,7 @@ def live_execute_signal(
                     raw_total_asset_qty=float(raw_total_asset_qty),
                     dust_tracking_qty=float(normalized_exposure.dust_tracking_qty),
                 )
-                suppression_preview = _normalize_order_qty_snapshot(qty=dust_analysis_qty)
+                non_authoritative_qty_preview = _build_non_authoritative_qty_normalization_snapshot(qty=dust_analysis_qty)
                 if (not harmless_dust_checked) and _record_harmless_dust_exit_suppression(
                     conn=conn,
                     state=state,
@@ -3797,7 +3801,7 @@ def live_execute_signal(
                     side=side,
                     requested_qty=float(dust_analysis_qty),
                     market_price=float(market_price),
-                    normalized_qty=float(suppression_preview["normalized_qty"]),
+                    normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                     submit_qty_source=dust_submit_qty_source,
                     position_state_source=dust_submit_qty_source,
                     raw_total_asset_qty=float(raw_total_asset_qty),
@@ -3907,7 +3911,7 @@ def live_execute_signal(
 
         requested_order_qty = float(order_qty)
         if side == "SELL" and not harmless_dust_checked:
-            suppression_preview = _normalize_order_qty_snapshot(qty=order_qty)
+            non_authoritative_qty_preview = _build_non_authoritative_qty_normalization_snapshot(qty=order_qty)
             if _record_harmless_dust_exit_suppression(
                 conn=conn,
                 state=state,
@@ -3915,7 +3919,7 @@ def live_execute_signal(
                 side=side,
                 requested_qty=float(order_qty),
                 market_price=float(market_price),
-                normalized_qty=float(suppression_preview["normalized_qty"]),
+                normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                 submit_qty_source=submit_qty_source,
                 position_state_source=str(decision_observability["position_state_source"]),
                 raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
@@ -3968,7 +3972,7 @@ def live_execute_signal(
                 side=side,
                 requested_qty=requested_order_qty,
                 market_price=float(market_price),
-                normalized_qty=float(suppression_preview["normalized_qty"]),
+                normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                 strategy_name=strategy_name,
                 decision_id=decision_id,
                 decision_reason=decision_reason,
@@ -4007,7 +4011,7 @@ def live_execute_signal(
                     market_price=market_price,
                     requested_qty=requested_order_qty,
                     position_qty=requested_order_qty,
-                    order_qty=float(suppression_preview["normalized_qty"]),
+                    order_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                     submit_payload_qty=0.0,
                     submit_qty_source=submit_qty_source,
                     entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
@@ -4032,7 +4036,7 @@ def live_execute_signal(
                 side=side,
                 requested_qty=requested_order_qty,
                 market_price=float(market_price),
-                normalized_qty=float(suppression_preview["normalized_qty"]),
+                normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
                 submit_qty_source=submit_qty_source,
                 position_state_source=str(decision_observability["position_state_source"]),
                 raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),

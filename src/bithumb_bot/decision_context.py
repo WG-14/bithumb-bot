@@ -25,6 +25,9 @@ _CANONICAL_COMPATIBILITY_TRUTH_SOURCES = {
 }
 _DECLARATION_RESIDUE_SUFFIXES = ("_source", "_truth_source", "_compatibility_residue")
 _DECLARATION_RESIDUE_KEYS = {"decision_compatibility_residue"}
+_CANONICAL_OPEN_EXPOSURE_QTY_SOURCE = "position_state.normalized_exposure.open_exposure_qty"
+_CANONICAL_SELL_LOT_AUTHORITY = "position_state.normalized_exposure.sellable_executable_lot_count"
+_CANONICAL_SELL_QTY_DERIVATION = "position_state.normalized_exposure.sellable_executable_qty"
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,19 @@ class CanonicalPositionExposureSnapshot:
     sell_normalized_exposure_qty: float
     sell_open_exposure_qty: float
     sell_dust_tracking_qty: float
+
+
+@dataclass(frozen=True)
+class _CanonicalSellAuthorityInputs:
+    open_exposure_qty: float
+    open_exposure_qty_truth_source: str
+    open_lot_count: int
+    reserved_exit_qty: float
+    reserved_exit_lot_count: int
+    sellable_executable_lot_count: int
+    sellable_executable_qty: float
+    sellable_executable_qty_truth_source: str
+    semantic_basis: str
 
 
 def materialize_strategy_decision_context(value: Any) -> Any:
@@ -220,8 +236,132 @@ def _resolve_canonical_sell_qty_basis(
 ) -> tuple[float, str, str]:
     return (
         float(sellable_executable_qty),
-        "position_state.normalized_exposure.sellable_executable_lot_count",
+        _CANONICAL_SELL_LOT_AUTHORITY,
         "derived:sellable_executable_lot_count",
+    )
+
+
+def _resolve_lot_native_sell_authority_inputs(
+    *,
+    payload: dict[str, Any],
+    position_gate: dict[str, Any],
+    position_state: dict[str, Any],
+    position_normalized: dict[str, Any],
+) -> _CanonicalSellAuthorityInputs:
+    open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
+        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
+        (_CANONICAL_OPEN_EXPOSURE_QTY_SOURCE, position_normalized.get("open_exposure_qty")),
+        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
+        ("position_gate.open_exposure_qty", position_gate.get("open_exposure_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    open_lot_count, _ = _resolve_int_with_source(
+        ("position_state.open_lot_count", position_state.get("open_lot_count")),
+        ("position_state.normalized_exposure.open_lot_count", position_normalized.get("open_lot_count")),
+        ("context.open_lot_count", payload.get("open_lot_count")),
+        ("position_gate.open_lot_count", position_gate.get("open_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    reserved_exit_lot_count, _ = _resolve_int_with_source(
+        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
+        (
+            "position_state.normalized_exposure.reserved_exit_lot_count",
+            position_normalized.get("reserved_exit_lot_count"),
+        ),
+        ("context.reserved_exit_lot_count", payload.get("reserved_exit_lot_count")),
+        ("position_gate.reserved_exit_lot_count", position_gate.get("reserved_exit_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    sellable_executable_lot_count, _ = _resolve_int_with_source(
+        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
+        (_CANONICAL_SELL_LOT_AUTHORITY, position_normalized.get("sellable_executable_lot_count")),
+        ("context.sellable_executable_lot_count", payload.get("sellable_executable_lot_count")),
+        ("position_gate.sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    reserved_exit_qty, _ = _resolve_with_source(
+        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
+        ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
+        ("context.reserved_exit_qty", payload.get("reserved_exit_qty")),
+        ("position_gate.reserved_exit_qty", position_gate.get("reserved_exit_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
+        ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
+        (_CANONICAL_SELL_QTY_DERIVATION, position_normalized.get("sellable_executable_qty")),
+        ("context.sellable_executable_qty", payload.get("sellable_executable_qty")),
+        default_value=max(0.0, float(open_exposure_qty or 0.0) - float(reserved_exit_qty or 0.0)),
+        default_source=_CANONICAL_SELL_QTY_DERIVATION,
+        value_kind="float",
+    )
+    semantic_basis = _as_text(
+        position_state.get("semantic_basis", position_normalized.get("semantic_basis", payload.get("semantic_basis"))),
+        default="",
+    )
+    return _CanonicalSellAuthorityInputs(
+        open_exposure_qty=0.0 if open_exposure_qty is None else float(open_exposure_qty),
+        open_exposure_qty_truth_source=open_exposure_qty_truth_source,
+        open_lot_count=int(open_lot_count),
+        reserved_exit_qty=0.0 if reserved_exit_qty is None else float(reserved_exit_qty),
+        reserved_exit_lot_count=int(reserved_exit_lot_count),
+        sellable_executable_lot_count=int(sellable_executable_lot_count),
+        sellable_executable_qty=(
+            max(0.0, float(open_exposure_qty or 0.0) - float(reserved_exit_qty or 0.0))
+            if sellable_executable_qty is None
+            else float(sellable_executable_qty)
+        ),
+        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
+        semantic_basis=semantic_basis,
+    )
+
+
+def _apply_non_authoritative_sell_compatibility_fallbacks(
+    *,
+    authority_inputs: _CanonicalSellAuthorityInputs,
+    raw_total_asset_qty: float,
+) -> _CanonicalSellAuthorityInputs:
+    # This adapter exists only to fail closed for legacy/fallback payloads.
+    # It must not be treated as the canonical SELL authority surface.
+    open_exposure_qty = float(authority_inputs.open_exposure_qty)
+    open_exposure_qty_truth_source = authority_inputs.open_exposure_qty_truth_source
+    sellable_executable_qty = float(authority_inputs.sellable_executable_qty)
+    sellable_executable_qty_truth_source = authority_inputs.sellable_executable_qty_truth_source
+
+    legacy_lot_semantics = bool(
+        authority_inputs.semantic_basis and authority_inputs.semantic_basis != "lot-native"
+    )
+    if legacy_lot_semantics or (
+        authority_inputs.open_lot_count <= 0 and float(raw_total_asset_qty) > 1e-12
+    ):
+        open_exposure_qty = 0.0
+        open_exposure_qty_truth_source = "fallback:legacy_lot_metadata_missing"
+        sellable_executable_qty = 0.0
+        sellable_executable_qty_truth_source = "fallback:legacy_lot_metadata_missing"
+    if authority_inputs.open_lot_count <= 0:
+        open_exposure_qty = 0.0
+        if open_exposure_qty_truth_source != "fallback:legacy_lot_metadata_missing":
+            open_exposure_qty_truth_source = "fallback:no_executable_open_lots"
+        sellable_executable_qty = 0.0
+        if sellable_executable_qty_truth_source != "fallback:legacy_lot_metadata_missing":
+            sellable_executable_qty_truth_source = "fallback:no_executable_open_lots"
+
+    return _CanonicalSellAuthorityInputs(
+        open_exposure_qty=open_exposure_qty,
+        open_exposure_qty_truth_source=open_exposure_qty_truth_source,
+        open_lot_count=authority_inputs.open_lot_count,
+        reserved_exit_qty=authority_inputs.reserved_exit_qty,
+        reserved_exit_lot_count=authority_inputs.reserved_exit_lot_count,
+        sellable_executable_lot_count=authority_inputs.sellable_executable_lot_count,
+        sellable_executable_qty=sellable_executable_qty,
+        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
+        semantic_basis=authority_inputs.semantic_basis,
     )
 
 
@@ -382,16 +522,6 @@ def resolve_canonical_position_exposure_snapshot(
         value_kind="float",
     )
     raw_total_asset_qty = raw_qty_open if raw_total_asset_qty is None else float(raw_total_asset_qty)
-    open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
-        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
-        ("position_state.normalized_exposure.open_exposure_qty", position_normalized.get("open_exposure_qty")),
-        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
-        ("position_gate.open_exposure_qty", position_gate.get("open_exposure_qty")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
-    )
-    open_exposure_qty = 0.0 if open_exposure_qty is None else float(open_exposure_qty)
     dust_tracking_qty, _ = _resolve_with_source(
         ("position_state.dust_tracking_qty", position_state.get("dust_tracking_qty")),
         ("position_state.normalized_exposure.dust_tracking_qty", position_normalized.get("dust_tracking_qty")),
@@ -402,14 +532,6 @@ def resolve_canonical_position_exposure_snapshot(
         value_kind="float",
     )
     dust_tracking_qty = 0.0 if dust_tracking_qty is None else float(dust_tracking_qty)
-    open_lot_count, _ = _resolve_int_with_source(
-        ("position_state.open_lot_count", position_state.get("open_lot_count")),
-        ("position_state.normalized_exposure.open_lot_count", position_normalized.get("open_lot_count")),
-        ("context.open_lot_count", payload.get("open_lot_count")),
-        ("position_gate.open_lot_count", position_gate.get("open_lot_count")),
-        default_value=0,
-        default_source="default:0",
-    )
     dust_tracking_lot_count, _ = _resolve_int_with_source(
         ("position_state.dust_tracking_lot_count", position_state.get("dust_tracking_lot_count")),
         (
@@ -421,71 +543,26 @@ def resolve_canonical_position_exposure_snapshot(
         default_value=0,
         default_source="default:0",
     )
-    reserved_exit_lot_count, _ = _resolve_int_with_source(
-        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
-        (
-            "position_state.normalized_exposure.reserved_exit_lot_count",
-            position_normalized.get("reserved_exit_lot_count"),
-        ),
-        ("context.reserved_exit_lot_count", payload.get("reserved_exit_lot_count")),
-        ("position_gate.reserved_exit_lot_count", position_gate.get("reserved_exit_lot_count")),
-        default_value=0,
-        default_source="default:0",
+    canonical_sell_authority = _resolve_lot_native_sell_authority_inputs(
+        payload=payload,
+        position_gate=position_gate,
+        position_state=position_state,
+        position_normalized=position_normalized,
     )
-    sellable_executable_lot_count, _ = _resolve_int_with_source(
-        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
-        (
-            "position_state.normalized_exposure.sellable_executable_lot_count",
-            position_normalized.get("sellable_executable_lot_count"),
-        ),
-        ("context.sellable_executable_lot_count", payload.get("sellable_executable_lot_count")),
-        ("position_gate.sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count")),
-        default_value=0,
-        default_source="default:0",
+    compatibility_adjusted_sell_authority = _apply_non_authoritative_sell_compatibility_fallbacks(
+        authority_inputs=canonical_sell_authority,
+        raw_total_asset_qty=float(raw_total_asset_qty),
     )
-    reserved_exit_qty, _ = _resolve_with_source(
-        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
-        ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
-        ("context.reserved_exit_qty", payload.get("reserved_exit_qty")),
-        ("position_gate.reserved_exit_qty", position_gate.get("reserved_exit_qty")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
+    open_exposure_qty = compatibility_adjusted_sell_authority.open_exposure_qty
+    open_exposure_qty_truth_source = compatibility_adjusted_sell_authority.open_exposure_qty_truth_source
+    open_lot_count = compatibility_adjusted_sell_authority.open_lot_count
+    reserved_exit_lot_count = compatibility_adjusted_sell_authority.reserved_exit_lot_count
+    sellable_executable_lot_count = compatibility_adjusted_sell_authority.sellable_executable_lot_count
+    reserved_exit_qty = compatibility_adjusted_sell_authority.reserved_exit_qty
+    sellable_executable_qty = compatibility_adjusted_sell_authority.sellable_executable_qty
+    sellable_executable_qty_truth_source = (
+        compatibility_adjusted_sell_authority.sellable_executable_qty_truth_source
     )
-    reserved_exit_qty = 0.0 if reserved_exit_qty is None else float(reserved_exit_qty)
-    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
-        ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
-        (
-            "position_state.normalized_exposure.sellable_executable_qty",
-            position_normalized.get("sellable_executable_qty"),
-        ),
-        ("context.sellable_executable_qty", payload.get("sellable_executable_qty")),
-        default_value=max(0.0, float(open_exposure_qty) - float(reserved_exit_qty)),
-        default_source="position_state.normalized_exposure.sellable_executable_qty",
-        value_kind="float",
-    )
-    sellable_executable_qty = (
-        max(0.0, float(open_exposure_qty) - float(reserved_exit_qty))
-        if sellable_executable_qty is None
-        else float(sellable_executable_qty)
-    )
-    semantic_basis = _as_text(
-        position_state.get("semantic_basis", position_normalized.get("semantic_basis", payload.get("semantic_basis"))),
-        default="",
-    )
-    legacy_lot_semantics = bool(semantic_basis and semantic_basis != "lot-native")
-    if legacy_lot_semantics or (open_lot_count <= 0 and float(raw_total_asset_qty) > 1e-12):
-        open_exposure_qty = 0.0
-        open_exposure_qty_truth_source = "fallback:legacy_lot_metadata_missing"
-        sellable_executable_qty = 0.0
-        sellable_executable_qty_truth_source = "fallback:legacy_lot_metadata_missing"
-    if open_lot_count <= 0:
-        open_exposure_qty = 0.0
-        if open_exposure_qty_truth_source != "fallback:legacy_lot_metadata_missing":
-            open_exposure_qty_truth_source = "fallback:no_executable_open_lots"
-        sellable_executable_qty = 0.0
-        if sellable_executable_qty_truth_source != "fallback:legacy_lot_metadata_missing":
-            sellable_executable_qty_truth_source = "fallback:no_executable_open_lots"
     exit_allowed, _ = _resolve_with_source(
         ("context.exit_allowed", payload.get("exit_allowed")),
         ("position_state.exit_allowed", position_state.get("exit_allowed")),
@@ -777,12 +854,12 @@ def normalize_strategy_decision_context(
         ),
         default="",
     )
-    submit_lot_source = "position_state.normalized_exposure.sellable_executable_lot_count"
-    submit_qty_source = "position_state.normalized_exposure.sellable_executable_qty"
+    submit_lot_source = _CANONICAL_SELL_LOT_AUTHORITY
+    submit_qty_source = _CANONICAL_SELL_QTY_DERIVATION
     sell_submit_qty_source = submit_qty_source
     sell_submit_lot_source = submit_lot_source
     submit_lot_count = int(sell_submit_lot_count)
-    sell_qty_basis_source = "position_state.normalized_exposure.sellable_executable_lot_count"
+    sell_qty_basis_source = _CANONICAL_SELL_LOT_AUTHORITY
     sell_failure_category, sell_failure_detail, _ = _derive_sell_failure_observability(
         final_signal=final_signal,
         sell_qty_boundary_kind=sell_qty_boundary_kind,

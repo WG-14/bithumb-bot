@@ -3022,8 +3022,11 @@ def test_live_execute_signal_sell_blocks_when_qty_step_floor_would_leave_unsella
     assert event_row is None
 
 
+# Authority boundary regression suite.
+
+
 @pytest.mark.fast_regression
-def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust_tracking(monkeypatch, tmp_path):
+def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust_tracking(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_normalized_exposure_only.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
@@ -3208,7 +3211,7 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
 
 
 @pytest.mark.fast_regression
-def test_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_for_submission(
+def test_authority_boundary_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_for_submission(
     monkeypatch,
     tmp_path,
 ):
@@ -3362,7 +3365,7 @@ def test_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_f
 
 
 @pytest.mark.fast_regression
-def test_live_execute_signal_sell_uses_exit_sizing_executable_qty_for_final_submit_payload(
+def test_authority_boundary_live_execute_signal_sell_uses_exit_sizing_executable_qty_for_final_submit_payload(
     monkeypatch,
     tmp_path,
 ):
@@ -3528,6 +3531,7 @@ def test_live_execute_signal_sell_uses_exit_sizing_executable_qty_for_final_subm
     assert submit_evidence["order_qty"] == pytest.approx(0.0004)
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_qty_basis_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)

@@ -1215,7 +1215,10 @@ def test_buy_direct_linked_decision_preempts_strict_fallback_candidates(tmp_path
     assert row["entry_decision_linkage"] == ENTRY_DECISION_LINKAGE_DIRECT
 
 
-def test_sell_lifecycle_uses_open_exposure_lots_and_keeps_dust_tracking_operator_only(tmp_path):
+# Authority boundary regression suite.
+
+
+def test_authority_boundary_sell_lifecycle_uses_open_exposure_lots_and_keeps_dust_tracking_operator_only(tmp_path):
     conn = ensure_db(str(tmp_path / "state_routing.sqlite"))
     base_ts = 1_700_001_000_000
 
@@ -1301,7 +1304,7 @@ def test_sell_lifecycle_uses_open_exposure_lots_and_keeps_dust_tracking_operator
     assert float(lifecycle_row[0]["matched_qty"]) == pytest.approx(0.5)
 
 
-def test_sell_lifecycle_ignores_dust_tracking_even_if_it_is_above_min_qty(tmp_path):
+def test_authority_boundary_sell_lifecycle_ignores_dust_tracking_even_if_it_is_above_min_qty(tmp_path):
     conn = ensure_db(str(tmp_path / "malformed_dust_tracking.sqlite"))
     base_ts = 1_700_001_100_000
 

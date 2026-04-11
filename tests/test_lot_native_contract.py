@@ -6,7 +6,10 @@ import sqlite3
 
 import pytest
 
-from bithumb_bot.decision_context import normalize_strategy_decision_context
+from bithumb_bot.decision_context import (
+    normalize_strategy_decision_context,
+    resolve_canonical_position_exposure_snapshot,
+)
 from bithumb_bot.dust import (
     DUST_TRACKING_LOT_STATE,
     OPEN_EXPOSURE_LOT_STATE,
@@ -23,10 +26,10 @@ from bithumb_bot.order_sizing import build_sell_execution_sizing
 pytestmark = pytest.mark.fast_regression
 
 
-# Current contract PASS baseline.
+# Authority boundary regression suite.
 
 
-def test_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_count() -> None:
+def test_authority_boundary_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_count() -> None:
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
@@ -78,7 +81,7 @@ def test_sell_suppression_categories_remain_normal_suppression_outcomes(
     assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
-def test_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separate() -> None:
+def test_authority_boundary_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separate() -> None:
     contract = lot_state_quantity_contract()
 
     assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_qty_source"] == "open_exposure_qty"
@@ -95,7 +98,7 @@ def test_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separ
     assert contract[DUST_TRACKING_LOT_STATE]["operator_tracking_only"] is True
 
 
-def test_lot_native_position_contract_declares_singular_authority_surface() -> None:
+def test_authority_boundary_lot_native_position_contract_declares_singular_authority_surface() -> None:
     contract = lot_native_position_contract()
 
     assert contract["semantic_basis"] == "lot-native"
@@ -158,7 +161,7 @@ def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qt
     assert model.state_interpretation.exit_submit_expected is False
 
 
-def test_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:
+def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:
     model = build_position_state_model(
         raw_qty_open=0.0012,
         metadata_raw={},
@@ -195,7 +198,7 @@ def test_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_st
     assert plan.requested_qty > model.normalized_exposure.sellable_executable_qty
 
 
-def test_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without_legacy_semantic_marker() -> None:
+def test_authority_boundary_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without_legacy_semantic_marker() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -228,7 +231,7 @@ def test_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without
     assert "legacy_lot_metadata_missing" not in snapshot.as_dict().values()
 
 
-def test_canonical_lot_summary_fails_closed_for_lot_native_rows_missing_explicit_counts() -> None:
+def test_authority_boundary_canonical_lot_summary_fails_closed_for_lot_native_rows_missing_explicit_counts() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -266,6 +269,37 @@ def test_canonical_lot_summary_fails_closed_for_lot_native_rows_missing_explicit
 
 
 # Full lot-native declaration closure.
+
+
+def test_authority_boundary_decision_context_ignores_fallback_only_qty_fields_without_canonical_lot_authority() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0004,
+            "sellable_executable_qty": 0.0004,
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        }
+    )
+
+    assert snapshot.open_lot_count == 0
+    assert snapshot.open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.sellable_executable_lot_count == 0
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0)
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0)
+    assert snapshot.sell_submit_lot_count == 0
 
 
 def test_decision_context_no_longer_emits_compatibility_fallback_or_provenance_layer() -> None:
