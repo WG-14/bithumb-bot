@@ -30,7 +30,9 @@ from .db_core import (
 )
 from .utils_time import kst_str, parse_interval_sec
 from .engine import (
+    build_resume_guidance,
     compute_signal,
+    evaluate_restart_readiness,
     evaluate_resume_eligibility,
     get_health_status,
     maybe_clear_stale_initial_reconcile_halt,
@@ -2058,173 +2060,30 @@ def _load_recovery_report(
         )
 
     resume_allowed, blockers = evaluate_resume_eligibility()
-    blocker_list: list[dict[str, str | bool | float | int | None]] = [
-        {
-            "code": b.code,
-            "reason_code": str(getattr(b, "reason_code", b.code)),
-            "summary": str(getattr(b, "summary", b.detail)),
-            "detail": b.detail,
-            "overridable": bool(b.overridable),
-            "balance_delta_krw": getattr(b, "balance_delta_krw", None),
-            "recent_external_cash_adjustment_present": getattr(b, "recent_external_cash_adjustment_present", None),
-            "recent_external_cash_adjustment_count": getattr(b, "recent_external_cash_adjustment_count", None),
-        }
-        for b in blockers
-    ]
+    guidance = build_resume_guidance(
+        resume_allowed=bool(resume_allowed),
+        blockers=blockers,
+        unresolved_count=unresolved_count,
+        recovery_required_count=recovery_required_count,
+        submit_unknown_count=submit_unknown_count,
+    )
+    blocker_list = guidance.blockers
     can_resume = bool(resume_allowed)
     blocker_codes = [str(b["code"]) for b in blocker_list]
     blocker_reason_codes = [str(b["reason_code"]) for b in blocker_list]
-    non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
-    primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
-    primary_blocker_reason_code = str(blocker_list[0]["reason_code"]) if blocker_list else "-"
-    blocker_summary = (
-        f"total={len(blocker_list)} "
-        f"non_overridable={len(non_overridable_blockers)} "
-        f"overridable={len(blocker_list) - len(non_overridable_blockers)}"
-    )
-
-    if bool(resume_allowed):
-        operator_next_action = "resume_now"
-        recommended_command = "uv run python bot.py resume"
-        recommended_next_action = "No active blocker. Resume trading now."
-        resume_blocked_reason = "none"
-    elif blocker_list and all(bool(b["overridable"]) for b in blocker_list):
-        operator_next_action = "review_and_force_resume"
-        recommended_command = "uv run python bot.py resume --force"
-        recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
-        resume_blocked_reason = "resume blocked by overridable blockers"
-    elif recovery_required_count > 0:
-        operator_next_action = "manual_recovery_required"
-        recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
-        recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
-        resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
-    elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
-        operator_next_action = "review_harmless_dust_policy"
-        recommended_command = "uv run python bot.py recovery-report --json"
-        recommended_next_action = (
-            "Confirm harmless broker/local dust is truly safe, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
-        )
-        resume_blocked_reason = "resume blocked by harmless dust policy review"
-    elif "BLOCKING_DUST_REVIEW_REQUIRED" in blocker_codes:
-        operator_next_action = "manual_dust_review_required"
-        recommended_command = "uv run python bot.py recovery-report --json"
-        recommended_next_action = (
-            "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
-        )
-        resume_blocked_reason = "resume blocked by blocking dust manual review"
-    elif "EXTERNAL_CASH_ADJUSTMENT_REQUIRED" in blocker_codes:
-        operator_next_action = "record_external_cash_adjustment"
-        recommended_command = "uv run python bot.py record-external-cash-adjustment --help"
-        recommended_next_action = (
-            "Record the missing external cash adjustment evidence, then rerun reconcile before resuming."
-        )
-        resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
-    elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
-        if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
-            operator_next_action = "reconcile_after_external_adjustment"
-            recommended_command = "uv run python bot.py reconcile"
-            recommended_next_action = (
-                "An external cash adjustment is already recorded. Verify the broker snapshot, then rerun reconcile."
-            )
-            resume_blocked_reason = "resume blocked by remaining balance split mismatch after external adjustment"
-        else:
-            operator_next_action = "investigate_blockers"
-            recommended_command = "uv run python bot.py recovery-report --json"
-            recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
-            resume_blocked_reason = "resume blocked by non-overridable safety blockers"
-    else:
-        operator_next_action = "investigate_blockers"
-        recommended_command = "uv run python bot.py recovery-report --json"
-        recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
-        resume_blocked_reason = "resume blocked by non-overridable safety blockers"
-
-    active_blocker_summary = "none"
-    if blocker_list:
-        active_blocker_summary = " | ".join(
-            f"{b['code']}(overridable={1 if bool(b['overridable']) else 0})"
-            for b in blocker_list[:3]
-        )
-
-    risk_level = "low"
-    if recovery_required_count > 0 or non_overridable_blockers:
-        risk_level = "high"
-    elif unresolved_count > 0 or blocker_list:
-        risk_level = "medium"
+    non_overridable_blockers = guidance.non_overridable_blockers
+    primary_blocker_code = guidance.primary_blocker_code
+    primary_blocker_reason_code = guidance.primary_blocker_reason_code
+    blocker_summary = guidance.blocker_summary
+    operator_next_action = guidance.operator_next_action
+    recommended_command = guidance.recommended_command
+    recommended_next_action = guidance.recommended_next_action
+    resume_blocked_reason = guidance.resume_blocked_reason
+    active_blocker_summary = guidance.active_blocker_summary
+    risk_level = guidance.risk_level
 
     state = runtime_state.snapshot()
-
-    def _next_action_for_blocker(code: str) -> str:
-        if code == "STARTUP_SAFETY_GATE_BLOCKED":
-            if recovery_required_count > 0:
-                return "uv run python bot.py recover-order --client-order-id <id>"
-            if submit_unknown_count > 0:
-                return "uv run python bot.py reconcile"
-            return "uv run python bot.py recovery-report"
-        if code == "LAST_RECONCILE_FAILED":
-            return "uv run python bot.py reconcile"
-        if code == "EXTERNAL_CASH_ADJUSTMENT_REQUIRED":
-            return "uv run python bot.py record-external-cash-adjustment --help"
-        if code == "BALANCE_SPLIT_MISMATCH":
-            if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
-                return "uv run python bot.py reconcile"
-            return "uv run python bot.py recovery-report --json"
-        if code == "HALT_RISK_OPEN_POSITION":
-            return "uv run python bot.py flatten-position"
-        if code in {"HARMLESS_DUST_POLICY_REVIEW_REQUIRED", "BLOCKING_DUST_REVIEW_REQUIRED"}:
-            return "uv run python bot.py recovery-report --json"
-        if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
-            return "uv run python bot.py restart-checklist"
-        return recommended_command
-
-    blocker_summary_view: list[dict[str, object]] = []
-    for blocker in blocker_list[:3]:
-        code = str(blocker["code"])
-        reason_code = str(blocker["reason_code"])
-        summary = str(blocker["summary"])
-        evidence = str(blocker["detail"])
-        if code == "STARTUP_SAFETY_GATE_BLOCKED":
-            evidence = (
-                f"unresolved={unresolved_count} "
-                f"submit_unknown={submit_unknown_count} "
-                f"recovery_required={recovery_required_count}; "
-                f"{evidence}"
-            )
-        balance_delta_krw = blocker.get("balance_delta_krw")
-        recent_adjustment_present = blocker.get("recent_external_cash_adjustment_present")
-        recent_adjustment_count = blocker.get("recent_external_cash_adjustment_count")
-        if balance_delta_krw is not None or recent_adjustment_present is not None:
-            delta_text = (
-                f"{float(balance_delta_krw):.3f}"
-                if isinstance(balance_delta_krw, (int, float))
-                else str(balance_delta_krw)
-            )
-            evidence = (
-                f"{evidence} "
-                f"delta_krw={delta_text} "
-                f"recent_external_cash_adjustment_present={1 if bool(recent_adjustment_present) else 0} "
-                f"recent_external_cash_adjustment_count={int(recent_adjustment_count or 0)}"
-            )
-        blocker_summary_view.append(
-            {
-                "blocker": code,
-                "reason_code": reason_code,
-                "summary": summary,
-                "evidence": evidence,
-                "recommended_next_action": _next_action_for_blocker(code),
-                "delta_krw": balance_delta_krw,
-                "recent_external_cash_adjustment_present": recent_adjustment_present,
-                "recent_external_cash_adjustment_count": recent_adjustment_count,
-            }
-        )
-
-    if not blocker_summary_view:
-        blocker_summary_view.append(
-            {
-                "blocker": "none",
-                "evidence": "resume gates clear",
-                "recommended_next_action": "uv run python bot.py resume",
-            }
-        )
+    blocker_summary_view = guidance.blocker_summary_view
 
     recent_orders_snapshot, broker_snapshot_error = _safe_recent_broker_orders_snapshot(limit=100)
     recent_dust_unsellable_event = None
@@ -2739,99 +2598,7 @@ def cmd_record_external_cash_adjustment(
 
 
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
-    maybe_clear_stale_initial_reconcile_halt()
-    report = _load_recovery_report()
-    state = runtime_state.snapshot()
-    dust_context = build_dust_display_context(state.last_reconcile_metadata)
-
-    conn = ensure_db()
-    try:
-        open_row = conn.execute(
-            """
-            SELECT COUNT(*) AS open_count
-            FROM orders
-            WHERE status IN ({})
-              AND status != 'RECOVERY_REQUIRED'
-            """.format(",".join("?" for _ in OPEN_ORDER_STATUSES)),
-            OPEN_ORDER_STATUSES,
-        ).fetchone()
-        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-    finally:
-        conn.close()
-
-    unresolved_count = int(report.get("unresolved_count") or 0)
-    recovery_required_count = int(report.get("recovery_required_count") or 0)
-    open_order_count = int(open_row["open_count"] if open_row else 0)
-    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
-    open_exposure_qty = asset_qty if asset_qty > 1e-12 and float(dust_context.raw_holdings.broker_qty) <= 1e-12 else 0.0
-    position_state = build_position_state_model(
-        raw_qty_open=asset_qty,
-        metadata_raw=state.last_reconcile_metadata,
-        raw_total_asset_qty=max(asset_qty, float(dust_context.raw_holdings.broker_qty)),
-        open_exposure_qty=open_exposure_qty,
-        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
-        open_lot_count=(1 if open_exposure_qty > 1e-12 else 0),
-    )
-    normalized_exposure = position_state.normalized_exposure
-    position_state_clear = bool(
-        not normalized_exposure.has_executable_exposure
-        and (
-            str(normalized_exposure.terminal_state) == "flat"
-            or (str(normalized_exposure.terminal_state) == "dust_only" and bool(dust_context.operator_view.resume_allowed))
-        )
-    )
-
-    last_reconcile_summary = str(report.get("last_reconcile_summary") or "none")
-    last_reconcile_ok = (
-        last_reconcile_summary == "none" or "status=ok" in last_reconcile_summary.lower()
-    )
-
-    halt_reason = str(report.get("recent_halt_reason") or "none")
-    halt_clear = (
-        not state.halt_new_orders_blocked
-        and not state.halt_state_unresolved
-        and halt_reason == "none"
-    )
-
-    return [
-        (
-            "unresolved/recovery-required orders",
-            unresolved_count == 0 and recovery_required_count == 0,
-            (
-                f"unresolved={unresolved_count} "
-                f"recovery_required={recovery_required_count}"
-            ),
-        ),
-        (
-            "open orders",
-            open_order_count == 0,
-            f"open_orders={open_order_count}",
-        ),
-        (
-            "normalized position state",
-            position_state_clear,
-            (
-                f"terminal_state={normalized_exposure.terminal_state} "
-                f"has_executable_exposure={1 if normalized_exposure.has_executable_exposure else 0} "
-                f"has_dust_only_remainder={1 if normalized_exposure.has_dust_only_remainder else 0} "
-                f"dust_resume_allowed={1 if dust_context.operator_view.resume_allowed else 0}"
-            ),
-        ),
-        (
-            "halt state",
-            halt_clear,
-            (
-                f"halt_blocked={1 if state.halt_new_orders_blocked else 0} "
-                f"halt_unresolved={1 if state.halt_state_unresolved else 0} "
-                f"detail={halt_reason}"
-            ),
-        ),
-        (
-            "last reconcile",
-            last_reconcile_ok,
-            last_reconcile_summary,
-        ),
-    ]
+    return evaluate_restart_readiness()
 
 
 def cmd_restart_checklist() -> None:

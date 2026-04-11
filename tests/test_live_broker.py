@@ -128,6 +128,11 @@ class _CommitCheckingBroker(_FakeBroker):
             ).fetchone()
             assert row is not None
             assert row["status"] == "PENDING_SUBMIT"
+            intent = conn.execute(
+                "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='intent_created'",
+                (client_order_id,),
+            ).fetchone()
+            assert intent is not None
 
             event = conn.execute(
                 "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
@@ -1074,6 +1079,16 @@ def test_live_stale_unresolved_open_order_blocks_new_order(tmp_path):
 
 def test_live_submit_intent_is_committed_before_remote_submit(tmp_path):
     db_path = str(tmp_path / "pre_submit_commit.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+
+    trade = live_execute_signal(_CommitCheckingBroker(db_path=db_path), "BUY", 1000, 100000000.0)
+
+    assert trade is not None
+
+
+def test_extension_invariant_live_submit_requires_persisted_local_intent_and_preflight(tmp_path):
+    db_path = str(tmp_path / "submit_invariant.sqlite")
     object.__setattr__(settings, "DB_PATH", db_path)
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
 

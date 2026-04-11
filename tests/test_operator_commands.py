@@ -29,7 +29,12 @@ from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown, init_portfolio, record_external_cash_adjustment
-from bithumb_bot.engine import evaluate_resume_eligibility
+from bithumb_bot.engine import (
+    ResumeBlocker,
+    build_resume_guidance,
+    evaluate_restart_readiness,
+    evaluate_resume_eligibility,
+)
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.public_api_orderbook import BestQuote
@@ -1030,6 +1035,31 @@ def test_resume_runs_preflight_reconcile_and_refuses_when_recovery_required(
     assert state.halt_new_orders_blocked is False
     assert state.startup_gate_reason is not None
     assert "recovery_required_orders=1" in str(state.startup_gate_reason)
+
+
+def test_extension_invariant_unresolved_or_recovery_required_state_never_auto_resumes(tmp_path):
+    _set_tmp_db(tmp_path)
+    now_ms = int(time.time() * 1000)
+    _insert_order(
+        status="NEW",
+        client_order_id="still_open",
+        created_ts=now_ms,
+    )
+    _insert_order(
+        status="RECOVERY_REQUIRED",
+        client_order_id="still_needs_recovery",
+        created_ts=now_ms,
+    )
+
+    runtime_state.enable_trading()
+    eligible, blockers = evaluate_resume_eligibility()
+
+    assert eligible is False
+    assert {blocker.code for blocker in blockers} >= {"STARTUP_SAFETY_GATE_BLOCKED"}
+    state = runtime_state.snapshot()
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "recovery_required_orders=1" in str(state.resume_gate_reason)
 
 
 def test_resume_refuses_when_reconcile_has_balance_split_mismatch(
@@ -3532,6 +3562,30 @@ def test_recovery_report_blocker_summary_view_for_submit_unknown(tmp_path):
     assert view[0]["recommended_next_action"] == "uv run python bot.py reconcile"
 
 
+def test_build_resume_guidance_prefers_manual_recovery_required_over_dust_review() -> None:
+    blockers = [
+        ResumeBlocker(
+            code="HARMLESS_DUST_POLICY_REVIEW_REQUIRED",
+            detail="harmless dust still needs review",
+            reason_code="DUST_RESIDUAL_BLOCK",
+            summary="harmless dust still needs policy review",
+            overridable=False,
+        )
+    ]
+
+    guidance = build_resume_guidance(
+        resume_allowed=False,
+        blockers=blockers,
+        unresolved_count=0,
+        recovery_required_count=1,
+        submit_unknown_count=0,
+    )
+
+    assert guidance.operator_next_action == "manual_recovery_required"
+    assert guidance.recommended_command == "uv run python bot.py recover-order --client-order-id <id>"
+    assert guidance.blocker_summary_view[0]["recommended_next_action"] == "uv run python bot.py recovery-report --json"
+
+
 def test_recovery_report_blocker_summary_view_for_recovery_required(tmp_path):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)
@@ -4777,6 +4831,52 @@ def test_restart_checklist_blocks_when_restart_risks_exist(tmp_path, capsys):
     assert "BLOCKED halt state" in out
     assert "BLOCKED last reconcile" in out
     assert "safe_to_resume=0" in out
+
+
+def test_evaluate_restart_readiness_uses_lot_native_dust_authority(tmp_path):
+    _set_tmp_db(tmp_path)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_classification": "harmless_dust",
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "dust_broker_qty": 0.00009629,
+            "dust_local_qty": 0.00009629,
+            "dust_effective_flat": 1,
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+        },
+    )
+
+    checklist = evaluate_restart_readiness()
+    normalized_position_item = next(item for item in checklist if item[0] == "normalized position state")
+    halt_item = next(item for item in checklist if item[0] == "halt state")
+
+    assert normalized_position_item[1] is True
+    assert "terminal_state=dust_only" in normalized_position_item[2]
+    assert "has_executable_exposure=0" in normalized_position_item[2]
+    assert halt_item[1] is True
 
 
 def test_restart_checklist_auto_clears_stale_initial_reconcile_halt(tmp_path, capsys):

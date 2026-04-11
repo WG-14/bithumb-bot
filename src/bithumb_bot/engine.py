@@ -102,6 +102,22 @@ class ResumeBlocker:
     recent_external_cash_adjustment_count: int | None = None
 
 
+@dataclass(frozen=True)
+class ResumeGuidance:
+    operator_next_action: str
+    recommended_command: str
+    recommended_next_action: str
+    resume_blocked_reason: str
+    blocker_summary: str
+    active_blocker_summary: str
+    risk_level: str
+    primary_blocker_code: str
+    primary_blocker_reason_code: str
+    blocker_summary_view: list[dict[str, object]]
+    blockers: list[dict[str, object]]
+    non_overridable_blockers: list[dict[str, object]]
+
+
 def _halt_reason(code: str, detail: str) -> HaltReason:
     return HaltReason(code=code, detail=detail)
 
@@ -911,6 +927,326 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
         gate_reason = "; ".join(f"{blocker.code}:{blocker.detail}" for blocker in reasons)
     runtime_state.set_resume_gate(blocked=bool(reasons), reason=gate_reason)
     return (len(reasons) == 0), reasons
+
+
+def build_resume_guidance(
+    *,
+    resume_allowed: bool,
+    blockers: list[ResumeBlocker],
+    unresolved_count: int,
+    recovery_required_count: int,
+    submit_unknown_count: int,
+) -> ResumeGuidance:
+    blocker_list: list[dict[str, object]] = [
+        {
+            "code": b.code,
+            "reason_code": str(getattr(b, "reason_code", b.code)),
+            "summary": str(getattr(b, "summary", b.detail)),
+            "detail": b.detail,
+            "overridable": bool(b.overridable),
+            "balance_delta_krw": getattr(b, "balance_delta_krw", None),
+            "recent_external_cash_adjustment_present": getattr(b, "recent_external_cash_adjustment_present", None),
+            "recent_external_cash_adjustment_count": getattr(b, "recent_external_cash_adjustment_count", None),
+        }
+        for b in blockers
+    ]
+    blocker_codes = [str(b["code"]) for b in blocker_list]
+    non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
+    primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
+    primary_blocker_reason_code = str(blocker_list[0]["reason_code"]) if blocker_list else "-"
+    blocker_summary = (
+        f"total={len(blocker_list)} "
+        f"non_overridable={len(non_overridable_blockers)} "
+        f"overridable={len(blocker_list) - len(non_overridable_blockers)}"
+    )
+
+    if resume_allowed:
+        operator_next_action = "resume_now"
+        recommended_command = "uv run python bot.py resume"
+        recommended_next_action = "No active blocker. Resume trading now."
+        resume_blocked_reason = "none"
+    elif blocker_list and all(bool(b["overridable"]) for b in blocker_list):
+        operator_next_action = "review_and_force_resume"
+        recommended_command = "uv run python bot.py resume --force"
+        recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
+        resume_blocked_reason = "resume blocked by overridable blockers"
+    elif recovery_required_count > 0:
+        operator_next_action = "manual_recovery_required"
+        recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
+        recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
+        resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
+    elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "review_harmless_dust_policy"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm harmless broker/local dust is truly safe, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
+        )
+        resume_blocked_reason = "resume blocked by harmless dust policy review"
+    elif "BLOCKING_DUST_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_dust_review_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
+        )
+        resume_blocked_reason = "resume blocked by blocking dust manual review"
+    elif "EXTERNAL_CASH_ADJUSTMENT_REQUIRED" in blocker_codes:
+        operator_next_action = "record_external_cash_adjustment"
+        recommended_command = "uv run python bot.py record-external-cash-adjustment --help"
+        recommended_next_action = (
+            "Record the missing external cash adjustment evidence, then rerun reconcile before resuming."
+        )
+        resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
+    elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
+        if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+            operator_next_action = "reconcile_after_external_adjustment"
+            recommended_command = "uv run python bot.py reconcile"
+            recommended_next_action = (
+                "An external cash adjustment is already recorded. Verify the broker snapshot, then rerun reconcile."
+            )
+            resume_blocked_reason = "resume blocked by remaining balance split mismatch after external adjustment"
+        else:
+            operator_next_action = "investigate_blockers"
+            recommended_command = "uv run python bot.py recovery-report --json"
+            recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+            resume_blocked_reason = "resume blocked by non-overridable safety blockers"
+    else:
+        operator_next_action = "investigate_blockers"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+        resume_blocked_reason = "resume blocked by non-overridable safety blockers"
+
+    active_blocker_summary = "none"
+    if blocker_list:
+        active_blocker_summary = " | ".join(
+            f"{b['code']}(overridable={1 if bool(b['overridable']) else 0})"
+            for b in blocker_list[:3]
+        )
+
+    risk_level = "low"
+    if recovery_required_count > 0 or non_overridable_blockers:
+        risk_level = "high"
+    elif unresolved_count > 0 or blocker_list:
+        risk_level = "medium"
+
+    def _next_action_for_blocker(code: str) -> str:
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            if recovery_required_count > 0:
+                return "uv run python bot.py recover-order --client-order-id <id>"
+            if submit_unknown_count > 0:
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report"
+        if code == "LAST_RECONCILE_FAILED":
+            return "uv run python bot.py reconcile"
+        if code == "EXTERNAL_CASH_ADJUSTMENT_REQUIRED":
+            return "uv run python bot.py record-external-cash-adjustment --help"
+        if code == "BALANCE_SPLIT_MISMATCH":
+            if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report --json"
+        if code == "HALT_RISK_OPEN_POSITION":
+            return "uv run python bot.py flatten-position"
+        if code in {"HARMLESS_DUST_POLICY_REVIEW_REQUIRED", "BLOCKING_DUST_REVIEW_REQUIRED"}:
+            return "uv run python bot.py recovery-report --json"
+        if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
+            return "uv run python bot.py restart-checklist"
+        return recommended_command
+
+    blocker_summary_view: list[dict[str, object]] = []
+    for blocker in blocker_list[:3]:
+        code = str(blocker["code"])
+        reason_code = str(blocker["reason_code"])
+        summary = str(blocker["summary"])
+        evidence = str(blocker["detail"])
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            evidence = (
+                f"unresolved={unresolved_count} "
+                f"submit_unknown={submit_unknown_count} "
+                f"recovery_required={recovery_required_count}; "
+                f"{evidence}"
+            )
+        balance_delta_krw = blocker.get("balance_delta_krw")
+        recent_adjustment_present = blocker.get("recent_external_cash_adjustment_present")
+        recent_adjustment_count = blocker.get("recent_external_cash_adjustment_count")
+        if balance_delta_krw is not None or recent_adjustment_present is not None:
+            delta_text = (
+                f"{float(balance_delta_krw):.3f}"
+                if isinstance(balance_delta_krw, (int, float))
+                else str(balance_delta_krw)
+            )
+            evidence = (
+                f"{evidence} "
+                f"delta_krw={delta_text} "
+                f"recent_external_cash_adjustment_present={1 if bool(recent_adjustment_present) else 0} "
+                f"recent_external_cash_adjustment_count={int(recent_adjustment_count or 0)}"
+            )
+        blocker_summary_view.append(
+            {
+                "blocker": code,
+                "reason_code": reason_code,
+                "summary": summary,
+                "evidence": evidence,
+                "recommended_next_action": _next_action_for_blocker(code),
+                "delta_krw": balance_delta_krw,
+                "recent_external_cash_adjustment_present": recent_adjustment_present,
+                "recent_external_cash_adjustment_count": recent_adjustment_count,
+            }
+        )
+
+    if not blocker_summary_view:
+        blocker_summary_view.append(
+            {
+                "blocker": "none",
+                "evidence": "resume gates clear",
+                "recommended_next_action": "uv run python bot.py resume",
+            }
+        )
+
+    return ResumeGuidance(
+        operator_next_action=operator_next_action,
+        recommended_command=recommended_command,
+        recommended_next_action=recommended_next_action,
+        resume_blocked_reason=resume_blocked_reason,
+        blocker_summary=blocker_summary,
+        active_blocker_summary=active_blocker_summary,
+        risk_level=risk_level,
+        primary_blocker_code=primary_blocker_code,
+        primary_blocker_reason_code=primary_blocker_reason_code,
+        blocker_summary_view=blocker_summary_view,
+        blockers=blocker_list,
+        non_overridable_blockers=non_overridable_blockers,
+    )
+
+
+def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
+    resume_allowed, blockers = evaluate_resume_eligibility()
+    state = runtime_state.snapshot()
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+
+    conn = ensure_db()
+    try:
+        open_row = conn.execute(
+            """
+            SELECT COUNT(*) AS open_count
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN')
+            """
+        ).fetchone()
+        recovery_row = conn.execute(
+            "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
+        ).fetchone()
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    open_order_count = int(open_row["open_count"] if open_row else 0)
+    recovery_required_count = int(recovery_row["recovery_required_count"] if recovery_row else 0)
+    unresolved_count = max(0, open_order_count + recovery_required_count)
+    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
+    position_state = build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    normalized_exposure = position_state.normalized_exposure
+    dust_present = bool(dust_context.classification.present)
+    dust_resume_safe = bool(dust_present and dust_context.operator_view.resume_allowed)
+    raw_qty_without_dust_evidence = bool(asset_qty > 1e-12 and not dust_present)
+    raw_qty_residue_without_resume_safe_dust = bool(
+        raw_qty_without_dust_evidence
+        or (
+            asset_qty > 1e-12
+            and not normalized_exposure.has_any_position_residue
+            and not dust_resume_safe
+        )
+    )
+    position_state_clear = bool(
+        not raw_qty_residue_without_resume_safe_dust
+        and not normalized_exposure.has_executable_exposure
+        and (
+            str(normalized_exposure.terminal_state) == "flat"
+            or (str(normalized_exposure.terminal_state) == "dust_only" and dust_resume_safe)
+        )
+    )
+    display_terminal_state = (
+        "open_exposure"
+        if raw_qty_residue_without_resume_safe_dust
+        else str(normalized_exposure.terminal_state)
+    )
+    display_has_executable_exposure = bool(
+        raw_qty_residue_without_resume_safe_dust or normalized_exposure.has_executable_exposure
+    )
+    display_has_dust_only_remainder = bool(
+        (not raw_qty_residue_without_resume_safe_dust) and normalized_exposure.has_dust_only_remainder
+    )
+
+    last_reconcile_summary = "none"
+    if state.last_reconcile_status:
+        last_reconcile_summary = (
+            f"status={state.last_reconcile_status} "
+            f"reason_code={state.last_reconcile_reason_code or '-'}"
+        )
+        if state.last_reconcile_error:
+            last_reconcile_summary += f" error={state.last_reconcile_error}"
+    last_reconcile_ok = bool(str(state.last_reconcile_status or "").lower() in {"", "ok"})
+
+    blocker_codes = {blocker.code for blocker in blockers}
+    halt_clear = bool(
+        state.halt_new_orders_blocked is False
+        and state.halt_state_unresolved is False
+        and "HALT_STATE_UNRESOLVED" not in blocker_codes
+        and "HALT_RISK_OPEN_POSITION" not in blocker_codes
+    )
+
+    return [
+        (
+            "unresolved/recovery-required orders",
+            unresolved_count == 0,
+            (
+                f"unresolved={unresolved_count} "
+                f"recovery_required={recovery_required_count}"
+            ),
+        ),
+        (
+            "open orders",
+            open_order_count == 0,
+            f"open_orders={open_order_count}",
+        ),
+        (
+            "normalized position state",
+            position_state_clear,
+            (
+                f"terminal_state={display_terminal_state} "
+                f"has_executable_exposure={1 if display_has_executable_exposure else 0} "
+                f"has_dust_only_remainder={1 if display_has_dust_only_remainder else 0} "
+                f"dust_resume_allowed={1 if dust_resume_safe else 0}"
+            ),
+        ),
+        (
+            "halt state",
+            halt_clear and resume_allowed,
+            (
+                f"halt_blocked={1 if state.halt_new_orders_blocked else 0} "
+                f"halt_unresolved={1 if state.halt_state_unresolved else 0} "
+                f"detail={state.last_disable_reason or 'none'}"
+            ),
+        ),
+        (
+            "last reconcile",
+            last_reconcile_ok,
+            last_reconcile_summary,
+        ),
+    ]
 
 def _halt_trading(reason: HaltReason, *, unresolved: bool = False, attempt_flatten: bool = False) -> None:
     runtime_state.enter_halt(
