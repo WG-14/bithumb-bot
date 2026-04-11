@@ -15,6 +15,7 @@ from .analytics_context import (
     normalize_analysis_context_from_lifecycle_row,
 )
 from .config import PATH_MANAGER, settings
+from .decision_context import resolve_canonical_position_exposure_snapshot
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
@@ -1589,336 +1590,154 @@ def fetch_decision_telemetry_summary(
 ) -> list[DecisionTelemetrySummary]:
     rows = conn.execute(
         """
-        SELECT
-            COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
-            COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
-            COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
-            COALESCE(json_extract(context_json, '$.final_signal'), signal) AS final_signal,
-            COALESCE(
-                CAST(json_extract(context_json, '$.entry_blocked') AS INTEGER),
-                CASE
-                    WHEN COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) IN ('BUY', 'SELL')
-                     AND COALESCE(json_extract(context_json, '$.final_signal'), signal) != COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal)
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS entry_blocked,
-            COALESCE(
-                CAST(json_extract(context_json, '$.entry_allowed') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.normalized_exposure.entry_allowed') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_gate.entry_allowed') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
-                0
-            ) AS entry_allowed,
-            COALESCE(json_extract(context_json, '$.strategy_name'), strategy_name, '<unknown>') AS strategy_name,
-            COALESCE(json_extract(context_json, '$.pair'), '<unknown>') AS pair,
-            COALESCE(json_extract(context_json, '$.interval'), '<unknown>') AS interval,
-            COALESCE(
-                NULLIF(json_extract(context_json, '$.entry_block_reason'), ''),
-                NULLIF(json_extract(context_json, '$.block_reason'), ''),
-                NULLIF(json_extract(context_json, '$.entry_reason'), ''),
-                NULLIF(json_extract(context_json, '$.reason'), ''),
-                reason
-            ) AS block_reason,
-            COALESCE(
-                json_extract(context_json, '$.dust_classification'),
-                json_extract(context_json, '$.position_gate.dust_classification'),
-                json_extract(context_json, '$.position_gate.dust_state'),
-                ''
-            ) AS dust_classification,
-            COALESCE(
-                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.effective_flat') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
-                0
-            ) AS effective_flat,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                json_extract(context_json, '$.raw_qty_open'),
-                json_extract(context_json, '$.position_gate.raw_qty_open'),
-                0.0
-            ) AS raw_qty_open,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.raw_total_asset_qty'),
-                json_extract(context_json, '$.raw_total_asset_qty'),
-                json_extract(context_json, '$.position_gate.raw_total_asset_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
-                json_extract(context_json, '$.raw_qty_open'),
-                0.0
-            ) AS raw_total_asset_qty,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
-                json_extract(context_json, '$.position_gate.open_exposure_qty'),
-                json_extract(context_json, '$.position_qty'),
-                0.0
-            ) AS position_qty,
-            COALESCE(
-                json_extract(context_json, '$.submit_payload_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.submit_payload_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.normalized_exposure_qty'),
-                0.0
-            ) AS submit_payload_qty,
-            COALESCE(
-                CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
-                CASE
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                        json_extract(context_json, '$.open_exposure_qty'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
-                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
-                        0.0
-                    ) > 0
-                    AND COALESCE(
-                        CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
-                        CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
-                        0
-                    ) = 0
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS normalized_exposure_active,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
-                json_extract(context_json, '$.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                CASE
-                    WHEN COALESCE(
-                        CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
-                        CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
-                        CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
-                        CASE
-                            WHEN COALESCE(
-                                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                                json_extract(context_json, '$.open_exposure_qty'),
-                                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
-                                json_extract(context_json, '$.position_gate.open_exposure_qty'),
-                                0.0
-                            ) > 0
-                            AND COALESCE(
-                                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
-                                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
-                                0
-                            ) = 0
-                            THEN 1
-                            ELSE 0
-                        END
-                    ) = 1
-                    THEN COALESCE(
-                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                        json_extract(context_json, '$.open_exposure_qty'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
-                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
-                        0.0
-                    )
-                    ELSE 0.0
-                END
-            ) AS normalized_exposure_qty,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
-                json_extract(context_json, '$.position_state.open_exposure_qty'),
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.position_gate.open_exposure_qty'),
-                0.0
-            ) AS open_exposure_qty,
-            COALESCE(
-                json_extract(context_json, '$.position_state.normalized_exposure.dust_tracking_qty'),
-                json_extract(context_json, '$.position_state.dust_tracking_qty'),
-                json_extract(context_json, '$.dust_tracking_qty'),
-                json_extract(context_json, '$.position_gate.dust_tracking_qty'),
-                0.0
-            ) AS dust_tracking_qty,
-            COALESCE(
-                json_extract(context_json, '$.sell_open_exposure_qty'),
-                json_extract(context_json, '$.position_state.sell_open_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_open_exposure_qty'),
-                json_extract(context_json, '$.open_exposure_qty'),
-                0.0
-            ) AS sell_open_exposure_qty,
-            COALESCE(
-                json_extract(context_json, '$.sell_dust_tracking_qty'),
-                json_extract(context_json, '$.position_state.sell_dust_tracking_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_dust_tracking_qty'),
-                json_extract(context_json, '$.dust_tracking_qty'),
-                0.0
-            ) AS sell_dust_tracking_qty,
-            COALESCE(
-                json_extract(context_json, '$.sell_qty_basis_qty'),
-                json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
-                json_extract(context_json, '$.sell_open_exposure_qty'),
-                json_extract(context_json, '$.sell_normalized_exposure_qty'),
-                0.0
-            ) AS sell_qty_basis_qty,
-            COALESCE(
-                json_extract(context_json, '$.sell_qty_boundary_kind'),
-                json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind'),
-                'none'
-            ) AS sell_qty_boundary_kind,
-            COALESCE(
-                CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.sell_submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_count') AS INTEGER),
-                CAST(json_extract(context_json, '$.position_gate.submit_lot_count') AS INTEGER),
-                0
-            ) AS sell_submit_lot_count,
-            COALESCE(
-                json_extract(context_json, '$.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
-                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
-                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
-                json_extract(context_json, '$.open_exposure_qty'),
-                json_extract(context_json, '$.normalized_exposure_qty'),
-                0.0
-            ) AS sell_normalized_exposure_qty,
-            COALESCE(
-                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
-                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_category'), 'none'),
-                CASE
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'min_qty' THEN 'boundary_below_min'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'qty_step' THEN 'qty_step_mismatch'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
-                    ELSE NULL
-                END,
-                'none'
-            ) AS sell_failure_category,
-            COALESCE(
-                NULLIF(json_extract(context_json, '$.sell_failure_detail'), 'none'),
-                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_detail'), 'none'),
-                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
-                CASE
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'min_qty' THEN 'boundary_below_min'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'qty_step' THEN 'qty_step_mismatch'
-                    WHEN COALESCE(
-                        json_extract(context_json, '$.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
-                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
-                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
-                    ELSE NULL
-                END,
-                'none'
-            ) AS sell_failure_detail,
-            COUNT(*) AS decision_count
-        FROM (
-            SELECT *
-            FROM strategy_decisions
-            ORDER BY decision_ts DESC, id DESC
-            LIMIT ?
-        ) recent
-        GROUP BY
+        SELECT signal, reason, strategy_name, context_json
+        FROM strategy_decisions
+        ORDER BY decision_ts DESC, id DESC
+        LIMIT ?
+        """,
+        (int(max(1, limit)),),
+    ).fetchall()
+
+    def _derived_sell_failure(kind: str) -> str | None:
+        if kind == "remainder_after_sell":
+            return SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD
+        if kind == "min_qty":
+            return SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
+        if kind == "qty_step":
+            return SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH
+        if kind == "dust_mismatch":
+            return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
+        return None
+
+    grouped: dict[tuple[object, ...], int] = {}
+    for row in rows:
+        try:
+            context = json.loads(str(row["context_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+
+        exposure = resolve_canonical_position_exposure_snapshot(context)
+        base_signal = str(context.get("base_signal") or context.get("raw_signal") or row["signal"])
+        decision_type = str(context.get("decision_type") or row["signal"])
+        raw_signal = str(context.get("raw_signal") or context.get("base_signal") or row["signal"])
+        final_signal = str(context.get("final_signal") or row["signal"])
+        entry_blocked = bool(
+            context.get("entry_blocked")
+            if "entry_blocked" in context
+            else raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
+        )
+        block_reason = str(
+            context.get("entry_block_reason")
+            or context.get("block_reason")
+            or context.get("entry_reason")
+            or context.get("reason")
+            or row["reason"]
+        )
+        strategy_name = str(context.get("strategy_name") or row["strategy_name"] or "<unknown>")
+        pair = str(context.get("pair") or "<unknown>")
+        interval = str(context.get("interval") or "<unknown>")
+        sell_failure_category = str(
+            context.get("sell_failure_category")
+            or context.get("decision_summary", {}).get("sell_failure_category")
+            or _derived_sell_failure(exposure.sell_qty_boundary_kind)
+            or "none"
+        )
+        sell_failure_detail = str(
+            context.get("sell_failure_detail")
+            or context.get("decision_summary", {}).get("sell_failure_detail")
+            or (
+                sell_failure_category
+                if sell_failure_category != "none"
+                else _derived_sell_failure(exposure.sell_qty_boundary_kind) or "none"
+            )
+        )
+
+        key = (
             base_signal,
             decision_type,
             raw_signal,
             final_signal,
             entry_blocked,
-            entry_allowed,
+            exposure.entry_allowed,
             strategy_name,
             pair,
             interval,
             block_reason,
-            dust_classification,
-            effective_flat,
-            raw_qty_open,
-            raw_total_asset_qty,
-            position_qty,
-            submit_payload_qty,
-            normalized_exposure_active,
-            normalized_exposure_qty,
-            open_exposure_qty,
-            dust_tracking_qty,
-            sell_open_exposure_qty,
-            sell_dust_tracking_qty,
-            sell_qty_basis_qty,
-            sell_qty_boundary_kind,
+            exposure.dust_classification,
+            exposure.effective_flat,
+            exposure.raw_qty_open,
+            exposure.raw_total_asset_qty,
+            exposure.position_qty,
+            exposure.submit_payload_qty,
+            exposure.normalized_exposure_active,
+            exposure.normalized_exposure_qty,
+            exposure.open_exposure_qty,
+            exposure.dust_tracking_qty,
+            exposure.sell_open_exposure_qty,
+            exposure.sell_dust_tracking_qty,
+            exposure.sell_qty_basis_qty,
+            exposure.sell_qty_boundary_kind,
             sell_failure_category,
             sell_failure_detail,
-            sell_submit_lot_count,
-            sell_normalized_exposure_qty
-        ORDER BY decision_count DESC, decision_type ASC, base_signal ASC, raw_signal ASC, final_signal ASC, strategy_name ASC, pair ASC, interval ASC
-        """,
-        (int(max(1, limit)),),
-    ).fetchall()
-    return [
-        DecisionTelemetrySummary(
-            base_signal=str(row["base_signal"]),
-            decision_type=str(row["decision_type"]),
-            raw_signal=str(row["raw_signal"]),
-            final_signal=str(row["final_signal"]),
-            buy_flow_state=_derive_buy_flow_state(
-                raw_signal=str(row["raw_signal"]),
-                final_signal=str(row["final_signal"]),
-                entry_blocked=bool(row["entry_blocked"]),
-            ),
-            entry_blocked=bool(row["entry_blocked"]),
-            entry_allowed=bool(row["entry_allowed"]),
-            block_reason=str(row["block_reason"]),
-            dust_classification=str(row["dust_classification"]),
-            effective_flat=bool(row["effective_flat"]),
-            raw_qty_open=float(row["raw_qty_open"] or 0.0),
-            raw_total_asset_qty=float(row["raw_total_asset_qty"] or 0.0),
-            position_qty=float(row["position_qty"] or 0.0),
-            submit_payload_qty=float(row["submit_payload_qty"] or 0.0),
-            normalized_exposure_active=bool(row["normalized_exposure_active"]),
-            normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
-            open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
-            dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
-            sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
-            sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
-            sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
-            sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
-            sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
-            sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
-            sell_failure_category=str(row["sell_failure_category"]),
-            sell_failure_detail=str(row["sell_failure_detail"]),
-            strategy_name=str(row["strategy_name"]),
-            pair=str(row["pair"]),
-            interval=str(row["interval"]),
-            count=int(row["decision_count"] or 0),
+            exposure.sell_submit_lot_count,
+            exposure.sell_normalized_exposure_qty,
         )
-        for row in rows
+        grouped[key] = grouped.get(key, 0) + 1
+
+    summaries = [
+        DecisionTelemetrySummary(
+            base_signal=str(key[0]),
+            decision_type=str(key[1]),
+            raw_signal=str(key[2]),
+            final_signal=str(key[3]),
+            buy_flow_state=_derive_buy_flow_state(
+                raw_signal=str(key[2]),
+                final_signal=str(key[3]),
+                entry_blocked=bool(key[4]),
+            ),
+            entry_blocked=bool(key[4]),
+            entry_allowed=bool(key[5]),
+            block_reason=str(key[9]),
+            dust_classification=str(key[10]),
+            effective_flat=bool(key[11]),
+            raw_qty_open=float(key[12]),
+            raw_total_asset_qty=float(key[13]),
+            position_qty=float(key[14]),
+            submit_payload_qty=float(key[15]),
+            normalized_exposure_active=bool(key[16]),
+            normalized_exposure_qty=float(key[17]),
+            open_exposure_qty=float(key[18]),
+            dust_tracking_qty=float(key[19]),
+            sell_open_exposure_qty=float(key[20]),
+            sell_dust_tracking_qty=float(key[21]),
+            sell_qty_basis_qty=float(key[22]),
+            sell_qty_boundary_kind=str(key[23]),
+            sell_submit_lot_count=int(key[26]),
+            sell_normalized_exposure_qty=float(key[27]),
+            sell_failure_category=str(key[24]),
+            sell_failure_detail=str(key[25]),
+            strategy_name=str(key[6]),
+            pair=str(key[7]),
+            interval=str(key[8]),
+            count=count,
+        )
+        for key, count in grouped.items()
     ]
+    summaries.sort(
+        key=lambda item: (
+            -item.count,
+            item.decision_type,
+            item.base_signal,
+            item.raw_signal,
+            item.final_signal,
+            item.strategy_name,
+            item.pair,
+            item.interval,
+        )
+    )
+    return summaries
 
 
 def _extract_blocked_filters(context_json: str | None) -> list[str]:

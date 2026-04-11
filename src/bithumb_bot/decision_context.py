@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
 
 from .reason_codes import (
@@ -24,6 +25,39 @@ _CANONICAL_COMPATIBILITY_TRUTH_SOURCES = {
 }
 _DECLARATION_RESIDUE_SUFFIXES = ("_source", "_truth_source", "_compatibility_residue")
 _DECLARATION_RESIDUE_KEYS = {"decision_compatibility_residue"}
+
+
+@dataclass(frozen=True)
+class CanonicalPositionExposureSnapshot:
+    dust_classification: str
+    entry_allowed: bool
+    effective_flat: bool
+    raw_qty_open: float
+    raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+    has_executable_exposure: bool
+    has_any_position_residue: bool
+    has_non_executable_residue: bool
+    has_dust_only_remainder: bool
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    open_lot_count: int
+    dust_tracking_lot_count: int
+    reserved_exit_lot_count: int
+    sellable_executable_lot_count: int
+    reserved_exit_qty: float
+    sellable_executable_qty: float
+    sell_submit_lot_count: int
+    exit_allowed: bool
+    exit_block_reason: str
+    sell_qty_basis_qty: float
+    sell_qty_boundary_kind: str
+    sell_normalized_exposure_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
 
 
 def materialize_strategy_decision_context(value: Any) -> Any:
@@ -275,6 +309,362 @@ def _extract_market_observations(context: dict[str, Any]) -> dict[str, float | N
     }
 
 
+def resolve_canonical_position_exposure_snapshot(
+    context: dict[str, Any] | None,
+) -> CanonicalPositionExposureSnapshot:
+    payload: dict[str, Any] = dict(context or {})
+    position_gate = payload.get("position_gate") if isinstance(payload.get("position_gate"), dict) else {}
+    position_state = dict(payload.get("position_state")) if isinstance(payload.get("position_state"), dict) else {}
+    position_normalized = (
+        position_state.get("normalized_exposure")
+        if isinstance(position_state.get("normalized_exposure"), dict)
+        else {}
+    )
+
+    dust_classification = _as_text(
+        payload.get(
+            "dust_classification",
+            position_gate.get("dust_classification", position_gate.get("dust_state", "")),
+        ),
+        default="",
+    )
+    entry_allowed, _ = _resolve_with_source(
+        ("position_state.normalized_exposure.entry_allowed", position_normalized.get("entry_allowed")),
+        ("context.entry_allowed", payload.get("entry_allowed")),
+        ("position_gate.entry_allowed", position_gate.get("entry_allowed")),
+        (
+            "position_gate.effective_flat_due_to_harmless_dust",
+            position_gate.get("effective_flat_due_to_harmless_dust"),
+        ),
+        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
+        default_value=False,
+        default_source="default:false",
+        value_kind="bool",
+    )
+    effective_flat, _ = _resolve_with_source(
+        ("position_state.normalized_exposure.effective_flat", position_normalized.get("effective_flat")),
+        ("context.effective_flat", payload.get("effective_flat")),
+        (
+            "position_gate.effective_flat_due_to_harmless_dust",
+            position_gate.get("effective_flat_due_to_harmless_dust"),
+        ),
+        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
+        default_value=False,
+        default_source="default:false",
+        value_kind="bool",
+    )
+    raw_qty_open, _ = _resolve_with_source(
+        ("position_state.raw_qty_open", position_state.get("raw_qty_open")),
+        ("position_state.normalized_exposure.raw_qty_open", position_normalized.get("raw_qty_open")),
+        ("context.raw_qty_open", payload.get("raw_qty_open")),
+        ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    raw_qty_open = 0.0 if raw_qty_open is None else float(raw_qty_open)
+    raw_total_asset_qty, _ = _resolve_with_source(
+        ("position_state.raw_total_asset_qty", position_state.get("raw_total_asset_qty")),
+        (
+            "position_state.normalized_exposure.raw_total_asset_qty",
+            position_normalized.get("raw_total_asset_qty"),
+        ),
+        ("context.raw_total_asset_qty", payload.get("raw_total_asset_qty")),
+        ("position_gate.raw_total_asset_qty", position_gate.get("raw_total_asset_qty")),
+        ("context.raw_qty_open", payload.get("raw_qty_open")),
+        (
+            "position_state.normalized_exposure.raw_qty_open",
+            position_normalized.get("raw_qty_open"),
+        ),
+        ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
+        default_value=raw_qty_open,
+        default_source="fallback:raw_qty_open",
+        value_kind="float",
+    )
+    raw_total_asset_qty = raw_qty_open if raw_total_asset_qty is None else float(raw_total_asset_qty)
+    open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
+        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
+        ("position_state.normalized_exposure.open_exposure_qty", position_normalized.get("open_exposure_qty")),
+        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
+        ("position_gate.open_exposure_qty", position_gate.get("open_exposure_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    open_exposure_qty = 0.0 if open_exposure_qty is None else float(open_exposure_qty)
+    dust_tracking_qty, _ = _resolve_with_source(
+        ("position_state.dust_tracking_qty", position_state.get("dust_tracking_qty")),
+        ("position_state.normalized_exposure.dust_tracking_qty", position_normalized.get("dust_tracking_qty")),
+        ("context.dust_tracking_qty", payload.get("dust_tracking_qty")),
+        ("position_gate.dust_tracking_qty", position_gate.get("dust_tracking_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    dust_tracking_qty = 0.0 if dust_tracking_qty is None else float(dust_tracking_qty)
+    open_lot_count, _ = _resolve_int_with_source(
+        ("position_state.open_lot_count", position_state.get("open_lot_count")),
+        ("position_state.normalized_exposure.open_lot_count", position_normalized.get("open_lot_count")),
+        ("context.open_lot_count", payload.get("open_lot_count")),
+        ("position_gate.open_lot_count", position_gate.get("open_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    dust_tracking_lot_count, _ = _resolve_int_with_source(
+        ("position_state.dust_tracking_lot_count", position_state.get("dust_tracking_lot_count")),
+        (
+            "position_state.normalized_exposure.dust_tracking_lot_count",
+            position_normalized.get("dust_tracking_lot_count"),
+        ),
+        ("context.dust_tracking_lot_count", payload.get("dust_tracking_lot_count")),
+        ("position_gate.dust_tracking_lot_count", position_gate.get("dust_tracking_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    reserved_exit_lot_count, _ = _resolve_int_with_source(
+        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
+        (
+            "position_state.normalized_exposure.reserved_exit_lot_count",
+            position_normalized.get("reserved_exit_lot_count"),
+        ),
+        ("context.reserved_exit_lot_count", payload.get("reserved_exit_lot_count")),
+        ("position_gate.reserved_exit_lot_count", position_gate.get("reserved_exit_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    sellable_executable_lot_count, _ = _resolve_int_with_source(
+        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
+        (
+            "position_state.normalized_exposure.sellable_executable_lot_count",
+            position_normalized.get("sellable_executable_lot_count"),
+        ),
+        ("context.sellable_executable_lot_count", payload.get("sellable_executable_lot_count")),
+        ("position_gate.sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    reserved_exit_qty, _ = _resolve_with_source(
+        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
+        ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
+        ("context.reserved_exit_qty", payload.get("reserved_exit_qty")),
+        ("position_gate.reserved_exit_qty", position_gate.get("reserved_exit_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    reserved_exit_qty = 0.0 if reserved_exit_qty is None else float(reserved_exit_qty)
+    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
+        ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
+        (
+            "position_state.normalized_exposure.sellable_executable_qty",
+            position_normalized.get("sellable_executable_qty"),
+        ),
+        ("context.sellable_executable_qty", payload.get("sellable_executable_qty")),
+        default_value=max(0.0, float(open_exposure_qty) - float(reserved_exit_qty)),
+        default_source="position_state.normalized_exposure.sellable_executable_qty",
+        value_kind="float",
+    )
+    sellable_executable_qty = (
+        max(0.0, float(open_exposure_qty) - float(reserved_exit_qty))
+        if sellable_executable_qty is None
+        else float(sellable_executable_qty)
+    )
+    semantic_basis = _as_text(
+        position_state.get("semantic_basis", position_normalized.get("semantic_basis", payload.get("semantic_basis"))),
+        default="",
+    )
+    legacy_lot_semantics = bool(semantic_basis and semantic_basis != "lot-native")
+    if legacy_lot_semantics or (open_lot_count <= 0 and float(raw_total_asset_qty) > 1e-12):
+        open_exposure_qty = 0.0
+        open_exposure_qty_truth_source = "fallback:legacy_lot_metadata_missing"
+        sellable_executable_qty = 0.0
+        sellable_executable_qty_truth_source = "fallback:legacy_lot_metadata_missing"
+    if open_lot_count <= 0:
+        open_exposure_qty = 0.0
+        if open_exposure_qty_truth_source != "fallback:legacy_lot_metadata_missing":
+            open_exposure_qty_truth_source = "fallback:no_executable_open_lots"
+        sellable_executable_qty = 0.0
+        if sellable_executable_qty_truth_source != "fallback:legacy_lot_metadata_missing":
+            sellable_executable_qty_truth_source = "fallback:no_executable_open_lots"
+    exit_allowed, _ = _resolve_with_source(
+        ("context.exit_allowed", payload.get("exit_allowed")),
+        ("position_state.exit_allowed", position_state.get("exit_allowed")),
+        ("position_state.normalized_exposure.exit_allowed", position_normalized.get("exit_allowed")),
+        default_value=sellable_executable_qty > 1e-12,
+        default_source="fallback:sellable_executable_qty",
+        value_kind="bool",
+    )
+    exit_block_reason = _as_text(
+        payload.get(
+            "exit_block_reason",
+            position_normalized.get("exit_block_reason", position_state.get("exit_block_reason")),
+        ),
+        default="",
+    )
+    if effective_flat is False and float(raw_total_asset_qty) <= 1e-12:
+        effective_flat = True
+    if entry_allowed is False and float(raw_total_asset_qty) <= 1e-12:
+        entry_allowed = True
+    has_executable_exposure, _ = _resolve_with_source(
+        ("position_state.has_executable_exposure", position_state.get("has_executable_exposure")),
+        (
+            "position_state.normalized_exposure.has_executable_exposure",
+            position_normalized.get("has_executable_exposure"),
+        ),
+        ("context.has_executable_exposure", payload.get("has_executable_exposure")),
+        ("position_gate.has_executable_exposure", position_gate.get("has_executable_exposure")),
+        default_value=bool(open_lot_count > 0 and sellable_executable_qty > 1e-12),
+        default_source=(
+            "fallback:executable_open_lot_count"
+            if open_lot_count > 0 and sellable_executable_qty > 1e-12
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    has_any_position_residue, _ = _resolve_with_source(
+        ("position_state.has_any_position_residue", position_state.get("has_any_position_residue")),
+        (
+            "position_state.normalized_exposure.has_any_position_residue",
+            position_normalized.get("has_any_position_residue"),
+        ),
+        ("context.has_any_position_residue", payload.get("has_any_position_residue")),
+        ("position_gate.has_any_position_residue", position_gate.get("has_any_position_residue")),
+        default_value=bool(raw_total_asset_qty > 1e-12),
+        default_source=("fallback:raw_total_asset_qty" if raw_total_asset_qty > 1e-12 else "default:false"),
+        value_kind="bool",
+    )
+    has_non_executable_residue, _ = _resolve_with_source(
+        ("position_state.has_non_executable_residue", position_state.get("has_non_executable_residue")),
+        (
+            "position_state.normalized_exposure.has_non_executable_residue",
+            position_normalized.get("has_non_executable_residue"),
+        ),
+        ("context.has_non_executable_residue", payload.get("has_non_executable_residue")),
+        ("position_gate.has_non_executable_residue", position_gate.get("has_non_executable_residue")),
+        default_value=bool(has_any_position_residue and not has_executable_exposure),
+        default_source=(
+            "fallback:non_executable_residue"
+            if has_any_position_residue and not has_executable_exposure
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    has_dust_only_remainder, _ = _resolve_with_source(
+        ("position_state.has_dust_only_remainder", position_state.get("has_dust_only_remainder")),
+        (
+            "position_state.normalized_exposure.has_dust_only_remainder",
+            position_normalized.get("has_dust_only_remainder"),
+        ),
+        ("context.has_dust_only_remainder", payload.get("has_dust_only_remainder")),
+        ("position_gate.has_dust_only_remainder", position_gate.get("has_dust_only_remainder")),
+        default_value=bool(dust_tracking_qty > 1e-12 and open_lot_count <= 0),
+        default_source=(
+            "fallback:dust_only_remainder"
+            if dust_tracking_qty > 1e-12 and open_lot_count <= 0
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
+        ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
+        (
+            "position_state.normalized_exposure.normalized_exposure_qty",
+            position_normalized.get("normalized_exposure_qty"),
+        ),
+        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
+        ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
+        default_value=(open_exposure_qty if has_executable_exposure else 0.0),
+        default_source=("fallback:open_exposure_qty" if has_executable_exposure else "default:0.0"),
+        value_kind="float",
+    )
+    if normalized_exposure_qty_truth_source == "default:0.0":
+        normalized_exposure_qty = float(open_exposure_qty) if has_executable_exposure else 0.0
+    else:
+        normalized_exposure_qty = 0.0 if normalized_exposure_qty is None else float(normalized_exposure_qty)
+    if not has_executable_exposure and normalized_exposure_qty_truth_source not in {
+        "position_state.normalized_exposure_qty",
+        "position_state.normalized_exposure.normalized_exposure_qty",
+        "context.normalized_exposure_qty",
+        "position_gate.normalized_exposure_qty",
+    }:
+        normalized_exposure_qty = 0.0
+    normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
+        (
+            "position_state.normalized_exposure_active",
+            position_state.get("normalized_exposure_active"),
+        ),
+        (
+            "position_state.normalized_exposure.normalized_exposure_active",
+            position_normalized.get("normalized_exposure_active"),
+        ),
+        ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
+        ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
+        default_value=bool(open_lot_count > 0 or reserved_exit_lot_count > 0),
+        default_source=(
+            "fallback:open_exposure_lot_count"
+            if open_lot_count > 0 or reserved_exit_lot_count > 0
+            else normalized_exposure_qty_truth_source
+        ),
+        value_kind="bool",
+    )
+    if normalized_exposure_active_truth_source == normalized_exposure_qty_truth_source:
+        normalized_exposure_active = bool(open_lot_count > 0 or reserved_exit_lot_count > 0)
+    if open_lot_count <= 0 and reserved_exit_lot_count <= 0 and normalized_exposure_active_truth_source not in {
+        "position_state.normalized_exposure_active",
+        "position_state.normalized_exposure.normalized_exposure_active",
+        "context.normalized_exposure_active",
+        "position_gate.normalized_exposure_active",
+    }:
+        normalized_exposure_active = False
+
+    position_qty = float(open_exposure_qty)
+    submit_payload_qty = float(normalized_exposure_qty)
+    sell_submit_lot_count = int(sellable_executable_lot_count)
+    sell_qty_basis_qty, _, _ = _resolve_canonical_sell_qty_basis(
+        sellable_executable_qty=sellable_executable_qty,
+        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
+    )
+    sell_qty_boundary_kind = _as_text(payload.get("sell_qty_boundary_kind"), default="")
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = _as_text(position_state.get("sell_qty_boundary_kind"), default="")
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = _as_text(position_normalized.get("sell_qty_boundary_kind"), default="")
+    if not sell_qty_boundary_kind:
+        sell_qty_boundary_kind = "none"
+
+    return CanonicalPositionExposureSnapshot(
+        dust_classification=dust_classification,
+        entry_allowed=bool(entry_allowed),
+        effective_flat=bool(effective_flat),
+        raw_qty_open=float(raw_qty_open),
+        raw_total_asset_qty=float(raw_total_asset_qty),
+        position_qty=float(position_qty),
+        submit_payload_qty=float(submit_payload_qty),
+        normalized_exposure_active=bool(normalized_exposure_active),
+        normalized_exposure_qty=float(normalized_exposure_qty),
+        has_executable_exposure=bool(has_executable_exposure),
+        has_any_position_residue=bool(has_any_position_residue),
+        has_non_executable_residue=bool(has_non_executable_residue),
+        has_dust_only_remainder=bool(has_dust_only_remainder),
+        open_exposure_qty=float(open_exposure_qty),
+        dust_tracking_qty=float(dust_tracking_qty),
+        open_lot_count=int(open_lot_count),
+        dust_tracking_lot_count=int(dust_tracking_lot_count),
+        reserved_exit_lot_count=int(reserved_exit_lot_count),
+        sellable_executable_lot_count=int(sellable_executable_lot_count),
+        reserved_exit_qty=float(reserved_exit_qty),
+        sellable_executable_qty=float(sellable_executable_qty),
+        sell_submit_lot_count=int(sell_submit_lot_count),
+        exit_allowed=bool(exit_allowed),
+        exit_block_reason=exit_block_reason,
+        sell_qty_basis_qty=float(sell_qty_basis_qty),
+        sell_qty_boundary_kind=sell_qty_boundary_kind,
+        sell_normalized_exposure_qty=float(normalized_exposure_qty),
+        sell_open_exposure_qty=float(open_exposure_qty),
+        sell_dust_tracking_qty=float(dust_tracking_qty),
+    )
+
+
 def normalize_strategy_decision_context(
     *,
     context: dict[str, Any] | None,
@@ -344,182 +734,42 @@ def normalize_strategy_decision_context(
     if entry_blocked and not filter_blocked and entry_block_reason_text:
         block_reason_hierarchy.append(entry_block_reason_text)
 
-    dust_classification = _as_text(
-        payload.get(
-            "dust_classification",
-            position_gate.get("dust_classification", position_gate.get("dust_state", "")),
-        ),
-        default="",
-    )
     position_state = dict(payload.get("position_state")) if isinstance(payload.get("position_state"), dict) else {}
     position_normalized = (
         position_state.get("normalized_exposure")
         if isinstance(position_state.get("normalized_exposure"), dict)
         else {}
     )
-    entry_allowed, entry_allowed_truth_source = _resolve_with_source(
-        ("position_state.normalized_exposure.entry_allowed", position_normalized.get("entry_allowed")),
-        ("context.entry_allowed", payload.get("entry_allowed")),
-        ("position_gate.entry_allowed", position_gate.get("entry_allowed")),
-        (
-            "position_gate.effective_flat_due_to_harmless_dust",
-            position_gate.get("effective_flat_due_to_harmless_dust"),
-        ),
-        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
-        default_value=False,
-        default_source="default:false",
-        value_kind="bool",
-    )
-    effective_flat, effective_flat_truth_source = _resolve_with_source(
-        ("position_state.normalized_exposure.effective_flat", position_normalized.get("effective_flat")),
-        ("context.effective_flat", payload.get("effective_flat")),
-        (
-            "position_gate.effective_flat_due_to_harmless_dust",
-            position_gate.get("effective_flat_due_to_harmless_dust"),
-        ),
-        ("position_gate.dust_treat_as_flat", position_gate.get("dust_treat_as_flat")),
-        default_value=False,
-        default_source="default:false",
-        value_kind="bool",
-    )
-    raw_qty_open, raw_qty_open_truth_source = _resolve_with_source(
-        ("position_state.raw_qty_open", position_state.get("raw_qty_open")),
-        ("position_state.normalized_exposure.raw_qty_open", position_normalized.get("raw_qty_open")),
-        ("context.raw_qty_open", payload.get("raw_qty_open")),
-        ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
-    )
-    if raw_qty_open is None:
-        raw_qty_open = 0.0
-    raw_total_asset_qty, raw_total_asset_qty_truth_source = _resolve_with_source(
-        ("position_state.raw_total_asset_qty", position_state.get("raw_total_asset_qty")),
-        (
-            "position_state.normalized_exposure.raw_total_asset_qty",
-            position_normalized.get("raw_total_asset_qty"),
-        ),
-        ("context.raw_total_asset_qty", payload.get("raw_total_asset_qty")),
-        ("position_gate.raw_total_asset_qty", position_gate.get("raw_total_asset_qty")),
-        ("context.raw_qty_open", payload.get("raw_qty_open")),
-        (
-            "position_state.normalized_exposure.raw_qty_open",
-            position_normalized.get("raw_qty_open"),
-        ),
-        ("position_gate.raw_qty_open", position_gate.get("raw_qty_open")),
-        default_value=raw_qty_open,
-        default_source="fallback:raw_qty_open",
-        value_kind="float",
-    )
-    if raw_total_asset_qty is None:
-        raw_total_asset_qty = raw_qty_open
-    open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
-        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
-        ("position_state.normalized_exposure.open_exposure_qty", position_normalized.get("open_exposure_qty")),
-        ("context.open_exposure_qty", payload.get("open_exposure_qty")),
-        ("position_gate.open_exposure_qty", position_gate.get("open_exposure_qty")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
-    )
-    if open_exposure_qty is None:
-        open_exposure_qty = 0.0
-    dust_tracking_qty, dust_tracking_qty_truth_source = _resolve_with_source(
-        ("position_state.dust_tracking_qty", position_state.get("dust_tracking_qty")),
-        ("position_state.normalized_exposure.dust_tracking_qty", position_normalized.get("dust_tracking_qty")),
-        ("context.dust_tracking_qty", payload.get("dust_tracking_qty")),
-        ("position_gate.dust_tracking_qty", position_gate.get("dust_tracking_qty")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
-    )
-    if dust_tracking_qty is None:
-        dust_tracking_qty = 0.0
-    open_lot_count, open_lot_count_truth_source = _resolve_int_with_source(
-        ("position_state.open_lot_count", position_state.get("open_lot_count")),
-        (
-            "position_state.normalized_exposure.open_lot_count",
-            position_normalized.get("open_lot_count"),
-        ),
-        ("context.open_lot_count", payload.get("open_lot_count")),
-        ("position_gate.open_lot_count", position_gate.get("open_lot_count")),
-        default_value=0,
-        default_source="default:0",
-    )
-    dust_tracking_lot_count, dust_tracking_lot_count_truth_source = _resolve_int_with_source(
-        ("position_state.dust_tracking_lot_count", position_state.get("dust_tracking_lot_count")),
-        (
-            "position_state.normalized_exposure.dust_tracking_lot_count",
-            position_normalized.get("dust_tracking_lot_count"),
-        ),
-        ("context.dust_tracking_lot_count", payload.get("dust_tracking_lot_count")),
-        ("position_gate.dust_tracking_lot_count", position_gate.get("dust_tracking_lot_count")),
-        default_value=0,
-        default_source="default:0",
-    )
-    reserved_exit_lot_count, reserved_exit_lot_count_truth_source = _resolve_int_with_source(
-        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
-        (
-            "position_state.normalized_exposure.reserved_exit_lot_count",
-            position_normalized.get("reserved_exit_lot_count"),
-        ),
-        ("context.reserved_exit_lot_count", payload.get("reserved_exit_lot_count")),
-        ("position_gate.reserved_exit_lot_count", position_gate.get("reserved_exit_lot_count")),
-        default_value=0,
-        default_source="default:0",
-    )
-    sellable_executable_lot_count, sellable_executable_lot_count_truth_source = _resolve_int_with_source(
-        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
-        (
-            "position_state.normalized_exposure.sellable_executable_lot_count",
-            position_normalized.get("sellable_executable_lot_count"),
-        ),
-        ("context.sellable_executable_lot_count", payload.get("sellable_executable_lot_count")),
-        ("position_gate.sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count")),
-        default_value=0,
-        default_source="default:0",
-    )
-    reserved_exit_qty, reserved_exit_qty_truth_source = _resolve_with_source(
-        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
-        ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
-        ("context.reserved_exit_qty", payload.get("reserved_exit_qty")),
-        ("position_gate.reserved_exit_qty", position_gate.get("reserved_exit_qty")),
-        default_value=0.0,
-        default_source="default:0.0",
-        value_kind="float",
-    )
-    if reserved_exit_qty is None:
-        reserved_exit_qty = 0.0
-    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
-        ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
-        (
-            "position_state.normalized_exposure.sellable_executable_qty",
-            position_normalized.get("sellable_executable_qty"),
-        ),
-        ("context.sellable_executable_qty", payload.get("sellable_executable_qty")),
-        default_value=max(0.0, float(open_exposure_qty) - float(reserved_exit_qty)),
-        default_source="position_state.normalized_exposure.sellable_executable_qty",
-        value_kind="float",
-    )
-    if sellable_executable_qty is None:
-        sellable_executable_qty = max(0.0, float(open_exposure_qty) - float(reserved_exit_qty))
-    semantic_basis = _as_text(
-        position_state.get("semantic_basis", position_normalized.get("semantic_basis", payload.get("semantic_basis"))),
-        default="",
-    )
-    legacy_lot_semantics = bool(semantic_basis and semantic_basis != "lot-native")
-    if legacy_lot_semantics or (open_lot_count <= 0 and float(raw_total_asset_qty) > 1e-12):
-        open_exposure_qty = 0.0
-        open_exposure_qty_truth_source = "fallback:legacy_lot_metadata_missing"
-        sellable_executable_qty = 0.0
-        sellable_executable_qty_truth_source = "fallback:legacy_lot_metadata_missing"
-    if open_lot_count <= 0:
-        open_exposure_qty = 0.0
-        if open_exposure_qty_truth_source != "fallback:legacy_lot_metadata_missing":
-            open_exposure_qty_truth_source = "fallback:no_executable_open_lots"
-        sellable_executable_qty = 0.0
-        if sellable_executable_qty_truth_source != "fallback:legacy_lot_metadata_missing":
-            sellable_executable_qty_truth_source = "fallback:no_executable_open_lots"
+    canonical_exposure = resolve_canonical_position_exposure_snapshot(payload)
+    dust_classification = canonical_exposure.dust_classification
+    entry_allowed = canonical_exposure.entry_allowed
+    effective_flat = canonical_exposure.effective_flat
+    raw_qty_open = canonical_exposure.raw_qty_open
+    raw_total_asset_qty = canonical_exposure.raw_total_asset_qty
+    position_qty = canonical_exposure.position_qty
+    submit_payload_qty = canonical_exposure.submit_payload_qty
+    normalized_exposure_active = canonical_exposure.normalized_exposure_active
+    normalized_exposure_qty = canonical_exposure.normalized_exposure_qty
+    has_executable_exposure = canonical_exposure.has_executable_exposure
+    has_any_position_residue = canonical_exposure.has_any_position_residue
+    has_non_executable_residue = canonical_exposure.has_non_executable_residue
+    has_dust_only_remainder = canonical_exposure.has_dust_only_remainder
+    open_exposure_qty = canonical_exposure.open_exposure_qty
+    dust_tracking_qty = canonical_exposure.dust_tracking_qty
+    open_lot_count = canonical_exposure.open_lot_count
+    dust_tracking_lot_count = canonical_exposure.dust_tracking_lot_count
+    reserved_exit_lot_count = canonical_exposure.reserved_exit_lot_count
+    sellable_executable_lot_count = canonical_exposure.sellable_executable_lot_count
+    reserved_exit_qty = canonical_exposure.reserved_exit_qty
+    sellable_executable_qty = canonical_exposure.sellable_executable_qty
+    sell_submit_lot_count = canonical_exposure.sell_submit_lot_count
+    exit_allowed = canonical_exposure.exit_allowed
+    exit_block_reason = canonical_exposure.exit_block_reason
+    sell_qty_basis_qty = canonical_exposure.sell_qty_basis_qty
+    sell_qty_boundary_kind = canonical_exposure.sell_qty_boundary_kind
+    sell_normalized_exposure_qty = canonical_exposure.sell_normalized_exposure_qty
+    sell_open_exposure_qty = canonical_exposure.sell_open_exposure_qty
+    sell_dust_tracking_qty = canonical_exposure.sell_dust_tracking_qty
     entry_block_reason = _as_text(
         payload.get(
             "entry_block_reason",
@@ -527,176 +777,13 @@ def normalize_strategy_decision_context(
         ),
         default="",
     )
-    exit_allowed, exit_allowed_truth_source = _resolve_with_source(
-        ("context.exit_allowed", payload.get("exit_allowed")),
-        ("position_state.exit_allowed", position_state.get("exit_allowed")),
-        ("position_state.normalized_exposure.exit_allowed", position_normalized.get("exit_allowed")),
-        default_value=sellable_executable_qty > 1e-12,
-        default_source="fallback:sellable_executable_qty",
-        value_kind="bool",
-    )
-    exit_block_reason = _as_text(
-        payload.get(
-            "exit_block_reason",
-            position_normalized.get("exit_block_reason", position_state.get("exit_block_reason")),
-        ),
-        default="",
-    )
-    if entry_allowed_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
-        entry_allowed = True
-        entry_allowed_truth_source = "fallback:flat_zero_holdings"
-    if effective_flat_truth_source == "default:false" and float(raw_total_asset_qty) <= 1e-12:
-        effective_flat = True
-        effective_flat_truth_source = "fallback:flat_zero_holdings"
-    has_executable_exposure, has_executable_exposure_truth_source = _resolve_with_source(
-        ("position_state.has_executable_exposure", position_state.get("has_executable_exposure")),
-        (
-            "position_state.normalized_exposure.has_executable_exposure",
-            position_normalized.get("has_executable_exposure"),
-        ),
-        ("context.has_executable_exposure", payload.get("has_executable_exposure")),
-        ("position_gate.has_executable_exposure", position_gate.get("has_executable_exposure")),
-        default_value=bool(open_lot_count > 0 and sellable_executable_qty > 1e-12),
-        default_source=(
-            "fallback:executable_open_lot_count"
-            if open_lot_count > 0 and sellable_executable_qty > 1e-12
-            else "default:false"
-        ),
-        value_kind="bool",
-    )
-    has_any_position_residue, has_any_position_residue_truth_source = _resolve_with_source(
-        ("position_state.has_any_position_residue", position_state.get("has_any_position_residue")),
-        (
-            "position_state.normalized_exposure.has_any_position_residue",
-            position_normalized.get("has_any_position_residue"),
-        ),
-        ("context.has_any_position_residue", payload.get("has_any_position_residue")),
-        ("position_gate.has_any_position_residue", position_gate.get("has_any_position_residue")),
-        default_value=bool(raw_total_asset_qty > 1e-12),
-        default_source=("fallback:raw_total_asset_qty" if raw_total_asset_qty > 1e-12 else "default:false"),
-        value_kind="bool",
-    )
-    has_non_executable_residue, has_non_executable_residue_truth_source = _resolve_with_source(
-        ("position_state.has_non_executable_residue", position_state.get("has_non_executable_residue")),
-        (
-            "position_state.normalized_exposure.has_non_executable_residue",
-            position_normalized.get("has_non_executable_residue"),
-        ),
-        ("context.has_non_executable_residue", payload.get("has_non_executable_residue")),
-        ("position_gate.has_non_executable_residue", position_gate.get("has_non_executable_residue")),
-        default_value=bool(has_any_position_residue and not has_executable_exposure),
-        default_source=(
-            "fallback:non_executable_residue"
-            if has_any_position_residue and not has_executable_exposure
-            else "default:false"
-        ),
-        value_kind="bool",
-    )
-    has_dust_only_remainder, has_dust_only_remainder_truth_source = _resolve_with_source(
-        ("position_state.has_dust_only_remainder", position_state.get("has_dust_only_remainder")),
-        (
-            "position_state.normalized_exposure.has_dust_only_remainder",
-            position_normalized.get("has_dust_only_remainder"),
-        ),
-        ("context.has_dust_only_remainder", payload.get("has_dust_only_remainder")),
-        ("position_gate.has_dust_only_remainder", position_gate.get("has_dust_only_remainder")),
-        default_value=bool(dust_tracking_qty > 1e-12 and open_lot_count <= 0),
-        default_source=(
-            "fallback:dust_only_remainder"
-            if dust_tracking_qty > 1e-12 and open_lot_count <= 0
-            else "default:false"
-        ),
-        value_kind="bool",
-    )
-    normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
-        ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
-        (
-            "position_state.normalized_exposure.normalized_exposure_qty",
-            position_normalized.get("normalized_exposure_qty"),
-        ),
-        ("context.normalized_exposure_qty", payload.get("normalized_exposure_qty")),
-        ("position_gate.normalized_exposure_qty", position_gate.get("normalized_exposure_qty")),
-        default_value=(open_exposure_qty if has_executable_exposure else 0.0),
-        default_source=("fallback:open_exposure_qty" if has_executable_exposure else "default:0.0"),
-        value_kind="float",
-    )
-    if normalized_exposure_qty_truth_source == "default:0.0":
-        if has_executable_exposure and open_exposure_qty_truth_source not in {"default:0.0"}:
-            normalized_exposure_qty = float(open_exposure_qty)
-            normalized_exposure_qty_truth_source = "fallback:open_exposure_qty"
-        else:
-            normalized_exposure_qty = 0.0
-    if not has_executable_exposure and normalized_exposure_qty_truth_source not in {
-        "position_state.normalized_exposure_qty",
-        "position_state.normalized_exposure.normalized_exposure_qty",
-        "context.normalized_exposure_qty",
-        "position_gate.normalized_exposure_qty",
-    }:
-        normalized_exposure_qty = 0.0
-        normalized_exposure_qty_truth_source = "fallback:no_executable_open_lots"
-    normalized_exposure_active, normalized_exposure_active_truth_source = _resolve_with_source(
-        (
-            "position_state.normalized_exposure_active",
-            position_state.get("normalized_exposure_active"),
-        ),
-        (
-            "position_state.normalized_exposure.normalized_exposure_active",
-            position_normalized.get("normalized_exposure_active"),
-        ),
-        ("context.normalized_exposure_active", payload.get("normalized_exposure_active")),
-        ("position_gate.normalized_exposure_active", position_gate.get("normalized_exposure_active")),
-        default_value=bool(open_lot_count > 0 or reserved_exit_lot_count > 0),
-        default_source=(
-            "fallback:open_exposure_lot_count"
-            if open_lot_count > 0 or reserved_exit_lot_count > 0
-            else normalized_exposure_qty_truth_source
-        ),
-        value_kind="bool",
-    )
-    if normalized_exposure_active_truth_source == normalized_exposure_qty_truth_source:
-        normalized_exposure_active = bool(open_lot_count > 0 or reserved_exit_lot_count > 0)
-    if open_lot_count <= 0 and reserved_exit_lot_count <= 0 and normalized_exposure_active_truth_source not in {
-        "position_state.normalized_exposure_active",
-        "position_state.normalized_exposure.normalized_exposure_active",
-        "context.normalized_exposure_active",
-        "position_gate.normalized_exposure_active",
-    }:
-        normalized_exposure_active = False
-        normalized_exposure_active_truth_source = "fallback:no_executable_open_lots"
-    position_qty = float(open_exposure_qty)
-    position_qty_truth_source = open_exposure_qty_truth_source
-    submit_payload_qty = float(normalized_exposure_qty)
-    submit_payload_qty_truth_source = normalized_exposure_qty_truth_source
     submit_lot_source = "position_state.normalized_exposure.sellable_executable_lot_count"
-    submit_lot_source_truth_source = "derived:sellable_executable_lot_count"
     submit_qty_source = "position_state.normalized_exposure.sellable_executable_qty"
-    submit_qty_source_truth_source = "derived:sellable_executable_qty"
     sell_submit_qty_source = submit_qty_source
     sell_submit_lot_source = submit_lot_source
-    sell_submit_lot_count = int(sellable_executable_lot_count)
     submit_lot_count = int(sell_submit_lot_count)
-    submit_lot_count_truth_source = submit_lot_source_truth_source
-    sell_qty_basis_qty, sell_qty_basis_source, sell_qty_basis_qty_truth_source = _resolve_canonical_sell_qty_basis(
-        sellable_executable_qty=sellable_executable_qty,
-        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
-    )
-    sell_qty_boundary_kind = _as_text(payload.get("sell_qty_boundary_kind"), default="")
-    sell_qty_boundary_kind_truth_source = "context.sell_qty_boundary_kind"
-    if not sell_qty_boundary_kind:
-        sell_qty_boundary_kind = _as_text(position_state.get("sell_qty_boundary_kind"), default="")
-        if sell_qty_boundary_kind:
-            sell_qty_boundary_kind_truth_source = "position_state.sell_qty_boundary_kind"
-    if not sell_qty_boundary_kind:
-        sell_qty_boundary_kind = _as_text(position_normalized.get("sell_qty_boundary_kind"), default="")
-        if sell_qty_boundary_kind:
-            sell_qty_boundary_kind_truth_source = "position_state.normalized_exposure.sell_qty_boundary_kind"
-    if not sell_qty_boundary_kind:
-        sell_qty_boundary_kind = "none"
-        sell_qty_boundary_kind_truth_source = "default:none"
-    sell_normalized_exposure_qty = float(normalized_exposure_qty)
-    sell_open_exposure_qty = float(open_exposure_qty)
-    sell_dust_tracking_qty = float(dust_tracking_qty)
-    sell_failure_category, sell_failure_detail, sell_failure_truth_source = _derive_sell_failure_observability(
+    sell_qty_basis_source = "position_state.normalized_exposure.sellable_executable_lot_count"
+    sell_failure_category, sell_failure_detail, _ = _derive_sell_failure_observability(
         final_signal=final_signal,
         sell_qty_boundary_kind=sell_qty_boundary_kind,
         dust_classification=dust_classification,
@@ -704,20 +791,6 @@ def normalize_strategy_decision_context(
         payload=payload,
     )
     position_state_source = submit_lot_source
-    position_state_source_truth_source = submit_lot_source_truth_source
-
-    open_exposure_qty_truth_source, _ = _split_compatibility_truth_source(
-        open_exposure_qty_truth_source
-    )
-    sellable_executable_qty_truth_source, _ = _split_compatibility_truth_source(
-        sellable_executable_qty_truth_source
-    )
-    normalized_exposure_qty_truth_source, _ = _split_compatibility_truth_source(
-        normalized_exposure_qty_truth_source
-    )
-    normalized_exposure_active_truth_source, _ = _split_compatibility_truth_source(
-        normalized_exposure_active_truth_source
-    )
 
     decision_summary = {
         "raw_signal": raw_signal,

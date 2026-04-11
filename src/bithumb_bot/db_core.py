@@ -261,6 +261,24 @@ def _ensure_open_position_lot_invariant_triggers(conn: sqlite3.Connection) -> No
                         ))
                  )
                 THEN RAISE(ABORT, 'open_position_lots lot-native state/count mismatch')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND COALESCE(NEW.internal_lot_size, 0.0) > 1e-12
+                 AND NEW.position_state = 'open_exposure'
+                 AND ABS(
+                    COALESCE(NEW.qty_open, 0.0)
+                    - (COALESCE(NEW.executable_lot_count, 0) * COALESCE(NEW.internal_lot_size, 0.0))
+                 ) > 1e-12
+                THEN RAISE(ABORT, 'open_position_lots executable qty must match lot authority')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND COALESCE(NEW.internal_lot_size, 0.0) > 1e-12
+                 AND NEW.position_state = 'dust_tracking'
+                 AND ABS(
+                    COALESCE(NEW.qty_open, 0.0)
+                    - (COALESCE(NEW.dust_tracking_lot_count, 0) * COALESCE(NEW.internal_lot_size, 0.0))
+                 ) > 1e-12
+                THEN RAISE(ABORT, 'open_position_lots dust qty must match lot authority')
             WHEN COALESCE(NEW.qty_open, 0.0) <= 1e-12
                  AND (
                     COALESCE(NEW.executable_lot_count, 0) != 0

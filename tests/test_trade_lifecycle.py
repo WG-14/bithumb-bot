@@ -422,6 +422,82 @@ def test_open_position_lots_schema_rejects_negative_lot_counts(tmp_path):
     conn.close()
 
 
+def test_open_position_lots_schema_rejects_executable_qty_lot_size_mismatch(tmp_path):
+    conn = ensure_db(str(tmp_path / "schema_executable_qty_mismatch.sqlite"))
+
+    with pytest.raises(sqlite3.IntegrityError, match="executable qty must match lot authority"):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                internal_lot_size,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTC_KRW",
+                1,
+                "qty_mismatch",
+                1_700_000_000_000,
+                40_000_000.0,
+                0.00025,
+                2,
+                0,
+                0.0001,
+                "lot-native",
+                OPEN_EXPOSURE_LOT_STATE,
+            ),
+        )
+
+    conn.close()
+
+
+def test_open_position_lots_schema_rejects_dust_qty_lot_size_mismatch(tmp_path):
+    conn = ensure_db(str(tmp_path / "schema_dust_qty_mismatch.sqlite"))
+
+    with pytest.raises(sqlite3.IntegrityError, match="dust qty must match lot authority"):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                internal_lot_size,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "BTC_KRW",
+                1,
+                "dust_qty_mismatch",
+                1_700_000_000_000,
+                40_000_000.0,
+                0.00015,
+                0,
+                2,
+                0.0001,
+                "lot-native",
+                DUST_TRACKING_LOT_STATE,
+            ),
+        )
+
+    conn.close()
+
+
 def test_mark_harmless_dust_positions_only_reclassifies_strict_sub_min_open_exposure_rows(tmp_path):
     conn = ensure_db(str(tmp_path / "harmless_dust_boundary.sqlite"))
     conn.execute(

@@ -320,6 +320,73 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert _collect_residue_paths(ctx) == []
 
 
+def test_decision_telemetry_summary_prefers_canonical_normalized_exposure_snapshot(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-telemetry-canonical.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="SELL",
+            reason="dust only",
+            candle_ts=1,
+            market_price=1.0,
+            context={
+                "base_signal": "SELL",
+                "final_signal": "SELL",
+                "raw_qty_open": 0.5,
+                "raw_total_asset_qty": 0.5,
+                "open_exposure_qty": 0.5,
+                "normalized_exposure_qty": 0.5,
+                "sellable_executable_lot_count": 5,
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.5,
+                        "raw_total_asset_qty": 0.5,
+                        "entry_allowed": False,
+                        "effective_flat": False,
+                        "normalized_exposure_active": False,
+                        "normalized_exposure_qty": 0.0,
+                        "has_executable_exposure": False,
+                        "has_any_position_residue": True,
+                        "has_non_executable_residue": True,
+                        "has_dust_only_remainder": True,
+                        "open_exposure_qty": 0.0,
+                        "dust_tracking_qty": 0.5,
+                        "open_lot_count": 0,
+                        "dust_tracking_lot_count": 5,
+                        "reserved_exit_lot_count": 0,
+                        "sellable_executable_lot_count": 0,
+                        "reserved_exit_qty": 0.0,
+                        "sellable_executable_qty": 0.0,
+                        "exit_allowed": False,
+                        "exit_block_reason": "dust_only_remainder",
+                        "sell_qty_boundary_kind": "none",
+                    }
+                },
+            },
+        )
+        conn.commit()
+        summary = fetch_decision_telemetry_summary(conn, limit=10)
+    finally:
+        conn.close()
+
+    assert len(summary) == 1
+    row = summary[0]
+    assert row.entry_allowed is False
+    assert row.normalized_exposure_active is False
+    assert row.normalized_exposure_qty == pytest.approx(0.0)
+    assert row.position_qty == pytest.approx(0.0)
+    assert row.open_exposure_qty == pytest.approx(0.0)
+    assert row.dust_tracking_qty == pytest.approx(0.5)
+    assert row.sell_submit_lot_count == 0
+    assert row.sell_normalized_exposure_qty == pytest.approx(0.0)
+
+
 def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_path, monkeypatch):
     db_path = str(tmp_path / "decision-sell-basis-canonical.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
