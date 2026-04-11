@@ -136,6 +136,7 @@ def _restore_settings_state():
         "DB_PATH",
         "START_CASH_KRW",
         "BUY_FRACTION",
+        "MAX_ORDER_KRW",
         "FEE_RATE",
         "LIVE_FEE_RATE_ESTIMATE",
         "MAX_ORDERBOOK_SPREAD_BPS",

@@ -1589,6 +1589,10 @@ class BithumbBroker:
         return format(rounded, "f").rstrip("0").rstrip(".") or "0"
 
     @classmethod
+    def _truncate_volume(cls, qty: object, *, places: int = 8) -> float:
+        return float(cls._format_volume(qty, places=places))
+
+    @classmethod
     def _validate_volume_constraints(
         cls,
         *,

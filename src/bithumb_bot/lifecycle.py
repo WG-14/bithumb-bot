@@ -720,8 +720,10 @@ def summarize_position_lots(
                 COALESCE(
                     SUM(
                         CASE
-                            WHEN COALESCE(executable_lot_count, 0) > 0 THEN qty_open
+                            WHEN COALESCE(executable_lot_count, 0) > 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
                             WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND position_state = ?
                                  AND COALESCE(executable_lot_count, 0) = 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
                             ELSE 0.0
@@ -732,8 +734,10 @@ def summarize_position_lots(
                 COALESCE(
                     SUM(
                         CASE
-                            WHEN COALESCE(executable_lot_count, 0) > 0 THEN executable_lot_count
+                            WHEN COALESCE(executable_lot_count, 0) > 0
+                                 AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN executable_lot_count
                             WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND position_state = ?
                                  AND COALESCE(executable_lot_count, 0) = 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
                             ELSE 0
@@ -742,9 +746,9 @@ def summarize_position_lots(
                     0
                 )
             FROM open_position_lots
-            WHERE pair=? AND position_state=?
+            WHERE pair=?
             """,
-            (str(pair), OPEN_EXPOSURE_LOT_STATE),
+            (OPEN_EXPOSURE_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, str(pair)),
         ).fetchone()
         dust_row = conn.execute(
             """
@@ -752,8 +756,10 @@ def summarize_position_lots(
                 COALESCE(
                     SUM(
                         CASE
-                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN qty_open
+                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0
+                                 AND COALESCE(executable_lot_count, 0) = 0 THEN qty_open
                             WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND position_state = ?
                                  AND COALESCE(executable_lot_count, 0) = 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN qty_open
                             ELSE 0.0
@@ -764,8 +770,10 @@ def summarize_position_lots(
                 COALESCE(
                     SUM(
                         CASE
-                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0 THEN dust_tracking_lot_count
+                            WHEN COALESCE(dust_tracking_lot_count, 0) > 0
+                                 AND COALESCE(executable_lot_count, 0) = 0 THEN dust_tracking_lot_count
                             WHEN COALESCE(position_semantic_basis, '') = 'lot-native'
+                                 AND position_state = ?
                                  AND COALESCE(executable_lot_count, 0) = 0
                                  AND COALESCE(dust_tracking_lot_count, 0) = 0 THEN 1
                             ELSE 0
@@ -774,9 +782,9 @@ def summarize_position_lots(
                     0
                 )
             FROM open_position_lots
-            WHERE pair=? AND position_state=?
+            WHERE pair=?
             """,
-            (str(pair), DUST_TRACKING_LOT_STATE),
+            (DUST_TRACKING_LOT_STATE, DUST_TRACKING_LOT_STATE, str(pair)),
         ).fetchone()
     except sqlite3.OperationalError:
         try:
