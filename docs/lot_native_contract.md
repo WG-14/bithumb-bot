@@ -94,6 +94,15 @@ When extending the SELL path, keep this implementation boundary explicit:
   - `tests/test_trade_lifecycle.py`
   - `tests/test_live_broker.py`
 
+### Forbidden Qty-First Patterns
+
+Keep these rules explicit in new decision-path code:
+
+- SELL authority must remain canonical lot-native authority from `position_state.normalized_exposure.sellable_executable_lot_count`.
+- observational qty such as `position_qty`, `requested_qty`, dust previews, or raw holdings snapshots is diagnostic-only and must not decide SELL eligibility or sizing.
+- `open_exposure`, `dust_tracking`, and `reserved_exit` must not be recombined into executable SELL authority from qty aggregation.
+- compatibility or fallback fields may remain only as derived or fail-closed adapter inputs and must not be promoted to canonical SELL authority.
+
 ## Regression Gate
 
 Use the dedicated lot-native gate before and after changing SELL authority,

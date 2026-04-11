@@ -4891,6 +4891,7 @@ def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(
                 )
             ),
         )
+
         monkeypatch.setattr(
             broker,
             "_post_private",
@@ -4902,6 +4903,77 @@ def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(
     finally:
         for key, value in original.items():
             object.__setattr__(settings, key, value)
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational_position_qty_non_authoritative(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = str(tmp_path / "sell-no-executable-exit-suppression.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    conn = ensure_db(db_path)
+    try:
+        recorded = live_module._record_sell_no_executable_exit_suppression(
+            conn=conn,
+            state=runtime_state.snapshot(),
+            ts=100,
+            market_price=100_000_000.0,
+            position_qty=0.0004,
+            strategy_name="suppression_test",
+            decision_id=None,
+            decision_reason="no executable lots",
+            exit_rule_name="exit_signal",
+            decision_observability={
+                "base_signal": "SELL",
+                "final_signal": "SELL",
+                "open_exposure_qty": 0.0,
+                "dust_tracking_qty": 0.0004,
+                "raw_total_asset_qty": 0.0004,
+                "exit_block_reason": "no_executable_exit_lot",
+                "sell_submit_lot_count": 0,
+            },
+            submit_qty_source="observation.sell_qty_preview",
+            position_state_source="observation.sell_qty_preview",
+            raw_total_asset_qty=0.0004,
+            open_exposure_qty=0.0,
+            dust_tracking_qty=0.0004,
+            exit_sizing=SimpleNamespace(
+                allowed=False,
+                block_reason="no_executable_exit_lot",
+                decision_reason_code="exit_suppressed_by_quantity_rule",
+                intended_lot_count=0,
+                executable_lot_count=0,
+                executable_qty=0.0,
+                internal_lot_size=0.0001,
+                effective_min_trade_qty=0.0001,
+                min_qty=0.0001,
+                min_notional_krw=5000.0,
+            ),
+        )
+        conn.commit()
+        suppression_row = conn.execute(
+            """
+            SELECT context_json
+            FROM order_suppressions
+            WHERE strategy_name='suppression_test'
+            ORDER BY updated_ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert recorded is True
+    assert suppression_row is not None
+    suppression_context = json.loads(str(suppression_row["context_json"]))
+    assert suppression_context["position_qty"] == pytest.approx(0.0004)
+    assert suppression_context["sell_open_exposure_qty"] == pytest.approx(0.0)
+    assert suppression_context["sell_qty_basis_qty"] == pytest.approx(0.0)
 
 
 @pytest.mark.fast_regression

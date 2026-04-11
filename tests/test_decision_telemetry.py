@@ -8,7 +8,7 @@ from bithumb_bot.app import main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_strategy_decision
 from bithumb_bot.decision_context import resolve_canonical_position_exposure_snapshot
-from bithumb_bot.reporting import fetch_decision_telemetry_summary
+from bithumb_bot.reporting import fetch_decision_telemetry_summary, fetch_recent_decision_flow
 
 
 def _collect_residue_paths(value, path: str = "") -> list[str]:
@@ -388,7 +388,11 @@ def test_decision_telemetry_summary_prefers_canonical_normalized_exposure_snapsh
     assert row.sell_normalized_exposure_qty == pytest.approx(0.0)
 
 
-def test_decision_telemetry_summary_treats_qty_only_context_as_diagnostic_only(tmp_path, monkeypatch):
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_decision_telemetry_summary_treats_qty_only_context_as_diagnostic_only(
+    tmp_path,
+    monkeypatch,
+):
     db_path = str(tmp_path / "decision-telemetry-qty-only.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)
     object.__setattr__(settings, "DB_PATH", db_path)
@@ -425,6 +429,55 @@ def test_decision_telemetry_summary_treats_qty_only_context_as_diagnostic_only(t
     assert row.open_exposure_qty == pytest.approx(0.0)
     assert row.sell_submit_lot_count == 0
     assert row.sell_normalized_exposure_qty == pytest.approx(0.0)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_recent_decision_flow_does_not_reconstruct_sell_basis_from_observational_qty(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = str(tmp_path / "decision-flow-observational-basis.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                5,
+                "sma_with_filter",
+                "SELL",
+                "legacy observational basis only",
+                5,
+                1.0,
+                None,
+                json.dumps(
+                    {
+                        "base_signal": "SELL",
+                        "final_signal": "SELL",
+                        "sell_open_exposure_qty": 0.0004,
+                        "sell_normalized_exposure_qty": 0.0004,
+                        "open_exposure_qty": 0.0004,
+                        "raw_total_asset_qty": 0.0004,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        rows = fetch_recent_decision_flow(conn, limit=10)
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.sell_open_exposure_qty == pytest.approx(0.0004)
+    assert row.sell_normalized_exposure_qty == pytest.approx(0.0004)
+    assert row.sell_qty_basis_qty == pytest.approx(0.0)
 
 
 def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_path, monkeypatch):
@@ -600,7 +653,8 @@ def test_decision_telemetry_prefers_normalized_position_state_over_shadow_top_le
     assert row.normalized_exposure_qty == pytest.approx(0.25)
 
 
-def test_canonical_exposure_snapshot_ignores_shadow_top_level_sell_authority_fields() -> None:
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_canonical_exposure_snapshot_ignores_shadow_top_level_sell_authority_fields() -> None:
     snapshot = resolve_canonical_position_exposure_snapshot(
         {
             "raw_total_asset_qty": 9.9,
@@ -636,6 +690,51 @@ def test_canonical_exposure_snapshot_ignores_shadow_top_level_sell_authority_fie
     assert snapshot.sellable_executable_lot_count == 1
     assert snapshot.sellable_executable_qty == pytest.approx(0.25)
     assert snapshot.exit_allowed is True
+
+
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_canonical_exposure_snapshot_keeps_reserved_exit_and_dust_mix_non_sellable() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_total_asset_qty": 0.0005,
+            "open_exposure_qty": 0.0005,
+            "sellable_executable_qty": 0.0005,
+            "sellable_executable_lot_count": 5,
+            "exit_allowed": True,
+            "exit_block_reason": "none",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0005,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.0001,
+                    "open_lot_count": 4,
+                    "dust_tracking_lot_count": 1,
+                    "reserved_exit_qty": 0.0004,
+                    "reserved_exit_lot_count": 4,
+                    "sellable_executable_qty": 0.0,
+                    "sellable_executable_lot_count": 0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "no_executable_exit_lot",
+                    "normalized_exposure_qty": 0.0,
+                    "normalized_exposure_active": True,
+                    "entry_allowed": False,
+                    "effective_flat": False,
+                }
+            },
+        }
+    )
+
+    assert snapshot.raw_total_asset_qty == pytest.approx(0.0005)
+    assert snapshot.open_exposure_qty == pytest.approx(0.0004)
+    assert snapshot.dust_tracking_qty == pytest.approx(0.0001)
+    assert snapshot.reserved_exit_qty == pytest.approx(0.0004)
+    assert snapshot.reserved_exit_lot_count == 4
+    assert snapshot.sellable_executable_lot_count == 0
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0)
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0)
+    assert snapshot.sell_submit_lot_count == 0
+    assert snapshot.exit_allowed is False
 
 
 @pytest.mark.lot_native_regression_gate

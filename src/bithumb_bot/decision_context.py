@@ -197,6 +197,13 @@ def _as_filter_list(raw: Any) -> list[str]:
     return []
 
 
+def _normalized_exposure_view(position_state: dict[str, Any]) -> dict[str, Any]:
+    normalized = position_state.get("normalized_exposure")
+    if isinstance(normalized, dict):
+        return dict(normalized)
+    return {}
+
+
 def _resolve_with_source(
     *candidates: tuple[str, Any],
     default_value: Any,
@@ -285,9 +292,12 @@ def _extract_canonical_sell_authority_inputs(
     position_state: dict[str, Any],
     position_normalized: dict[str, Any],
 ) -> _CanonicalSellAuthorityInputs:
+    semantic_basis = _as_text(
+        position_state.get("semantic_basis", position_normalized.get("semantic_basis")),
+        default="",
+    )
     open_lot_count, _ = _resolve_int_with_source(
         ("position_state.normalized_exposure.open_lot_count", position_normalized.get("open_lot_count")),
-        ("position_state.open_lot_count", position_state.get("open_lot_count")),
         default_value=0,
         default_source="default:0",
     )
@@ -296,32 +306,86 @@ def _extract_canonical_sell_authority_inputs(
             "position_state.normalized_exposure.reserved_exit_lot_count",
             position_normalized.get("reserved_exit_lot_count"),
         ),
-        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
         default_value=0,
         default_source="default:0",
     )
     sellable_executable_lot_count, _ = _resolve_int_with_source(
         (_CANONICAL_SELL_LOT_AUTHORITY, position_normalized.get("sellable_executable_lot_count")),
-        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
         default_value=0,
         default_source="default:0",
     )
     open_exposure_qty, _ = _resolve_with_source(
         (_CANONICAL_OPEN_EXPOSURE_QTY_SOURCE, position_normalized.get("open_exposure_qty")),
-        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
         default_value=0.0,
         default_source="default:0.0",
         value_kind="float",
     )
     reserved_exit_qty, _ = _resolve_with_source(
         ("position_state.normalized_exposure.reserved_exit_qty", position_normalized.get("reserved_exit_qty")),
-        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
         default_value=0.0,
         default_source="default:0.0",
         value_kind="float",
     )
     sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
         (_CANONICAL_SELL_QTY_DERIVATION, position_normalized.get("sellable_executable_qty")),
+        default_value=max(
+            0.0,
+            float(open_exposure_qty or 0.0) - float(reserved_exit_qty or 0.0),
+        ),
+        default_source=_CANONICAL_SELL_QTY_DERIVATION,
+        value_kind="float",
+    )
+    return _CanonicalSellAuthorityInputs(
+        open_exposure_qty=float(open_exposure_qty or 0.0),
+        open_exposure_qty_truth_source=_CANONICAL_OPEN_EXPOSURE_QTY_SOURCE,
+        open_lot_count=int(open_lot_count),
+        reserved_exit_qty=float(reserved_exit_qty or 0.0),
+        reserved_exit_lot_count=int(reserved_exit_lot_count),
+        sellable_executable_lot_count=int(sellable_executable_lot_count),
+        sellable_executable_qty=(
+            max(0.0, float(open_exposure_qty or 0.0) - float(reserved_exit_qty or 0.0))
+            if sellable_executable_qty is None
+            else float(sellable_executable_qty)
+        ),
+        sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
+        semantic_basis=semantic_basis,
+    )
+
+
+def _extract_fail_closed_sell_compatibility_inputs(
+    *,
+    position_state: dict[str, Any],
+) -> _CanonicalSellAuthorityInputs:
+    # Compatibility inputs are an internal fail-closed adapter only.
+    # They must never be treated as peer authority with normalized_exposure.
+    open_lot_count, _ = _resolve_int_with_source(
+        ("position_state.open_lot_count", position_state.get("open_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    reserved_exit_lot_count, _ = _resolve_int_with_source(
+        ("position_state.reserved_exit_lot_count", position_state.get("reserved_exit_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    sellable_executable_lot_count, _ = _resolve_int_with_source(
+        ("position_state.sellable_executable_lot_count", position_state.get("sellable_executable_lot_count")),
+        default_value=0,
+        default_source="default:0",
+    )
+    open_exposure_qty, _ = _resolve_with_source(
+        ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    reserved_exit_qty, _ = _resolve_with_source(
+        ("position_state.reserved_exit_qty", position_state.get("reserved_exit_qty")),
+        default_value=0.0,
+        default_source="default:0.0",
+        value_kind="float",
+    )
+    sellable_executable_qty, sellable_executable_qty_truth_source = _resolve_with_source(
         ("position_state.sellable_executable_qty", position_state.get("sellable_executable_qty")),
         default_value=max(
             0.0,
@@ -331,7 +395,7 @@ def _extract_canonical_sell_authority_inputs(
         value_kind="float",
     )
     semantic_basis = _as_text(
-        position_state.get("semantic_basis", position_normalized.get("semantic_basis")),
+        position_state.get("semantic_basis"),
         default="",
     )
     return _CanonicalSellAuthorityInputs(
@@ -349,6 +413,21 @@ def _extract_canonical_sell_authority_inputs(
         sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
         semantic_basis=semantic_basis,
     )
+
+
+def _resolve_canonical_sell_authority_inputs(
+    *,
+    position_state: dict[str, Any],
+) -> _CanonicalSellAuthorityInputs:
+    # Canonical SELL authority is read through normalized_exposure only.
+    # Top-level position_state fields remain a compatibility-only boundary.
+    position_normalized = _normalized_exposure_view(position_state)
+    if position_normalized:
+        return _extract_canonical_sell_authority_inputs(
+            position_state=position_state,
+            position_normalized=position_normalized,
+        )
+    return _extract_fail_closed_sell_compatibility_inputs(position_state=position_state)
 
 
 def _apply_non_authoritative_sell_diagnostic_fallbacks(
@@ -484,11 +563,7 @@ def resolve_canonical_position_exposure_snapshot(
     payload: dict[str, Any] = dict(context or {})
     position_gate = payload.get("position_gate") if isinstance(payload.get("position_gate"), dict) else {}
     position_state = dict(payload.get("position_state")) if isinstance(payload.get("position_state"), dict) else {}
-    position_normalized = (
-        position_state.get("normalized_exposure")
-        if isinstance(position_state.get("normalized_exposure"), dict)
-        else {}
-    )
+    position_normalized = _normalized_exposure_view(position_state)
 
     dust_classification = _as_text(
         payload.get(
@@ -572,30 +647,25 @@ def resolve_canonical_position_exposure_snapshot(
         default_value=0,
         default_source="default:0",
     )
-    canonical_sell_authority = _extract_canonical_sell_authority_inputs(
-        position_state=position_state,
-        position_normalized=position_normalized,
-    )
+    canonical_sell_authority = _resolve_canonical_sell_authority_inputs(position_state=position_state)
     compatibility = _extract_non_authoritative_sell_diagnostic_observation(
         payload=payload,
         position_gate=position_gate,
         position_state=position_state,
         position_normalized=position_normalized,
     )
-    compatibility_adjusted_sell_authority = _apply_non_authoritative_sell_diagnostic_fallbacks(
+    fail_closed_sell_authority = _apply_non_authoritative_sell_diagnostic_fallbacks(
         authority_inputs=canonical_sell_authority,
         raw_total_asset_qty=float(compatibility.raw_total_asset_qty),
     )
-    open_exposure_qty = compatibility_adjusted_sell_authority.open_exposure_qty
-    open_exposure_qty_truth_source = compatibility_adjusted_sell_authority.open_exposure_qty_truth_source
-    open_lot_count = compatibility_adjusted_sell_authority.open_lot_count
-    reserved_exit_lot_count = compatibility_adjusted_sell_authority.reserved_exit_lot_count
-    sellable_executable_lot_count = compatibility_adjusted_sell_authority.sellable_executable_lot_count
-    reserved_exit_qty = compatibility_adjusted_sell_authority.reserved_exit_qty
-    sellable_executable_qty = compatibility_adjusted_sell_authority.sellable_executable_qty
-    sellable_executable_qty_truth_source = (
-        compatibility_adjusted_sell_authority.sellable_executable_qty_truth_source
-    )
+    open_exposure_qty = fail_closed_sell_authority.open_exposure_qty
+    open_exposure_qty_truth_source = fail_closed_sell_authority.open_exposure_qty_truth_source
+    open_lot_count = fail_closed_sell_authority.open_lot_count
+    reserved_exit_lot_count = fail_closed_sell_authority.reserved_exit_lot_count
+    sellable_executable_lot_count = fail_closed_sell_authority.sellable_executable_lot_count
+    reserved_exit_qty = fail_closed_sell_authority.reserved_exit_qty
+    sellable_executable_qty = fail_closed_sell_authority.sellable_executable_qty
+    sellable_executable_qty_truth_source = fail_closed_sell_authority.sellable_executable_qty_truth_source
     exit_allowed, _ = _resolve_with_source(
         ("position_state.normalized_exposure.exit_allowed", position_normalized.get("exit_allowed")),
         ("position_state.exit_allowed", position_state.get("exit_allowed")),
@@ -844,11 +914,7 @@ def normalize_strategy_decision_context(
         block_reason_hierarchy.append(entry_block_reason_text)
 
     position_state = dict(payload.get("position_state")) if isinstance(payload.get("position_state"), dict) else {}
-    position_normalized = (
-        position_state.get("normalized_exposure")
-        if isinstance(position_state.get("normalized_exposure"), dict)
-        else {}
-    )
+    position_normalized = _normalized_exposure_view(position_state)
     canonical_exposure = resolve_canonical_position_exposure_snapshot(payload)
     dust_classification = canonical_exposure.dust_classification
     entry_allowed = canonical_exposure.entry_allowed

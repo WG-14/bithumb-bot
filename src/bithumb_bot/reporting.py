@@ -121,6 +121,8 @@ class FeeDiagnosticSummary:
 
 @dataclass
 class DecisionTelemetrySummary:
+    """Operator-facing telemetry summary; qty fields are diagnostic, not authority."""
+
     base_signal: str
     decision_type: str
     raw_signal: str
@@ -562,6 +564,8 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
 
 @dataclass
 class RecentDecisionFlowSummary:
+    """Recent decision/reporting view; sell qty fields remain non-authoritative diagnostics."""
+
     decision_id: int
     decision_ts: int
     strategy_name: str
@@ -595,6 +599,8 @@ class RecentDecisionFlowSummary:
 
 @dataclass
 class SellSuppressionSummary:
+    """Suppression report surface; qty snapshots document the event but do not grant authority."""
+
     event_ts: int
     strategy_name: str
     signal: str
@@ -1025,8 +1031,6 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
             ) AS sell_dust_tracking_qty,
             COALESCE(
                 json_extract(oe.submit_evidence, '$.sell_qty_basis_qty'),
-                json_extract(oe.submit_evidence, '$.sell_open_exposure_qty'),
-                json_extract(oe.submit_evidence, '$.sell_normalized_exposure_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
             COALESCE(
@@ -1089,8 +1093,6 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
             ) AS sell_submit_lot_count,
             COALESCE(
                 json_extract(context_json, '$.sell_qty_basis_qty'),
-                json_extract(context_json, '$.sell_open_exposure_qty'),
-                json_extract(context_json, '$.sell_normalized_exposure_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
             COALESCE(
@@ -1415,8 +1417,6 @@ def fetch_recent_decision_flow(
                 json_extract(context_json, '$.sell_qty_basis_qty'),
                 json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
-                json_extract(context_json, '$.sell_open_exposure_qty'),
-                json_extract(context_json, '$.sell_normalized_exposure_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
             COALESCE(

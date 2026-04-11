@@ -348,6 +348,40 @@ def test_authority_boundary_decision_context_prefers_canonical_normalized_sell_s
     assert snapshot.sell_submit_lot_count == 1
 
 
+def test_authority_boundary_decision_context_prefers_normalized_sell_authority_over_position_state_compatibility_fields() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "position_state": {
+                "open_exposure_qty": 0.0009,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0009,
+                "sellable_executable_lot_count": 9,
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0002,
+                    "raw_total_asset_qty": 0.0002,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": 0.0001,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0001,
+                    "sellable_executable_lot_count": 1,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                },
+            }
+        }
+    )
+
+    assert snapshot.open_exposure_qty == pytest.approx(0.0002)
+    assert snapshot.open_lot_count == 2
+    assert snapshot.reserved_exit_qty == pytest.approx(0.0001)
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0001)
+    assert snapshot.sellable_executable_lot_count == 1
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0001)
+
+
 def test_decision_context_no_longer_emits_compatibility_fallback_or_provenance_layer() -> None:
     ctx = normalize_strategy_decision_context(
         context={
