@@ -1386,6 +1386,7 @@ def test_authority_boundary_sell_lifecycle_ignores_dust_tracking_even_if_it_is_a
     assert float(lifecycle_row[0]["matched_qty"]) == pytest.approx(0.5)
 
 
+@pytest.mark.lot_native_regression_gate
 def test_recovery_reconstructs_lot_native_exposure_and_dust_after_restart(tmp_path):
     db_path = tmp_path / "restart_lot_native.sqlite"
     lot_rules = _test_lot_rules()
@@ -1423,6 +1424,7 @@ def test_recovery_reconstructs_lot_native_exposure_and_dust_after_restart(tmp_pa
     assert summary.raw_total_asset_qty == pytest.approx(fill_qty)
 
 
+@pytest.mark.lot_native_regression_gate
 def test_recovery_does_not_infer_executable_semantics_from_qty_without_lot_counts(tmp_path):
     conn = ensure_db(str(tmp_path / "legacy_qty_only.sqlite"))
     base_ts = 1_700_001_300_000

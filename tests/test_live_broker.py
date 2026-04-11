@@ -4744,6 +4744,7 @@ def test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_su
 
 
 @pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
 def test_live_execute_signal_sell_ignores_stale_recorded_sellable_qty_without_current_lot_state(monkeypatch, tmp_path):
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))

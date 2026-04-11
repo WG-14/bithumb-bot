@@ -964,7 +964,10 @@ def summarize_position_lots(
     tracked_dust_qty = max(0.0, float(dust_row[0] if dust_row is not None else 0.0))
     open_lot_count = max(0, int(open_row[1] if open_row is not None else 0))
     dust_lot_count = max(0, int(dust_row[1] if dust_row is not None else 0))
-    lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
+    try:
+        lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
+    except (sqlite3.OperationalError, AssertionError):
+        lot_definition = None
     if executable_lot is None:
         executable_qty = 0.0
         effective_min_trade_qty = 0.0

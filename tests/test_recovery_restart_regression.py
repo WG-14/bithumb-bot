@@ -1128,6 +1128,7 @@ def test_ambiguous_submit_persists_across_restart_until_reconcile_runs(isolated_
 
 
 
+@pytest.mark.lot_native_regression_gate
 def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:

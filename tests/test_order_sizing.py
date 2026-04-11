@@ -4,7 +4,11 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.lifecycle import LotDefinitionSnapshot, LOT_SEMANTIC_VERSION_V1
-from bithumb_bot.order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
+from bithumb_bot.order_sizing import (
+    SellExecutionAuthority,
+    build_buy_execution_sizing,
+    build_sell_execution_sizing,
+)
 
 
 @pytest.fixture
@@ -103,9 +107,11 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=308,
-        exit_allowed=True,
-        exit_block_reason="none",
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=308,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
     )
 
     assert plan.side == "SELL"
@@ -123,9 +129,11 @@ def test_sell_execution_sizing_uses_suppression_reason_code_when_quantity_rule_b
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=0,
-        exit_allowed=False,
-        exit_block_reason="no_executable_exit_lot",
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=False,
+            exit_block_reason="no_executable_exit_lot",
+        ),
     )
 
     assert plan.side == "SELL"
@@ -141,9 +149,11 @@ def test_sell_execution_sizing_uses_canonical_sellable_lot_count_when_qty_rounds
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=2,
-        exit_allowed=True,
-        exit_block_reason="none",
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=2,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
     )
 
     assert plan.side == "SELL"
@@ -176,9 +186,11 @@ def test_sell_execution_sizing_prefers_persisted_lot_definition_over_current_rul
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=2,
-        exit_allowed=True,
-        exit_block_reason="none",
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=2,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
         lot_definition=persisted_lot_definition,
     )
 
@@ -189,3 +201,22 @@ def test_sell_execution_sizing_prefers_persisted_lot_definition_over_current_rul
     assert plan.min_qty == pytest.approx(0.0001)
     assert plan.qty_step == pytest.approx(0.0001)
     assert plan.min_notional_krw == pytest.approx(5000.0)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_sell_execution_sizing_requires_canonical_sell_authority_inputs(sizing_rule_overrides) -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
+    )
+
+    assert plan.allowed is False
+    assert plan.requested_qty == pytest.approx(0.0)
+    assert plan.executable_qty == pytest.approx(0.0)
+    assert plan.block_reason == "no_executable_exit_lot"
+    assert plan.decision_reason_code == "exit_suppressed_by_quantity_rule"

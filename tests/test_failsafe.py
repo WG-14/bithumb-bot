@@ -113,7 +113,7 @@ class _LoopConn:
         q = " ".join(str(query).split())
 
         if "FROM candles" in q:
-            return _Rows({"ts": int(10_000_000_000_000), "close": 100.0})
+            return _Rows({"ts": 10_000, "close": 100.0})
 
         if "COUNT(*) AS open_count" in q:
             if self.open_order_created_ts is None:
@@ -144,6 +144,33 @@ class _LoopConn:
             and "side='SELL'" in q
         ):
             return _Rows({"reserved_exit_qty": 0.0})
+
+        if (
+            "SELECT DISTINCT" in q
+            and "FROM open_position_lots" in q
+            and "lot_semantic_version" in q
+        ):
+            if self.asset_qty <= 1e-12:
+                return _Rows([])
+            return _Rows(
+                [
+                    {
+                        "lot_semantic_version": 1,
+                        "internal_lot_size": 0.0001,
+                        "lot_min_qty": 0.0001,
+                        "lot_qty_step": 0.0001,
+                        "lot_min_notional_krw": 5000.0,
+                        "lot_max_qty_decimals": 8,
+                        "lot_rule_source_mode": "ledger",
+                    }
+                ]
+            )
+
+        if "FROM open_position_lots" in q and "SUM(" in q:
+            if "executable_lot_count" in q and "dust_tracking_lot_count, 0) = 0" in q:
+                return _Rows((self.asset_qty, 1 if self.asset_qty > 1e-12 else 0))
+            if "dust_tracking_lot_count" in q and "executable_lot_count, 0) = 0" in q:
+                return _Rows((0.0, 0))
 
         if (
             "AS pending_submit_count" in q
@@ -216,6 +243,13 @@ class _Rows:
     def fetchone(self):
         return self._row
 
+    def fetchall(self):
+        if self._row is None:
+            return []
+        if isinstance(self._row, list):
+            return self._row
+        return [self._row]
+
 
 class _DummyBroker:
     def get_open_orders(self):
@@ -242,6 +276,10 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
     runtime_state.set_startup_gate_reason(None)
+    runtime_state._STATE.last_processed_candle_ts_ms = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_ts_ms = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_status = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_status_detail = None  # type: ignore[attr-defined]
 
     resolved_db_path = str(Path(settings.DB_PATH).resolve())
     monkeypatch.setenv("DB_PATH", resolved_db_path)
@@ -270,9 +308,13 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
     monkeypatch.setattr(
+        "bithumb_bot.engine._select_latest_closed_candle",
+        lambda _conn, **_kwargs: ({"ts": 9000, "close": 100.0}, None),
+    )
+    monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
         lambda conn, s, l: {
-            "ts": 1000,
+            "ts": 9000,
             "last_close": 100.0,
             "curr_s": 1.0,
             "curr_l": 0.5,

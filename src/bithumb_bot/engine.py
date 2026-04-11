@@ -456,9 +456,21 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     conn = ensure_db()
     try:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
-        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
         state = runtime_state.snapshot()
+        try:
+            reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        except Exception as exc:
+            # Halt-clearing checks must fail closed when lot-native exposure
+            # cannot be reconstructed from local state.
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[STARTUP_GATE] exposure snapshot unavailable",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    open_orders_present=1 if open_count > 0 else 0,
+                )
+            )
+            return open_count > 0, True
     finally:
         conn.close()
 
@@ -1378,8 +1390,18 @@ def _position_summary() -> str:
     try:
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         state = runtime_state.snapshot()
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
-        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        try:
+            reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        except Exception as exc:
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[RUN] position summary unavailable",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            qty = float(row["asset_qty"] or 0.0) if row is not None else 0.0
+            return f"position=unknown qty={qty:.8f} reason=lot_snapshot_unavailable"
     finally:
         conn.close()
 

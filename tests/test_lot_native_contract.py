@@ -20,7 +20,7 @@ from bithumb_bot.dust import (
     lot_state_quantity_contract,
 )
 from bithumb_bot.lifecycle import summarize_position_lots
-from bithumb_bot.order_sizing import build_sell_execution_sizing
+from bithumb_bot.order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 
 
 pytestmark = pytest.mark.fast_regression
@@ -33,9 +33,11 @@ def test_authority_boundary_sell_execution_sizing_derives_final_qty_from_canonic
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=2,
-        exit_allowed=True,
-        exit_block_reason="none",
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=2,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
     )
 
     expected_qty = pytest.approx(plan.internal_lot_size * 2)
@@ -65,9 +67,11 @@ def test_sell_suppression_categories_remain_normal_suppression_outcomes(
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=20_000_000.0,
-        sellable_lot_count=0,
-        exit_allowed=False,
-        exit_block_reason=exit_block_reason,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=False,
+            exit_block_reason=exit_block_reason,
+        ),
     )
 
     assert plan.side == "SELL"
@@ -181,9 +185,11 @@ def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_bu
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
         market_price=100_000_000.0,
-        sellable_lot_count=model.normalized_exposure.sellable_executable_lot_count,
-        exit_allowed=model.normalized_exposure.exit_allowed,
-        exit_block_reason=model.normalized_exposure.exit_block_reason,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=model.normalized_exposure.sellable_executable_lot_count,
+            exit_allowed=model.normalized_exposure.exit_allowed,
+            exit_block_reason=model.normalized_exposure.exit_block_reason,
+        ),
     )
 
     assert model.normalized_exposure.open_lot_count == 3

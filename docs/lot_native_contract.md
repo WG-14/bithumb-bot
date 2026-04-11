@@ -94,6 +94,24 @@ When extending the SELL path, keep this implementation boundary explicit:
   - `tests/test_trade_lifecycle.py`
   - `tests/test_live_broker.py`
 
+## Regression Gate
+
+Use the dedicated lot-native gate before and after changing SELL authority,
+decision-context extraction, reporting interpretation, recovery, or lifecycle
+logic:
+
+```bash
+uv run pytest -q -m lot_native_regression_gate
+```
+
+This gate must keep passing for these invariants:
+
+- SELL authority comes from canonical lot/open-exposure state only
+- dust remains a normal non-sellable state transition
+- aggregate qty alone does not restore exit authority
+- partial fill and restart reconciliation preserve lot-native state
+- qty-only legacy or compatibility rows stay fail-closed
+
 ## Suppression Semantics
 
 The following outcomes are suppression outcomes, not submit failures:

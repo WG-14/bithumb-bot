@@ -649,6 +649,7 @@ def test_position_state_model_does_not_reconstruct_executable_semantics_from_qty
     assert model.normalized_exposure.exit_block_reason == "dust_only_remainder"
 
 
+@pytest.mark.lot_native_regression_gate
 def test_position_state_model_interprets_dust_only_as_state_layer_no_submit_outcome() -> None:
     dust = classify_dust_residual(
         broker_qty=0.00009629,

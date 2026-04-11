@@ -44,6 +44,19 @@ class ExecutionSizingPlan:
     non_executable_reason: str
 
 
+@dataclass(frozen=True)
+class SellExecutionAuthority:
+    """Canonical SELL authority surface for execution sizing.
+
+    The SELL path must accept lot-native authority, not raw aggregate qty.
+    Any qty used for execution remains derived from this lot-native input.
+    """
+
+    sellable_executable_lot_count: int
+    exit_allowed: bool
+    exit_block_reason: str
+
+
 def _sell_decision_reason_code(*, exit_block_reason: str) -> str:
     """Return the canonical sell decision outcome code.
 
@@ -223,9 +236,7 @@ def build_sell_execution_sizing(
     *,
     pair: str,
     market_price: float,
-    sellable_lot_count: int,
-    exit_allowed: bool,
-    exit_block_reason: str,
+    authority: SellExecutionAuthority,
     lot_definition: LotDefinitionSnapshot | None = None,
 ) -> ExecutionSizingPlan:
     if lot_definition is not None and lot_definition.is_authoritative:
@@ -249,14 +260,14 @@ def build_sell_execution_sizing(
         min_qty = float(lot_rules.min_qty)
         qty_step = float(lot_rules.qty_step)
         min_notional_krw = float(lot_rules.min_notional_krw)
-    intended_lot_count = max(0, int(sellable_lot_count))
+    intended_lot_count = max(0, int(authority.sellable_executable_lot_count))
     requested_qty = lot_count_to_qty(
         lot_count=intended_lot_count,
         lot_size=float(internal_lot_size),
     )
     executable_qty = float(requested_qty)
-    allowed = bool(exit_allowed) and intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS
-    block_reason = "none" if allowed else str(exit_block_reason or "no_executable_exit_lot")
+    allowed = bool(authority.exit_allowed) and intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS
+    block_reason = "none" if allowed else str(authority.exit_block_reason or "no_executable_exit_lot")
     if not allowed and block_reason in {"", "none"}:
         block_reason = "no_executable_exit_lot"
     return ExecutionSizingPlan(

@@ -52,7 +52,7 @@ from .order_rules import get_effective_order_rules, side_min_total_krw
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
-from ..order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
+from ..order_sizing import SellExecutionAuthority, build_buy_execution_sizing, build_sell_execution_sizing
 from ..oms import (
     MAX_CLIENT_ORDER_ID_LENGTH,
     build_client_order_id,
@@ -3634,9 +3634,11 @@ def live_execute_signal(
             exit_sizing = build_sell_execution_sizing(
                 pair=settings.PAIR,
                 market_price=float(market_price),
-                sellable_lot_count=int(canonical_sellable_lot_count),
-                exit_allowed=exit_allowed,
-                exit_block_reason=exit_block_reason,
+                authority=SellExecutionAuthority(
+                    sellable_executable_lot_count=int(canonical_sellable_lot_count),
+                    exit_allowed=exit_allowed,
+                    exit_block_reason=exit_block_reason,
+                ),
                 lot_definition=position_snapshot.lot_definition,
             )
             canonical_sell_submit_qty = float(exit_sizing.executable_qty if exit_sizing.allowed else 0.0)

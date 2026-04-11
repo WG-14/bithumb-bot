@@ -16,7 +16,7 @@ from ..decision_context import load_recorded_strategy_decision_context
 from .. import runtime_state
 from ..dust import build_normalized_exposure
 from ..lifecycle import summarize_position_lots, summarize_reserved_exit_qty
-from ..order_sizing import build_buy_execution_sizing, build_sell_execution_sizing
+from ..order_sizing import SellExecutionAuthority, build_buy_execution_sizing, build_sell_execution_sizing
 from .order_rules import get_effective_order_rules
 from ..oms import (
     build_client_order_id,
@@ -276,9 +276,11 @@ def paper_execute(
             exit_sizing = build_sell_execution_sizing(
                 pair=settings.PAIR,
                 market_price=float(fill_price),
-                sellable_lot_count=int(normalized_exposure.sellable_executable_lot_count),
-                exit_allowed=bool(normalized_exposure.exit_allowed),
-                exit_block_reason=str(normalized_exposure.exit_block_reason),
+                authority=SellExecutionAuthority(
+                    sellable_executable_lot_count=int(normalized_exposure.sellable_executable_lot_count),
+                    exit_allowed=bool(normalized_exposure.exit_allowed),
+                    exit_block_reason=str(normalized_exposure.exit_block_reason),
+                ),
                 lot_definition=lot_snapshot.lot_definition,
             )
             if not exit_sizing.allowed:
