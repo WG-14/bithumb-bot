@@ -62,14 +62,8 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     open_lot_count = int(lot_snapshot.open_lot_count)
     dust_tracking_qty = float(lot_snapshot.dust_tracking_qty)
     dust_tracking_lot_count = int(lot_snapshot.dust_tracking_lot_count)
-    if (
-        open_lot_count <= 0
-        and dust_tracking_lot_count <= 0
-        and qty > 1e-12
-        and float(dust_context.raw_holdings.broker_qty) <= 1e-12
-    ):
-        open_exposure_qty = float(qty)
-        open_lot_count = 1
+    # Flatten is a SELL-capable path, so qty-only holdings stay observational.
+    # Without explicit lot-native executable authority, we must suppress.
     position_state = build_position_state_model(
         raw_qty_open=qty,
         metadata_raw=state_snapshot.last_reconcile_metadata,

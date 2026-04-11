@@ -161,12 +161,8 @@ def paper_execute(
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
         open_lot_count = int(lot_snapshot.open_lot_count)
         dust_tracking_lot_count = int(lot_snapshot.dust_tracking_lot_count)
-        if (
-            open_lot_count <= 0
-            and dust_tracking_lot_count <= 0
-            and float(qty) > POSITION_EPSILON
-        ):
-            open_lot_count = 1
+        # Paper SELL must follow the same contract as live/operator paths:
+        # raw qty does not recreate executable lot authority.
         normalized_exposure = build_normalized_exposure(
             raw_qty_open=float(qty),
             dust_context=runtime_state.snapshot().last_reconcile_metadata,

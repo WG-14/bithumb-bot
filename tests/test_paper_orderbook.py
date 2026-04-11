@@ -280,6 +280,84 @@ def test_paper_execute_pnl_changes_when_paper_fee_rate_changes(tmp_path: Path, m
         _set("PAPER_FEE_RATE", old_paper_fee)
 
 
+def test_paper_execute_sell_requires_canonical_lot_authority(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_sell_lot_authority.sqlite"))
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
+    try:
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0002)
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "entry_open", 1, 100.0, 0.0002, 2, 0, "lot-native", "open_exposure"),
+        )
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=100.0),
+        )
+
+        trade = paper.paper_execute("SELL", ts=2, price=100.0)
+
+        assert trade is not None
+        assert trade["side"] == "SELL"
+        assert trade["qty"] == pytest.approx(0.0002)
+    finally:
+        _set("DB_PATH", old_db)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+
+
+def test_paper_execute_sell_rejects_qty_only_holdings_without_lot_authority(tmp_path: Path, monkeypatch):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_sell_qty_only.sqlite"))
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 0.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
+    try:
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.0002)
+        conn.close()
+
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=100.0),
+        )
+
+        trade = paper.paper_execute("SELL", ts=2, price=100.0)
+
+        assert trade is None
+        conn = ensure_db()
+        order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        trade_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        conn.close()
+        assert order_count == 0
+        assert trade_count == 0
+    finally:
+        _set("DB_PATH", old_db)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+
+
 def test_paper_execute_blocks_on_abnormal_spread(tmp_path: Path, monkeypatch):
     old_db = _set("DB_PATH", str(tmp_path / "paper2.sqlite"))
     old_spread = _set("MAX_ORDERBOOK_SPREAD_BPS", 10.0)
