@@ -3183,7 +3183,7 @@ def test_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust
     assert submit_evidence["order_qty"] == pytest.approx(0.0002)
     assert submit_evidence["normalized_qty"] == pytest.approx(0.0002)
     assert submit_evidence["submit_lot_count"] == 2
-    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert submit_evidence["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert submit_evidence["position_state_source"] == "derived:sellable_executable_lot_count"
@@ -3339,9 +3339,9 @@ def test_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_f
     assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00049193)
-    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_qty_basis_qty"] == pytest.approx(0.0004)
-    assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_qty_boundary_kind"] == "none"
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
 
@@ -3372,7 +3372,7 @@ def test_live_execute_signal_sell_uses_exit_sizing_executable_qty_for_final_subm
             internal_lot_size=0.0004,
             intended_lot_count=1,
             executable_lot_count=1,
-            qty_source="position_state.normalized_exposure.executable_exit_lot_count",
+            qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
             effective_min_trade_qty=0.0001,
             min_qty=0.0001,
             qty_step=0.0001,

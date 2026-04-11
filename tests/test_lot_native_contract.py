@@ -39,7 +39,7 @@ def test_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_cou
 
     assert plan.side == "SELL"
     assert plan.allowed is True
-    assert plan.qty_source == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert plan.requested_qty == expected_qty
     assert plan.executable_qty == expected_qty
     assert plan.intended_lot_count == 2
@@ -76,7 +76,7 @@ def test_sell_suppression_categories_remain_normal_suppression_outcomes(
     assert plan.executable_lot_count == 0
     assert plan.block_reason == exit_block_reason
     assert plan.non_executable_reason == exit_block_reason
-    assert plan.qty_source == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
 def test_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separate() -> None:

@@ -110,7 +110,7 @@ def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizin
 
     assert plan.side == "SELL"
     assert plan.allowed is True
-    assert plan.qty_source == "position_state.normalized_exposure.executable_exit_lot_count"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert plan.requested_qty == pytest.approx(0.1232)
     assert plan.executable_qty == pytest.approx(0.1232)
     assert plan.internal_lot_size == pytest.approx(0.0004)

@@ -1,13 +1,21 @@
 # Lot-Native Contract
 
-This document defines the current lot-native batch contract and the full
-declaration completion line.
+This document defines the current verified lot-native contract, the P0
+completion line for this batch, and the remaining explicit cleanup boundary.
 
 The already-achieved contract PASS is the starting baseline.
-The direct goal of this batch is full lot-native declaration completion, which
-means the remaining `decision_context` compatibility fallback/provenance and
-the remaining `reporting` truth-source/provenance primary-field layer must be
-removed.
+The direct P0 goal of this batch is to keep canonical lot-native SELL
+authority intact while removing truth-source/provenance residue from the
+primary emitted and reporting flows.
+
+The code and tests now verify that:
+
+- canonical SELL quantity and SELL lot count are taken from lot-native state
+- emitted `decision_context` payloads do not carry compatibility/provenance residue
+- primary reporting summaries no longer read truth-source/provenance fields in their main flow
+
+The remaining work after that is an explicit internal compatibility-boundary
+cleanup task, not external semantic authority.
 
 ## Batch Scope
 
@@ -26,19 +34,28 @@ batch:
 These premises are not the finish line. They are the baseline that must stay
 intact while the remaining declaration gap is closed.
 
-### Full declaration target
+### Verified P0 target
 
-The full lot-native declaration is complete only when every downstream
-consumer treats lot-native state as the only semantic authority and no longer
+The verified P0 target is complete when every externally consumed SELL and
+reporting path uses lot-native state as semantic authority and no longer
 retains compatibility or provenance as a primary field layer.
 
-For this batch, that specifically means:
+For this batch, that means:
 
-- `decision_context` no longer depends on legacy compatibility fallback authority or provenance
-- `reporting` no longer preserves compatibility, truth-source, or provenance layers as primary fields
+- `decision_context` output no longer emits compatibility fallback authority or provenance residue
+- `reporting` primary summaries no longer preserve compatibility, truth-source, or provenance layers as primary fields
 
-The goal of this batch is therefore not to defer those residues. It is to close
-them as direct completion conditions for the full declaration.
+This is the direct contract enforced by the current tests and runtime behavior.
+
+### Remaining explicit boundary
+
+The remaining non-P0 work is the internal compatibility boundary:
+
+- `decision_context` still contains internal fail-closed compatibility normalization while building canonical output
+- diagnostic-only broker/reporting evidence may still retain source or truth-source metadata outside the primary semantic flow
+
+That remaining boundary must stay non-authoritative. It is cleanup scope, not
+semantic authority.
 
 ## Canonical Authority
 
@@ -96,44 +113,53 @@ FAIL:
 
 - SELL submission can still be driven by qty aggregation or by mixed open_exposure/dust_tracking semantics
 
-## Full Declaration PASS
+## P0 PASS
 
 PASS is true only when all of the following are true at the same time:
 
 - the contract PASS baseline above remains intact
-- `decision_context` no longer emits, preserves, or depends on legacy compatibility fallback authority or provenance
-- `decision_context` no longer carries an explicit compatibility residue bucket
-- `reporting` no longer preserves truth-source, provenance, or compatibility layers as primary fields
-- `reporting` no longer carries an explicit provenance or truth-source layer at the primary-field level
+- `decision_context` output no longer emits compatibility fallback authority or provenance
+- `decision_context` output no longer carries an explicit compatibility residue bucket
+- `reporting` primary summaries no longer preserve truth-source, provenance, or compatibility layers as primary fields
 - the executable SELL path remains lot-native and canonical at the boundary
 - recovery and lifecycle continue to fail closed for qty-only legacy rows without reintroducing semantic authority
 
 FAIL is true if any of the following remain:
 
 - any executable SELL decision still depends on qty as authority
-- `decision_context` still contains legacy compatibility fallback authority or provenance
-- `decision_context` still contains a compatibility residue bucket
-- `reporting` still exposes truth-source or provenance layers as primary fields
-- `reporting` still exposes compatibility layers as primary fields
+- emitted `decision_context` payloads still expose compatibility fallback authority or provenance
+- emitted `decision_context` payloads still contain a compatibility residue bucket
+- primary reporting summaries still expose truth-source or provenance layers as primary fields
+- primary reporting summaries still expose compatibility layers as primary fields
 - `open_exposure` and `dust_tracking` are merged into a single executable inventory
 - recovery or lifecycle restores qty-only legacy rows as executable semantic authority
 
+## Remaining P1 Boundary
+
+The following may still remain after P0, but only behind an explicit
+non-authoritative boundary:
+
+- internal fail-closed compatibility normalization inside `decision_context`
+- diagnostic-only source or truth-source metadata in broker/reporting evidence
+
+These are not allowed to regain semantic authority over SELL, position, or
+recovery state.
+
 ## Batch Completion Line
 
-This batch is complete only when the document, tests, and working instructions
-all describe the full lot-native declaration as the direct target, not as a
-later refinement.
+This batch's P0 work is complete only when the document, tests, and working
+instructions all describe the verified external contract the same way.
 
 The completion line is:
 
 - current contract PASS remains preserved
-- the remaining `decision_context` compatibility fallback/provenance residue is gone
-- the remaining `reporting` truth-source/provenance primary-field residue is gone
+- emitted `decision_context` compatibility fallback/provenance residue is gone
+- `reporting` primary-flow truth-source/provenance residue is gone
 - no already-satisfied SELL-boundary or recovery premise is reopened
 
 ## Declaration Rule
 
-The system can be declared fully lot-native only when the canonical lot
+The system can be declared P0-complete for this batch when canonical lot
 authority at the SELL boundary remains intact and the remaining downstream
-compatibility/provenance residue disappears from `decision_context` and
-`reporting`.
+compatibility/provenance residue disappears from emitted `decision_context`
+and primary `reporting` flows.

@@ -257,7 +257,7 @@ def build_sell_execution_sizing(
         internal_lot_size=float(lot_rules.lot_size),
         intended_lot_count=int(intended_lot_count),
         executable_lot_count=int(intended_lot_count if allowed else 0),
-        qty_source="position_state.normalized_exposure.executable_exit_lot_count",
+        qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
         effective_min_trade_qty=float(lot_rules.executable_min_qty),
         min_qty=float(lot_rules.min_qty),
         qty_step=float(lot_rules.qty_step),
