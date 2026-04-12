@@ -14,18 +14,18 @@ Background: This document is a limited live operations checklist and does not im
 Example commands:
 
 ```bash
-MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.safe.sqlite uv run python bot.py health
-MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.safe.sqlite LIVE_DRY_RUN=true uv run python bot.py health
+MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.safe.sqlite uv run bithumb-bot health
+MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.safe.sqlite LIVE_DRY_RUN=true uv run bithumb-bot health
 ```
 
 ## 2. Live Preflight
 
 ```bash
-uv run python bot.py broker-diagnose
-uv run python bot.py health
-uv run python bot.py recovery-report
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
+uv run bithumb-bot broker-diagnose
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
 ```
 
 Pass criteria:
@@ -53,44 +53,58 @@ Live safety reminders:
 ## 4. Live Halt, Recovery, and Resume
 
 ```bash
-# Pause live trading immediately
-uv run python bot.py pause
+# Integrated emergency path
+uv run bithumb-bot panic-stop
+uv run bithumb-bot panic-stop --flatten
 
-# Cancel open live orders
-uv run python bot.py cancel-open-orders
+# Manual halt without integrated cleanup
+uv run bithumb-bot pause
+uv run bithumb-bot cancel-open-orders
 
 # Reconcile the ledger
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
 ```
 
 Resume:
 
 ```bash
-uv run python bot.py resume
+uv run bithumb-bot resume
 ```
 
-- Do not resume until the blocker list is empty.
+- Use `panic-stop` as the current integrated live emergency command.
+- Use `pause` when you need a persistent halt without automatic cancel / flatten cleanup.
+- Do not resume until `recovery-report` shows `resume_allowed=1`, `can_resume=true`, and the blocker list is empty.
 - Use `resume --force` only after operator review.
+
+Targeted unresolved-order recovery:
+
+```bash
+uv run bithumb-bot recover-order --client-order-id <client_id> --exchange-order-id <exchange_id> --dry-run
+uv run bithumb-bot recover-order --client-order-id <client_id> --exchange-order-id <exchange_id> --yes
+```
+
+- Use `recover-order` only for a specific unresolved live order after reviewing `recovery-report`.
+- Run the `--dry-run` preview first. The applied path requires `--yes` and still leaves trading disabled until explicit `resume`.
 
 ## 5. Restart / Reconcile Checklist
 
 ```bash
-uv run python bot.py restart-checklist
-uv run python bot.py health
-uv run python bot.py recovery-report
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
-uv run python bot.py cancel-open-orders
-uv run python bot.py reconcile
-uv run python bot.py recovery-report
-uv run python bot.py resume
+uv run bithumb-bot restart-checklist
+uv run bithumb-bot health
+uv run bithumb-bot recovery-report
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
+uv run bithumb-bot cancel-open-orders
+uv run bithumb-bot reconcile
+uv run bithumb-bot recovery-report
+uv run bithumb-bot resume
 ```
 
 Pass criteria:
 
 - `restart-checklist` reports `safe_to_resume=1`
-- `recovery-report` shows unresolved and recovery-required counts cleared
+- `recovery-report` shows unresolved and recovery-required counts cleared, `resume_allowed=1`, and no remaining dust / lot resume blocker
 - Live monitoring remains stable for 30 to 60 minutes after resume
 
 ## 6. Kill Switch

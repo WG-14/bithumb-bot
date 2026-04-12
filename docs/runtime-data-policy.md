@@ -270,15 +270,24 @@ These outputs are diagnostic and recovery-critical, not disposable logs.
 
 ## Lot State Routing Rule
 
-`open_position_lots.position_state` is part of the storage contract and must keep the following meaning stable:
+`open_position_lots` is the persisted storage authority for lot-native position state.
 
-- `open_lot_count`: canonical executable exposure authority for the position row.
-- `dust_tracking_lot_count`: canonical operator-only residual authority for the position row.
-- `raw_total_asset_qty`: broker-visible total remainder for the asset. It is a reconciliation and reporting value, not the semantic authority for executable state.
-- `open_exposure_qty`: derived executable quantity materialized from the lot-native open exposure state for broker payloads and compatibility.
-- `dust_tracking_qty`: derived operator-only residual quantity materialized from the dust-tracking lot state.
-- `open_exposure`: real strategy exposure that may be sold normally.
-- `dust_tracking`: operator-only residual tracking for harmless dust evidence.
+Persisted schema-backed fields:
+
+- `qty_open`: stored row quantity for the current lot-state row.
+- `executable_lot_count`: stored executable lot authority for an `open_exposure` row.
+- `dust_tracking_lot_count`: stored residual lot authority for a `dust_tracking` row.
+- `position_state`: stored lot-state classification. Current values are `open_exposure` and `dust_tracking`.
+- `position_semantic_basis`: stored semantic basis and must remain `lot-native`.
+- `lot_semantic_version`, `internal_lot_size`, `lot_min_qty`, `lot_qty_step`, `lot_min_notional_krw`, `lot_max_qty_decimals`, and `lot_rule_source_mode`: stored lot-rule metadata used during interpretation, recovery, and reporting.
+
+Derived / interpreted outputs from the lot-state and dust interpretation layer:
+
+- `open_lot_count`: interpreted executable exposure count derived from the stored lot-state row.
+- `raw_total_asset_qty`: interpreted broker-visible total remainder for the asset. It is a reconciliation and reporting value, not a stored `open_position_lots` column.
+- `open_exposure_qty`: interpreted executable quantity materialized from lot-native open exposure for broker payloads and compatibility.
+- `dust_tracking_qty`: interpreted operator-only residual quantity materialized from the dust-tracking lot state.
+- `sellable_executable_qty`: interpreted sell-submit quantity derived from sellable executable lot count, not a persisted column.
 
 Practical routing rules:
 
@@ -287,7 +296,7 @@ Practical routing rules:
 - `dust_tracking` lots are not sellable inventory and must not be counted as the basis for a normal SELL order.
 - Harmless dust suppression is defined around the `dust_tracking` path, not the `open_exposure` path.
 - Suppression behavior must avoid creating a normal SELL order, SELL event, or fresh client order ID for dust-only exits unless an operator explicitly clears the dust state.
-- Reporting must surface `open_lot_count`, `dust_tracking_lot_count`, `open_exposure_qty`, `dust_tracking_qty`, and `raw_total_asset_qty` together so operators can explain the gap between broker-visible holdings and the sellable position base.
+- Reporting should surface the interpreted fields `open_lot_count`, `open_exposure_qty`, `dust_tracking_qty`, `sellable_executable_qty`, and `raw_total_asset_qty` together with the persisted lot-state fields so operators can explain the gap between broker-visible holdings and the sellable position base.
 - Boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty` stays `open_exposure`.
 - If a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as operator evidence and remains excluded from normal SELL submission until an operator clears the inconsistency.
 - Routing summary:

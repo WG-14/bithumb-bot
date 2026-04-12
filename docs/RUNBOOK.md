@@ -134,41 +134,61 @@ uv run bithumb-bot recovery-report
 
 ## Emergency Stop, Pause, and Resume
 
-### A. Immediate stop
+### A. Integrated emergency stop
+
+```bash
+uv run bithumb-bot panic-stop
+uv run bithumb-bot panic-stop --flatten
+```
+
+- `panic-stop` is the current integrated live emergency path.
+- It blocks new orders immediately, cancels open orders, and can optionally attempt flattening with `--flatten`.
+- Use `panic-stop --flatten` only when exposure reduction is required and the live situation justifies an explicit flatten attempt.
+- After either command, read `health` and `recovery-report` before considering `resume`.
+
+### B. Pause only
 
 ```bash
 uv run bithumb-bot pause
 ```
 
 - Use this to block new orders immediately.
+- `pause` does not cancel open orders; use it when you need a persistent halt without the integrated cleanup path.
 - After pause, read `health`, `recovery-report`, and the most recent logs before resuming.
 
-### B. Cancel open orders
+### C. Decomposed cleanup path
 
 ```bash
 uv run bithumb-bot cancel-open-orders
 ```
 
-- Use this only when live mode needs exchange-side order cleanup.
+- Use this after `pause` when live mode needs exchange-side order cleanup without invoking `panic-stop`.
 - Follow it with `reconcile` and `recovery-report`.
 
-### C. Resume
+### D. Resume
 
 ```bash
 uv run bithumb-bot resume
 ```
 
-- Never use `resume` until the blocker list is clear.
+- Never use `resume` until `recovery-report` shows `resume_allowed=1` / `can_resume=true` and the blocker list is clear.
+- Check the current dust and lot signals before resuming:
+  - `dust_state`, `dust_resume_allowed`, and `dust_treat_as_flat`
+  - `open_lot_count`, `dust_tracking_lot_count`, `sellable_executable_lot_count`, and `sellable_executable_qty`
+  - `terminal_state` and `exit_block_reason`
 - Use `resume --force` only as a last resort and only after operator review.
 
 ## Recovery Checklist
 
 1. Check `journalctl` for the last error cause.
 2. Run `uv run bithumb-bot recovery-report`.
-3. Confirm `unresolved_orders` and `recovery_required_orders` are both zero.
-4. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
-5. Re-run `health` and confirm `trading_enabled` is healthy.
-6. Resume only after the state is understood.
+3. Confirm `unresolved_count` and `recovery_required_count` are both zero.
+4. Confirm `[P2] resume_eligibility` shows `resume_allowed=1`, `can_resume=true`, and no active blockers.
+5. Review `[P3] dust_residual` and `[P3.1] lot_exposure`.
+6. Do not treat a clear unresolved count alone as sufficient if `dust_state=blocking_dust`, `dust_resume_allowed=0`, `sellable_executable_qty=0`, or `exit_block_reason` still indicates a lot/dust boundary blocker.
+7. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
+8. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
+9. Resume only after the state is understood.
 
 ## Post-Change Validation
 

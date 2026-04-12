@@ -92,8 +92,9 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
 - `recovery_required_count`: explicit recovery action is still required.
 - `last_reconcile_*`: the most recent reconciliation evidence.
 - Dust terms:
+  - Canonical current states are `no_dust`, `harmless_dust`, and `blocking_dust`.
   - `harmless_dust`: a small remainder that is policy-classified as harmless dust.
-  - `unsafe dust` / `mismatch dust`: any dust-like residual that is not policy-approved to resume.
+  - `blocking_dust`: a dust residual that is not policy-approved to resume and requires manual review.
   - `effective flat`: the remainder is treated as flat for the entry gate.
   - `resume allowed` / `new orders allowed`: policy flags that must be true before fresh BUYs are allowed.
 - `effective_flat_due_to_harmless_dust` does not prove a literal zero balance.
@@ -201,7 +202,8 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
 
 - `accounts_flat_start_allowed` is only an `/v1/accounts` diagnostic.
 - `dust_state=harmless_dust` means broker/local dust matches closely enough to be treated as harmless dust.
-- `dust_state=dangerous_dust` means the remainder is not safely resumable.
+- `dust_state=blocking_dust` means the remainder is not safely resumable.
+- Legacy labels such as `dangerous_dust` may still be normalized from older metadata, but operators should treat `blocking_dust` as the current canonical state name.
 - `unresolved_count > 0` or `recovery_required_count > 0` means the state is still recovery-related.
 - If `position.in_position=False` because of harmless dust, the entry gate has already accepted the remainder as flat.
 - Use this order when you read the fields:
