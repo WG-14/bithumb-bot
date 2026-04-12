@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
+from ..decision_context import resolve_canonical_position_exposure_snapshot
 from ..execution import apply_fill_and_trade, record_order_if_missing
 from ..dust import (
     DustState,
@@ -647,131 +648,22 @@ def _load_strategy_decision_observability(
     )
     entry_context = context.get("entry") if isinstance(context.get("entry"), dict) else {}
     entry_intent = entry_context.get("intent") if isinstance(entry_context.get("intent"), dict) else {}
+    canonical_exposure = resolve_canonical_position_exposure_snapshot(context)
 
     base_signal = str(context.get("base_signal") or context.get("raw_signal") or fallback_signal)
     final_signal = str(context.get("final_signal") or row["signal"] or fallback_signal)
-    entry_allowed = bool(
-        position_normalized.get(
-            "entry_allowed",
-            context.get(
-                "entry_allowed",
-                position_gate.get(
-                    "entry_allowed",
-                    position_gate.get(
-                        "effective_flat_due_to_harmless_dust",
-                        position_gate.get("dust_treat_as_flat", False),
-                    ),
-                ),
-            ),
-        )
-    )
-    effective_flat = bool(
-        position_normalized.get(
-            "effective_flat",
-            context.get(
-                "effective_flat",
-                position_gate.get(
-                    "effective_flat_due_to_harmless_dust",
-                    position_gate.get("dust_treat_as_flat", False),
-                ),
-            ),
-        )
-    )
-    raw_qty_open = float(
-        position_normalized.get(
-            "raw_qty_open",
-            context.get("raw_qty_open", position_gate.get("raw_qty_open", 0.0)),
-        )
-        or 0.0
-    )
-    raw_total_asset_qty = float(
-        position_normalized.get(
-            "raw_total_asset_qty",
-            context.get("raw_total_asset_qty", position_gate.get("raw_total_asset_qty", raw_qty_open)),
-        )
-        or 0.0
-    )
-    open_exposure_qty = float(
-        position_normalized.get(
-            "open_exposure_qty",
-            context.get("open_exposure_qty", position_gate.get("open_exposure_qty", raw_qty_open)),
-        )
-        or 0.0
-    )
-    dust_tracking_qty = float(
-        position_normalized.get(
-            "dust_tracking_qty",
-            context.get("dust_tracking_qty", position_gate.get("dust_tracking_qty", 0.0)),
-        )
-        or 0.0
-    )
-    has_executable_exposure = bool(
-        position_normalized.get(
-            "has_executable_exposure",
-            context.get(
-                "has_executable_exposure",
-                position_gate.get(
-                    "has_executable_exposure",
-                    bool(open_exposure_qty > 1e-12 and (position_normalized.get("exit_allowed", context.get("exit_allowed", True))))
-                ),
-            ),
-        )
-    )
-    has_any_position_residue = bool(
-        position_normalized.get(
-            "has_any_position_residue",
-            context.get(
-                "has_any_position_residue",
-                position_gate.get("has_any_position_residue", raw_total_asset_qty > 1e-12),
-            ),
-        )
-    )
-    has_non_executable_residue = bool(
-        position_normalized.get(
-            "has_non_executable_residue",
-            context.get(
-                "has_non_executable_residue",
-                position_gate.get(
-                    "has_non_executable_residue",
-                    bool(has_any_position_residue and not has_executable_exposure),
-                ),
-            ),
-        )
-    )
-    has_dust_only_remainder = bool(
-        position_normalized.get(
-            "has_dust_only_remainder",
-            context.get(
-                "has_dust_only_remainder",
-                position_gate.get(
-                    "has_dust_only_remainder",
-                    bool(dust_tracking_qty > 1e-12 and open_exposure_qty <= 1e-12),
-                ),
-            ),
-        )
-    )
-    normalized_exposure_active = bool(
-        position_normalized.get(
-            "normalized_exposure_active",
-            context.get(
-                "normalized_exposure_active",
-                position_gate.get("normalized_exposure_active", raw_qty_open > 1e-12),
-            ),
-        )
-    )
-    normalized_exposure_qty = float(
-        position_normalized.get(
-            "normalized_exposure_qty",
-            context.get(
-                "normalized_exposure_qty",
-                position_gate.get(
-                    "normalized_exposure_qty",
-                    open_exposure_qty if has_executable_exposure else 0.0,
-                ),
-            ),
-        )
-        or 0.0
-    )
+    entry_allowed = bool(canonical_exposure.entry_allowed)
+    effective_flat = bool(canonical_exposure.effective_flat)
+    raw_qty_open = float(canonical_exposure.raw_qty_open)
+    raw_total_asset_qty = float(canonical_exposure.raw_total_asset_qty)
+    open_exposure_qty = float(canonical_exposure.open_exposure_qty)
+    dust_tracking_qty = float(canonical_exposure.dust_tracking_qty)
+    has_executable_exposure = bool(canonical_exposure.has_executable_exposure)
+    has_any_position_residue = bool(canonical_exposure.has_any_position_residue)
+    has_non_executable_residue = bool(canonical_exposure.has_non_executable_residue)
+    has_dust_only_remainder = bool(canonical_exposure.has_dust_only_remainder)
+    normalized_exposure_active = bool(canonical_exposure.normalized_exposure_active)
+    normalized_exposure_qty = float(canonical_exposure.normalized_exposure_qty)
     submit_qty_source = str(
         context.get(
             "submit_qty_source",
@@ -790,42 +682,15 @@ def _load_strategy_decision_observability(
     )
     if submit_lot_source == "-":
         submit_lot_source = _CANONICAL_SELL_SUBMIT_LOT_SOURCE
-    sell_submit_lot_count = int(
-        context.get(
-            "sell_submit_lot_count",
-            position_normalized.get("sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count", 0)),
-        )
-        or 0
-    )
+    sell_submit_lot_count = int(canonical_exposure.sell_submit_lot_count)
     sell_submit_lot_source_truth_source = str(
         context.get("sell_submit_lot_source_truth_source")
         or decision_truth_sources.get("sell_submit_lot_source")
         or "derived:sellable_executable_lot_count"
     )
-    position_qty = float(
-        context.get(
-            "position_qty",
-            position_normalized.get("position_qty", open_exposure_qty),
-        )
-        or open_exposure_qty
-    )
-    submit_payload_qty = float(
-        context.get(
-            "submit_payload_qty",
-            position_normalized.get("submit_payload_qty", normalized_exposure_qty),
-        )
-        or normalized_exposure_qty
-    )
-    submit_lot_count = int(
-        context.get(
-            "submit_lot_count",
-            context.get(
-                "sell_submit_lot_count",
-                position_normalized.get("sellable_executable_lot_count", position_gate.get("sellable_executable_lot_count", 0)),
-            ),
-        )
-        or 0
-    )
+    position_qty = float(canonical_exposure.position_qty)
+    submit_payload_qty = float(canonical_exposure.submit_payload_qty)
+    submit_lot_count = int(canonical_exposure.sell_submit_lot_count)
     position_qty_truth_source = str(context.get("position_qty_truth_source") or "context.position_qty")
     submit_payload_qty_truth_source = str(context.get("submit_payload_qty_truth_source") or "context.submit_payload_qty")
     submit_lot_count_truth_source = str(

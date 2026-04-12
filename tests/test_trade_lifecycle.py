@@ -6,10 +6,18 @@ import pytest
 
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.dust import DUST_TRACKING_LOT_STATE, OPEN_EXPOSURE_LOT_STATE, build_dust_display_context, classify_dust_residual, dust_qty_gap_tolerance
+from bithumb_bot.dust import (
+    DUST_TRACKING_LOT_STATE,
+    OPEN_EXPOSURE_LOT_STATE,
+    build_dust_display_context,
+    build_position_state_model,
+    classify_dust_residual,
+    dust_qty_gap_tolerance,
+)
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import build_order_intent_key, claim_order_intent_dedup
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
+from bithumb_bot.order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 from bithumb_bot.lifecycle import (
     ENTRY_DECISION_LINKAGE_AMBIGUOUS_MULTI_CANDIDATE,
     ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
@@ -1415,6 +1423,32 @@ def test_recovery_reconstructs_lot_native_exposure_and_dust_after_restart(tmp_pa
     conn = ensure_db(str(db_path))
     pair = str(conn.execute("SELECT pair FROM open_position_lots LIMIT 1").fetchone()[0])
     summary = summarize_position_lots(conn, pair=pair)
+    normalized = build_position_state_model(
+        raw_qty_open=float(summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(summary.raw_total_asset_qty),
+        open_exposure_qty=float(summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(summary.dust_tracking_qty),
+        open_lot_count=int(summary.open_lot_count),
+        dust_tracking_lot_count=int(summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+    sell_plan = build_sell_execution_sizing(
+        pair=pair,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=int(
+                normalized.normalized_exposure.sellable_executable_lot_count
+            ),
+            exit_allowed=bool(normalized.normalized_exposure.exit_allowed),
+            exit_block_reason=str(normalized.normalized_exposure.exit_block_reason),
+        ),
+        lot_definition=summary.lot_definition,
+    )
     conn.close()
 
     assert summary.open_lot_count == 2
@@ -1422,6 +1456,95 @@ def test_recovery_reconstructs_lot_native_exposure_and_dust_after_restart(tmp_pa
     assert summary.raw_open_exposure_qty == pytest.approx(executable_qty)
     assert summary.dust_tracking_qty == pytest.approx(dust_qty)
     assert summary.raw_total_asset_qty == pytest.approx(fill_qty)
+    assert normalized.normalized_exposure.sellable_executable_lot_count == 2
+    assert normalized.normalized_exposure.exit_allowed is True
+    assert sell_plan.allowed is True
+    assert sell_plan.executable_lot_count == 2
+    assert sell_plan.requested_qty == pytest.approx(executable_qty)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_partial_exit_keeps_remaining_sell_authority_lot_native(tmp_path):
+    conn = ensure_db(str(tmp_path / "partial_exit_remaining_lot_authority.sqlite"))
+    lot_rules = _test_lot_rules()
+    base_ts = 1_700_001_250_000
+    buy_qty = lot_count_to_qty(lot_count=3, lot_size=lot_rules.lot_size)
+    partial_exit_qty = lot_count_to_qty(lot_count=1, lot_size=lot_rules.lot_size)
+
+    _record_order(conn, client_order_id="partial_entry", side="BUY", qty_req=buy_qty, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_entry",
+        side="BUY",
+        fill_id="fill_partial_entry",
+        fill_ts=base_ts,
+        price=40_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=701,
+    )
+    _record_order(
+        conn,
+        client_order_id="partial_exit",
+        side="SELL",
+        qty_req=partial_exit_qty,
+        ts_ms=base_ts + 60_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_exit",
+        side="SELL",
+        fill_id="fill_partial_exit",
+        fill_ts=base_ts + 60_000,
+        price=41_000_000.0,
+        qty=partial_exit_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=701,
+        exit_decision_id=702,
+        exit_reason="trim",
+        exit_rule_name="partial_trim",
+    )
+
+    pair = str(settings.PAIR)
+    summary = summarize_position_lots(conn, pair=pair)
+    normalized = build_position_state_model(
+        raw_qty_open=float(summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(summary.raw_total_asset_qty),
+        open_exposure_qty=float(summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(summary.dust_tracking_qty),
+        open_lot_count=int(summary.open_lot_count),
+        dust_tracking_lot_count=int(summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+    sell_plan = build_sell_execution_sizing(
+        pair=pair,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=int(
+                normalized.normalized_exposure.sellable_executable_lot_count
+            ),
+            exit_allowed=bool(normalized.normalized_exposure.exit_allowed),
+            exit_block_reason=str(normalized.normalized_exposure.exit_block_reason),
+        ),
+        lot_definition=summary.lot_definition,
+    )
+    conn.close()
+
+    assert summary.open_lot_count == 2
+    assert summary.raw_open_exposure_qty == pytest.approx(buy_qty - partial_exit_qty)
+    assert normalized.normalized_exposure.sellable_executable_lot_count == 2
+    assert normalized.normalized_exposure.sellable_executable_qty == pytest.approx(buy_qty - partial_exit_qty)
+    assert normalized.normalized_exposure.exit_allowed is True
+    assert sell_plan.allowed is True
+    assert sell_plan.executable_lot_count == 2
+    assert sell_plan.requested_qty == pytest.approx(buy_qty - partial_exit_qty)
 
 
 @pytest.mark.lot_native_regression_gate

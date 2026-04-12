@@ -120,6 +120,7 @@ def test_authority_boundary_lot_native_position_contract_declares_singular_autho
     assert contract["dust_tracking_sellable"] is False
 
 
+@pytest.mark.lot_native_regression_gate
 def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qty_aggregation() -> None:
     dust = classify_dust_residual(
         broker_qty=0.00049193,
@@ -165,6 +166,7 @@ def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qt
     assert model.state_interpretation.exit_submit_expected is False
 
 
+@pytest.mark.lot_native_regression_gate
 def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:
     model = build_position_state_model(
         raw_qty_open=0.0012,
@@ -380,6 +382,35 @@ def test_authority_boundary_decision_context_prefers_normalized_sell_authority_o
     assert snapshot.sellable_executable_qty == pytest.approx(0.0001)
     assert snapshot.sellable_executable_lot_count == 1
     assert snapshot.sell_qty_basis_qty == pytest.approx(0.0001)
+
+
+def test_authority_boundary_decision_context_fail_closes_position_state_exit_flags_without_normalized_lot_authority() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_total_asset_qty": 0.0002,
+            "open_exposure_qty": 0.0002,
+            "sellable_executable_qty": 0.0002,
+            "sellable_executable_lot_count": 2,
+            "exit_allowed": True,
+            "exit_block_reason": "none",
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "open_exposure_qty": 0.0002,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0002,
+                "sellable_executable_lot_count": 2,
+                "exit_allowed": True,
+                "exit_block_reason": "none",
+            },
+        }
+    )
+
+    assert snapshot.open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.sellable_executable_lot_count == 0
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0)
+    assert snapshot.sell_submit_lot_count == 0
+    assert snapshot.exit_allowed is False
+    assert snapshot.exit_block_reason == "no_executable_exit_lot"
 
 
 def test_decision_context_no_longer_emits_compatibility_fallback_or_provenance_layer() -> None:
