@@ -16,6 +16,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.lifecycle import summarize_position_lots
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.recovery import (
     RecoveryDisposition,
@@ -2052,7 +2053,8 @@ def test_reconcile_success_auto_clears_stale_initial_reconcile_halt(isolated_db)
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 
 
-def test_reconcile_does_not_clear_halt_from_qty_only_holdings_without_lot_native_exposure(isolated_db):
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_reconcile_does_not_clear_halt_from_qty_only_holdings_without_lot_native_exposure(isolated_db):
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "START_CASH_KRW", 1000.0)
     try:
@@ -2080,9 +2082,17 @@ def test_reconcile_does_not_clear_halt_from_qty_only_holdings_without_lot_native
         reconcile_with_broker(_DustBalanceBroker(asset_available=1.0))
 
         state = runtime_state.snapshot()
+        conn = ensure_db(str(isolated_db))
+        try:
+            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        finally:
+            conn.close()
         assert state.halt_new_orders_blocked is True
         assert state.halt_state_unresolved is True
         assert state.halt_reason_code == "POST_TRADE_RECONCILE_REQUIRED"
+        assert lot_snapshot.open_lot_count == 0
+        assert lot_snapshot.executable_open_exposure_qty == pytest.approx(0.0)
+        assert lot_snapshot.exit_non_executable_reason == "no_executable_open_lots"
     finally:
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 

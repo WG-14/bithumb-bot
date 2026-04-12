@@ -1247,6 +1247,7 @@ def fetch_recent_decision_flow(
             id AS decision_id,
             decision_ts,
             strategy_name,
+            context_json,
             COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
             COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
             COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
@@ -1512,44 +1513,48 @@ def fetch_recent_decision_flow(
         """,
         (int(max(1, limit)),),
     ).fetchall()
-    return [
-        RecentDecisionFlowSummary(
-            decision_id=int(row["decision_id"]),
-            decision_ts=int(row["decision_ts"] or 0),
-            strategy_name=str(row["strategy_name"]),
-            decision_type=str(row["decision_type"]),
-            base_signal=str(row["base_signal"]),
-            raw_signal=str(row["raw_signal"]),
-            final_signal=str(row["final_signal"]),
-            buy_flow_state=_derive_buy_flow_state(
+    summaries: list[RecentDecisionFlowSummary] = []
+    for row in rows:
+        context = _load_json_dict(str(row["context_json"] or ""))
+        exposure = resolve_canonical_position_exposure_snapshot(context)
+        summaries.append(
+            RecentDecisionFlowSummary(
+                decision_id=int(row["decision_id"]),
+                decision_ts=int(row["decision_ts"] or 0),
+                strategy_name=str(row["strategy_name"]),
+                decision_type=str(row["decision_type"]),
+                base_signal=str(row["base_signal"]),
                 raw_signal=str(row["raw_signal"]),
                 final_signal=str(row["final_signal"]),
+                buy_flow_state=_derive_buy_flow_state(
+                    raw_signal=str(row["raw_signal"]),
+                    final_signal=str(row["final_signal"]),
+                    entry_blocked=bool(row["entry_blocked"]),
+                ),
                 entry_blocked=bool(row["entry_blocked"]),
-            ),
-            entry_blocked=bool(row["entry_blocked"]),
-            entry_allowed=bool(row["entry_allowed"]),
-            effective_flat=bool(row["effective_flat"]),
-            raw_qty_open=float(row["raw_qty_open"] or 0.0),
-            raw_total_asset_qty=float(row["raw_total_asset_qty"] or 0.0),
-            position_qty=float(row["position_qty"] or 0.0),
-            submit_payload_qty=float(row["submit_payload_qty"] or 0.0),
-            normalized_exposure_active=bool(row["normalized_exposure_active"]),
-            normalized_exposure_qty=float(row["normalized_exposure_qty"] or 0.0),
-            open_exposure_qty=float(row["open_exposure_qty"] or 0.0),
-            dust_tracking_qty=float(row["dust_tracking_qty"] or 0.0),
-            sell_open_exposure_qty=float(row["sell_open_exposure_qty"] or 0.0),
-            sell_dust_tracking_qty=float(row["sell_dust_tracking_qty"] or 0.0),
-            sell_qty_basis_qty=float(row["sell_qty_basis_qty"] or 0.0),
-            sell_qty_boundary_kind=str(row["sell_qty_boundary_kind"]),
-            sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
-            sell_normalized_exposure_qty=float(row["sell_normalized_exposure_qty"] or 0.0),
-            sell_failure_category=str(row["sell_failure_category"]),
-            sell_failure_detail=str(row["sell_failure_detail"]),
-            block_reason=str(row["block_reason"]),
-            reason=str(row["block_reason"]),
+                entry_allowed=bool(row["entry_allowed"]),
+                effective_flat=bool(row["effective_flat"]),
+                raw_qty_open=float(exposure.raw_qty_open),
+                raw_total_asset_qty=float(exposure.raw_total_asset_qty),
+                position_qty=float(exposure.position_qty),
+                submit_payload_qty=float(exposure.submit_payload_qty),
+                normalized_exposure_active=bool(exposure.normalized_exposure_active),
+                normalized_exposure_qty=float(exposure.normalized_exposure_qty),
+                open_exposure_qty=float(exposure.open_exposure_qty),
+                dust_tracking_qty=float(exposure.dust_tracking_qty),
+                sell_open_exposure_qty=float(exposure.sell_open_exposure_qty),
+                sell_dust_tracking_qty=float(exposure.sell_dust_tracking_qty),
+                sell_qty_basis_qty=float(exposure.sell_qty_basis_qty),
+                sell_qty_boundary_kind=str(exposure.sell_qty_boundary_kind),
+                sell_submit_lot_count=int(exposure.sell_submit_lot_count),
+                sell_normalized_exposure_qty=float(exposure.sell_normalized_exposure_qty),
+                sell_failure_category=str(row["sell_failure_category"]),
+                sell_failure_detail=str(row["sell_failure_detail"]),
+                block_reason=str(row["block_reason"]),
+                reason=str(row["block_reason"]),
+            )
         )
-        for row in rows
-    ]
+    return summaries
 
 
 def _fetch_recent_fills_with_side(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:

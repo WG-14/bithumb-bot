@@ -6,6 +6,7 @@ import math
 import time
 from dataclasses import replace
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
+from enum import Enum
 
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
@@ -104,6 +105,10 @@ class SellDustGuardError(ValueError):
     def __init__(self, message: str, *, details: dict[str, float | int | str]) -> None:
         super().__init__(message)
         self.details = details
+
+
+class _CanonicalSellSubmitLotSource(str, Enum):
+    CANONICAL_LOT_NATIVE = _CANONICAL_SELL_SUBMIT_LOT_SOURCE
 
 
 def _resolve_non_authoritative_sell_basis_qty(
@@ -910,6 +915,21 @@ def _sell_dust_analysis_qty(*, raw_total_asset_qty: float, open_exposure_qty: fl
 def _sell_dust_analysis_source(*, raw_total_asset_qty: float, dust_tracking_qty: float) -> str:
     # Observational only; this source must never be promoted to SELL authority.
     return _NON_AUTHORITATIVE_SELL_QTY_OBSERVATION_SOURCE
+
+
+def _require_canonical_sell_submit_lot_source(
+    *,
+    submit_qty_source: str | None,
+    context: str,
+) -> _CanonicalSellSubmitLotSource:
+    normalized_submit_qty_source = str(submit_qty_source or "").strip()
+    if normalized_submit_qty_source != _CANONICAL_SELL_SUBMIT_LOT_SOURCE:
+        raise ValueError(
+            f"{context} requires canonical lot-native SELL authority: "
+            f"submit_qty_source={normalized_submit_qty_source or '-'} "
+            f"expected={_CANONICAL_SELL_SUBMIT_LOT_SOURCE}"
+        )
+    return _CanonicalSellSubmitLotSource.CANONICAL_LOT_NATIVE
 
 
 def _harmless_dust_suppression_submit_qty_source(submit_qty_source: str | None) -> str:
@@ -3761,7 +3781,10 @@ def live_execute_signal(
                     )
                 )
                 return None
-            submit_qty_source = str(exit_sizing.qty_source)
+            submit_qty_source = _require_canonical_sell_submit_lot_source(
+                submit_qty_source=str(exit_sizing.qty_source),
+                context="live SELL submit",
+            ).value
             order_qty = float(canonical_sell_submit_qty)
 
         else:

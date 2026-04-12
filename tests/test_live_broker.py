@@ -2496,6 +2496,26 @@ def test_adjust_sell_order_qty_for_dust_safety_keeps_exact_min_qty_executable():
     assert adjusted == pytest.approx(0.0001)
 
 
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_executable_sell_submit_rejects_observational_qty_preview_source() -> None:
+    with pytest.raises(ValueError, match="requires canonical lot-native SELL authority"):
+        live_module._require_canonical_sell_submit_lot_source(
+            submit_qty_source="observation.sell_qty_preview",
+            context="live SELL submit",
+        )
+
+
+@pytest.mark.fast_regression
+def test_canonical_sell_submit_source_returns_typed_lot_native_authority_value() -> None:
+    source = live_module._require_canonical_sell_submit_lot_source(
+        submit_qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
+        context="live SELL submit",
+    )
+
+    assert source.value == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
 def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)

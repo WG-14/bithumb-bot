@@ -111,7 +111,16 @@ logic:
 
 ```bash
 uv run pytest -q -m lot_native_regression_gate
+./scripts/run_lot_native_regression_gate.sh
 ```
+
+Treat this gate as the required completion target for changes touching:
+
+- SELL authority
+- position-state authority surfaces
+- recovery or reconcile authority handling
+- `decision_context` canonical extraction
+- reporting or telemetry flows that expose lot-native authority context
 
 This gate must keep passing for these invariants:
 

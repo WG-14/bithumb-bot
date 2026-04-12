@@ -475,9 +475,84 @@ def test_lot_native_gate_recent_decision_flow_does_not_reconstruct_sell_basis_fr
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.sell_open_exposure_qty == pytest.approx(0.0004)
-    assert row.sell_normalized_exposure_qty == pytest.approx(0.0004)
+    assert row.sell_open_exposure_qty == pytest.approx(0.0)
+    assert row.sell_normalized_exposure_qty == pytest.approx(0.0)
     assert row.sell_qty_basis_qty == pytest.approx(0.0)
+    assert row.sell_submit_lot_count == 0
+
+
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_recent_decision_flow_prefers_canonical_normalized_exposure_over_shadow_qty_fields(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = str(tmp_path / "decision-flow-canonical-shadow.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO strategy_decisions(
+                decision_ts, strategy_name, signal, reason, candle_ts, market_price, confidence, context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                6,
+                "sma_with_filter",
+                "SELL",
+                "shadow qty residue",
+                6,
+                1.0,
+                None,
+                json.dumps(
+                    {
+                        "base_signal": "SELL",
+                        "final_signal": "SELL",
+                        "raw_qty_open": 9.9,
+                        "raw_total_asset_qty": 9.9,
+                        "open_exposure_qty": 9.9,
+                        "normalized_exposure_qty": 9.9,
+                        "sellable_executable_lot_count": 99,
+                        "sellable_executable_qty": 9.9,
+                        "position_state": {
+                            "normalized_exposure": {
+                                "raw_qty_open": 0.3,
+                                "raw_total_asset_qty": 0.35,
+                                "open_exposure_qty": 0.25,
+                                "dust_tracking_qty": 0.1,
+                                "open_lot_count": 1,
+                                "dust_tracking_lot_count": 1,
+                                "reserved_exit_lot_count": 0,
+                                "sellable_executable_lot_count": 1,
+                                "sellable_executable_qty": 0.25,
+                                "normalized_exposure_qty": 0.25,
+                                "normalized_exposure_active": True,
+                                "entry_allowed": False,
+                                "effective_flat": False,
+                                "exit_allowed": True,
+                                "exit_block_reason": "none",
+                            }
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+        rows = fetch_recent_decision_flow(conn, limit=10)
+    finally:
+        conn.close()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.raw_qty_open == pytest.approx(0.3)
+    assert row.raw_total_asset_qty == pytest.approx(0.35)
+    assert row.position_qty == pytest.approx(0.25)
+    assert row.open_exposure_qty == pytest.approx(0.25)
+    assert row.dust_tracking_qty == pytest.approx(0.1)
+    assert row.sell_submit_lot_count == 1
+    assert row.sell_normalized_exposure_qty == pytest.approx(0.25)
 
 
 def test_record_strategy_decision_canonicalizes_sell_basis_to_open_exposure(tmp_path, monkeypatch):
@@ -585,7 +660,8 @@ def test_record_strategy_decision_merges_top_level_position_state_fallbacks(tmp_
     assert _collect_residue_paths(ctx) == []
 
 
-def test_decision_telemetry_prefers_normalized_position_state_over_shadow_top_level_values(
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_decision_telemetry_prefers_normalized_position_state_over_shadow_top_level_values(
     tmp_path,
     monkeypatch,
 ):
