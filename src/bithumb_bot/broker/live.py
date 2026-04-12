@@ -510,7 +510,7 @@ def _sell_submit_observability_fields(
         or (MANUAL_DUST_REVIEW_REQUIRED if sell_failure_category != "none" else "-")
     )
     return {
-        "position_qty": float(position_qty),
+        "observed_position_qty": float(position_qty),
         "submit_payload_qty": float(submit_payload_qty),
         "submit_lot_count": int(submit_lot_count),
         "sell_submit_qty_source": submit_qty_source,
@@ -522,7 +522,7 @@ def _sell_submit_observability_fields(
         "sell_submit_lot_count": int(submit_lot_count),
         "sell_submit_lot_count_truth_source": submit_lot_source_truth_source,
         "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
-        "sell_qty_basis_qty": float(sell_qty_basis_qty),
+        "observed_sell_qty_basis_qty": float(sell_qty_basis_qty),
         "sell_qty_basis_qty_truth_source": sell_qty_basis_qty_truth_source,
         "sell_qty_basis_source": sell_qty_basis_source,
         "sell_qty_basis_source_truth_source": sell_qty_basis_source_truth_source,
@@ -1454,26 +1454,28 @@ def _record_sell_dust_unsellable(
     state,
     ts: int,
     market_price: float,
-    position_qty: float,
+    canonical_sell: _CanonicalSellExecutionView,
+    diagnostic_qty: _SellDiagnosticQtyView,
     strategy_name: str | None,
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
     dust_details: dict[str, float | int | str] | None = None,
     decision_observability: dict[str, object],
-    submit_qty_source: str | None = None,
-    position_state_source: str | None = None,
-    raw_total_asset_qty: float | None = None,
-    open_exposure_qty: float | None = None,
-    dust_tracking_qty: float | None = None,
 ) -> bool:
+    canonical_submit_lot_source = _require_canonical_sell_submit_lot_source(
+        submit_qty_source=canonical_sell.submit_qty_source,
+        context="sell dust suppression",
+    )
+    position_qty = float(diagnostic_qty.observed_position_qty)
     dust_details = dust_details or _build_sell_dust_unsellable_details(qty=position_qty, market_price=market_price)
     if dust_details is None:
         return False
     dust_details = _normalize_sell_dust_details(details=dust_details, market_price=market_price)
 
     exit_non_executable_reason = str(
-        decision_observability.get("exit_non_executable_reason")
+        canonical_sell.exit_block_reason
+        or decision_observability.get("exit_non_executable_reason")
         or decision_observability.get("exit_block_reason")
         or (
             decision_observability.get("position_state", {})
@@ -1536,17 +1538,17 @@ def _record_sell_dust_unsellable(
     )
     sell_truth_source_fields = _sell_truth_source_fields(
         decision_observability=decision_observability,
-        submit_qty_source=submit_qty_source,
+        submit_qty_source=_CANONICAL_SELL_SUBMIT_QTY_SOURCE,
     )
     resolved_sell_submit_qty_source = _CANONICAL_SELL_SUBMIT_QTY_SOURCE
     sell_qty_basis_qty = _resolve_non_authoritative_sell_basis_qty(
         decision_observability=decision_observability,
-        open_exposure_qty=open_exposure_qty,
+        open_exposure_qty=diagnostic_qty.open_exposure_qty,
     )
     sell_qty_basis_source = str(
         decision_observability.get("sell_qty_basis_source")
         or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
-        or submit_qty_source
+        or canonical_submit_lot_source.value
         or "-"
     )
     sell_qty_boundary_kind = _sell_qty_boundary_kind_from_dust_details(dust_details=dust_details)
@@ -1558,16 +1560,16 @@ def _record_sell_dust_unsellable(
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
         "sell_submit_qty_source": resolved_sell_submit_qty_source,
-        "sell_qty_basis_qty": float(sell_qty_basis_qty),
+        "observed_sell_qty_basis_qty": float(sell_qty_basis_qty),
         "sell_qty_basis_source": sell_qty_basis_source,
         "sell_qty_boundary_kind": sell_qty_boundary_kind,
         "terminal_state": str(decision_observability.get("terminal_state") or "-"),
         "exit_block_reason": str(decision_observability.get("exit_block_reason") or "-"),
         "sell_normalized_exposure_qty": 0.0,
-        "raw_total_asset_qty": float(position_qty if raw_total_asset_qty is None else raw_total_asset_qty),
-        "sell_open_exposure_qty": float(0.0 if open_exposure_qty is None else open_exposure_qty),
-        "sell_dust_tracking_qty": float(0.0 if dust_tracking_qty is None else dust_tracking_qty),
-        "position_qty": float(position_qty),
+        "raw_total_asset_qty": float(diagnostic_qty.raw_total_asset_qty),
+        "sell_open_exposure_qty": float(diagnostic_qty.open_exposure_qty),
+        "sell_dust_tracking_qty": float(diagnostic_qty.dust_tracking_qty),
+        "observed_position_qty": float(position_qty),
         "submit_payload_qty": 0.0,
         "normalized_qty": float(dust_details["normalized_qty"]),
         "effective_min_trade_qty": float(decision_observability.get("effective_min_trade_qty") or 0.0),
@@ -1764,7 +1766,7 @@ def _record_sell_no_executable_exit_suppression(
         "sell_submit_lot_count_truth_source": str(
             decision_observability.get("sell_submit_lot_count_truth_source") or "-"
         ),
-        "sell_qty_basis_qty": _resolve_non_authoritative_sell_basis_qty(
+        "observed_sell_qty_basis_qty": _resolve_non_authoritative_sell_basis_qty(
             decision_observability=decision_observability,
             open_exposure_qty=diagnostic_qty.open_exposure_qty,
         ),
@@ -1786,7 +1788,7 @@ def _record_sell_no_executable_exit_suppression(
         "raw_total_asset_qty": float(diagnostic_qty.raw_total_asset_qty),
         "sell_open_exposure_qty": float(diagnostic_qty.open_exposure_qty),
         "sell_dust_tracking_qty": float(diagnostic_qty.dust_tracking_qty),
-        "position_qty": float(diagnostic_qty.observed_position_qty),
+        "observed_position_qty": float(diagnostic_qty.observed_position_qty),
         "submit_payload_qty": 0.0,
         "normalized_qty": normalized_qty,
         "effective_min_trade_qty": effective_min_trade_qty,
@@ -2025,7 +2027,7 @@ def _record_harmless_dust_exit_suppression(
         "requested_qty": requested_qty,
         "normalized_qty": normalized_qty,
         "market_price": market_price,
-        "position_qty": float(requested_qty),
+        "observed_position_qty": float(requested_qty),
         "operator_action": dust_view.operator_action,
         "dust_action": dust_view.operator_action,
         "submit_qty_source": suppression_submit_qty_source,
@@ -2033,7 +2035,7 @@ def _record_harmless_dust_exit_suppression(
         "sell_submit_qty_source": suppression_submit_qty_source,
         "sell_submit_lot_source": suppression_sell_submit_lot_source,
         "sell_submit_lot_count": suppression_sell_submit_lot_count,
-        "sell_qty_basis_qty": float(suppression_sell_qty_basis_qty),
+        "observed_sell_qty_basis_qty": float(suppression_sell_qty_basis_qty),
         "sell_qty_basis_source": suppression_sell_qty_basis_source,
         "sell_qty_boundary_kind": suppression_sell_qty_boundary_kind,
         "sell_qty_basis_qty_truth_source": str(
@@ -3635,13 +3637,9 @@ def live_execute_signal(
                         state=state,
                         ts=int(ts),
                         market_price=float(market_price),
-                        position_qty=float(diagnostic_sell_qty.observed_position_qty),
+                        canonical_sell=canonical_sell,
+                        diagnostic_qty=diagnostic_sell_qty,
                         decision_observability=decision_observability,
-                        submit_qty_source=diagnostic_sell_qty.observed_position_qty_source,
-                        position_state_source=canonical_sell.position_state_source,
-                        raw_total_asset_qty=float(diagnostic_sell_qty.raw_total_asset_qty),
-                        open_exposure_qty=float(diagnostic_sell_qty.open_exposure_qty),
-                        dust_tracking_qty=float(diagnostic_sell_qty.dust_tracking_qty),
                         strategy_name=(strategy_name or settings.STRATEGY_NAME),
                         decision_id=decision_id,
                         decision_reason=decision_reason,
@@ -3790,13 +3788,9 @@ def live_execute_signal(
                     state=state,
                     ts=int(ts),
                     market_price=float(market_price),
-                    position_qty=float(diagnostic_sell_qty.observed_position_qty),
+                    canonical_sell=canonical_sell,
+                    diagnostic_qty=diagnostic_sell_qty,
                     decision_observability=decision_observability,
-                    submit_qty_source=diagnostic_sell_qty.observed_position_qty_source,
-                    position_state_source=canonical_sell.position_state_source,
-                    raw_total_asset_qty=float(diagnostic_sell_qty.raw_total_asset_qty),
-                    open_exposure_qty=float(diagnostic_sell_qty.open_exposure_qty),
-                    dust_tracking_qty=float(diagnostic_sell_qty.dust_tracking_qty),
                     strategy_name=(strategy_name or settings.STRATEGY_NAME),
                     decision_id=decision_id,
                     decision_reason=decision_reason,
@@ -3944,13 +3938,22 @@ def live_execute_signal(
                 state=state,
                 ts=int(ts),
                 market_price=float(market_price),
-                position_qty=requested_order_qty,
+                canonical_sell=_CanonicalSellExecutionView(
+                    sellable_executable_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+                    sellable_executable_qty=float(requested_order_qty),
+                    exit_allowed=False,
+                    exit_block_reason=str(decision_observability.get("exit_block_reason") or "").strip(),
+                    submit_qty_source=str(submit_qty_source or ""),
+                    position_state_source=str(decision_observability["position_state_source"]),
+                ),
+                diagnostic_qty=_SellDiagnosticQtyView(
+                    observed_position_qty=float(requested_order_qty),
+                    observed_position_qty_source=str(submit_qty_source or ""),
+                    raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
+                    open_exposure_qty=float(decision_observability["open_exposure_qty"]),
+                    dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
+                ),
                 decision_observability=decision_observability,
-                submit_qty_source=submit_qty_source,
-                position_state_source=str(decision_observability["position_state_source"]),
-                raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
-                open_exposure_qty=float(decision_observability["open_exposure_qty"]),
-                dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
                 strategy_name=(strategy_name or settings.STRATEGY_NAME),
                 decision_id=decision_id,
                 decision_reason=decision_reason,
@@ -4013,13 +4016,22 @@ def live_execute_signal(
                 state=state,
                 ts=int(ts),
                 market_price=float(market_price),
-                position_qty=requested_order_qty,
+                canonical_sell=_CanonicalSellExecutionView(
+                    sellable_executable_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+                    sellable_executable_qty=float(requested_order_qty),
+                    exit_allowed=False,
+                    exit_block_reason=str(decision_observability.get("exit_block_reason") or "").strip(),
+                    submit_qty_source=str(submit_qty_source or ""),
+                    position_state_source=str(decision_observability["position_state_source"]),
+                ),
+                diagnostic_qty=_SellDiagnosticQtyView(
+                    observed_position_qty=float(requested_order_qty),
+                    observed_position_qty_source=str(submit_qty_source or ""),
+                    raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
+                    open_exposure_qty=float(decision_observability["open_exposure_qty"]),
+                    dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
+                ),
                 decision_observability=decision_observability,
-                submit_qty_source=submit_qty_source,
-                position_state_source=str(decision_observability["position_state_source"]),
-                raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
-                open_exposure_qty=float(decision_observability["open_exposure_qty"]),
-                dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
                 strategy_name=(strategy_name or settings.STRATEGY_NAME),
                 decision_id=decision_id,
                 decision_reason=decision_reason,

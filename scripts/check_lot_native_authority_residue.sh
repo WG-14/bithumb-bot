@@ -13,6 +13,8 @@ targets=(
 forbidden_submit_sources='submit_qty_source["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'](observation\.sell_qty_preview|position_state\.raw_total_asset_qty|position_qty|submit_payload_qty)'
 forbidden_sell_basis_sources='sell_qty_basis_source["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'](position_state\.raw_total_asset_qty|position_qty|submit_payload_qty)'
 forbidden_live_shadow_submit_source='submit_qty_source[[:space:]]*=[[:space:]]*str\(exit_sizing\.qty_source\)'
+forbidden_mixed_sell_dust_boundary_definition='def _record_sell_dust_unsellable\([\s\S]{0,500}position_qty:'
+forbidden_mixed_sell_dust_boundary_call='(?m)^[[:space:]]+_record_sell_dust_unsellable\([\s\S]{0,500}(position_qty=|submit_qty_source=|raw_total_asset_qty=|open_exposure_qty=|dust_tracking_qty=)'
 
 if rg -n --pcre2 "$forbidden_submit_sources" "${targets[@]}"; then
   echo "lot-native residue check failed: suspicious non-canonical SELL submit source literal found" >&2
@@ -26,6 +28,16 @@ fi
 
 if rg -n --pcre2 "$forbidden_live_shadow_submit_source" "src/bithumb_bot/broker/live.py"; then
   echo "lot-native residue check failed: live SELL submit path must not trust exit_sizing.qty_source as canonical authority" >&2
+  exit 1
+fi
+
+if rg -nUP "$forbidden_mixed_sell_dust_boundary_definition" "src/bithumb_bot/broker/live.py"; then
+  echo "lot-native residue check failed: sell dust suppression boundary must not reintroduce mixed position_qty authority inputs" >&2
+  exit 1
+fi
+
+if rg -nUP "$forbidden_mixed_sell_dust_boundary_call" "src/bithumb_bot/broker/live.py"; then
+  echo "lot-native residue check failed: sell dust suppression call sites must pass separated canonical and diagnostic views" >&2
   exit 1
 fi
 

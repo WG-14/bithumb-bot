@@ -2516,6 +2516,54 @@ def test_canonical_sell_submit_source_returns_typed_lot_native_authority_value()
     assert source.value == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_sell_dust_unsellable_rejects_observational_qty_authority(monkeypatch, tmp_path) -> None:
+    db_path = str(tmp_path / "sell_dust_unsellable_boundary.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    conn = ensure_db(db_path)
+    try:
+        with pytest.raises(ValueError, match="requires canonical lot-native SELL authority"):
+            live_module._record_sell_dust_unsellable(
+                conn=conn,
+                state=runtime_state.snapshot(),
+                ts=100,
+                market_price=100_000_000.0,
+                canonical_sell=live_module._CanonicalSellExecutionView(
+                    sellable_executable_lot_count=0,
+                    sellable_executable_qty=0.0004,
+                    exit_allowed=False,
+                    exit_block_reason="no_executable_exit_lot",
+                    submit_qty_source="observation.sell_qty_preview",
+                    position_state_source="observation.sell_qty_preview",
+                ),
+                diagnostic_qty=live_module._SellDiagnosticQtyView(
+                    observed_position_qty=0.0004,
+                    observed_position_qty_source="observation.sell_qty_preview",
+                    raw_total_asset_qty=0.0004,
+                    open_exposure_qty=0.0,
+                    dust_tracking_qty=0.0004,
+                ),
+                strategy_name="authority_boundary_test",
+                decision_id=None,
+                decision_reason="non canonical source",
+                exit_rule_name="exit_signal",
+                decision_observability={
+                    "base_signal": "SELL",
+                    "final_signal": "SELL",
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "exit_block_reason": "no_executable_exit_lot",
+                },
+            )
+    finally:
+        conn.close()
+
+
 def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -3372,13 +3420,13 @@ def test_authority_boundary_live_execute_signal_sell_does_not_sum_open_exposure_
     assert float(submit_attempt["qty"]) == pytest.approx(0.0004)
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["order_qty"] == pytest.approx(0.0004)
-    assert submit_evidence["position_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["observed_position_qty"] == pytest.approx(0.0004)
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00049193)
     assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
-    assert submit_evidence["sell_qty_basis_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["observed_sell_qty_basis_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_qty_boundary_kind"] == "none"
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
@@ -3550,7 +3598,7 @@ def test_authority_boundary_live_execute_signal_sell_uses_exit_sizing_executable
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["order_qty"] == pytest.approx(0.0004)
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0004)
-    assert submit_evidence["sell_qty_basis_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["observed_sell_qty_basis_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
@@ -3892,7 +3940,7 @@ def test_live_execute_signal_sell_uses_open_exposure_only_when_dust_tracking_coe
     assert float(submit_attempt["qty"]) == pytest.approx(0.00012)
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["order_qty"] == pytest.approx(0.00012)
-    assert submit_evidence["position_qty"] == pytest.approx(0.00012)
+    assert submit_evidence["observed_position_qty"] == pytest.approx(0.00012)
     assert submit_evidence["submit_payload_qty"] == pytest.approx(0.00012)
     assert submit_evidence["normalized_qty"] == pytest.approx(0.00012)
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00021999)
@@ -4513,7 +4561,7 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert "decision_truth_sources" in suppression_context
     assert suppression_context["entry_allowed_truth_source"] == "-"
     assert suppression_context["effective_flat_truth_source"] == "-"
-    assert suppression_context["position_qty"] == pytest.approx(0.00009)
+    assert suppression_context["observed_position_qty"] == pytest.approx(0.00009)
     assert suppression_context["submit_payload_qty"] == pytest.approx(0.0)
     assert suppression_context["normalized_qty"] == pytest.approx(0.0)
     assert EXIT_PARTIAL_LEFT_DUST in str(event_rows[0]["summary"])
@@ -5169,9 +5217,9 @@ def test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational
     assert recorded is True
     assert suppression_row is not None
     suppression_context = json.loads(str(suppression_row["context_json"]))
-    assert suppression_context["position_qty"] == pytest.approx(0.0004)
+    assert suppression_context["observed_position_qty"] == pytest.approx(0.0004)
     assert suppression_context["sell_open_exposure_qty"] == pytest.approx(0.0)
-    assert suppression_context["sell_qty_basis_qty"] == pytest.approx(0.0)
+    assert suppression_context["observed_sell_qty_basis_qty"] == pytest.approx(0.0)
     assert suppression_context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert suppression_context["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
 

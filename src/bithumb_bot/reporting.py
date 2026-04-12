@@ -1002,6 +1002,7 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS raw_total_asset_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_position_qty'),
                 json_extract(oe.submit_evidence, '$.position_qty'),
                 oe.qty,
                 0.0
@@ -1030,6 +1031,7 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS sell_dust_tracking_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_sell_qty_basis_qty'),
                 json_extract(oe.submit_evidence, '$.sell_qty_basis_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
@@ -1092,6 +1094,7 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
                 0
             ) AS sell_submit_lot_count,
             COALESCE(
+                json_extract(context_json, '$.observed_sell_qty_basis_qty'),
                 json_extract(context_json, '$.sell_qty_basis_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
@@ -1304,6 +1307,7 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS raw_total_asset_qty,
             COALESCE(
+                json_extract(context_json, '$.observed_position_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
                 json_extract(context_json, '$.position_state.open_exposure_qty'),
                 json_extract(context_json, '$.open_exposure_qty'),
@@ -1415,6 +1419,7 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS sell_dust_tracking_qty,
             COALESCE(
+                json_extract(context_json, '$.observed_sell_qty_basis_qty'),
                 json_extract(context_json, '$.sell_qty_basis_qty'),
                 json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
