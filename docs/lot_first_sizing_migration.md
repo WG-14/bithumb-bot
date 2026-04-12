@@ -37,13 +37,15 @@ The current contract PASS already includes:
 
 - final SELL quantity authority from canonical sellable lot count
 - qty-only legacy rows failing closed without regaining executable authority
-- removal of `legacy_lot_metadata_missing` as lifecycle semantic state
+- `legacy_lot_metadata_missing` no longer being the desired semantic authority model
 - downstream fallback or provenance being treated as residue that must be removed for full declaration
 
-The remaining declaration-closing gap for this batch includes only:
+The remaining declaration-closing gap for this batch still includes real code
+paths, not just cosmetic residue:
 
 - removing the remaining `decision_context` compatibility fallback / provenance residue
 - removing the remaining `reporting` truth-source / provenance primary-field residue
+- removing fail-closed lot-metadata-gap residue from primary/emitted semantic surfaces without restoring qty-first authority
 
 These items are the direct closure targets for full lot-native declaration.
 They are not later-stage extras.
@@ -78,11 +80,12 @@ Required outcome:
 
 - No database migration is required for the current storage shape.
 - Existing quantity fields remain available as derived compatibility values.
-- New lot-count fields are additive and derived:
+- Current lot-count fields are authoritative lot-native state, not just additive reporting fields:
   - `open_lot_count`
   - `dust_tracking_lot_count`
   - `reserved_exit_lot_count`
   - `sellable_executable_lot_count`
+- Qty fields remain derived compatibility, reporting, and broker-interface values materialized from those lot-authoritative fields.
 
 ## Batch Completion Line
 
@@ -92,7 +95,7 @@ This batch passes when:
 - contract PASS remains preserved
 - the remaining `decision_context` compatibility fallback / provenance residue is removed
 - the remaining `reporting` truth-source / provenance primary-field residue is removed
-- canonical downstream truth remains lot-derived and non-authoritative
+- canonical downstream truth remains lot-derived and authoritative
 - the completion line for this batch is the full lot-native declaration line
 
 ## Final Termination Condition

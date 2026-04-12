@@ -11,8 +11,8 @@ primary emitted and reporting flows.
 The code and tests now verify that:
 
 - canonical SELL quantity and SELL lot count are taken from lot-native state
-- emitted `decision_context` payloads do not carry compatibility/provenance residue
-- primary reporting summaries no longer read truth-source/provenance fields in their main flow
+- the public SELL boundary still treats qty as derived from lot-native authority
+- compatibility and provenance residue remains an internal cleanup boundary rather than canonical authority
 
 The remaining work after that is an explicit internal compatibility-boundary
 cleanup task, not external semantic authority.
@@ -29,7 +29,7 @@ batch:
 - dust-only remainder, boundary-below-min, and no executable exit are normal suppression outcomes
 - open_exposure and dust_tracking stay separate on the SELL path
 - qty-only legacy rows fail closed in recovery and lifecycle
-- `legacy_lot_metadata_missing` is not an active lifecycle semantic state
+- `legacy_lot_metadata_missing` no longer defines the desired semantic authority model, but it still exists in fail-closed blocker and compatibility-fallback paths
 
 These premises are not the finish line. They are the baseline that must stay
 intact while the remaining declaration gap is closed.
@@ -45,13 +45,15 @@ For this batch, that means:
 - `decision_context` output no longer emits compatibility fallback authority or provenance residue
 - `reporting` primary summaries no longer preserve compatibility, truth-source, or provenance layers as primary fields
 
-This is the direct contract enforced by the current tests and runtime behavior.
+This is the intended declaration target, not a statement that every internal
+compatibility/fail-closed path has already disappeared from the current code.
 
 ### Remaining explicit boundary
 
 The remaining non-P0 work is the internal compatibility boundary:
 
 - `decision_context` still contains internal fail-closed compatibility normalization while building canonical output
+- fail-closed `legacy_lot_metadata_missing` handling still exists in the current code path as a blocker/reason and fallback marker
 - diagnostic-only broker/reporting evidence may still retain source or truth-source metadata outside the primary semantic flow
 
 That remaining boundary must stay non-authoritative. It is cleanup scope, not
@@ -145,7 +147,9 @@ They do not mean the system failed to submit a valid SELL order.
 
 - `open_exposure` means lot-native executable exposure.
 - `dust_tracking` means operator-only residual tracking.
+- `reserved_exit` means open executable lots already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the executable SELL lot count after applying the lot-native state rules.
+- `reserved_exit_pending` means executable exposure exists but the current sellable lot count is zero because open SELL orders already reserved that inventory.
 - flatness and exitability must be judged from lot-native state, not from qty aggregation.
 - `open_exposure` and `dust_tracking` must not be merged into a single SELL executable inventory.
 
@@ -189,6 +193,7 @@ PASS is true only when all of the following are true at the same time:
 - `reporting` primary summaries no longer preserve truth-source, provenance, or compatibility layers as primary fields
 - the executable SELL path remains lot-native and canonical at the boundary
 - recovery and lifecycle continue to fail closed for qty-only legacy rows without reintroducing semantic authority
+- fail-closed blocker paths such as `legacy_lot_metadata_missing` no longer remain in emitted or primary semantic surfaces
 
 FAIL is true if any of the following remain:
 
@@ -199,6 +204,7 @@ FAIL is true if any of the following remain:
 - primary reporting summaries still expose compatibility layers as primary fields
 - `open_exposure` and `dust_tracking` are merged into a single executable inventory
 - recovery or lifecycle restores qty-only legacy rows as executable semantic authority
+- fail-closed `legacy_lot_metadata_missing` blocker or fallback residue still remains in a primary semantic or emitted surface
 
 ## Remaining P1 Boundary
 

@@ -98,10 +98,15 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
   - `effective flat`: the remainder is treated as flat for the entry gate.
   - `resume allowed` / `new orders allowed`: policy flags that must be true before fresh BUYs are allowed.
 - `effective_flat_due_to_harmless_dust` does not prove a literal zero balance.
-- `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together.
+- `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together, but they are not the primary SELL/exit authority layer.
 - `strategy.context.position_gate.in_position` is an exposure-state field, not a dust-state field.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.
 - `dust_min_qty` and `dust_min_notional_krw` are separate sellability gates.
+- For exit authority, check the lot-native fields first:
+  - `sellable_executable_lot_count`
+  - `reserved_exit_lot_count`
+  - `exit_block_reason`
+  - normalized or lot-native exposure fields such as `open_lot_count`, `open_exposure_qty`, and `normalized_exposure_qty`
 
 ## 3-1-1. Preflight Interpretation
 
@@ -206,11 +211,13 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
 - Legacy labels such as `dangerous_dust` may still be normalized from older metadata, but operators should treat `blocking_dust` as the current canonical state name.
 - `unresolved_count > 0` or `recovery_required_count > 0` means the state is still recovery-related.
 - If `position.in_position=False` because of harmless dust, the entry gate has already accepted the remainder as flat.
+- Do not use `dust_state` alone to infer whether a SELL or exit is currently allowed.
 - Use this order when you read the fields:
   1. restart gate
-  2. dust policy
-  3. quantity cross-check
-  4. exchange minimum cross-check
+  2. lot-native exit authority (`sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_block_reason`, normalized exposure fields)
+  3. dust policy and resume posture
+  4. quantity cross-check
+  5. exchange minimum cross-check
 
 ## 7. Manual App Sell Caution
 

@@ -119,8 +119,8 @@ Healthcheck thresholds:
 
 - `HEALTH_MAX_CANDLE_AGE_SEC=180`
 - `HEALTH_MAX_ERROR_COUNT=3`
-- `HEALTH_MAX_RECONCILE_AGE_SEC=900`
-- `HEALTH_MAX_UNRESOLVED_ORDER_AGE_SEC=900`
+- `HEALTH_MAX_RECONCILE_AGE_SEC` and `HEALTH_MAX_UNRESOLVED_ORDER_AGE_SEC` are not core `.env.example` template defaults today.
+- If your operator wrapper or local healthcheck tooling uses reconcile-age or unresolved-order-age thresholds, document them in the runtime env or service config as additional optional operator settings rather than assuming they come from the base template.
 
 Backup verification:
 

@@ -14,8 +14,11 @@ The repository is optimized for:
 
 This bot uses lot-native executable position semantics.
 
-- Executable exposure is tracked as lot-aligned state.
-- Dust and sub-lot remainder are tracked separately from executable exposure.
+- `open_exposure` is the canonical lot-native executable exposure.
+- `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
+- `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
+- `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
+- `reserved_exit_pending` is a real normalized terminal state: executable exposure still exists, but normal SELL submission is blocked because the sellable lots are already reserved by open SELL orders.
 - If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order.
 - Lot counts are the canonical executable state meaning.
 - Qty remains an exchange-interface and reporting value, derived from the lot-native state.
@@ -51,7 +54,9 @@ The `project.scripts` entry in `pyproject.toml` defines the canonical CLI.
 - Use explicit env files for operator, live, and healthcheck operations.
 - `BITHUMB_ENV_FILE` takes priority when it is set.
 - `MODE=live` uses `BITHUMB_ENV_FILE_LIVE` when `BITHUMB_ENV_FILE` is not set.
-- `MODE=paper` and `MODE=test` use `BITHUMB_ENV_FILE_PAPER` when `BITHUMB_ENV_FILE` is not set.
+- The supported runtime modes are `paper` and `live`.
+- `MODE=paper` uses `BITHUMB_ENV_FILE_PAPER` when `BITHUMB_ENV_FILE` is not set.
+- `MODE=test` only appears here as an env-selection compatibility edge case in the helper logic; it is not a normal operator/runtime mode.
 - Healthcheck and live-operation commands must fail fast when the explicit env file is missing.
 
 Example:
