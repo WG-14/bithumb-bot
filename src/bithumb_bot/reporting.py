@@ -3493,7 +3493,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "requested_qty": row.requested_qty,
                 "normalized_qty": row.normalized_qty,
                 "market_price": row.market_price,
-                "sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "observed_sell_qty_basis_qty": row.sell_qty_basis_qty,
                 "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
                 "sell_submit_lot_count": row.sell_submit_lot_count,
                 "dust_state": row.dust_state,
@@ -3526,7 +3526,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "dust_tracking_qty": row.dust_tracking_qty,
                 "sell_open_exposure_qty": row.sell_open_exposure_qty,
                 "sell_dust_tracking_qty": row.sell_dust_tracking_qty,
-                "sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "observed_sell_qty_basis_qty": row.sell_qty_basis_qty,
                 "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
                 "sell_submit_lot_count": row.sell_submit_lot_count,
                 "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
@@ -3833,7 +3833,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
                 f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
-                f"sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
                 f"sell_qty_boundary_kind={row['sell_qty_boundary_kind'] or '-'} "
                 f"sell_failure_category={sell_failure_category} "
                 f"sell_failure_detail={sell_failure_detail} "
@@ -3859,7 +3859,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"reason={row.reason_code} sell_failure_category={row.suppression_category} "
                 f"sell_failure_detail={row.sell_failure_detail or '-'} "
                 f"sell_submit_lot_count={row.sell_submit_lot_count} "
-                f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind or '-'} "
                 f"requested_qty={_fmt_float(float(row.requested_qty or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row.normalized_qty or 0.0), 8)} "
@@ -3888,7 +3888,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"position_qty={_fmt_float(float(row.position_qty), 8)} "
                 f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"sell_submit_lot_count={row.sell_submit_lot_count} "
-                f"sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "
                 f"sell_normalized_exposure_qty={_fmt_float(float(row.sell_normalized_exposure_qty), 8)} "
                 f"sell_failure_category={row.sell_failure_category} "
@@ -3958,7 +3958,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
         "raw_total_asset_qty,position_qty,submit_payload_qty,normalized_exposure_active,"
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
-        "sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
+        "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
         "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"
         "strategy_name,pair,interval,count"
     )

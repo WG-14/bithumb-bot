@@ -19,39 +19,16 @@ from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 def _resolve_flatten_sell_authority(
     *,
     position_state,
-    open_lot_count: int,
-    reserved_exit_qty: float,
-    lot_definition,
 ):
     canonical_exposure = resolve_canonical_position_exposure_snapshot(
         {"position_state": position_state.as_dict()}
     )
-    sellable_executable_lot_count = int(canonical_exposure.sellable_executable_lot_count)
-    exit_allowed = bool(canonical_exposure.exit_allowed)
-    exit_block_reason = str(canonical_exposure.exit_block_reason or "no_executable_exit_lot")
-
-    # Keep flatten fail-closed if the normalized payload is missing reserved-exit
-    # lot materialization but the authoritative lot metadata proves those lots
-    # are already reserved for an open SELL.
-    if (
-        lot_definition is not None
-        and lot_definition.is_authoritative
-        and int(open_lot_count) > 0
-        and float(reserved_exit_qty) > 0.0
-        and int(canonical_exposure.reserved_exit_lot_count) <= 0
-    ):
-        lot_size = float(lot_definition.internal_lot_size or 0.0)
-        if lot_size > 0.0:
-            reserved_exit_lot_count = min(
-                int(open_lot_count),
-                max(0, int(math.floor((float(reserved_exit_qty) / lot_size) + 1e-12))),
-            )
-            sellable_executable_lot_count = max(0, int(open_lot_count) - reserved_exit_lot_count)
-            if reserved_exit_lot_count > 0 and sellable_executable_lot_count <= 0:
-                exit_allowed = False
-                exit_block_reason = "reserved_for_open_sell_orders"
-
-    return canonical_exposure, sellable_executable_lot_count, exit_allowed, exit_block_reason
+    return (
+        canonical_exposure,
+        int(canonical_exposure.sellable_executable_lot_count),
+        bool(canonical_exposure.exit_allowed),
+        str(canonical_exposure.exit_block_reason or "no_executable_exit_lot"),
+    )
 
 
 def _normalize_flatten_qty(*, qty: float, market_price: float) -> float:
@@ -128,9 +105,6 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     )
     canonical_exposure, sellable_executable_lot_count, exit_allowed, exit_block_reason = _resolve_flatten_sell_authority(
         position_state=position_state,
-        open_lot_count=open_lot_count,
-        reserved_exit_qty=float(reserved_exit_qty),
-        lot_definition=lot_snapshot.lot_definition,
     )
     terminal_state = str(position_state.normalized_exposure.terminal_state)
     if (not exit_allowed) or sellable_executable_lot_count < 1:

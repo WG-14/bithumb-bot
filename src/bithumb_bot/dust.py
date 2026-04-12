@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from .lot_model import build_market_lot_rules, lot_count_to_qty, qty_to_executable_lot_count
+from .lot_model import build_market_lot_rules, lot_count_to_qty
 
 
 DUST_POSITION_EPS = 1e-12
@@ -1585,10 +1585,20 @@ def build_normalized_exposure(
         effective_open_exposure_qty,
         max(0.0, float(inventory.reserved_exit_qty)),
     )
-    normalized_reserved_exit_lot_count = max(
-        0,
-        int(qty_to_executable_lot_count(qty=effective_reserved_exit_qty, lot_rules=lot_rules)),
-    )
+    lot_size = float(lot_rules.lot_size)
+    if normalized_open_lot_count > 0 and effective_open_exposure_qty > DUST_POSITION_EPS:
+        authoritative_lot_size = effective_open_exposure_qty / float(normalized_open_lot_count)
+        if authoritative_lot_size > DUST_POSITION_EPS:
+            lot_size = authoritative_lot_size
+    # Reserved exit lots remain canonical lot-state authority. Materialize them
+    # directly from lot-size flooring so fully reserved exits do not collapse
+    # back to zero just because no executable SELL lots remain.
+    normalized_reserved_exit_lot_count = 0
+    if lot_size > 0.0 and effective_reserved_exit_qty > DUST_POSITION_EPS:
+        normalized_reserved_exit_lot_count = min(
+            normalized_open_lot_count,
+            max(0, int(math.floor((effective_reserved_exit_qty / lot_size) + 1e-12))),
+        )
     normalized_sellable_lot_count = max(0, normalized_open_lot_count - normalized_reserved_exit_lot_count)
     sellable_executable_qty = max(0.0, effective_open_exposure_qty - effective_reserved_exit_qty)
     has_any_position_residue = bool(normalized_total_asset_qty > DUST_POSITION_EPS)

@@ -3390,29 +3390,6 @@ def live_execute_signal(
             exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
         )
-        if (
-            raw_total_asset_qty <= POSITION_EPSILON
-            and int(position_snapshot.open_lot_count) == 0
-            and int(position_snapshot.dust_tracking_lot_count) == 0
-            and float(reserved_exit_qty) <= POSITION_EPSILON
-        ):
-            normalized_exposure = replace(
-                normalized_exposure,
-                effective_flat=True,
-                entry_allowed=True,
-                entry_block_reason="none",
-                exit_allowed=False,
-                exit_block_reason="no_position",
-                terminal_state="flat",
-                normalized_exposure_active=False,
-                has_executable_exposure=False,
-                has_any_position_residue=False,
-                has_non_executable_residue=False,
-                has_dust_only_remainder=False,
-                normalized_exposure_qty=0.0,
-                sellable_executable_qty=0.0,
-                sellable_executable_lot_count=0,
-            )
         decision_observability = _load_strategy_decision_observability(
             conn=conn,
             decision_id=decision_id,

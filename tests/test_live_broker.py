@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -5087,6 +5088,87 @@ def test_live_execute_signal_sell_ignores_stale_recorded_sellable_qty_without_cu
 
     assert order_count == 0
     assert suppression_row is None
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_boundary_does_not_override_canonical_authority_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_boundary_authority.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+
+    conn = ensure_db(str(tmp_path / "sell_boundary_authority.sqlite"))
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0008,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    canonical_snapshot = replace(
+        live_module.build_normalized_exposure(
+            raw_qty_open=0.0,
+            dust_context={"dust_residual_present": 0},
+            raw_total_asset_qty=0.0,
+            open_exposure_qty=0.0,
+            dust_tracking_qty=0.0,
+            reserved_exit_qty=0.0,
+            open_lot_count=0,
+            dust_tracking_lot_count=0,
+            market_price=100_000_000.0,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            max_qty_decimals=8,
+            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+        ),
+        open_exposure_qty=0.0002,
+        open_lot_count=2,
+        sellable_executable_qty=0.0002,
+        sellable_executable_lot_count=2,
+        exit_allowed=True,
+        exit_block_reason="none",
+        terminal_state="open_exposure",
+        normalized_exposure_active=True,
+        has_executable_exposure=True,
+        has_any_position_residue=True,
+        has_non_executable_residue=False,
+        has_dust_only_remainder=False,
+        normalized_exposure_qty=0.0002,
+    )
+    monkeypatch.setattr("bithumb_bot.broker.live.build_normalized_exposure", lambda **_kwargs: canonical_snapshot)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1400,
+        100_000_000.0,
+        strategy_name="boundary_authority_test",
+        decision_reason="canonical snapshot",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
 
 
 def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(monkeypatch):

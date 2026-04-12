@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -5116,6 +5117,36 @@ def test_flatten_position_qty_only_portfolio_does_not_restore_sell_authority(
     assert state.last_flatten_position_summary is not None
     assert '"raw_total_asset_qty": 0.12345678' in state.last_flatten_position_summary
     assert '"executable_exposure_qty": 0.0' in state.last_flatten_position_summary
+
+
+@pytest.mark.lot_native_regression_gate
+def test_flatten_sell_authority_boundary_reads_canonical_snapshot_without_local_override(monkeypatch) -> None:
+    from bithumb_bot.flatten import _resolve_flatten_sell_authority
+
+    canonical_exposure = SimpleNamespace(
+        sellable_executable_lot_count=2,
+        reserved_exit_lot_count=0,
+        exit_allowed=True,
+        exit_block_reason="none",
+    )
+
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.resolve_canonical_position_exposure_snapshot",
+        lambda _payload: canonical_exposure,
+    )
+
+    class _DummyPositionState:
+        def as_dict(self) -> dict[str, object]:
+            return {"normalized_exposure": {"sellable_executable_lot_count": 0}}
+
+    resolved_exposure, sellable_lot_count, exit_allowed, exit_block_reason = _resolve_flatten_sell_authority(
+        position_state=_DummyPositionState(),
+    )
+
+    assert resolved_exposure is canonical_exposure
+    assert sellable_lot_count == 2
+    assert exit_allowed is True
+    assert exit_block_reason == "none"
 
 
 @pytest.mark.lot_native_regression_gate

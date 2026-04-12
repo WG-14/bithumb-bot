@@ -1069,11 +1069,12 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "reason=DUST_RESIDUAL_SUPPRESSED" in out
     assert "sell_failure_category=dust_suppression" in out
     assert "sell_failure_detail=dust_suppression" in out
-    assert "sell_qty_basis_qty=0.00009629" in out
+    assert "observed_sell_qty_basis_qty=0.00009629" in out
     assert "operator_action=harmless_dust_tracked_resume_allowed" in out
     assert "open_exposure_qty=" in out
     assert "dust_tracking_qty=0.00009563" in out
     assert "harmless_dust_tracked_resume_allowed" in out
+    assert "sell_qty_basis_qty=" not in out
     assert "submit_qty_source=" not in out
     assert "sell_submit_qty_source=" not in out
     assert "sell_submit_lot_source=" not in out
@@ -1083,7 +1084,8 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     sell_suppression = payload["recent_sell_suppressions"][0]
     assert sell_suppression["operator_action"] == "harmless_dust_tracked_resume_allowed"
-    assert sell_suppression["sell_qty_basis_qty"] == pytest.approx(0.00009629)
+    assert sell_suppression["observed_sell_qty_basis_qty"] == pytest.approx(0.00009629)
+    assert "sell_qty_basis_qty" not in sell_suppression
     assert sell_suppression["sell_submit_lot_count"] == 0
     assert _collect_residue_paths(sell_suppression) == []
 

@@ -14,9 +14,10 @@ from bithumb_bot.broker.base import (
 )
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
+from bithumb_bot.dust import build_dust_display_context, build_position_state_model
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.lifecycle import summarize_position_lots
+from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from bithumb_bot.oms import set_exchange_order_id, set_status
 from bithumb_bot.recovery import (
     RecoveryDisposition,
@@ -542,8 +543,37 @@ def _resolved_order_rules(*, min_qty: float, min_notional_krw: float):
 
 def _latest_reconcile_metadata() -> dict[str, object]:
     state = runtime_state.snapshot()
-    assert state.last_reconcile_metadata is not None
+    if state.last_reconcile_metadata is None:
+        return {}
     return json.loads(str(state.last_reconcile_metadata))
+
+
+def _load_reconciled_position_authority(*, db_path: Path):
+    metadata = _latest_reconcile_metadata()
+    dust_context = build_dust_display_context(metadata)
+    conn = ensure_db(str(db_path))
+    try:
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        asset_qty = float(portfolio_row["asset_qty"] or 0.0) if portfolio_row is not None else 0.0
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    return build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=metadata,
+        raw_total_asset_qty=max(
+            asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        reserved_exit_qty=float(reserved_exit_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+    ).normalized_exposure
 
 
 def _seed_dust_state(*, db_path: Path, asset_qty: float, close_price: float) -> None:
@@ -1171,6 +1201,7 @@ def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated
 
     reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
 
     assert row is not None
     assert row["status"] == "FILLED"
@@ -1178,6 +1209,11 @@ def test_restart_after_partial_fill_applies_recent_fill_and_clears_gate(isolated
     assert fills == 2
     assert reason is None
     assert state.unresolved_open_order_count == 0
+    assert authority.open_lot_count > 0
+    assert authority.reserved_exit_lot_count == 0
+    assert authority.sellable_executable_lot_count == authority.open_lot_count
+    assert authority.exit_allowed is True
+    assert authority.exit_block_reason == "none"
 
 
 
@@ -1233,6 +1269,7 @@ def test_submit_unknown_timeout_metadata_strong_correlation_resolves_on_restart(
     assert gate_reason is None
 
 
+@pytest.mark.lot_native_regression_gate
 def test_reconcile_recent_fill_replay_preserves_filled_terminal_state(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
@@ -1278,6 +1315,12 @@ def test_reconcile_recent_fill_replay_preserves_filled_terminal_state(isolated_d
     assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == pytest.approx(0.4)
     assert fill_count == 1
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    assert authority.open_lot_count > 0
+    assert authority.reserved_exit_lot_count == 0
+    assert authority.sellable_executable_lot_count == authority.open_lot_count
+    assert authority.exit_allowed is True
+    assert authority.exit_block_reason == "none"
 
 
 def test_reconcile_filled_buy_and_flattened_sell_remains_idempotent(isolated_db):
@@ -1925,6 +1968,7 @@ def test_submit_success_then_crash_restart_blocks_new_submit_attempt(isolated_db
 
 
 
+@pytest.mark.lot_native_regression_gate
 def test_restart_during_cancel_request_reconciles_to_canceled(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
@@ -1954,11 +1998,18 @@ def test_restart_during_cancel_request_reconciles_to_canceled(isolated_db):
         conn.close()
 
     reason = evaluate_startup_safety_gate()
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
     assert status == "CANCELED"
     assert reason is None
+    assert authority.open_lot_count == 0
+    assert authority.reserved_exit_lot_count == 0
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "no_position"
 
 
 
+@pytest.mark.lot_native_regression_gate
 def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monkeypatch):
     conn = ensure_db(str(isolated_db))
     try:
@@ -2004,6 +2055,12 @@ def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monk
         conn.close()
 
     assert fills_after_crash == 1
+    authority_after_crash = _load_reconciled_position_authority(db_path=isolated_db)
+    assert authority_after_crash.open_lot_count > 0
+    assert authority_after_crash.reserved_exit_lot_count == 0
+    assert authority_after_crash.sellable_executable_lot_count == authority_after_crash.open_lot_count
+    assert authority_after_crash.exit_allowed is True
+    assert authority_after_crash.exit_block_reason == "none"
 
     monkeypatch.setattr("bithumb_bot.recovery.set_portfolio_breakdown", original_set_portfolio_breakdown)
     reconcile_with_broker(_RecentFillBroker())
@@ -2022,6 +2079,12 @@ def test_restart_mid_reconcile_rolls_back_then_retries_cleanly(isolated_db, monk
     assert float(row["qty_filled"]) == pytest.approx(1.0)
     assert fills_after_retry == 2
     assert evaluate_startup_safety_gate() is None
+    authority_after_retry = _load_reconciled_position_authority(db_path=isolated_db)
+    assert authority_after_retry.open_lot_count > 0
+    assert authority_after_retry.reserved_exit_lot_count == 0
+    assert authority_after_retry.sellable_executable_lot_count == authority_after_retry.open_lot_count
+    assert authority_after_retry.exit_allowed is True
+    assert authority_after_retry.exit_block_reason == "none"
 
 
 def test_reconcile_success_auto_clears_stale_initial_reconcile_halt(isolated_db):
@@ -2093,6 +2156,12 @@ def test_lot_native_gate_reconcile_does_not_clear_halt_from_qty_only_holdings_wi
         assert lot_snapshot.open_lot_count == 0
         assert lot_snapshot.executable_open_exposure_qty == pytest.approx(0.0)
         assert lot_snapshot.exit_non_executable_reason == "no_executable_open_lots"
+        authority = _load_reconciled_position_authority(db_path=isolated_db)
+        assert authority.open_lot_count == 0
+        assert authority.reserved_exit_lot_count == 0
+        assert authority.sellable_executable_lot_count == 0
+        assert authority.exit_allowed is False
+        assert authority.exit_block_reason == "dust_only_remainder"
     finally:
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 

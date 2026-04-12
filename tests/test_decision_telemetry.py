@@ -247,6 +247,7 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert "submit_payload_qty" in out
     assert "open_exposure_qty" in out
     assert "dust_tracking_qty" in out
+    assert "observed_sell_qty_basis_qty" in out
     assert "sell_normalized_exposure_qty" in out
     assert "sell_open_exposure_qty" in out
     assert "sell_dust_tracking_qty" in out

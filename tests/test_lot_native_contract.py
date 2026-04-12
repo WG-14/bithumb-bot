@@ -206,6 +206,31 @@ def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_bu
     assert plan.requested_qty > model.normalized_exposure.sellable_executable_qty
 
 
+@pytest.mark.lot_native_regression_gate
+def test_authority_boundary_reserved_exit_equal_to_open_exposure_still_materializes_reserved_exit_lots() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0002,
+        metadata_raw={},
+        raw_total_asset_qty=0.0002,
+        open_exposure_qty=0.0002,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0002,
+        open_lot_count=2,
+        dust_tracking_lot_count=0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    assert model.normalized_exposure.open_lot_count == 2
+    assert model.normalized_exposure.reserved_exit_qty == pytest.approx(0.0002)
+    assert model.normalized_exposure.reserved_exit_lot_count == 2
+    assert model.normalized_exposure.sellable_executable_lot_count == 0
+    assert model.normalized_exposure.exit_allowed is False
+    assert model.normalized_exposure.exit_block_reason == "reserved_for_open_sell_orders"
+
+
 def test_authority_boundary_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without_legacy_semantic_marker() -> None:
     conn = sqlite3.connect(":memory:")
     conn.execute(
