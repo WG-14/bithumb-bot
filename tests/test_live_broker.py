@@ -20,6 +20,9 @@ from bithumb_bot.broker.live import (
     validate_order,
     validate_pretrade,
 )
+from bithumb_bot.execution import record_order_if_missing
+from bithumb_bot.lifecycle import apply_fill_lifecycle
+from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.oms import payload_fingerprint
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision, set_portfolio_breakdown
 from bithumb_bot.reason_codes import (
@@ -2565,6 +2568,53 @@ def test_lot_native_gate_sell_dust_unsellable_rejects_observational_qty_authorit
         conn.close()
 
 
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_harmless_dust_suppression_rejects_observational_qty_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    db_path = str(tmp_path / "harmless_dust_authority_boundary.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    conn = ensure_db(db_path)
+    try:
+        state = type(
+            "_State",
+            (),
+            {
+                "last_reconcile_metadata": json.dumps(
+                    {
+                        "dust_classification": "harmless_dust",
+                        "dust_residual_present": 1,
+                        "dust_residual_allow_resume": 1,
+                        "dust_effective_flat": 1,
+                    }
+                )
+            },
+        )()
+        with pytest.raises(ValueError, match="requires canonical lot-native SELL authority"):
+            live_module._record_harmless_dust_exit_suppression(
+                conn=conn,
+                state=state,
+                signal="SELL",
+                side="SELL",
+                requested_qty=0.0004,
+                market_price=100_000_000.0,
+                normalized_qty=0.0004,
+                submit_qty_source="observation.sell_qty_preview",
+                position_state_source="observation.sell_qty_preview",
+                strategy_name="authority_boundary_test",
+                decision_id=None,
+                decision_reason="non canonical source",
+                exit_rule_name="exit_signal",
+            )
+    finally:
+        conn.close()
+
+
 def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_qty_step.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -4691,13 +4741,15 @@ def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_ro
     assert context["dust_action"] == "harmless_dust_tracked_resume_allowed"
     assert context["sell_failure_category"] == "dust_suppression"
     assert context["sell_failure_detail"] == "dust_suppression"
-    assert context["submit_qty_source"] == "observation.sell_qty_preview"
-    assert context["sell_submit_qty_source"] == "observation.sell_qty_preview"
-    assert context["position_state_source"] == "observation.sell_qty_preview"
+    assert context["requested_qty"] == pytest.approx(0.0)
+    assert context["normalized_qty"] == pytest.approx(0.0)
+    assert context["observed_position_qty"] == pytest.approx(0.0)
+    assert context["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert context["entry_allowed_truth_source"] == "-"
     assert context["effective_flat_truth_source"] == "-"
-    assert context["submit_qty_source_truth_source"] == "context.submit_qty_source"
-    assert context["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert context["submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
+    assert context["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 
@@ -4832,10 +4884,14 @@ def test_live_execute_signal_sell_falls_back_to_harmless_dust_suppression_when_s
     assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"
     context = json.loads(str(suppression_row["context_json"]))
     assert context["operator_action"] == "harmless_dust_tracked_resume_allowed"
+    assert context["requested_qty"] == pytest.approx(0.0)
+    assert context["normalized_qty"] == pytest.approx(0.0)
     assert context["entry_allowed_truth_source"] == "-"
     assert context["effective_flat_truth_source"] == "-"
-    assert context["submit_qty_source_truth_source"] == "context.submit_qty_source"
-    assert context["sell_submit_qty_source_truth_source"] == "context.submit_qty_source"
+    assert context["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert context["submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
+    assert context["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert any("event=decision_suppressed" in msg for msg in notifications)
     assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
 
@@ -5171,6 +5227,110 @@ def test_live_execute_signal_sell_boundary_does_not_override_canonical_authority
     assert broker.place_order_calls == 1
 
 
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_reserved_exit_state_submits_only_unreserved_lots(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_reserved_exit_authority.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+    lot_rules = build_market_lot_rules(
+        market_id="BTC_KRW",
+        market_price=100_000_000.0,
+        rules=SimpleNamespace(
+            min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+            qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+            min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+            max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        ),
+        source_mode="derived",
+    )
+    buy_qty = lot_count_to_qty(lot_count=3, lot_size=lot_rules.lot_size)
+    reserved_exit_qty = lot_count_to_qty(lot_count=1, lot_size=lot_rules.lot_size)
+    base_ts = int(time.time() * 1000)
+
+    conn = ensure_db(str(tmp_path / "sell_reserved_exit_authority.sqlite"))
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=buy_qty,
+        asset_locked=0.0,
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="entry_reserved",
+        side="BUY",
+        qty_req=buy_qty,
+        symbol=settings.PAIR,
+        price=100_000_000.0,
+        ts_ms=base_ts,
+        status="NEW",
+    )
+    apply_fill_lifecycle(
+        conn,
+        side="BUY",
+        pair=settings.PAIR,
+        trade_id=1,
+        client_order_id="entry_reserved",
+        fill_id="fill_entry_reserved",
+        fill_ts=base_ts + 100,
+        price=100_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="reserved_exit_test",
+        entry_decision_id=501,
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="reserved_exit",
+        side="SELL",
+        qty_req=reserved_exit_qty,
+        symbol=settings.PAIR,
+        price=100_000_000.0,
+        ts_ms=base_ts + 200,
+        status="NEW",
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        base_ts + 300,
+        100_000_000.0,
+        strategy_name="reserved_exit_test",
+        decision_reason="trim_after_partial_exit",
+        exit_rule_name="exit_signal",
+    )
+    conn = ensure_db(str(tmp_path / "sell_reserved_exit_authority.sqlite"))
+    attempted_order = conn.execute(
+        """
+        SELECT qty_req, status
+        FROM orders
+        WHERE client_order_id LIKE 'live_%' AND side='SELL'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert attempted_order is not None
+    assert attempted_order["status"] == "FAILED"
+    assert float(attempted_order["qty_req"]) == pytest.approx(buy_qty - reserved_exit_qty)
+
 def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(monkeypatch):
     original = {
         "LIVE_DRY_RUN": bool(settings.LIVE_DRY_RUN),
@@ -5498,6 +5658,8 @@ def test_harmless_dust_exit_suppression_blocks_sell_path_even_without_sub_min_qt
             requested_qty=0.0002,
             market_price=100_000_000.0,
             normalized_qty=0.0002,
+            submit_qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
+            position_state_source="position_state.normalized_exposure.sellable_executable_lot_count",
             strategy_name="dust_exit_test",
             decision_id=77,
             decision_reason="partial_take_profit",

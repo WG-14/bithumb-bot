@@ -990,10 +990,11 @@ def _require_canonical_sell_submit_lot_source(
 
 
 def _harmless_dust_suppression_submit_qty_source(submit_qty_source: str | None) -> str:
-    normalized_submit_qty_source = str(submit_qty_source or "").strip()
-    if not normalized_submit_qty_source or normalized_submit_qty_source == "-":
-        return _CANONICAL_SELL_SUBMIT_QTY_SOURCE
-    return normalized_submit_qty_source
+    _require_canonical_sell_submit_lot_source(
+        submit_qty_source=submit_qty_source,
+        context="harmless dust SELL suppression",
+    )
+    return _CANONICAL_SELL_SUBMIT_QTY_SOURCE
 
 
 def validate_order(*, signal: str, side: str, qty: float, market_price: float) -> None:
@@ -3672,11 +3673,11 @@ def live_execute_signal(
                     state=state,
                     signal=signal,
                     side=side,
-                    requested_qty=float(diagnostic_sell_qty.observed_position_qty),
+                    requested_qty=float(canonical_sell_submit_qty),
                     market_price=float(market_price),
-                    normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
-                    submit_qty_source=diagnostic_sell_qty.observed_position_qty_source,
-                    position_state_source=diagnostic_sell_qty.observed_position_qty_source,
+                    normalized_qty=float(canonical_sell_submit_qty),
+                    submit_qty_source=canonical_sell.submit_qty_source,
+                    position_state_source=canonical_sell.position_state_source,
                     raw_total_asset_qty=float(diagnostic_sell_qty.raw_total_asset_qty),
                     open_exposure_qty=float(diagnostic_sell_qty.open_exposure_qty),
                     dust_tracking_qty=float(diagnostic_sell_qty.dust_tracking_qty),
@@ -3731,11 +3732,11 @@ def live_execute_signal(
                     state=state,
                     signal=signal,
                     side=side,
-                    requested_qty=float(diagnostic_sell_qty.observed_position_qty),
+                    requested_qty=float(canonical_sell_submit_qty),
                     market_price=float(market_price),
-                    normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
-                    submit_qty_source=diagnostic_sell_qty.observed_position_qty_source,
-                    position_state_source=diagnostic_sell_qty.observed_position_qty_source,
+                    normalized_qty=float(canonical_sell_submit_qty),
+                    submit_qty_source=canonical_sell.submit_qty_source,
+                    position_state_source=canonical_sell.position_state_source,
                     raw_total_asset_qty=float(diagnostic_sell_qty.raw_total_asset_qty),
                     open_exposure_qty=float(diagnostic_sell_qty.open_exposure_qty),
                     dust_tracking_qty=float(diagnostic_sell_qty.dust_tracking_qty),
@@ -3852,7 +3853,7 @@ def live_execute_signal(
                 requested_qty=float(order_qty),
                 market_price=float(market_price),
                 normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
-                submit_qty_source=submit_qty_source,
+                submit_qty_source=canonical_sell.submit_qty_source if canonical_sell is not None else submit_qty_source,
                 position_state_source=str(decision_observability["position_state_source"]),
                 raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
                 open_exposure_qty=float(decision_observability["open_exposure_qty"]),
@@ -3905,6 +3906,7 @@ def live_execute_signal(
                 requested_qty=requested_order_qty,
                 market_price=float(market_price),
                 normalized_qty=float(non_authoritative_qty_preview["normalized_qty"]),
+                submit_qty_source=canonical_sell.submit_qty_source if canonical_sell is not None else submit_qty_source,
                 strategy_name=strategy_name,
                 decision_id=decision_id,
                 decision_reason=decision_reason,
