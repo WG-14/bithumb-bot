@@ -3556,6 +3556,175 @@ def test_authority_boundary_live_execute_signal_sell_uses_exit_sizing_executable
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
 
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_lot_native_gate_live_execute_signal_sell_ignores_exit_sizing_qty_source_shadow(
+    monkeypatch,
+    tmp_path,
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_exit_sizing_shadow_source.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr(
+        live_module,
+        "build_sell_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            requested_qty=0.0004,
+            executable_qty=0.0004,
+            internal_lot_size=0.0004,
+            intended_lot_count=1,
+            executable_lot_count=1,
+            qty_source="position_state.raw_total_asset_qty",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+        ),
+    )
+
+    conn = ensure_db(str(tmp_path / "sell_exit_sizing_shadow_source.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.00049193,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.0004, 1, 0, "lot-native", "open_exposure"),
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 2, "entry_dust", 1_700_000_000_100, 100_000_000.0, 0.00009193, 0, 1, "lot-native", "dust_tracking"),
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_000_000_200,
+        strategy_name="dust_exit_test",
+        signal="SELL",
+        reason="partial_take_profit",
+        candle_ts=1_700_000_000_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "entry_allowed": False,
+            "effective_flat": False,
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.00049193,
+            "open_exposure_qty": 0.0004,
+            "dust_tracking_qty": 0.00009193,
+            "open_lot_count": 1,
+            "dust_tracking_lot_count": 1,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_qty": 0.00049193,
+            "sellable_executable_lot_count": 1,
+            "normalized_exposure_active": True,
+            "normalized_exposure_qty": 0.0004,
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.00049193,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.00009193,
+                    "open_lot_count": 1,
+                    "dust_tracking_lot_count": 1,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_qty": 0.00049193,
+                    "sellable_executable_lot_count": 1,
+                    "effective_flat": False,
+                    "entry_allowed": False,
+                    "normalized_exposure_active": True,
+                    "normalized_exposure_qty": 0.0004,
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_residual_present": 0,
+            "dust_effective_flat": 0,
+            "dust_policy_reason": "none",
+        },
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0004)
+
+    conn = ensure_db(str(tmp_path / "sell_exit_sizing_shadow_source.sqlite"))
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE client_order_id LIKE 'live_1000_sell_%' AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert submit_attempt is not None
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["order_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
+
 @pytest.mark.fast_regression
 def test_live_execute_signal_sell_uses_open_exposure_only_when_dust_tracking_coexists(
     monkeypatch,
@@ -4943,7 +5112,21 @@ def test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational
             state=runtime_state.snapshot(),
             ts=100,
             market_price=100_000_000.0,
-            position_qty=0.0004,
+            canonical_sell=live_module._CanonicalSellExecutionView(
+                sellable_executable_lot_count=0,
+                sellable_executable_qty=0.0,
+                exit_allowed=False,
+                exit_block_reason="no_executable_exit_lot",
+                submit_qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
+                position_state_source="position_state.normalized_exposure.sellable_executable_lot_count",
+            ),
+            diagnostic_qty=live_module._SellDiagnosticQtyView(
+                observed_position_qty=0.0004,
+                observed_position_qty_source="observation.sell_qty_preview",
+                raw_total_asset_qty=0.0004,
+                open_exposure_qty=0.0,
+                dust_tracking_qty=0.0004,
+            ),
             strategy_name="suppression_test",
             decision_id=None,
             decision_reason="no executable lots",
@@ -4957,11 +5140,6 @@ def test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational
                 "exit_block_reason": "no_executable_exit_lot",
                 "sell_submit_lot_count": 0,
             },
-            submit_qty_source="observation.sell_qty_preview",
-            position_state_source="observation.sell_qty_preview",
-            raw_total_asset_qty=0.0004,
-            open_exposure_qty=0.0,
-            dust_tracking_qty=0.0004,
             exit_sizing=SimpleNamespace(
                 allowed=False,
                 block_reason="no_executable_exit_lot",
@@ -4994,6 +5172,8 @@ def test_lot_native_gate_sell_no_executable_exit_suppression_keeps_observational
     assert suppression_context["position_qty"] == pytest.approx(0.0004)
     assert suppression_context["sell_open_exposure_qty"] == pytest.approx(0.0)
     assert suppression_context["sell_qty_basis_qty"] == pytest.approx(0.0)
+    assert suppression_context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert suppression_context["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
 @pytest.mark.fast_regression

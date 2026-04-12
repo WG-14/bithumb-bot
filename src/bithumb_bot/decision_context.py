@@ -77,10 +77,16 @@ class _CanonicalSellAuthorityInputs:
 
 
 @dataclass(frozen=True)
-class _SellCompatibilityObservation:
+class _SellDiagnosticObservation:
     raw_total_asset_qty: float
     open_exposure_qty: float
     reserved_exit_qty: float
+
+
+@dataclass(frozen=True)
+class _ResolvedSellAuthorityBoundary:
+    canonical_authority: _CanonicalSellAuthorityInputs
+    diagnostic_observation: _SellDiagnosticObservation
 
 
 def materialize_strategy_decision_context(value: Any) -> Any:
@@ -284,7 +290,7 @@ def _extract_non_authoritative_sell_diagnostic_observation(
     position_gate: dict[str, Any],
     position_state: dict[str, Any],
     position_normalized: dict[str, Any],
-) -> _SellCompatibilityObservation:
+) -> _SellDiagnosticObservation:
     open_exposure_qty, open_exposure_qty_truth_source = _resolve_with_source(
         (_CANONICAL_OPEN_EXPOSURE_QTY_SOURCE, position_normalized.get("open_exposure_qty")),
         ("position_state.open_exposure_qty", position_state.get("open_exposure_qty")),
@@ -303,7 +309,7 @@ def _extract_non_authoritative_sell_diagnostic_observation(
         default_source="default:0.0",
         value_kind="float",
     )
-    return _SellCompatibilityObservation(
+    return _SellDiagnosticObservation(
         raw_total_asset_qty=max(0.0, float(payload.get("raw_total_asset_qty") or 0.0)),
         open_exposure_qty=0.0 if open_exposure_qty is None else float(open_exposure_qty),
         reserved_exit_qty=0.0 if reserved_exit_qty is None else float(reserved_exit_qty),
@@ -453,6 +459,30 @@ def _apply_non_authoritative_sell_diagnostic_fallbacks(
         sellable_executable_qty=sellable_executable_qty,
         sellable_executable_qty_truth_source=sellable_executable_qty_truth_source,
         semantic_basis=authority_inputs.semantic_basis,
+    )
+
+
+def _resolve_sell_authority_boundary(
+    *,
+    payload: dict[str, Any],
+    position_gate: dict[str, Any],
+    position_state: dict[str, Any],
+    position_normalized: dict[str, Any],
+) -> _ResolvedSellAuthorityBoundary:
+    diagnostic_observation = _extract_non_authoritative_sell_diagnostic_observation(
+        payload=payload,
+        position_gate=position_gate,
+        position_state=position_state,
+        position_normalized=position_normalized,
+    )
+    canonical_authority = _resolve_canonical_sell_authority_inputs(position_state=position_state)
+    fail_closed_canonical_authority = _apply_non_authoritative_sell_diagnostic_fallbacks(
+        authority_inputs=canonical_authority,
+        raw_total_asset_qty=float(diagnostic_observation.raw_total_asset_qty),
+    )
+    return _ResolvedSellAuthorityBoundary(
+        canonical_authority=fail_closed_canonical_authority,
+        diagnostic_observation=diagnostic_observation,
     )
 
 
@@ -630,17 +660,13 @@ def resolve_canonical_position_exposure_snapshot(
         default_value=0,
         default_source="default:0",
     )
-    canonical_sell_authority = _resolve_canonical_sell_authority_inputs(position_state=position_state)
-    compatibility = _extract_non_authoritative_sell_diagnostic_observation(
+    sell_authority_boundary = _resolve_sell_authority_boundary(
         payload=payload,
         position_gate=position_gate,
         position_state=position_state,
         position_normalized=position_normalized,
     )
-    fail_closed_sell_authority = _apply_non_authoritative_sell_diagnostic_fallbacks(
-        authority_inputs=canonical_sell_authority,
-        raw_total_asset_qty=float(compatibility.raw_total_asset_qty),
-    )
+    fail_closed_sell_authority = sell_authority_boundary.canonical_authority
     open_exposure_qty = fail_closed_sell_authority.open_exposure_qty
     open_exposure_qty_truth_source = fail_closed_sell_authority.open_exposure_qty_truth_source
     open_lot_count = fail_closed_sell_authority.open_lot_count

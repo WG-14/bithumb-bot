@@ -22,3 +22,4 @@ Run the dedicated lot-native regression gate before and after the change:
 - Confirm qty-only or legacy compatibility data still fails closed in recovery/reconcile and does not restore executable authority.
 - Confirm reporting/telemetry surfaces touched by the change read authority-sensitive exposure fields from canonical lot-native state and treat qty residue as diagnostic only.
 - Confirm new or updated tests covering the touched authority-sensitive path are included in the lot-native gate.
+- Confirm the touched SELL live-path regressions still collect through `scripts/run_lot_native_regression_gate.sh`, especially the shadow-submit-source and no-executable-exit suppression tests in `tests/test_live_broker.py`.
