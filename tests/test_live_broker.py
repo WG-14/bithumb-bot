@@ -186,6 +186,108 @@ class _CanceledBroker(_FakeBroker):
             1,
         )
 
+
+def _seed_sell_retry_authority_state(*, db_path: str) -> int:
+    conn = ensure_db(db_path)
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.00049193,
+            asset_locked=0.0,
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.0004, 1, 0, "lot-native", "open_exposure"),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 2, "entry_dust", 1_700_000_000_100, 100_000_000.0, 0.00009193, 0, 1, "lot-native", "dust_tracking"),
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1_700_000_000_200,
+            strategy_name="dust_exit_test",
+            signal="SELL",
+            reason="partial_take_profit",
+            candle_ts=1_700_000_000_000,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "SELL",
+                "final_signal": "SELL",
+                "entry_allowed": False,
+                "effective_flat": False,
+                "raw_qty_open": 0.0004,
+                "raw_total_asset_qty": 0.00049193,
+                "open_exposure_qty": 0.0004,
+                "dust_tracking_qty": 0.00009193,
+                "open_lot_count": 1,
+                "dust_tracking_lot_count": 1,
+                "reserved_exit_lot_count": 0,
+                "sellable_executable_lot_count": 1,
+                "sellable_executable_qty": 0.0004,
+                "normalized_exposure_active": True,
+                "normalized_exposure_qty": 0.0004,
+                "submit_lot_count": 1,
+                "submit_lot_source": "position_state.normalized_exposure.sellable_executable_lot_count",
+                "sell_qty_basis_qty": 0.0004,
+                "sell_qty_basis_source": "position_state.normalized_exposure.sellable_executable_lot_count",
+                "exit_allowed": True,
+                "exit_block_reason": "none",
+                "terminal_state": "open_exposure",
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.0004,
+                        "raw_total_asset_qty": 0.00049193,
+                        "open_exposure_qty": 0.0004,
+                        "dust_tracking_qty": 0.00009193,
+                        "open_lot_count": 1,
+                        "dust_tracking_lot_count": 1,
+                        "reserved_exit_lot_count": 0,
+                        "sellable_executable_lot_count": 1,
+                        "sellable_executable_qty": 0.0004,
+                        "effective_flat": False,
+                        "entry_allowed": False,
+                        "normalized_exposure_active": True,
+                        "normalized_exposure_qty": 0.0004,
+                    }
+                },
+            },
+        )
+        conn.commit()
+        return decision_id
+    finally:
+        conn.close()
+
+
 class _StrayBroker(_FakeBroker):
     def get_open_orders(
         self,
@@ -822,6 +924,191 @@ def test_live_failed_before_send_releases_dedup_for_same_intent_retry(monkeypatc
     assert dedup_row is not None
     assert dedup_row["client_order_id"] == rows[1]["client_order_id"]
     assert dedup_row["order_status"] == "FILLED"
+
+
+def test_live_sell_duplicate_intent_after_cancel_keeps_lot_native_authority(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "sell_retry_after_cancel.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    decision_id = _seed_sell_retry_authority_state(db_path=db_path)
+
+    from bithumb_bot.broker import live as live_module
+
+    attempt_ids = iter(["attempt_a", "attempt_b"])
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={"dust_residual_present": 0, "dust_effective_flat": 0, "dust_policy_reason": "none"},
+    )
+
+    broker = _CanceledBroker()
+    first = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    second = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert first is None
+    assert second is None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0004)
+    assert broker._last_qty != pytest.approx(0.00049193)
+
+    conn = ensure_db(db_path)
+    try:
+        order_row = conn.execute(
+            """
+            SELECT client_order_id, submit_attempt_id, status
+            FROM orders
+            WHERE client_order_id LIKE 'live_1000_sell_%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        dedup_row = conn.execute(
+            """
+            SELECT client_order_id, order_status
+            FROM order_intent_dedup
+            WHERE symbol=? AND side='SELL' AND intent_ts=1000
+            """,
+            (settings.PAIR,),
+        ).fetchone()
+        submit_attempt = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id LIKE 'live_1000_sell_%' AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert order_row is not None
+    assert order_row["status"] == "CANCELED"
+    assert order_row["submit_attempt_id"] == "attempt_a"
+    assert dedup_row is not None
+    assert dedup_row["client_order_id"] == order_row["client_order_id"]
+    assert dedup_row["order_status"] == "CANCELED"
+    assert submit_attempt is not None
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["sell_submit_lot_count"] == 1
+    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert submit_evidence["observed_submit_payload_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["order_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
+
+
+def test_live_sell_failed_before_send_retry_keeps_lot_native_authority(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "sell_terminal_resubmit_guard.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    decision_id = _seed_sell_retry_authority_state(db_path=db_path)
+
+    from bithumb_bot.broker import live as live_module
+
+    attempt_ids = iter(["attempt_fail", "attempt_retry"])
+    monkeypatch.setattr(live_module, "_submit_attempt_id", lambda: next(attempt_ids))
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={"dust_residual_present": 0, "dust_effective_flat": 0, "dust_policy_reason": "none"},
+    )
+
+    failed_trade = live_execute_signal(
+        _FailingSubmitBroker(),
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    retry_broker = _FakeBroker()
+    retried_trade = live_execute_signal(
+        retry_broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert failed_trade is None
+    assert retried_trade is not None
+    assert retry_broker._last_qty == pytest.approx(0.0004)
+    assert retry_broker._last_qty != pytest.approx(0.00049193)
+
+    conn = ensure_db(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT client_order_id, submit_attempt_id, status
+            FROM orders
+            WHERE client_order_id LIKE 'live_1000_sell_%'
+            ORDER BY id
+            """
+        ).fetchall()
+        dedup_row = conn.execute(
+            """
+            SELECT client_order_id, order_status
+            FROM order_intent_dedup
+            WHERE symbol=? AND side='SELL' AND intent_ts=1000
+            """,
+            (settings.PAIR,),
+        ).fetchone()
+        submit_attempt = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (rows[1]["client_order_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert len(rows) == 2
+    assert rows[0]["status"] == "FAILED"
+    assert rows[0]["submit_attempt_id"] == "attempt_fail"
+    assert rows[1]["status"] == "FILLED"
+    assert rows[1]["submit_attempt_id"] == "attempt_retry"
+    assert dedup_row is not None
+    assert dedup_row["client_order_id"] == rows[1]["client_order_id"]
+    assert dedup_row["order_status"] == "FILLED"
+    assert submit_attempt is not None
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["sell_submit_lot_count"] == 1
+    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert submit_evidence["observed_submit_payload_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["order_qty"] == pytest.approx(0.0004)
+    assert submit_evidence["order_qty"] != pytest.approx(0.00049193)
 
 def test_live_submit_unknown_unresolved_blocks_and_persists_reason(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown_gate.sqlite"))
@@ -3320,7 +3607,7 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
     assert submit_evidence["order_qty"] == pytest.approx(0.0002)
     assert submit_evidence["normalized_qty"] == pytest.approx(0.0002)
     assert submit_evidence["submit_lot_count"] == 2
-    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert submit_evidence["submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert submit_evidence["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert submit_evidence["position_state_source"] == "derived:sellable_executable_lot_count"
@@ -3476,7 +3763,7 @@ def test_authority_boundary_live_execute_signal_sell_does_not_sum_open_exposure_
     assert submit_evidence["sell_open_exposure_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_dust_tracking_qty"] == pytest.approx(0.00009193)
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00049193)
-    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert submit_evidence["observed_sell_qty_basis_qty"] == pytest.approx(0.0004)
     assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["sell_qty_boundary_kind"] == "none"
@@ -3820,7 +4107,7 @@ def test_lot_native_gate_live_execute_signal_sell_ignores_exit_sizing_qty_source
 
     assert submit_attempt is not None
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
-    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert submit_evidence["sell_qty_basis_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert submit_evidence["order_qty"] == pytest.approx(0.0004)
     assert submit_evidence["order_qty"] != pytest.approx(0.00049193)

@@ -243,7 +243,7 @@ def test_ops_report_with_strategy_and_trade_data(tmp_path, monkeypatch, capsys):
     assert f"db_path={db_path}" in out
     assert "paper:sma_cross:1m,1,1,100000.00,0.00,50.00,-100050.00" in out
     assert "order_events_qty=" in out
-    assert "submit_payload_qty=" in out
+    assert "observed_submit_payload_qty=" in out
     assert "event=submit_attempt_recorded" in out
     assert "reason=DUST_RESIDUAL_UNSELLABLE" in out
     assert "sell_failure_category=dust_residual_unsellable" in out
@@ -796,8 +796,8 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     assert "sellable_executable_qty" in out
     assert "has_executable_exposure=0" in out
     assert "sell_normalized_exposure_qty=0.00000000" in out
-    assert "position_qty=" in out
-    assert "submit_payload_qty=" in out
+    assert "observed_position_qty=" in out
+    assert "observed_submit_payload_qty=" in out
     assert "raw_total_asset_qty=0.00019192" in out
     assert "open_exposure_qty=" in out
     assert "dust_tracking_qty=0.00009563" in out

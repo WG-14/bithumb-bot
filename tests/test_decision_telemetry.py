@@ -243,8 +243,8 @@ def test_decision_telemetry_cli_exposes_buy_to_hold_reason_fields(tmp_path, monk
     assert "[DECISION-TELEMETRY]" in out
     assert "base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,entry_allowed" in out
     assert "raw_total_asset_qty" in out
-    assert "position_qty" in out
-    assert "submit_payload_qty" in out
+    assert "observed_position_qty" in out
+    assert "observed_submit_payload_qty" in out
     assert "open_exposure_qty" in out
     assert "dust_tracking_qty" in out
     assert "observed_sell_qty_basis_qty" in out

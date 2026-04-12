@@ -1008,6 +1008,7 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
                 0.0
             ) AS position_qty,
             COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_submit_payload_qty'),
                 json_extract(oe.submit_evidence, '$.submit_payload_qty'),
                 oe.qty,
                 0.0
@@ -1317,6 +1318,7 @@ def fetch_recent_decision_flow(
                 0.0
             ) AS position_qty,
             COALESCE(
+                json_extract(context_json, '$.observed_submit_payload_qty'),
                 json_extract(context_json, '$.submit_payload_qty'),
                 json_extract(context_json, '$.position_state.submit_payload_qty'),
                 json_extract(context_json, '$.position_state.normalized_exposure.submit_payload_qty'),
@@ -3518,7 +3520,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "effective_flat": row.effective_flat,
                 "raw_qty_open": row.raw_qty_open,
                 "raw_total_asset_qty": row.raw_total_asset_qty,
+                "observed_position_qty": row.position_qty,
                 "position_qty": row.position_qty,
+                "observed_submit_payload_qty": row.submit_payload_qty,
                 "submit_payload_qty": row.submit_payload_qty,
                 "normalized_exposure_active": row.normalized_exposure_active,
                 "normalized_exposure_qty": row.normalized_exposure_qty,
@@ -3829,8 +3833,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "  "
                 f"{ts} strategy={strategy_context} cid={row['client_order_id']} "
                 f"event={row['event_type']} status={row['order_status'] or '-'} side={row['side'] or '-'} "
-                f"position_qty={_fmt_float(float(row['position_qty'] or 0.0), 8)} "
-                f"submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
+                f"observed_position_qty={_fmt_float(float(row['position_qty'] or 0.0), 8)} "
+                f"observed_submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
                 f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
                 f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
                 f"observed_sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
@@ -3885,8 +3889,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
                 f"has_executable_exposure={1 if bool(getattr(row, 'has_executable_exposure', False)) else 0} "
                 f"has_dust_only_remainder={1 if bool(getattr(row, 'has_dust_only_remainder', False)) else 0} "
-                f"position_qty={_fmt_float(float(row.position_qty), 8)} "
-                f"submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
+                f"observed_position_qty={_fmt_float(float(row.position_qty), 8)} "
+                f"observed_submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
                 f"sell_submit_lot_count={row.sell_submit_lot_count} "
                 f"observed_sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
                 f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "
@@ -3956,7 +3960,7 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
     print(
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
-        "raw_total_asset_qty,position_qty,submit_payload_qty,normalized_exposure_active,"
+        "raw_total_asset_qty,observed_position_qty,observed_submit_payload_qty,normalized_exposure_active,"
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
         "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
         "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"

@@ -509,11 +509,17 @@ def _sell_submit_observability_fields(
         or (decision_observability or {}).get("dust_operator_action")
         or (MANUAL_DUST_REVIEW_REQUIRED if sell_failure_category != "none" else "-")
     )
+    emitted_submit_qty_source = (
+        _CANONICAL_SELL_SUBMIT_QTY_SOURCE
+        if submit_qty_source == _CANONICAL_SELL_SUBMIT_LOT_SOURCE
+        else submit_qty_source
+    )
     return {
         "observed_position_qty": float(position_qty),
+        "observed_submit_payload_qty": float(submit_payload_qty),
         "submit_payload_qty": float(submit_payload_qty),
         "submit_lot_count": int(submit_lot_count),
-        "sell_submit_qty_source": submit_qty_source,
+        "sell_submit_qty_source": emitted_submit_qty_source,
         "submit_qty_source_truth_source": submit_qty_source_truth_source,
         "submit_lot_source": submit_lot_source,
         "submit_lot_source_truth_source": submit_lot_source_truth_source,
@@ -537,7 +543,7 @@ def _sell_submit_observability_fields(
         "sell_dust_tracking_qty_truth_source": sell_dust_tracking_qty_truth_source,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
-        "submit_qty_source": submit_qty_source,
+        "submit_qty_source": emitted_submit_qty_source,
         "position_state_source": position_state_source,
         "raw_total_asset_qty": float(raw_total_asset_qty),
         "open_exposure_qty": float(open_exposure_qty),
