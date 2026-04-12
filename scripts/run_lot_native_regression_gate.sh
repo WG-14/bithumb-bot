@@ -11,6 +11,10 @@ required_tests=(
   # Live SELL submit boundary: exit sizing shadow qty sources must stay non-authoritative.
   "tests/test_live_broker.py::test_lot_native_gate_live_execute_signal_sell_ignores_exit_sizing_qty_source_shadow"
 
+  # Operator/emergency SELL-capable path: flatten must stay on canonical lot-native authority.
+  "tests/test_operator_commands.py::test_flatten_position_qty_only_portfolio_does_not_restore_sell_authority"
+  "tests/test_operator_commands.py::test_flatten_position_reserved_exit_qty_does_not_bypass_canonical_sell_authority"
+
   # Decision/reporting boundary: shadow top-level qty fields must not outrank canonical normalized exposure.
   "tests/test_decision_telemetry.py::test_lot_native_gate_canonical_exposure_snapshot_ignores_shadow_top_level_sell_authority_fields"
 )

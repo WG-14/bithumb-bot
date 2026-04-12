@@ -10,8 +10,17 @@ from .dust import build_dust_display_context, build_position_state_model
 from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
+from .order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
-from .lifecycle import summarize_position_lots
+from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+
+
+def _infer_flatten_lot_size(*, open_lot_count: int, open_exposure_qty: float, lot_definition) -> float:
+    if lot_definition is not None and lot_definition.is_authoritative:
+        return max(0.0, float(lot_definition.internal_lot_size or 0.0))
+    if int(open_lot_count) <= 0:
+        return 0.0
+    return max(0.0, float(open_exposure_qty) / float(open_lot_count))
 
 
 def _normalize_flatten_qty(*, qty: float, market_price: float) -> float:
@@ -53,6 +62,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         init_portfolio(conn)
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
     finally:
         conn.close()
 
@@ -74,11 +84,37 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         ),
         open_exposure_qty=open_exposure_qty,
         dust_tracking_qty=dust_tracking_qty,
+        reserved_exit_qty=reserved_exit_qty,
         open_lot_count=open_lot_count,
         dust_tracking_lot_count=dust_tracking_lot_count,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
     normalized_exposure = position_state.normalized_exposure
-    if not normalized_exposure.has_executable_exposure:
+    lot_size = _infer_flatten_lot_size(
+        open_lot_count=open_lot_count,
+        open_exposure_qty=open_exposure_qty,
+        lot_definition=lot_snapshot.lot_definition,
+    )
+    reserved_exit_lot_count = 0
+    if lot_size > 0.0 and reserved_exit_qty > 0.0:
+        reserved_exit_lot_count = min(
+            open_lot_count,
+            max(0, int(math.floor((float(reserved_exit_qty) / lot_size) + 1e-12))),
+        )
+    sellable_lot_count = max(0, open_lot_count - reserved_exit_lot_count)
+    exit_allowed = bool(sellable_lot_count > 0)
+    exit_block_reason = (
+        "reserved_for_open_sell_orders"
+        if open_lot_count > 0 and reserved_exit_qty > 0.0 and sellable_lot_count <= 0
+        else str(normalized_exposure.exit_block_reason or "no_executable_exit_lot")
+    )
+    if (not exit_allowed) or sellable_lot_count < 1:
         summary = {
             "status": "no_position",
             "qty": float(normalized_exposure.open_exposure_qty),
@@ -91,6 +127,17 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         }
         runtime_state.record_flatten_position_result(status="no_position", summary=summary)
         return summary
+
+    exit_sizing = build_sell_execution_sizing(
+        pair=settings.PAIR,
+        market_price=1.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=sellable_lot_count,
+            exit_allowed=exit_allowed,
+            exit_block_reason=exit_block_reason,
+        ),
+        lot_definition=lot_snapshot.lot_definition,
+    )
 
     runtime_state.record_flatten_position_result(
         status="started",
@@ -121,7 +168,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     if dry_run:
         summary = {
             "status": "dry_run",
-            "qty": float(normalized_exposure.open_exposure_qty),
+            "qty": float(exit_sizing.executable_qty),
             "raw_total_asset_qty": float(normalized_exposure.raw_total_asset_qty),
             "executable_exposure_qty": float(normalized_exposure.open_exposure_qty),
             "tracked_dust_qty": float(normalized_exposure.dust_tracking_qty),
@@ -135,7 +182,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         return summary
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
-    normalized_qty = float(normalized_exposure.open_exposure_qty)
+    normalized_qty = float(exit_sizing.executable_qty)
     try:
         quote = fetch_orderbook_top(settings.PAIR)
         bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)

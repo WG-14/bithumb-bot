@@ -1002,19 +1002,26 @@ def summarize_reserved_exit_qty(
 ) -> float:
     """Return remaining qty already reserved by unresolved SELL orders."""
 
+    query_with_symbol = """
+        SELECT COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty
+        FROM orders
+        WHERE symbol=?
+          AND side='SELL'
+          AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+    """
+    query_without_symbol = """
+        SELECT COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty
+        FROM orders
+        WHERE side='SELL'
+          AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+    """
     try:
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty
-            FROM orders
-            WHERE symbol=?
-              AND side='SELL'
-              AND status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
-            """,
-            (str(pair),),
-        ).fetchone()
+        row = conn.execute(query_with_symbol, (str(pair),)).fetchone()
     except sqlite3.OperationalError:
-        return 0.0
+        try:
+            row = conn.execute(query_without_symbol).fetchone()
+        except sqlite3.OperationalError:
+            return 0.0
     if row is None:
         return 0.0
     try:
