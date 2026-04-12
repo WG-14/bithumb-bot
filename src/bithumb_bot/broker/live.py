@@ -3369,6 +3369,8 @@ def live_execute_signal(
         reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
         harmless_dust_checked = False
         effective_rules = _effective_order_rules(settings.PAIR).rules
+        canonical_sell: _CanonicalSellExecutionView | None = None
+        diagnostic_sell_qty: _SellDiagnosticQtyView | None = None
 
         normalized_exposure = build_normalized_exposure(
             raw_qty_open=float(open_exposure_qty),
@@ -3933,33 +3935,27 @@ def live_execute_signal(
             ):
                 conn.commit()
                 return None
-            if side == "SELL" and _record_sell_dust_unsellable(
+            if (
+                side == "SELL"
+                and canonical_sell is not None
+                and diagnostic_sell_qty is not None
+                and _record_sell_dust_unsellable(
                 conn=conn,
                 state=state,
                 ts=int(ts),
                 market_price=float(market_price),
-                canonical_sell=_CanonicalSellExecutionView(
-                    sellable_executable_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+                canonical_sell=replace(
+                    canonical_sell,
                     sellable_executable_qty=float(requested_order_qty),
-                    exit_allowed=False,
-                    exit_block_reason=str(decision_observability.get("exit_block_reason") or "").strip(),
-                    submit_qty_source=str(submit_qty_source or ""),
-                    position_state_source=str(decision_observability["position_state_source"]),
                 ),
-                diagnostic_qty=_SellDiagnosticQtyView(
-                    observed_position_qty=float(requested_order_qty),
-                    observed_position_qty_source=str(submit_qty_source or ""),
-                    raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
-                    open_exposure_qty=float(decision_observability["open_exposure_qty"]),
-                    dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
-                ),
+                diagnostic_qty=diagnostic_sell_qty,
                 decision_observability=decision_observability,
                 strategy_name=(strategy_name or settings.STRATEGY_NAME),
                 decision_id=decision_id,
                 decision_reason=decision_reason,
                 exit_rule_name=exit_rule_name,
                 dust_details=e.details,
-            ):
+            )):
                 conn.commit()
                 return None
             RUN_LOG.info(
@@ -4011,32 +4007,26 @@ def live_execute_signal(
             ):
                 conn.commit()
                 return None
-            if side == "SELL" and _record_sell_dust_unsellable(
+            if (
+                side == "SELL"
+                and canonical_sell is not None
+                and diagnostic_sell_qty is not None
+                and _record_sell_dust_unsellable(
                 conn=conn,
                 state=state,
                 ts=int(ts),
                 market_price=float(market_price),
-                canonical_sell=_CanonicalSellExecutionView(
-                    sellable_executable_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+                canonical_sell=replace(
+                    canonical_sell,
                     sellable_executable_qty=float(requested_order_qty),
-                    exit_allowed=False,
-                    exit_block_reason=str(decision_observability.get("exit_block_reason") or "").strip(),
-                    submit_qty_source=str(submit_qty_source or ""),
-                    position_state_source=str(decision_observability["position_state_source"]),
                 ),
-                diagnostic_qty=_SellDiagnosticQtyView(
-                    observed_position_qty=float(requested_order_qty),
-                    observed_position_qty_source=str(submit_qty_source or ""),
-                    raw_total_asset_qty=float(decision_observability["raw_total_asset_qty"]),
-                    open_exposure_qty=float(decision_observability["open_exposure_qty"]),
-                    dust_tracking_qty=float(decision_observability["dust_tracking_qty"]),
-                ),
+                diagnostic_qty=diagnostic_sell_qty,
                 decision_observability=decision_observability,
                 strategy_name=(strategy_name or settings.STRATEGY_NAME),
                 decision_id=decision_id,
                 decision_reason=decision_reason,
                 exit_rule_name=exit_rule_name,
-            ):
+            )):
                 conn.commit()
                 return None
             RUN_LOG.info(
