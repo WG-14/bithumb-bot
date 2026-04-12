@@ -1936,6 +1936,23 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
             ) VALUES (1, 1000000.0, 0.05, 1000000.0, 0.0, 0.05, 0.0)
             """
         )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "panic_flatten_lot", now_ms - 10_000, 100_000_000.0, 0.05, 1, 0, "lot-native", "open_exposure"),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -5246,6 +5263,23 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
             ) VALUES (1, 1000000.0, 0.01, 1000000.0, 0.0, 0.01, 0.0)
             """
         )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "flatten_submit_failure", 1_700_000_000_000, 100_000_000.0, 0.01, 1, 0, "lot-native", "open_exposure"),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -5290,6 +5324,23 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
                 id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
             ) VALUES (1, 1000000.0, 0.015, 1000000.0, 0.0, 0.015, 0.0)
             """
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "flatten_validation_failure", 1_700_000_000_000, 100_000_000.0, 0.015, 1, 0, "lot-native", "open_exposure"),
         )
         conn.commit()
     finally:
@@ -5337,6 +5388,23 @@ def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, ca
                 id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
             ) VALUES (1, 1000000.0, 0.015, 1000000.0, 0.0, 0.015, 0.0)
             """
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "flatten_invalid_quote", 1_700_000_000_000, 100_000_000.0, 0.015, 1, 0, "lot-native", "open_exposure"),
         )
         conn.commit()
     finally:

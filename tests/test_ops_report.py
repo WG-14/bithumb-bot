@@ -1074,7 +1074,7 @@ def test_ops_report_includes_sell_suppression_category(tmp_path, monkeypatch, ca
     assert "open_exposure_qty=" in out
     assert "dust_tracking_qty=0.00009563" in out
     assert "harmless_dust_tracked_resume_allowed" in out
-    assert "sell_qty_basis_qty=" not in out
+    assert " sell_qty_basis_qty=" not in out
     assert "submit_qty_source=" not in out
     assert "sell_submit_qty_source=" not in out
     assert "sell_submit_lot_source=" not in out

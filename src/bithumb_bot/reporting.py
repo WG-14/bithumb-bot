@@ -1097,6 +1097,8 @@ def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> 
             COALESCE(
                 json_extract(context_json, '$.observed_sell_qty_basis_qty'),
                 json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
                 0.0
             ) AS sell_qty_basis_qty,
             COALESCE(

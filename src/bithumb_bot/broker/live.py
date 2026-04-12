@@ -1469,6 +1469,7 @@ def _record_sell_dust_unsellable(
     exit_rule_name: str | None,
     dust_details: dict[str, float | int | str] | None = None,
     decision_observability: dict[str, object],
+    allow_decision_suppression: bool = True,
 ) -> bool:
     canonical_submit_lot_source = _require_canonical_sell_submit_lot_source(
         submit_qty_source=canonical_sell.submit_qty_source,
@@ -1499,7 +1500,10 @@ def _record_sell_dust_unsellable(
         )
         else ""
     ).strip()
-    suppress_as_decision = exit_non_executable_reason in {"dust_only_remainder", "no_executable_exit_lot"}
+    suppress_as_decision = allow_decision_suppression and exit_non_executable_reason in {
+        "dust_only_remainder",
+        "no_executable_exit_lot",
+    }
     reason_code = DUST_RESIDUAL_SUPPRESSED if suppress_as_decision else DUST_RESIDUAL_UNSELLABLE
     sell_failure_category = _classify_sell_failure_category(
         reason_code=reason_code,
@@ -3555,10 +3559,12 @@ def live_execute_signal(
             submit_qty_source = str(entry_sizing.qty_source)
 
         elif signal == "SELL":
+            # Qty-only holdings may be interpreted as dust diagnostically, but they do not
+            # become canonical SELL authority or "decision-suppressed" lot-native state.
             has_lot_native_sell_state = any(
                 (
-                    int(normalized_exposure.open_lot_count) > 0,
-                    int(normalized_exposure.dust_tracking_lot_count) > 0,
+                    int(position_snapshot.open_lot_count) > 0,
+                    int(position_snapshot.dust_tracking_lot_count) > 0,
                     int(normalized_exposure.reserved_exit_lot_count) > 0,
                     int(normalized_exposure.sellable_executable_lot_count) > 0,
                 )
@@ -3630,6 +3636,7 @@ def live_execute_signal(
                         decision_id=decision_id,
                         decision_reason=decision_reason,
                         exit_rule_name=exit_rule_name,
+                        allow_decision_suppression=has_lot_native_sell_state,
                     ):
                         conn.commit()
                     RUN_LOG.info(
@@ -3781,6 +3788,7 @@ def live_execute_signal(
                     decision_id=decision_id,
                     decision_reason=decision_reason,
                     exit_rule_name=exit_rule_name,
+                    allow_decision_suppression=has_lot_native_sell_state,
                     ):
                     conn.commit()
                     return None

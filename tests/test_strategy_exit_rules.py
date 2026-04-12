@@ -28,8 +28,9 @@ def _insert_open_position_lot(conn, *, entry_ts: int, entry_price: float, qty_op
         """
         INSERT INTO open_position_lots(
             pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts,
-            entry_price, qty_open, entry_fee_total, strategy_name, entry_decision_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            entry_price, qty_open, executable_lot_count, dust_tracking_lot_count,
+            position_semantic_basis, position_state, entry_fee_total, strategy_name, entry_decision_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             settings.PAIR,
@@ -39,6 +40,10 @@ def _insert_open_position_lot(conn, *, entry_ts: int, entry_price: float, qty_op
             int(entry_ts),
             float(entry_price),
             float(qty_open),
+            1,
+            0,
+            "lot-native",
+            "open_exposure",
             0.0,
             "sma_cross",
             None,
