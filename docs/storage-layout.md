@@ -42,93 +42,83 @@ Classification examples:
 
 ## Required Layout
 
-Use the following runtime root structure:
+The storage contract is defined per managed root, not as one required shared tree.
+
+Managed roots:
+
+- `ENV_ROOT`
+- `RUN_ROOT`
+- `DATA_ROOT`
+- `LOG_ROOT`
+- `BACKUP_ROOT`
+- `ARCHIVE_ROOT` when archive storage is enabled
+
+Current live contract:
+
+- Every managed live root must be explicitly set to an absolute path.
+- Live managed roots must be repository-external.
+- Live managed roots must not overlap.
+- Live managed roots must not have parent/child relationships with one another.
+- Managed roots themselves must stay mode-neutral; `paper`, `live`, and `dryrun` are not valid root path segments for the root directories.
+
+Bucket structure is resolved relative to each managed root:
 
 ```text
-RUNTIME_ROOT/
-  env/
-    paper.env
-    live.env
+ENV_ROOT/
+  paper.env
+  live.env
 
-  run/
-    paper/
-      bithumb-bot.pid
-      bithumb-bot.lock
-      heartbeat.json
-    live/
-      bithumb-bot.pid
-      bithumb-bot.lock
-      heartbeat.json
+RUN_ROOT/
+  paper/
+    bithumb-bot.pid
+    bithumb-bot.lock
+    runtime_state.json
+  live/
+    bithumb-bot.pid
+    bithumb-bot.lock
+    runtime_state.json
 
-  data/
-    paper/
-      raw/
-        market/
-        broker/
-        snapshots/
-      derived/
-        indicators/
-        features/
-        validation/
-      trades/
-        paper.sqlite
-        orders/
-        fills/
-        balances/
-        reconcile/
-      reports/
-        ops/
-        strategy/
-        pnl/
-    live/
-      raw/
-        market/
-        broker/
-        snapshots/
-      derived/
-        indicators/
-        features/
-        validation/
-      trades/
-        live.sqlite
-        orders/
-        fills/
-        balances/
-        reconcile/
-      reports/
-        ops/
-        strategy/
-        pnl/
+DATA_ROOT/
+  paper/
+    raw/
+    derived/
+    trades/
+      paper.sqlite
+    reports/
+  live/
+    raw/
+    derived/
+    trades/
+      live.sqlite
+    reports/
 
-  logs/
-    paper/
-      app/
-      strategy/
-      orders/
-      fills/
-      errors/
-      audit/
-    live/
-      app/
-      strategy/
-      orders/
-      fills/
-      errors/
-      audit/
+LOG_ROOT/
+  paper/
+    app/
+    strategy/
+    orders/
+    fills/
+    errors/
+    audit/
+  live/
+    app/
+    strategy/
+    orders/
+    fills/
+    errors/
+    audit/
 
-  backup/
-    paper/
-      db/
-      configs/
-      snapshots/
-    live/
-      db/
-      configs/
-      snapshots/
+BACKUP_ROOT/
+  paper/
+    db/
+    snapshots/
+  live/
+    db/
+    snapshots/
 
-  archive/
-    paper/
-    live/
+ARCHIVE_ROOT/
+  paper/
+  live/
 ```
 
 ## Allowed Overrides
@@ -171,27 +161,28 @@ Path creation and path resolution must use the shared path layer:
 
 ## Runtime Roots
 
-Recommended runtime roots:
+Recommended live/runtime shape: choose separate absolute roots and pass them through the managed env vars.
+
+Example:
 
 ```text
-/var/lib/bithumb-bot/
+ENV_ROOT=/var/lib/bithumb-bot/env
+RUN_ROOT=/var/lib/bithumb-bot/run
+DATA_ROOT=/var/lib/bithumb-bot/data
+LOG_ROOT=/var/log/bithumb-bot
+BACKUP_ROOT=/var/backups/bithumb-bot
+ARCHIVE_ROOT=/srv/bithumb-bot-archive
 ```
 
-Alternative:
-
-```text
-/home/<run-user>/trading-bot-runtime/
-```
-
-The repository should refer to these roots through `RUNTIME_ROOT` and the managed env variables.
+These examples are illustrative locations only. The contract is the managed-root separation and the mode-relative bucket structure, not a single required parent directory.
 
 ## File Placement Examples
 
 ### env
 
 ```text
-RUNTIME_ROOT/env/paper.env
-RUNTIME_ROOT/env/live.env
+ENV_ROOT/paper.env
+ENV_ROOT/live.env
 ```
 
 GitHub stores only `.env.example`. Real API keys, webhook secrets, and DB paths belong in runtime env files.
@@ -199,22 +190,22 @@ GitHub stores only `.env.example`. Real API keys, webhook secrets, and DB paths 
 ### run
 
 ```text
-RUNTIME_ROOT/run/live/bithumb-bot.lock
-RUNTIME_ROOT/run/live/bithumb-bot.pid
-RUNTIME_ROOT/run/live/heartbeat.json
+RUN_ROOT/live/bithumb-bot.lock
+RUN_ROOT/live/bithumb-bot.pid
+RUN_ROOT/live/runtime_state.json
 ```
 
-The run lock must live under `run/<mode>/`.
+The run lock must live under `RUN_ROOT/<mode>/`.
 Do not invent a `data/locks/` or similar alternate lock path.
 
 ### trades
 
 ```text
-RUNTIME_ROOT/data/live/trades/live.sqlite
-RUNTIME_ROOT/data/live/trades/orders/orders_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/fills/fills_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/balances/balance_snapshots_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/reconcile/reconcile_2026-03-30.jsonl
+DATA_ROOT/live/trades/live.sqlite
+DATA_ROOT/live/trades/orders/orders_2026-03-30.jsonl
+DATA_ROOT/live/trades/fills/fills_2026-03-30.jsonl
+DATA_ROOT/live/trades/balance_snapshots/balance_snapshots_2026-03-30.jsonl
+DATA_ROOT/live/trades/reconcile_events/reconcile_events_2026-03-30.jsonl
 ```
 
 Use SQLite for stateful ledgers and JSONL append-only files for live evidence.
@@ -222,9 +213,9 @@ Use SQLite for stateful ledgers and JSONL append-only files for live evidence.
 ### reports
 
 ```text
-RUNTIME_ROOT/data/live/reports/ops/ops_report_2026-03-30T090000KST.txt
-RUNTIME_ROOT/data/live/reports/strategy/strategy_report_2026-03-30.json
-RUNTIME_ROOT/data/live/reports/market_catalog_diff/market_catalog_diff_2026-03-30.jsonl
+DATA_ROOT/live/reports/ops_report/ops_report_2026-03-30.json
+DATA_ROOT/live/reports/strategy_validation/strategy_validation_2026-03-30.json
+DATA_ROOT/live/reports/recovery_report/recovery_report_2026-03-30.json
 ```
 
 Reports are operator-readable outputs. Keep them separate from general logs.
@@ -232,11 +223,11 @@ Reports are operator-readable outputs. Keep them separate from general logs.
 ### logs
 
 ```text
-RUNTIME_ROOT/logs/live/app/app_2026-03-30.log
-RUNTIME_ROOT/logs/live/strategy/strategy_2026-03-30.log
-RUNTIME_ROOT/logs/live/orders/orders_2026-03-30.log
-RUNTIME_ROOT/logs/live/errors/error_2026-03-30.log
-RUNTIME_ROOT/logs/live/audit/audit_2026-03-30.log
+LOG_ROOT/live/app/app_2026-03-30.log
+LOG_ROOT/live/strategy/strategy_2026-03-30.log
+LOG_ROOT/live/orders/orders_2026-03-30.log
+LOG_ROOT/live/errors/errors_2026-03-30.log
+LOG_ROOT/live/audit/audit_2026-03-30.log
 ```
 
 Keep log kinds separated. Valid log kinds are `app`, `strategy`, `orders`, `fills`, `errors`, and `audit`.
@@ -244,9 +235,8 @@ Keep log kinds separated. Valid log kinds are `app`, `strategy`, `orders`, `fill
 ### backup
 
 ```text
-RUNTIME_ROOT/backup/live/db/live.sqlite.20260330_120000.sqlite
-RUNTIME_ROOT/backup/live/configs/live.env.20260330_120000.redacted
-RUNTIME_ROOT/backup/live/snapshots/runtime_snapshot_20260330_120000.tar.gz
+BACKUP_ROOT/live/db/live.sqlite.20260330_120000.sqlite
+BACKUP_ROOT/live/snapshots/runtime_snapshot_20260330_120000.tar.gz
 ```
 
 Backups are mode-specific. Do not let paper and live share backup storage.
@@ -263,11 +253,6 @@ Backups are mode-specific. Do not let paper and live share backup storage.
 - Live is for real orders and recovery-critical evidence.
 - Live requires explicit DB path configuration, notifier readiness, risk-limit configuration, and arming requirements.
 - Live paths must be absolute, repository-external, and mode-correct.
-
-### dryrun
-
-- If a dry-run mode exists, it must not share paper or live storage.
-- Dry-run may use a separate layout only if it is explicitly isolated from both modes.
 
 ## Storage Formats
 

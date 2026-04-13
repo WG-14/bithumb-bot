@@ -80,12 +80,15 @@ Record the following fields:
 
 ## 9. Dust Residual vs Unresolved Order
 
+- Read lot-native exit authority before interpreting any dust field:
+  `sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_block_reason`, and the normalized/open exposure fields are the canonical exit decision layer.
 - `harmless_dust`: broker/local remainder is matched closely enough to be policy-classified as harmless dust. It can still be a real BTC remainder.
-- `unsafe dust` / `mismatch dust`: a dust-like remainder that is not policy-approved to resume, including broker/local mismatch or recovery-unclear residue.
+- `blocking_dust`: the remainder is not policy-approved to resume and requires operator review. Older metadata may still normalize legacy policy reasons, but `blocking_dust` is the current canonical state name.
 - `effective flat`: the strategy may treat the residual as flat for BUY entry. This is not a literal zero-balance claim.
 - `dust_state=harmless_dust` means the remainder may be resume-safe only when the policy also allows resume and new orders.
-- `dust_state=dangerous_dust` means the remainder is not safely resumable. Treat it as operator-review required.
+- `dust_state=blocking_dust` means the remainder is not safely resumable. Treat it as operator-review required.
 - `unresolved_count > 0` or `recovery_required_count > 0` means the problem is still recovery-related, not dust-only.
+- Do not infer SELL or exit authority from `dust_state` alone.
 - Do not restart immediately after a manual app sell until `health`, `recovery-report`, and `ops-report` are re-run.
 - If the remaining quantity is below exchange minimums, confirm both quantity and notional minimums before trying another liquidation.
 
@@ -104,4 +107,4 @@ Use this order when you need to reason about a live incident:
 2. `recovery-report`
 3. `ops-report --limit 20`
 
-Note: If the above three outputs disagree, treat the discrepancy as a recovery task, not as a cosmetic issue.
+Within those outputs, read lot-native exit authority first and dust fields second. If the above three outputs disagree, treat the discrepancy as a recovery task, not as a cosmetic issue.

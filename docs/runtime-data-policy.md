@@ -213,6 +213,17 @@ All path resolution must go through the shared path layer:
 
 Path locations are configuration. Path structure rules are code.
 
+Managed root location rules:
+
+- `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, and `BACKUP_ROOT` are separate managed roots.
+- `ARCHIVE_ROOT` is a separate managed root when archive storage is enabled.
+- Bucket classification stays the same regardless of where the managed roots are mounted.
+- Live managed roots must be absolute paths.
+- Live managed roots must be repository-external.
+- Live managed roots must not overlap.
+- Live managed roots must not have parent/child relationships with one another.
+- Managed roots themselves must stay mode-neutral; mode scoping happens below the root in paths such as `RUN_ROOT/<mode>/...` and `DATA_ROOT/<mode>/...`.
+
 Live mode requirements:
 
 - Use absolute paths only
@@ -248,11 +259,6 @@ These overrides must remain compatible with the storage contract:
 - Live is for real orders and recovery-critical evidence.
 - Live requires explicit preflight checks, notifier readiness, live arming requirements, and mode-correct paths.
 - Live failures must fail fast rather than continue ambiguously.
-
-### dryrun
-
-- A dry-run mode, if present, must not share paper or live storage.
-- Dry-run should use its own isolated storage roots.
 
 ## Operator Evidence
 
