@@ -712,6 +712,7 @@ def test_ops_report_keeps_dust_detail_when_reconcile_metadata_is_trimmed(tmp_pat
         "flat_start_effective_flat("
         "state=harmless_dust broker_qty=0.00009193 local_qty=0.00009193 "
         "delta_qty=0.00000000 min_qty=0.00010000 min_notional_krw=5000.0 "
+        "dust_threshold_basis=below_min_qty_only "
         "qty_below_min(broker=1 local=1) notional_below_min(broker=0 local=0) "
         "broker_local_match=1 operator_action=harmless_dust_tracked_resume_allowed "
         "new_orders_allowed=1 resume_allowed=1 treat_as_flat=1)"
@@ -810,6 +811,93 @@ def test_ops_report_includes_recent_decision_flow_truth_sources(tmp_path, monkey
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     assert payload["recent_decision_flow"][0]["sell_submit_lot_count"] == 0
     assert _collect_residue_paths(payload["recent_decision_flow"]) == []
+
+
+def test_ops_report_surfaces_compact_position_authority_summary_for_dust_only_recovery_block(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = str(tmp_path / "ops-report-position-authority-dust-recovery.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {"source": "accounts_v1_rest_snapshot", "reason": "ok"},
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "dust_residual_present": 1,
+                "dust_state": "blocking_dust",
+                "dust_broker_qty": 0.00009,
+                "dust_local_qty": 0.00009,
+                "dust_delta_qty": 0.0,
+                "dust_min_qty": 0.0001,
+                "dust_min_notional_krw": 5000.0,
+                "dust_broker_qty_is_dust": 1,
+                "dust_local_qty_is_dust": 1,
+                "dust_broker_notional_is_dust": 1,
+                "dust_local_notional_is_dust": 1,
+                "dust_qty_gap_small": 1,
+            },
+            now_epoch_sec=1000.0,
+        )
+        conn.execute(
+            """
+            INSERT INTO orders(
+                client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            ("needs-recovery", None, "RECOVERY_REQUIRED", "BUY", 100000000.0, 0.00009, 0.0, 10, 10),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    evaluate_startup_safety_gate()
+    cmd_ops_report(limit=1)
+    out = capsys.readouterr().out
+
+    assert (
+        "position_authority_summary=holding_authority_state=dust_only "
+        "recovery_blocked=1 recovery_block_reason=recovery_required_and_unresolved_orders_present"
+    ) in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    summary = payload["operator_recovery_summary"]
+    assert (
+        summary["position_authority_summary"]
+        == "holding_authority_state=dust_only recovery_blocked=1 "
+        "recovery_block_reason=recovery_required_and_unresolved_orders_present has_executable_exposure=0 "
+        "has_dust_only_remainder=1 sellable_executable_lot_count=0"
+    )
 
 
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):

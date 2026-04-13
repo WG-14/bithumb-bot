@@ -348,6 +348,62 @@ def test_dust_operator_view_keeps_summary_and_detail_consistent(
     assert "broker_local_match=1" in view.compact_summary
 
 
+@pytest.mark.parametrize(
+    ("broker_qty", "local_qty", "latest_price", "expected_basis"),
+    [
+        (0.00009629, 0.00009629, 100_000_000.0, "below_min_qty_only"),
+        (0.0002, 0.0002, 10_000_000.0, "below_min_notional_only"),
+        (0.00009629, 0.00009629, 40_000_000.0, "below_min_qty_and_notional"),
+        (0.0002, 0.0002, 40_000_000.0, "neither"),
+    ],
+    ids=["qty_only", "notional_only", "both", "neither"],
+)
+def test_dust_surfaces_explicit_threshold_basis(
+    broker_qty: float,
+    local_qty: float,
+    latest_price: float,
+    expected_basis: str,
+) -> None:
+    dust = classify_dust_residual(
+        broker_qty=broker_qty,
+        local_qty=local_qty,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=latest_price,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+    context = build_dust_display_context(dust)
+
+    assert context.operator_view.threshold_basis == expected_basis
+    assert context.raw_holdings.threshold_basis == expected_basis
+    assert context.fields["dust_threshold_basis"] == expected_basis
+    assert context.raw_holdings.as_dict()["dust_threshold_basis"] == expected_basis
+    assert f"dust_threshold_basis={expected_basis}" in context.compact_summary
+
+
+def test_matched_harmless_dust_preserves_explicit_threshold_basis_in_surfaced_output() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009629,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+    context = build_dust_display_context(dust)
+
+    assert context.classification.classification == "harmless_dust"
+    assert context.operator_view.threshold_basis == "below_min_qty_and_notional"
+    assert context.fields["dust_threshold_basis"] == "below_min_qty_and_notional"
+    assert context.raw_holdings.as_dict()["dust_threshold_basis"] == "below_min_qty_and_notional"
+
+
 def test_dust_display_context_exposes_effective_flat_due_to_harmless_dust() -> None:
     context = build_dust_display_context(
         classify_dust_residual(
@@ -673,9 +729,49 @@ def test_position_state_model_interprets_dust_only_as_state_layer_no_submit_outc
     )
 
     assert model.normalized_exposure.terminal_state == "dust_only"
+    assert model.normalized_exposure.as_dict()["entry_gate_effective_flat"] is True
+    assert model.normalized_exposure.as_dict()["holding_authority_state"] == "dust_only"
     assert model.state_interpretation.operator_outcome == "tracked_unsellable_residual"
     assert model.state_interpretation.exit_submit_expected is False
     assert "HOLD/no-submit outcome" in model.state_interpretation.operator_message
+
+
+def test_position_state_model_surfaces_effective_flat_as_entry_gate_only_for_harmless_dust() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009563,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=100_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+
+    model = build_position_state_model(
+        raw_qty_open=0.0,
+        metadata_raw=dust,
+        raw_total_asset_qty=0.00019192,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00009563,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=100_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    surfaced = model.normalized_exposure.as_dict()
+
+    assert surfaced["effective_flat"] is True
+    assert surfaced["entry_gate_effective_flat"] is True
+    assert surfaced["holding_authority_state"] == "dust_only"
+    assert surfaced["has_any_position_residue"] is True
+    assert surfaced["has_executable_exposure"] is False
 
 
 def test_position_state_model_interprets_non_executable_open_exposure_as_active_residue() -> None:
@@ -716,6 +812,178 @@ def test_position_state_model_interprets_non_executable_open_exposure_as_active_
     assert model.state_interpretation.operator_outcome == "executable_open_exposure"
     assert model.state_interpretation.exit_submit_expected is True
     assert "sellable lots" in model.state_interpretation.operator_message.lower()
+
+
+def test_position_state_model_reports_dust_only_recovery_block_on_authority_surface() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.00009,
+        metadata_raw={
+            "dust_residual_present": 1,
+            "dust_state": "blocking_dust",
+            "dust_broker_qty": 0.00009,
+            "dust_local_qty": 0.00009,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_qty_gap_small": 1,
+            "unresolved_open_order_count": 1,
+            "recovery_required_count": 1,
+        },
+        raw_total_asset_qty=0.00009,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00009,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    authority = model.normalized_exposure
+
+    assert authority.terminal_state == "dust_only"
+    assert authority.has_dust_only_remainder is True
+    assert authority.has_executable_exposure is False
+    assert authority.recovery_blocked is True
+    assert authority.recovery_block_reason == "recovery_required_and_unresolved_orders_present"
+    assert authority.unresolved_order_count == 1
+    assert authority.recovery_required_count == 1
+    assert authority.as_dict()["recovery_blocked"] is True
+
+
+def test_position_state_model_reports_executable_exposure_recovery_block_on_authority_surface() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0002,
+        metadata_raw={
+            "dust_residual_present": 0,
+            "unresolved_open_order_count": 2,
+            "recovery_required_count": 1,
+        },
+        raw_total_asset_qty=0.0002,
+        open_exposure_qty=0.0002,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0,
+        open_lot_count=2,
+        dust_tracking_lot_count=0,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    authority = model.normalized_exposure
+
+    assert authority.terminal_state == "open_exposure"
+    assert authority.has_executable_exposure is True
+    assert authority.sellable_executable_lot_count == 2
+    assert authority.recovery_blocked is True
+    assert authority.recovery_block_reason == "recovery_required_and_unresolved_orders_present"
+    assert authority.unresolved_order_count == 2
+    assert authority.recovery_required_count == 1
+
+
+def test_position_state_model_surfaces_compact_position_authority_summary_for_executable_exposure() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0002,
+        metadata_raw={
+            "dust_residual_present": 0,
+            "dust_policy_reason": "no_dust_residual",
+        },
+        raw_total_asset_qty=0.0002,
+        open_exposure_qty=0.0002,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0,
+        open_lot_count=2,
+        dust_tracking_lot_count=0,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    assert (
+        model.normalized_exposure.position_authority_summary
+        == "holding_authority_state=open_exposure recovery_blocked=0 "
+        "recovery_block_reason=none has_executable_exposure=1 "
+        "has_dust_only_remainder=0 sellable_executable_lot_count=2"
+    )
+    assert (
+        model.normalized_exposure.as_dict()["position_authority_summary"]
+        == model.normalized_exposure.position_authority_summary
+    )
+
+
+def test_position_state_model_clears_recovery_block_without_changing_authority_classification() -> None:
+    blocked = build_position_state_model(
+        raw_qty_open=0.00009,
+        metadata_raw={
+            "dust_residual_present": 1,
+            "dust_state": "blocking_dust",
+            "dust_broker_qty": 0.00009,
+            "dust_local_qty": 0.00009,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_qty_gap_small": 1,
+            "unresolved_open_order_count": 1,
+            "recovery_required_count": 1,
+        },
+        raw_total_asset_qty=0.00009,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00009,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    cleared = build_position_state_model(
+        raw_qty_open=0.00009,
+        metadata_raw={
+            "dust_residual_present": 1,
+            "dust_state": "blocking_dust",
+            "dust_broker_qty": 0.00009,
+            "dust_local_qty": 0.00009,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_qty_gap_small": 1,
+            "unresolved_open_order_count": 0,
+            "recovery_required_count": 0,
+        },
+        raw_total_asset_qty=0.00009,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00009,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    assert blocked.normalized_exposure.terminal_state == cleared.normalized_exposure.terminal_state == "dust_only"
+    assert blocked.normalized_exposure.has_dust_only_remainder is True
+    assert cleared.normalized_exposure.has_dust_only_remainder is True
+    assert blocked.normalized_exposure.recovery_blocked is True
+    assert cleared.normalized_exposure.recovery_blocked is False
+    assert cleared.normalized_exposure.recovery_block_reason == "none"
 
 
 def test_position_lot_snapshot_exposes_explicit_quantities_for_recovery_and_ops() -> None:

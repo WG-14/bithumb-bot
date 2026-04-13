@@ -35,6 +35,8 @@ class CanonicalPositionExposureSnapshot:
     dust_classification: str
     entry_allowed: bool
     effective_flat: bool
+    entry_gate_effective_flat: bool
+    holding_authority_state: str
     raw_qty_open: float
     raw_total_asset_qty: float
     position_qty: float
@@ -45,6 +47,10 @@ class CanonicalPositionExposureSnapshot:
     has_any_position_residue: bool
     has_non_executable_residue: bool
     has_dust_only_remainder: bool
+    recovery_blocked: bool
+    recovery_block_reason: str
+    unresolved_order_count: int
+    recovery_required_count: int
     open_exposure_qty: float
     dust_tracking_qty: float
     open_lot_count: int
@@ -757,6 +763,84 @@ def resolve_canonical_position_exposure_snapshot(
         ),
         value_kind="bool",
     )
+    unresolved_order_count, _ = _resolve_int_with_source(
+        (
+            "position_state.normalized_exposure.unresolved_order_count",
+            position_normalized.get("unresolved_order_count"),
+        ),
+        ("position_state.unresolved_order_count", position_state.get("unresolved_order_count")),
+        ("context.unresolved_order_count", payload.get("unresolved_order_count")),
+        (
+            "context.unresolved_open_order_count",
+            payload.get("unresolved_open_order_count"),
+        ),
+        (
+            "position_gate.unresolved_order_count",
+            position_gate.get("unresolved_order_count"),
+        ),
+        (
+            "position_gate.unresolved_open_order_count",
+            position_gate.get("unresolved_open_order_count"),
+        ),
+        default_value=0,
+        default_source="default:0",
+    )
+    recovery_required_count, _ = _resolve_int_with_source(
+        (
+            "position_state.normalized_exposure.recovery_required_count",
+            position_normalized.get("recovery_required_count"),
+        ),
+        (
+            "position_state.recovery_required_count",
+            position_state.get("recovery_required_count"),
+        ),
+        (
+            "context.recovery_required_count",
+            payload.get("recovery_required_count"),
+        ),
+        (
+            "position_gate.recovery_required_count",
+            position_gate.get("recovery_required_count"),
+        ),
+        default_value=0,
+        default_source="default:0",
+    )
+    recovery_blocked, _ = _resolve_with_source(
+        (
+            "position_state.normalized_exposure.recovery_blocked",
+            position_normalized.get("recovery_blocked"),
+        ),
+        ("position_state.recovery_blocked", position_state.get("recovery_blocked")),
+        ("context.recovery_blocked", payload.get("recovery_blocked")),
+        ("position_gate.recovery_blocked", position_gate.get("recovery_blocked")),
+        default_value=bool(unresolved_order_count > 0 or recovery_required_count > 0),
+        default_source=(
+            "fallback:recovery_counts"
+            if unresolved_order_count > 0 or recovery_required_count > 0
+            else "default:false"
+        ),
+        value_kind="bool",
+    )
+    derived_recovery_block_reason = "none"
+    if recovery_required_count > 0 and unresolved_order_count > 0:
+        derived_recovery_block_reason = "recovery_required_and_unresolved_orders_present"
+    elif recovery_required_count > 0:
+        derived_recovery_block_reason = "recovery_required_present"
+    elif unresolved_order_count > 0:
+        derived_recovery_block_reason = "unresolved_orders_present"
+    recovery_block_reason = _as_text(
+        position_normalized.get(
+            "recovery_block_reason",
+            position_state.get(
+                "recovery_block_reason",
+                payload.get(
+                    "recovery_block_reason",
+                    position_gate.get("recovery_block_reason"),
+                ),
+            ),
+        ),
+        default=derived_recovery_block_reason,
+    )
     normalized_exposure_qty, normalized_exposure_qty_truth_source = _resolve_with_source(
         ("position_state.normalized_exposure_qty", position_state.get("normalized_exposure_qty")),
         (
@@ -823,11 +907,23 @@ def resolve_canonical_position_exposure_snapshot(
         sell_qty_boundary_kind = _as_text(position_normalized.get("sell_qty_boundary_kind"), default="")
     if not sell_qty_boundary_kind:
         sell_qty_boundary_kind = "none"
+    if int(open_lot_count) > 0 and int(reserved_exit_lot_count) > 0 and int(sellable_executable_lot_count) <= 0:
+        holding_authority_state = "reserved_exit_pending"
+    elif bool(has_executable_exposure):
+        holding_authority_state = "open_exposure"
+    elif bool(has_dust_only_remainder):
+        holding_authority_state = "dust_only"
+    elif bool(has_any_position_residue):
+        holding_authority_state = "non_executable_position"
+    else:
+        holding_authority_state = "flat"
 
     return CanonicalPositionExposureSnapshot(
         dust_classification=dust_classification,
         entry_allowed=bool(entry_allowed),
         effective_flat=bool(effective_flat),
+        entry_gate_effective_flat=bool(effective_flat),
+        holding_authority_state=holding_authority_state,
         raw_qty_open=float(raw_qty_open),
         raw_total_asset_qty=float(raw_total_asset_qty),
         position_qty=float(position_qty),
@@ -838,6 +934,10 @@ def resolve_canonical_position_exposure_snapshot(
         has_any_position_residue=bool(has_any_position_residue),
         has_non_executable_residue=bool(has_non_executable_residue),
         has_dust_only_remainder=bool(has_dust_only_remainder),
+        recovery_blocked=bool(recovery_blocked),
+        recovery_block_reason=recovery_block_reason,
+        unresolved_order_count=int(unresolved_order_count),
+        recovery_required_count=int(recovery_required_count),
         open_exposure_qty=float(open_exposure_qty),
         dust_tracking_qty=float(dust_tracking_qty),
         open_lot_count=int(open_lot_count),
@@ -932,6 +1032,8 @@ def normalize_strategy_decision_context(
     dust_classification = canonical_exposure.dust_classification
     entry_allowed = canonical_exposure.entry_allowed
     effective_flat = canonical_exposure.effective_flat
+    entry_gate_effective_flat = canonical_exposure.entry_gate_effective_flat
+    holding_authority_state = canonical_exposure.holding_authority_state
     raw_qty_open = canonical_exposure.raw_qty_open
     raw_total_asset_qty = canonical_exposure.raw_total_asset_qty
     position_qty = canonical_exposure.position_qty
@@ -942,6 +1044,10 @@ def normalize_strategy_decision_context(
     has_any_position_residue = canonical_exposure.has_any_position_residue
     has_non_executable_residue = canonical_exposure.has_non_executable_residue
     has_dust_only_remainder = canonical_exposure.has_dust_only_remainder
+    recovery_blocked = canonical_exposure.recovery_blocked
+    recovery_block_reason = canonical_exposure.recovery_block_reason
+    unresolved_order_count = canonical_exposure.unresolved_order_count
+    recovery_required_count = canonical_exposure.recovery_required_count
     open_exposure_qty = canonical_exposure.open_exposure_qty
     dust_tracking_qty = canonical_exposure.dust_tracking_qty
     open_lot_count = canonical_exposure.open_lot_count
@@ -989,6 +1095,8 @@ def normalize_strategy_decision_context(
         "entry_allowed": bool(entry_allowed),
         "entry_block_reason": entry_block_reason,
         "effective_flat": bool(effective_flat),
+        "entry_gate_effective_flat": bool(entry_gate_effective_flat),
+        "holding_authority_state": holding_authority_state,
         "raw_qty_open": float(raw_qty_open),
         "raw_total_asset_qty": float(raw_total_asset_qty),
         "position_qty": float(position_qty),
@@ -1001,6 +1109,10 @@ def normalize_strategy_decision_context(
         "has_any_position_residue": bool(has_any_position_residue),
         "has_non_executable_residue": bool(has_non_executable_residue),
         "has_dust_only_remainder": bool(has_dust_only_remainder),
+        "recovery_blocked": bool(recovery_blocked),
+        "recovery_block_reason": recovery_block_reason,
+        "unresolved_order_count": int(unresolved_order_count),
+        "recovery_required_count": int(recovery_required_count),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
         "open_lot_count": int(open_lot_count),
@@ -1037,6 +1149,8 @@ def normalize_strategy_decision_context(
     payload["entry_allowed"] = bool(entry_allowed)
     payload["entry_block_reason"] = entry_block_reason_text or entry_block_reason
     payload["effective_flat"] = bool(effective_flat)
+    payload["entry_gate_effective_flat"] = bool(entry_gate_effective_flat)
+    payload["holding_authority_state"] = holding_authority_state
     payload["raw_qty_open"] = float(raw_qty_open)
     payload["raw_total_asset_qty"] = float(raw_total_asset_qty)
     payload["position_qty"] = float(position_qty)
@@ -1049,6 +1163,10 @@ def normalize_strategy_decision_context(
     payload["has_any_position_residue"] = bool(has_any_position_residue)
     payload["has_non_executable_residue"] = bool(has_non_executable_residue)
     payload["has_dust_only_remainder"] = bool(has_dust_only_remainder)
+    payload["recovery_blocked"] = bool(recovery_blocked)
+    payload["recovery_block_reason"] = recovery_block_reason
+    payload["unresolved_order_count"] = int(unresolved_order_count)
+    payload["recovery_required_count"] = int(recovery_required_count)
     payload["open_exposure_qty"] = float(open_exposure_qty)
     payload["dust_tracking_qty"] = float(dust_tracking_qty)
     payload["open_lot_count"] = int(open_lot_count)
@@ -1113,14 +1231,20 @@ def normalize_strategy_decision_context(
         "dust_state": dust_classification,
         "entry_allowed": bool(entry_allowed),
         "effective_flat": bool(effective_flat),
+        "entry_gate_effective_flat": bool(entry_gate_effective_flat),
         "harmless_dust_effective_flat": bool(entry_allowed and dust_classification == "harmless_dust"),
         "effective_flat_due_to_harmless_dust": bool(entry_allowed and dust_classification == "harmless_dust"),
+        "holding_authority_state": holding_authority_state,
         "normalized_exposure_active": bool(normalized_exposure_active),
         "normalized_exposure_qty": float(normalized_exposure_qty),
         "has_executable_exposure": bool(has_executable_exposure),
         "has_any_position_residue": bool(has_any_position_residue),
         "has_non_executable_residue": bool(has_non_executable_residue),
         "has_dust_only_remainder": bool(has_dust_only_remainder),
+        "recovery_blocked": bool(recovery_blocked),
+        "recovery_block_reason": recovery_block_reason,
+        "unresolved_order_count": int(unresolved_order_count),
+        "recovery_required_count": int(recovery_required_count),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
         "open_lot_count": int(open_lot_count),

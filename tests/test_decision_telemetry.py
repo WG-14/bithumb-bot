@@ -299,6 +299,8 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     ctx = json.loads(str(row["context_json"]))
     assert ctx["entry_allowed"] is True
     assert ctx["effective_flat"] is True
+    assert ctx["entry_gate_effective_flat"] is True
+    assert ctx["holding_authority_state"] == "dust_only"
     assert ctx["normalized_exposure_active"] is False
     assert ctx["has_executable_exposure"] is False
     assert ctx["has_any_position_residue"] is True
@@ -318,6 +320,8 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["sell_open_exposure_qty"] == pytest.approx(0.0)
     assert ctx["sell_dust_tracking_qty"] == pytest.approx(0.00009563)
     assert ctx["position_state"]["normalized_exposure"]["entry_allowed"] is True
+    assert ctx["position_state"]["normalized_exposure"]["entry_gate_effective_flat"] is True
+    assert ctx["position_state"]["normalized_exposure"]["holding_authority_state"] == "dust_only"
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
     assert _collect_residue_paths(ctx) == []
 
@@ -812,6 +816,46 @@ def test_lot_native_gate_canonical_exposure_snapshot_keeps_reserved_exit_and_dus
     assert snapshot.sell_qty_basis_qty == pytest.approx(0.0)
     assert snapshot.sell_submit_lot_count == 0
     assert snapshot.exit_allowed is False
+
+
+def test_canonical_exposure_snapshot_surfaces_recovery_block_on_same_authority_object() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.00009,
+                    "raw_total_asset_qty": 0.00009,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.00009,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 1,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                    "reserved_exit_qty": 0.0,
+                    "sellable_executable_qty": 0.0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "dust_only_remainder",
+                    "normalized_exposure_qty": 0.0,
+                    "normalized_exposure_active": False,
+                    "entry_allowed": False,
+                    "effective_flat": False,
+                    "has_executable_exposure": False,
+                    "has_any_position_residue": True,
+                    "has_non_executable_residue": True,
+                    "has_dust_only_remainder": True,
+                    "unresolved_order_count": 1,
+                    "recovery_required_count": 1,
+                }
+            }
+        }
+    )
+
+    assert snapshot.has_dust_only_remainder is True
+    assert snapshot.has_executable_exposure is False
+    assert snapshot.recovery_blocked is True
+    assert snapshot.recovery_block_reason == "recovery_required_and_unresolved_orders_present"
+    assert snapshot.unresolved_order_count == 1
+    assert snapshot.recovery_required_count == 1
 
 
 @pytest.mark.lot_native_regression_gate

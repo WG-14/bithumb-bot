@@ -3583,11 +3583,26 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         },
         "run_lock": run_lock_status.as_dict(),
     }
-    dust_context = build_dust_display_context(health_row["last_reconcile_metadata"] if health_row else None)
+    reconcile_metadata_raw = health_row["last_reconcile_metadata"] if health_row else None
+    dust_context = build_dust_display_context(reconcile_metadata_raw)
+    position_metadata_raw: str | dict[str, object] | None = reconcile_metadata_raw
+    if isinstance(reconcile_metadata_raw, str):
+        try:
+            parsed_metadata = json.loads(reconcile_metadata_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_metadata = None
+        if isinstance(parsed_metadata, dict):
+            position_metadata_raw = parsed_metadata
+    if isinstance(position_metadata_raw, dict):
+        position_metadata_raw = {
+            **position_metadata_raw,
+            "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
+            "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
+        }
     portfolio_asset_qty = float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0
     position_state = build_position_state_model(
         raw_qty_open=portfolio_asset_qty,
-        metadata_raw=health_row["last_reconcile_metadata"] if health_row else None,
+        metadata_raw=position_metadata_raw,
         raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
         dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
         reserved_exit_qty=reserved_exit_qty,
@@ -3596,6 +3611,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     payload["operator_recovery_summary"] = {
         "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
         "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
+        "position_authority_summary": position_state.normalized_exposure.position_authority_summary,
         **dust_context.fields,
         "raw_holdings": position_state.raw_holdings.as_dict(),
         "normalized_exposure": position_state.normalized_exposure.as_dict(),
@@ -3670,6 +3686,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"dust_resume_allowed={1 if operator_recovery['dust_resume_allowed_by_policy'] else 0} "
         f"dust_treat_as_flat={1 if operator_recovery['dust_treat_as_flat'] else 0}"
     )
+    print(f"  position_authority_summary={operator_recovery['position_authority_summary']}")
     print(
         "  "
         f"raw_holdings_state={position_state.raw_holdings.state} "
@@ -3706,6 +3723,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"dust_min_qty={float(position_state.raw_holdings.min_qty):.8f} "
         f"dust_min_notional_krw={float(position_state.raw_holdings.min_notional_krw):.1f} "
         f"dust_broker_local_match={1 if position_state.raw_holdings.broker_local_match else 0} "
+        f"dust_threshold_basis={dust_context.fields['dust_threshold_basis']} "
         f"dust_qty_below_min={dust_context.qty_below_min_summary} "
         f"dust_notional_below_min={dust_context.notional_below_min_summary}"
     )

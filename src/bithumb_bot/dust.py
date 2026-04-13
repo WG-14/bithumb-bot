@@ -453,6 +453,13 @@ class DustOperatorView:
         )
 
     @property
+    def threshold_basis(self) -> str:
+        return dust_threshold_basis(
+            qty_below_min=bool(self.broker_qty_below_min or self.local_qty_below_min),
+            notional_below_min=bool(self.broker_notional_below_min or self.local_notional_below_min),
+        )
+
+    @property
     def compact_summary(self) -> str:
         return (
             f"state={self.state} "
@@ -461,6 +468,7 @@ class DustOperatorView:
             f"delta_qty={self.delta_qty:.8f} "
             f"min_qty={self.min_qty:.8f} "
             f"min_notional_krw={self.min_notional_krw:.1f} "
+            f"dust_threshold_basis={self.threshold_basis} "
             f"qty_below_min({self.qty_below_min_summary}) "
             f"notional_below_min({self.notional_below_min_summary}) "
             f"broker_local_match={1 if self.broker_local_match else 0} "
@@ -501,6 +509,13 @@ class RawHoldingsSnapshot:
         return bool(self.qty_gap_small)
 
     @property
+    def threshold_basis(self) -> str:
+        return dust_threshold_basis(
+            qty_below_min=bool(self.broker_qty_is_dust or self.local_qty_is_dust),
+            notional_below_min=bool(self.broker_notional_is_dust or self.local_notional_is_dust),
+        )
+
+    @property
     def compact_summary(self) -> str:
         return (
             f"state={self.state} "
@@ -509,6 +524,7 @@ class RawHoldingsSnapshot:
             f"delta_qty={self.delta_qty:.8f} "
             f"min_qty={self.min_qty:.8f} "
             f"min_notional_krw={self.min_notional_krw:.1f} "
+            f"dust_threshold_basis={self.threshold_basis} "
             f"qty_below_min(broker={1 if self.broker_qty_is_dust else 0} local={1 if self.local_qty_is_dust else 0}) "
             f"notional_below_min(broker={1 if self.broker_notional_is_dust else 0} local={1 if self.local_notional_is_dust else 0}) "
             f"broker_local_match={1 if self.broker_local_match else 0}"
@@ -537,6 +553,7 @@ class RawHoldingsSnapshot:
             "broker_notional_is_dust": bool(self.broker_notional_is_dust),
             "local_notional_is_dust": bool(self.local_notional_is_dust),
             "broker_local_match": bool(self.broker_local_match),
+            "dust_threshold_basis": self.threshold_basis,
             "compact_summary": self.compact_summary,
         }
 
@@ -636,6 +653,10 @@ class NormalizedExposure:
     has_any_position_residue: bool
     has_non_executable_residue: bool
     has_dust_only_remainder: bool
+    recovery_blocked: bool
+    recovery_block_reason: str
+    unresolved_order_count: int
+    recovery_required_count: int
     normalized_exposure_qty: float
 
     @property
@@ -698,6 +719,17 @@ class NormalizedExposure:
     def semantic_basis(self) -> str:
         return "lot-native"
 
+    @property
+    def position_authority_summary(self) -> str:
+        return (
+            f"holding_authority_state={self.terminal_state} "
+            f"recovery_blocked={1 if self.recovery_blocked else 0} "
+            f"recovery_block_reason={self.recovery_block_reason} "
+            f"has_executable_exposure={1 if self.has_executable_exposure else 0} "
+            f"has_dust_only_remainder={1 if self.has_dust_only_remainder else 0} "
+            f"sellable_executable_lot_count={int(self.sellable_executable_lot_count)}"
+        )
+
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
             "semantic_basis": self.semantic_basis,
@@ -722,11 +754,14 @@ class NormalizedExposure:
             "dust_classification": self.dust_classification,
             "dust_state": self.dust_state,
             "effective_flat": bool(self.effective_flat),
+            "entry_gate_effective_flat": bool(self.effective_flat),
             "entry_allowed": bool(self.entry_allowed),
             "entry_block_reason": self.entry_block_reason,
             "exit_allowed": bool(self.exit_allowed),
             "exit_block_reason": self.exit_block_reason,
             "terminal_state": self.terminal_state,
+            "holding_authority_state": self.terminal_state,
+            "position_authority_summary": self.position_authority_summary,
             "harmless_dust_effective_flat": bool(self.harmless_dust_effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.harmless_dust_effective_flat),
             "normalized_exposure_active": bool(self.normalized_exposure_active),
@@ -734,6 +769,10 @@ class NormalizedExposure:
             "has_any_position_residue": bool(self.has_any_position_residue),
             "has_non_executable_residue": bool(self.has_non_executable_residue),
             "has_dust_only_remainder": bool(self.has_dust_only_remainder),
+            "recovery_blocked": bool(self.recovery_blocked),
+            "recovery_block_reason": self.recovery_block_reason,
+            "unresolved_order_count": int(self.unresolved_order_count),
+            "recovery_required_count": int(self.recovery_required_count),
             "normalized_exposure_qty": float(self.normalized_exposure_qty),
             "executable_exposure_qty": float(self.normalized_exposure_qty),
             "submit_lot_source": self.sell_submit_lot_source,
@@ -798,7 +837,9 @@ class PositionStateModel:
             "submit_lot_source": self.normalized_exposure.sell_submit_lot_source,
             "position_state_lot_source": self.normalized_exposure.sell_submit_lot_source,
             "effective_flat": bool(self.effective_flat),
+            "entry_gate_effective_flat": bool(self.effective_flat),
             "effective_flat_due_to_harmless_dust": bool(self.effective_flat_due_to_harmless_dust),
+            "holding_authority_state": self.normalized_exposure.terminal_state,
             "fields": dict(self.fields),
         }
 
@@ -1295,6 +1336,16 @@ def format_broker_local_flags(*, broker: bool, local: bool) -> str:
     return f"broker={1 if broker else 0} local={1 if local else 0}"
 
 
+def dust_threshold_basis(*, qty_below_min: bool, notional_below_min: bool) -> str:
+    if qty_below_min and notional_below_min:
+        return "below_min_qty_and_notional"
+    if qty_below_min:
+        return "below_min_qty_only"
+    if notional_below_min:
+        return "below_min_notional_only"
+    return "neither"
+
+
 def build_dust_display_context(
     metadata_raw: str | dict[str, object] | DustClassification | None,
 ) -> DustDisplayContext:
@@ -1338,6 +1389,7 @@ def build_dust_display_context(
             "dust_local_qty_below_min": bool(view.local_qty_below_min),
             "dust_broker_notional_below_min": bool(view.broker_notional_below_min),
             "dust_local_notional_below_min": bool(view.local_notional_below_min),
+            "dust_threshold_basis": view.threshold_basis,
         },
     )
 
@@ -1403,7 +1455,21 @@ def _resolve_position_display_context(
         if isinstance(metadata_raw, DustClassification)
         else DustClassification.from_metadata(metadata_raw)
     )
-    return build_dust_display_context(dust)
+    display_context = build_dust_display_context(dust)
+    if isinstance(metadata_raw, dict):
+        display_context.fields["unresolved_open_order_count"] = max(
+            0,
+            int(metadata_raw.get("unresolved_open_order_count", 0) or 0),
+        )
+        display_context.fields["submit_unknown_count"] = max(
+            0,
+            int(metadata_raw.get("submit_unknown_count", 0) or 0),
+        )
+        display_context.fields["recovery_required_count"] = max(
+            0,
+            int(metadata_raw.get("recovery_required_count", 0) or 0),
+        )
+    return display_context
 
 
 def _build_position_state_normalized_exposure(
@@ -1615,6 +1681,23 @@ def build_normalized_exposure(
     has_executable_exposure = bool(normalized_sellable_lot_count > 0)
     has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
     has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
+    unresolved_order_count = max(
+        0,
+        int(display_context.fields.get("unresolved_open_order_count", 0) or 0),
+    )
+    recovery_required_count = max(
+        0,
+        int(display_context.fields.get("recovery_required_count", 0) or 0),
+    )
+    recovery_blocked = bool(unresolved_order_count > 0 or recovery_required_count > 0)
+    if recovery_required_count > 0 and unresolved_order_count > 0:
+        recovery_block_reason = "recovery_required_and_unresolved_orders_present"
+    elif recovery_required_count > 0:
+        recovery_block_reason = "recovery_required_present"
+    elif unresolved_order_count > 0:
+        recovery_block_reason = "unresolved_orders_present"
+    else:
+        recovery_block_reason = "none"
     normalized_qty = float(sellable_executable_qty if has_executable_exposure else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
@@ -1677,6 +1760,10 @@ def build_normalized_exposure(
         has_any_position_residue=has_any_position_residue,
         has_non_executable_residue=has_non_executable_residue,
         has_dust_only_remainder=has_dust_only_remainder,
+        recovery_blocked=recovery_blocked,
+        recovery_block_reason=recovery_block_reason,
+        unresolved_order_count=unresolved_order_count,
+        recovery_required_count=recovery_required_count,
         normalized_exposure_qty=normalized_qty,
     )
 
