@@ -80,12 +80,13 @@ Required outcome:
 
 - No database migration is required for the current storage shape.
 - Existing quantity fields remain available as derived compatibility values.
-- Current lot-count fields are authoritative lot-native state, not just additive reporting fields:
+- Persisted lot-state fields remain the storage base contract:
   - `open_lot_count`
   - `dust_tracking_lot_count`
+- Derived canonical authority fields remain normalized execution/reporting outputs:
   - `reserved_exit_lot_count`
   - `sellable_executable_lot_count`
-- Qty fields remain derived compatibility, reporting, and broker-interface values materialized from those lot-authoritative fields.
+- Qty fields remain derived compatibility, reporting, and broker-interface values materialized from the persisted lot-state base contract and the normalized authority layer.
 
 ## Batch Completion Line
 

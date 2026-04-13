@@ -1,12 +1,13 @@
 # Lot-Native Contract
 
-This document defines the current verified lot-native contract, the P0
-completion line for this batch, and the remaining explicit cleanup boundary.
+This document defines the current verified lot-native contract, the current
+canonical SELL authority surface, and the remaining explicit compatibility /
+fail-closed cleanup boundary.
 
 The already-achieved contract PASS is the starting baseline.
-The direct P0 goal of this batch is to keep canonical lot-native SELL
-authority intact while removing truth-source/provenance residue from the
-primary emitted and reporting flows.
+Canonical SELL authority is already lot-native at the public boundary.
+Internal compatibility and fail-closed handling still remain in code and are
+part of the current cleanup boundary.
 
 The code and tests now verify that:
 
@@ -14,8 +15,8 @@ The code and tests now verify that:
 - the public SELL boundary still treats qty as derived from lot-native authority
 - compatibility and provenance residue remains an internal cleanup boundary rather than canonical authority
 
-The remaining work after that is an explicit internal compatibility-boundary
-cleanup task, not external semantic authority.
+The remaining work after that is explicit compatibility-boundary cleanup, not a
+change to canonical SELL semantic authority.
 
 ## Batch Scope
 
@@ -34,18 +35,18 @@ batch:
 These premises are not the finish line. They are the baseline that must stay
 intact while the remaining declaration gap is closed.
 
-### Verified P0 target
+### Current verified external contract
 
-The verified P0 target is complete when every externally consumed SELL and
-reporting path uses lot-native state as semantic authority and no longer
-retains compatibility or provenance as a primary field layer.
+The current verified external contract is that externally consumed SELL and
+reporting paths use lot-native state as semantic authority and do not expose
+compatibility or provenance as a primary field layer.
 
 For this batch, that means:
 
 - `decision_context` output no longer emits compatibility fallback authority or provenance residue
 - `reporting` primary summaries no longer preserve compatibility, truth-source, or provenance layers as primary fields
 
-This is the intended declaration target, not a statement that every internal
+This is the current external contract, not a statement that every internal
 compatibility/fail-closed path has already disappeared from the current code.
 
 ### Remaining explicit boundary
@@ -183,9 +184,9 @@ FAIL:
 
 - SELL submission can still be driven by qty aggregation or by mixed open_exposure/dust_tracking semantics
 
-## P0 PASS
+## Current PASS Baseline
 
-PASS is true only when all of the following are true at the same time:
+The current PASS baseline keeps all of the following true at the same time:
 
 - the contract PASS baseline above remains intact
 - `decision_context` output no longer emits compatibility fallback authority or provenance
@@ -194,8 +195,9 @@ PASS is true only when all of the following are true at the same time:
 - the executable SELL path remains lot-native and canonical at the boundary
 - recovery and lifecycle continue to fail closed for qty-only legacy rows without reintroducing semantic authority
 - fail-closed blocker paths such as `legacy_lot_metadata_missing` no longer remain in emitted or primary semantic surfaces
+- internal fail-closed compatibility handling may still remain behind the normalized authority boundary
 
-FAIL is true if any of the following remain:
+This baseline fails if any of the following become true:
 
 - any executable SELL decision still depends on qty as authority
 - emitted `decision_context` payloads still expose compatibility fallback authority or provenance
@@ -206,9 +208,9 @@ FAIL is true if any of the following remain:
 - recovery or lifecycle restores qty-only legacy rows as executable semantic authority
 - fail-closed `legacy_lot_metadata_missing` blocker or fallback residue still remains in a primary semantic or emitted surface
 
-## Remaining P1 Boundary
+## Remaining Internal Boundary
 
-The following may still remain after P0, but only behind an explicit
+The following still remain today, but only behind an explicit
 non-authoritative boundary:
 
 - internal fail-closed compatibility normalization inside `decision_context`
@@ -217,21 +219,15 @@ non-authoritative boundary:
 These are not allowed to regain semantic authority over SELL, position, or
 recovery state.
 
-## Batch Completion Line
+## Documentation Rule
 
-This batch's P0 work is complete only when the document, tests, and working
-instructions all describe the verified external contract the same way.
+This document must describe the same external contract that the current code
+and tests verify:
 
-The completion line is:
-
-- current contract PASS remains preserved
-- emitted `decision_context` compatibility fallback/provenance residue is gone
-- `reporting` primary-flow truth-source/provenance residue is gone
-- no already-satisfied SELL-boundary or recovery premise is reopened
-
-## Declaration Rule
-
-The system can be declared P0-complete for this batch when canonical lot
-authority at the SELL boundary remains intact and the remaining downstream
-compatibility/provenance residue disappears from emitted `decision_context`
-and primary `reporting` flows.
+- canonical lot-native SELL authority remains intact at the boundary
+- emitted `decision_context` compatibility fallback/provenance residue is not a
+  primary semantic surface
+- `reporting` primary-flow truth-source/provenance residue is not a primary
+  semantic surface
+- internal fail-closed compatibility handling may still remain behind the
+  normalized authority boundary

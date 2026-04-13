@@ -18,7 +18,8 @@ Run the dedicated lot-native regression gate before and after the change:
 - Confirm SELL authority still comes from `position_state.normalized_exposure.sellable_executable_lot_count`.
 - Confirm submitted SELL qty remains derived from canonical lot-native state, not `raw_total_asset_qty`, `position_qty`, `submit_payload_qty`, or other observational qty fields.
 - Confirm dust remains non-executable tracking and is not merged into executable SELL inventory.
-- Confirm `open_exposure`, `dust_tracking`, and `reserved_exit` remain separate semantics.
+- Confirm persisted lot states remain `open_exposure` and `dust_tracking`.
+- Confirm `reserved_exit` remains a normalized reservation / accounting dimension and is not treated as a stored `position_state` peer.
 - Confirm qty-only or legacy compatibility data still fails closed in recovery/reconcile and does not restore executable authority.
 - Confirm reporting/telemetry surfaces touched by the change read authority-sensitive exposure fields from canonical lot-native state and treat qty residue as diagnostic only.
 - Confirm new or updated tests covering the touched authority-sensitive path are included in the lot-native gate.

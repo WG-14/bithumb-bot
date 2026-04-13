@@ -8,7 +8,8 @@ with `docs/lot_native_contract.md` and the lot-native gate scripts.
 - Canonical SELL authority comes from `position_state.normalized_exposure.sellable_executable_lot_count`.
 - Submitted SELL qty is derived from canonical lot-native state; qty snapshots are broker/reporting values only.
 - Dust is a normal non-executable state transition and must not become SELL authority.
-- `open_exposure`, `dust_tracking`, and `reserved_exit` remain separate semantics.
+- Persisted lot states remain `open_exposure` and `dust_tracking`.
+- `reserved_exit` remains a separate normalized reservation / accounting dimension, not a persisted lot-state peer.
 - Aggregate or raw qty must not override canonical lot-native SELL authority.
 - Qty-only or compatibility residue must fail closed in recovery and reconcile flows.
 
@@ -17,6 +18,7 @@ with `docs/lot_native_contract.md` and the lot-native gate scripts.
 For any new SELL, exit, recovery, or reconcile path:
 
 - Read final SELL authority from `position_state.normalized_exposure.sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, and `exit_block_reason`.
+- Treat `reserved_exit_lot_count` as normalized reservation authority derived from the current exposure context, not as a stored `position_state` row value.
 - Treat raw qty, aggregate qty, and observational telemetry fields as derived-only; they must not grant or restore SELL authority.
 - Extend the nearest `lot_native_regression_gate` tests when a change can affect SELL authority, reserved-exit handling, or qty-only fail-closed behavior.
 

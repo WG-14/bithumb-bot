@@ -22,7 +22,7 @@ Minimum required value:
 Recommended context values:
 
 - `MODE` (`paper` / `live`)
-- `PAIR` (`BTC_KRW` is the canonical example)
+- `PAIR` (`KRW-BTC` is the canonical market example; legacy alias `BTC_KRW` is still accepted as input)
 - `INTERVAL` (`1m` is the canonical example)
 - `BITHUMB_ENV_FILE` or `BITHUMB_ENV_FILE_LIVE` for explicit env injection
 
@@ -99,14 +99,14 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
   - `resume allowed` / `new orders allowed`: policy flags that must be true before fresh BUYs are allowed.
 - `effective_flat_due_to_harmless_dust` does not prove a literal zero balance.
 - `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together, but they are not the primary SELL/exit authority layer.
-- `strategy.context.position_gate.in_position` is an exposure-state field, not a dust-state field.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.
 - `dust_min_qty` and `dust_min_notional_krw` are separate sellability gates.
 - For exit authority, check the lot-native fields first:
   - `sellable_executable_lot_count`
   - `reserved_exit_lot_count`
+  - `exit_allowed`
   - `exit_block_reason`
-  - normalized or lot-native exposure fields such as `open_lot_count`, `open_exposure_qty`, and `normalized_exposure_qty`
+  - current exposure cross-check fields such as `sellable_executable_qty`, `executable_exposure_qty`, `tracked_dust_qty`, and `normalized_exposure_qty`
 
 ## 3-1-1. Preflight Interpretation
 
@@ -162,7 +162,7 @@ MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite uv run bi
 MODE=paper DB_PATH=/var/lib/bithumb-bot/data/paper/trades/paper.sqlite \
   uv run bithumb-bot strategy-report \
   --from-date 2026-03-01 --to-date 2026-03-27 \
-  --pair BTC_KRW \
+  --pair KRW-BTC \
   --group-by strategy_name,exit_rule_name,pair \
   --json
 ```

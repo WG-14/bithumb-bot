@@ -315,7 +315,12 @@ The current codebase expects:
 
 ## Lot State Quantity Contract
 
-`open_position_lots` is the persisted storage contract for lot-native position state.
+`open_position_lots` is the persisted storage contract for the base lot-native
+position rows.
+
+Execution and reporting do not read final SELL authority directly from an
+individual stored row. They materialize normalized authority from the persisted
+lot-state rows together with reservation and dust interpretation.
 
 Persisted schema-backed authority in `open_position_lots`:
 
@@ -333,6 +338,7 @@ Derived / interpreted outputs from the lot-state and dust interpretation layer:
 - `open_exposure_qty`: interpreted executable quantity derived from lot-native exposure for broker payloads, reporting, and compatibility.
 - `dust_tracking_qty`: interpreted operator-only residual quantity derived from the dust-tracking lot state for evidence and reporting.
 - `sellable_executable_qty`: interpreted sell-submit quantity derived from sellable executable lot count, not a persisted column.
+- `sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, and `exit_block_reason`: normalized execution/reporting authority fields materialized from persisted lot rows plus reservation and dust interpretation; they are not direct `open_position_lots` storage columns.
 
 Practical routing rules:
 
@@ -346,6 +352,6 @@ Practical routing rules:
 - If a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as operator evidence and remains excluded from normal SELL submission until an operator clears the inconsistency.
 - Routing summary:
   - BUY creates or refreshes `open_exposure` lots.
-  - SELL lifecycle and real-order submission use lot-native exposure counts as the canonical state authority, with `open_exposure_qty` materialized from that state for the final broker payload.
+- SELL lifecycle and real-order submission use normalized lot-native authority materialized from the persisted lot-state base contract, with `open_exposure_qty` materialized from that authority for the final broker payload.
   - `dust_tracking_qty` is operator-tracking evidence only and is excluded from normal SELL submission.
   - Harmless dust suppression is anchored to the `dust_tracking` path, not the `open_exposure` path.
