@@ -2493,8 +2493,11 @@ def test_lot_native_gate_reconcile_does_not_clear_halt_from_qty_only_holdings_wi
         assert authority.open_lot_count == 0
         assert authority.reserved_exit_lot_count == 0
         assert authority.sellable_executable_lot_count == 0
+        assert authority.has_dust_only_remainder is False
         assert authority.exit_allowed is False
-        assert authority.exit_block_reason == "dust_only_remainder"
+        assert authority.exit_block_reason == "legacy_lot_metadata_missing"
+        assert authority.terminal_state == "non_executable_position"
+        assert authority.authority_gap_reason == "authority_missing_recovery_required"
     finally:
         object.__setattr__(settings, "START_CASH_KRW", original_cash)
 
