@@ -224,6 +224,7 @@ def paper_execute(
             effective_flat = bool(normalized_exposure.effective_flat)
             entry_allowed = bool(normalized_exposure.entry_allowed)
             normalized_exposure_active = bool(normalized_exposure.normalized_exposure_active)
+            has_executable_exposure = bool(normalized_exposure.has_executable_exposure)
             open_exposure_qty = float(normalized_exposure.open_exposure_qty)
 
         fee = 0.0

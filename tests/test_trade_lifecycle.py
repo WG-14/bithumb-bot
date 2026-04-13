@@ -1548,6 +1548,185 @@ def test_partial_exit_keeps_remaining_sell_authority_lot_native(tmp_path):
 
 
 @pytest.mark.lot_native_regression_gate
+def test_partial_exit_residue_crosses_into_dust_only_state(tmp_path):
+    conn = ensure_db(str(tmp_path / "partial_exit_dust_only_residue.sqlite"))
+    lot_rules = _test_lot_rules()
+    base_ts = 1_700_001_275_000
+    executable_entry_qty = lot_count_to_qty(lot_count=2, lot_size=lot_rules.lot_size)
+    dust_qty = lot_rules.lot_size / 2.0
+    buy_qty = float(executable_entry_qty + dust_qty)
+    partial_exit_qty = float(executable_entry_qty)
+
+    _record_order(conn, client_order_id="partial_dust_entry", side="BUY", qty_req=buy_qty, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_dust_entry",
+        side="BUY",
+        fill_id="fill_partial_dust_entry",
+        fill_ts=base_ts,
+        price=40_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=711,
+    )
+    _record_order(
+        conn,
+        client_order_id="partial_dust_exit",
+        side="SELL",
+        qty_req=partial_exit_qty,
+        ts_ms=base_ts + 60_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_dust_exit",
+        side="SELL",
+        fill_id="fill_partial_dust_exit",
+        fill_ts=base_ts + 60_000,
+        price=41_000_000.0,
+        qty=partial_exit_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=711,
+        exit_decision_id=712,
+        exit_reason="trim_to_dust",
+        exit_rule_name="partial_trim",
+    )
+
+    pair = str(settings.PAIR)
+    summary = summarize_position_lots(conn, pair=pair)
+    normalized = build_position_state_model(
+        raw_qty_open=float(summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(summary.raw_total_asset_qty),
+        open_exposure_qty=float(summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(summary.dust_tracking_qty),
+        open_lot_count=int(summary.open_lot_count),
+        dust_tracking_lot_count=int(summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+    sell_plan = build_sell_execution_sizing(
+        pair=pair,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=int(
+                normalized.normalized_exposure.sellable_executable_lot_count
+            ),
+            exit_allowed=bool(normalized.normalized_exposure.exit_allowed),
+            exit_block_reason=str(normalized.normalized_exposure.exit_block_reason),
+        ),
+        lot_definition=summary.lot_definition,
+    )
+    conn.close()
+
+    assert summary.open_lot_count == 0
+    assert summary.raw_open_exposure_qty == pytest.approx(0.0)
+    assert summary.dust_tracking_lot_count == 1
+    assert summary.dust_tracking_qty == pytest.approx(dust_qty)
+    assert normalized.normalized_exposure.sellable_executable_lot_count == 0
+    assert normalized.normalized_exposure.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.normalized_exposure.exit_allowed is False
+    assert normalized.normalized_exposure.exit_block_reason == "dust_only_remainder"
+    assert normalized.normalized_exposure.terminal_state == "dust_only"
+    assert sell_plan.allowed is False
+    assert sell_plan.requested_qty == pytest.approx(0.0)
+    assert sell_plan.executable_qty == pytest.approx(0.0)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_rounding_induced_residue_ends_in_dust_only_state(tmp_path):
+    conn = ensure_db(str(tmp_path / "rounding_residue_dust_only.sqlite"))
+    lot_rules = _test_lot_rules()
+    base_ts = 1_700_001_290_000
+    executable_entry_qty = lot_count_to_qty(lot_count=2, lot_size=lot_rules.lot_size)
+    rounded_residue_qty = float(lot_rules.lot_size / 4.0)
+    buy_qty = float(executable_entry_qty + rounded_residue_qty)
+
+    _record_order(conn, client_order_id="rounded_entry", side="BUY", qty_req=buy_qty, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="rounded_entry",
+        side="BUY",
+        fill_id="fill_rounded_entry",
+        fill_ts=base_ts,
+        price=40_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=721,
+    )
+    _record_order(
+        conn,
+        client_order_id="rounded_exit",
+        side="SELL",
+        qty_req=executable_entry_qty,
+        ts_ms=base_ts + 60_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="rounded_exit",
+        side="SELL",
+        fill_id="fill_rounded_exit",
+        fill_ts=base_ts + 60_000,
+        price=41_000_000.0,
+        qty=executable_entry_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=721,
+        exit_decision_id=722,
+        exit_reason="rounded_residue_cleanup",
+        exit_rule_name="full_exit",
+    )
+
+    pair = str(settings.PAIR)
+    summary = summarize_position_lots(conn, pair=pair)
+    normalized = build_position_state_model(
+        raw_qty_open=float(summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(summary.raw_total_asset_qty),
+        open_exposure_qty=float(summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(summary.dust_tracking_qty),
+        open_lot_count=int(summary.open_lot_count),
+        dust_tracking_lot_count=int(summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+    sell_plan = build_sell_execution_sizing(
+        pair=pair,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=int(
+                normalized.normalized_exposure.sellable_executable_lot_count
+            ),
+            exit_allowed=bool(normalized.normalized_exposure.exit_allowed),
+            exit_block_reason=str(normalized.normalized_exposure.exit_block_reason),
+        ),
+        lot_definition=summary.lot_definition,
+    )
+    conn.close()
+
+    assert summary.open_lot_count == 0
+    assert summary.raw_open_exposure_qty == pytest.approx(0.0)
+    assert summary.dust_tracking_lot_count == 1
+    assert summary.dust_tracking_qty == pytest.approx(rounded_residue_qty)
+    assert normalized.normalized_exposure.sellable_executable_lot_count == 0
+    assert normalized.normalized_exposure.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.normalized_exposure.has_executable_exposure is False
+    assert normalized.normalized_exposure.terminal_state == "dust_only"
+    assert normalized.normalized_exposure.exit_block_reason == "dust_only_remainder"
+    assert sell_plan.allowed is False
+    assert sell_plan.requested_qty == pytest.approx(0.0)
+    assert sell_plan.executable_qty == pytest.approx(0.0)
+
+
+@pytest.mark.lot_native_regression_gate
 def test_recovery_does_not_infer_executable_semantics_from_qty_without_lot_counts(tmp_path):
     conn = ensure_db(str(tmp_path / "legacy_qty_only.sqlite"))
     base_ts = 1_700_001_300_000

@@ -160,7 +160,10 @@ def test_paper_execute_canonicalizes_legacy_pair_once_for_orderbook_and_ledger(t
         _set("PAPER_FEE_RATE", old_paper_fee)
 
 
-def test_paper_execute_buy_allows_harmless_dust_effective_flat(tmp_path: Path, monkeypatch):
+def test_paper_execute_buy_allows_harmless_dust_without_recorded_decision_context(
+    tmp_path: Path,
+    monkeypatch,
+):
     old_db = _set("DB_PATH", str(tmp_path / "paper_harmless_dust.sqlite"))
     old_slip = _set("SLIPPAGE_BPS", 0.0)
     old_max_order = _set("MAX_ORDER_KRW", 20_000.0)
@@ -223,6 +226,76 @@ def test_paper_execute_buy_allows_harmless_dust_effective_flat(tmp_path: Path, m
         assert row["side"] == "BUY"
         assert row["status"] in {"NEW", "FILLED"}
         assert float(row["qty_req"]) > 0
+    finally:
+        _set("DB_PATH", old_db)
+        _set("SLIPPAGE_BPS", old_slip)
+        _set("MAX_ORDER_KRW", old_max_order)
+        _set("PAPER_FEE_RATE", old_paper_fee)
+        _set("BUY_FRACTION", old_buy_fraction)
+
+
+def test_paper_execute_buy_blocks_blocking_dust_without_recorded_decision_context(
+    tmp_path: Path,
+    monkeypatch,
+):
+    old_db = _set("DB_PATH", str(tmp_path / "paper_blocking_dust.sqlite"))
+    old_slip = _set("SLIPPAGE_BPS", 0.0)
+    old_max_order = _set("MAX_ORDER_KRW", 20_000.0)
+    old_paper_fee = _set("PAPER_FEE_RATE", 0.0)
+    old_buy_fraction = _set("BUY_FRACTION", 1.0)
+    try:
+        monkeypatch.setattr(
+            paper,
+            "fetch_orderbook_top",
+            lambda _pair: BestQuote(market="KRW-BTC", bid_price=100.0, ask_price=100.0),
+        )
+        monkeypatch.setattr(
+            runtime_state,
+            "snapshot",
+            lambda: SimpleNamespace(
+                last_reconcile_metadata={
+                    "dust_classification": "blocking_dust",
+                    "dust_residual_present": 1,
+                    "dust_residual_allow_resume": 0,
+                    "dust_effective_flat": 0,
+                    "dust_policy_reason": "dangerous_dust_operator_review_required",
+                    "dust_partial_flatten_recent": 0,
+                    "dust_partial_flatten_reason": "flatten_not_recent",
+                    "dust_qty_gap_tolerance": 0.00005,
+                    "dust_qty_gap_small": 0,
+                    "dust_broker_qty": 0.000099,
+                    "dust_local_qty": 0.000010,
+                    "dust_delta_qty": 0.000089,
+                    "dust_min_qty": 0.0001,
+                    "dust_min_notional_krw": 5_000.0,
+                    "dust_latest_price": 40_000_000.0,
+                    "dust_broker_notional_krw": 3_960.0,
+                    "dust_local_notional_krw": 400.0,
+                    "dust_broker_qty_is_dust": 1,
+                    "dust_local_qty_is_dust": 1,
+                    "dust_broker_notional_is_dust": 1,
+                    "dust_local_notional_is_dust": 1,
+                    "dust_broker_local_match": 0,
+                    "dust_residual_summary": (
+                        "classification=blocking_dust harmless_dust=0 broker_local_match=0 "
+                        "allow_resume=0 effective_flat=0 policy_reason=dangerous_dust_operator_review_required"
+                    ),
+                }
+            ),
+        )
+
+        conn = ensure_db()
+        set_portfolio(conn, cash_krw=1_000_000, asset_qty=0.000099)
+        conn.close()
+
+        trade = paper.paper_execute("BUY", ts=1, price=100.0)
+        assert trade is None
+
+        conn = ensure_db()
+        order_count = conn.execute("SELECT COUNT(*) AS n FROM orders WHERE side='BUY'").fetchone()["n"]
+        conn.close()
+
+        assert order_count == 0
     finally:
         _set("DB_PATH", old_db)
         _set("SLIPPAGE_BPS", old_slip)
