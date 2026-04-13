@@ -900,6 +900,90 @@ def test_ops_report_surfaces_compact_position_authority_summary_for_dust_only_re
     )
 
 
+def test_ops_report_surfaces_missing_lot_authority_as_non_dust_recovery_state(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = str(tmp_path / "ops-report-authority-gap.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {"source": "accounts_v1_rest_snapshot", "reason": "ok"},
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (0.0008, 0.0008),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+            "dust_broker_qty": 0.0008,
+            "dust_local_qty": 0.0008,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 0,
+            "dust_local_qty_is_dust": 0,
+            "dust_qty_gap_small": 1,
+        },
+        now_epoch_sec=1000.0,
+    )
+
+    cmd_ops_report(limit=1)
+    out = capsys.readouterr().out
+
+    assert "dust_state=no_dust" in out
+    assert "holding_authority_state=non_executable_position" in out
+    assert "has_dust_only_remainder=0" in out
+    assert "authority_gap_reason=authority_missing_recovery_required" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    summary = payload["operator_recovery_summary"]
+    assert summary["normalized_exposure"]["holding_authority_state"] == "non_executable_position"
+    assert summary["normalized_exposure"]["authority_gap_reason"] == "authority_missing_recovery_required"
+    assert summary["normalized_exposure"]["has_dust_only_remainder"] is False
+    assert summary["dust_state"] == "no_dust"
+
+
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "ops-report-position-state-top-level.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

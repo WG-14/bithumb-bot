@@ -602,7 +602,11 @@ def cmd_health() -> None:
         raw_qty_open=position_qty,
         metadata_raw=health.get("last_reconcile_metadata"),
         raw_total_asset_qty=max(position_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        dust_tracking_qty=(
+            float(dust_context.raw_holdings.local_qty)
+            if bool(dust_context.classification.present)
+            else 0.0
+        ),
         reserved_exit_qty=reserved_exit_qty,
     )
     normalized_exposure = position_state.normalized_exposure
@@ -2267,7 +2271,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         raw_qty_open=portfolio_asset_qty,
         metadata_raw=report,
         raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        dust_tracking_qty=(
+            float(dust_context.raw_holdings.local_qty)
+            if bool(dust_context.classification.present)
+            else 0.0
+        ),
         reserved_exit_qty=reserved_exit_qty,
     )
     lot_exposure = position_state.normalized_exposure

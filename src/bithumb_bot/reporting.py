@@ -3604,7 +3604,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         raw_qty_open=portfolio_asset_qty,
         metadata_raw=position_metadata_raw,
         raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+        dust_tracking_qty=(
+            float(dust_context.raw_holdings.local_qty)
+            if bool(dust_context.classification.present)
+            else 0.0
+        ),
         reserved_exit_qty=reserved_exit_qty,
     )
     dust_view = position_state.operator_diagnostics

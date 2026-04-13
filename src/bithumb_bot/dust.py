@@ -720,8 +720,21 @@ class NormalizedExposure:
         return "lot-native"
 
     @property
+    def authority_gap_reason(self) -> str:
+        if (
+            self.terminal_state == "non_executable_position"
+            and self.exit_block_reason == "legacy_lot_metadata_missing"
+            and self.raw_total_asset_qty > DUST_POSITION_EPS
+            and self.open_lot_count <= 0
+            and self.dust_tracking_lot_count <= 0
+            and self.dust_tracking_qty <= DUST_POSITION_EPS
+        ):
+            return "authority_missing_recovery_required"
+        return "none"
+
+    @property
     def position_authority_summary(self) -> str:
-        return (
+        summary = (
             f"holding_authority_state={self.terminal_state} "
             f"recovery_blocked={1 if self.recovery_blocked else 0} "
             f"recovery_block_reason={self.recovery_block_reason} "
@@ -729,6 +742,9 @@ class NormalizedExposure:
             f"has_dust_only_remainder={1 if self.has_dust_only_remainder else 0} "
             f"sellable_executable_lot_count={int(self.sellable_executable_lot_count)}"
         )
+        if self.authority_gap_reason != "none":
+            summary = f"{summary} authority_gap_reason={self.authority_gap_reason}"
+        return summary
 
     def as_dict(self) -> dict[str, bool | float | str]:
         return {
@@ -769,6 +785,7 @@ class NormalizedExposure:
             "has_any_position_residue": bool(self.has_any_position_residue),
             "has_non_executable_residue": bool(self.has_non_executable_residue),
             "has_dust_only_remainder": bool(self.has_dust_only_remainder),
+            "authority_gap_reason": self.authority_gap_reason,
             "recovery_blocked": bool(self.recovery_blocked),
             "recovery_block_reason": self.recovery_block_reason,
             "unresolved_order_count": int(self.unresolved_order_count),
@@ -1639,6 +1656,7 @@ def build_normalized_exposure(
         normalized_dust_tracking_qty <= DUST_POSITION_EPS
         and normalized_open_lot_count <= 0
         and float(inventory.raw_total_asset_qty) > DUST_POSITION_EPS
+        and bool(display_context.classification.present)
     ):
         normalized_dust_tracking_qty = float(inventory.raw_total_asset_qty)
     normalized_total_asset_qty = max(
@@ -1804,14 +1822,20 @@ def build_position_state_interpretation(
         if normalized_exposure.exit_allowed
         else f"blocked:{normalized_exposure.exit_block_reason}"
     )
+    operator_message = operator_message_map.get(
+        terminal_state,
+        "Shared state requires operator review before execution can continue.",
+    )
+    if normalized_exposure.authority_gap_reason == "authority_missing_recovery_required":
+        operator_message = (
+            "Holdings remain, but lot authority is missing, so SELL stays blocked "
+            "and manual recovery is required before execution can continue."
+        )
     return PositionStateInterpretation(
         lifecycle_state=terminal_state,
         lifecycle_label=lifecycle_label_map.get(terminal_state, terminal_state.replace("_", " ")),
         operator_outcome=operator_outcome_map.get(terminal_state, terminal_state),
-        operator_message=operator_message_map.get(
-            terminal_state,
-            "Shared state requires operator review before execution can continue.",
-        ),
+        operator_message=operator_message,
         entry_status=entry_status,
         exit_status=exit_status,
         exit_submit_expected=bool(normalized_exposure.exit_allowed),

@@ -736,6 +736,42 @@ def test_position_state_model_interprets_dust_only_as_state_layer_no_submit_outc
     assert "HOLD/no-submit outcome" in model.state_interpretation.operator_message
 
 
+@pytest.mark.lot_native_regression_gate
+def test_position_state_model_keeps_qty_only_holdings_without_lot_authority_out_of_dust_only() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0008,
+        metadata_raw={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+        },
+        raw_total_asset_qty=0.0008,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=0,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    authority = model.normalized_exposure
+
+    assert authority.terminal_state == "non_executable_position"
+    assert authority.has_dust_only_remainder is False
+    assert authority.dust_tracking_qty == pytest.approx(0.0)
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "legacy_lot_metadata_missing"
+    assert authority.authority_gap_reason == "authority_missing_recovery_required"
+    assert authority.as_dict()["holding_authority_state"] == "non_executable_position"
+    assert authority.as_dict()["authority_gap_reason"] == "authority_missing_recovery_required"
+    assert "manual recovery is required" in model.state_interpretation.operator_message
+
+
 def test_position_state_model_surfaces_effective_flat_as_entry_gate_only_for_harmless_dust() -> None:
     dust = classify_dust_residual(
         broker_qty=0.00009629,
@@ -918,6 +954,35 @@ def test_position_state_model_surfaces_compact_position_authority_summary_for_ex
         model.normalized_exposure.as_dict()["position_authority_summary"]
         == model.normalized_exposure.position_authority_summary
     )
+
+
+@pytest.mark.lot_native_regression_gate
+def test_position_state_model_position_authority_summary_surfaces_missing_lot_authority_separately_from_dust() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0008,
+        metadata_raw={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+        },
+        raw_total_asset_qty=0.0008,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=0,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    summary = model.normalized_exposure.position_authority_summary
+
+    assert "holding_authority_state=non_executable_position" in summary
+    assert "has_dust_only_remainder=0" in summary
+    assert "authority_gap_reason=authority_missing_recovery_required" in summary
 
 
 def test_position_state_model_clears_recovery_block_without_changing_authority_classification() -> None:

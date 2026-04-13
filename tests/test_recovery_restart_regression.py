@@ -851,6 +851,62 @@ def test_restart_reconcile_keeps_open_exposure_dust_tracking_and_recovery_requir
     assert "recovery_required_orders=1" in startup_blocker_after
 
 
+@pytest.mark.lot_native_regression_gate
+def test_restart_reconcile_keeps_large_holdings_without_lot_metadata_blocked_not_dust(
+    isolated_db,
+    monkeypatch,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (0.0008, 0.0008),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.0008))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert authority.raw_total_asset_qty == pytest.approx(0.0008)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.dust_tracking_qty == pytest.approx(0.0)
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_lot_count == 0
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.has_executable_exposure is False
+    assert authority.has_dust_only_remainder is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "legacy_lot_metadata_missing"
+    assert authority.terminal_state == "non_executable_position"
+    assert authority.authority_gap_reason == "authority_missing_recovery_required"
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(0.0)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+
+
 def test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
