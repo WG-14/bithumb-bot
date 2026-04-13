@@ -2799,6 +2799,248 @@ def test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit(
 
 
 @pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_fee_created_residue_keeps_raw_holdings_non_executable_and_skips_submit(
+    monkeypatch,
+    tmp_path,
+):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_fee_residue.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    fee_residue_qty = 0.00005
+    metadata = {
+        "dust_classification": "harmless_dust",
+        "dust_residual_present": 1,
+        "dust_residual_allow_resume": 1,
+        "dust_effective_flat": 1,
+        "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+        "dust_partial_flatten_recent": 0,
+        "dust_partial_flatten_reason": "fee_deduction_after_sell",
+        "dust_qty_gap_tolerance": 0.00005,
+        "dust_qty_gap_small": 1,
+        "dust_broker_qty": fee_residue_qty,
+        "dust_local_qty": fee_residue_qty,
+        "dust_delta_qty": 0.0,
+        "dust_min_qty": 0.0001,
+        "dust_min_notional_krw": 0.0,
+        "dust_latest_price": 100_000_000.0,
+        "dust_broker_notional_krw": 5_000.0,
+        "dust_local_notional_krw": 5_000.0,
+        "dust_broker_qty_is_dust": 1,
+        "dust_local_qty_is_dust": 1,
+        "dust_broker_notional_is_dust": 0,
+        "dust_local_notional_is_dust": 0,
+        "dust_residual_summary": (
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+            "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+        ),
+    }
+    runtime_state.record_reconcile_result(success=True, metadata=metadata)
+
+    conn = ensure_db(str(tmp_path / "sell_fee_residue.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=fee_residue_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    normalized = build_position_state_model(
+        raw_qty_open=fee_residue_qty,
+        metadata_raw=metadata,
+        raw_total_asset_qty=fee_residue_qty,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=fee_residue_qty,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=100_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    ).normalized_exposure
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="fee_residue_cleanup",
+        exit_rule_name="exit_signal",
+    )
+
+    conn = ensure_db(str(tmp_path / "sell_fee_residue.sqlite"))
+    order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, summary, context_json
+        FROM order_suppressions
+        WHERE strategy_name='dust_exit_test' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert normalized.raw_total_asset_qty == pytest.approx(fee_residue_qty)
+    assert normalized.open_exposure_qty == pytest.approx(0.0)
+    assert normalized.dust_tracking_qty == pytest.approx(fee_residue_qty)
+    assert normalized.sellable_executable_lot_count == 0
+    assert normalized.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.exit_allowed is False
+    assert normalized.exit_block_reason == "dust_only_remainder"
+    assert normalized.terminal_state == "dust_only"
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert order_count == 0
+    assert event_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    context = json.loads(str(suppression_row["context_json"]))
+    assert context["raw_total_asset_qty"] == pytest.approx(fee_residue_qty)
+    assert context["sell_submit_lot_count"] == 0
+    assert context["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_min_notional_only_residue_keeps_raw_holdings_non_executable_and_skips_submit(
+    monkeypatch,
+    tmp_path,
+):
+    notifications: list[str] = []
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_min_notional_only.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    min_notional_residue_qty = 0.0001
+    metadata = {
+        "dust_classification": "harmless_dust",
+        "dust_residual_present": 1,
+        "dust_residual_allow_resume": 1,
+        "dust_effective_flat": 1,
+        "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+        "dust_partial_flatten_recent": 0,
+        "dust_partial_flatten_reason": "notional_below_min_after_sell",
+        "dust_qty_gap_tolerance": 0.00005,
+        "dust_qty_gap_small": 1,
+        "dust_broker_qty": min_notional_residue_qty,
+        "dust_local_qty": min_notional_residue_qty,
+        "dust_delta_qty": 0.0,
+        "dust_min_qty": 0.0001,
+        "dust_min_notional_krw": 5_000.0,
+        "dust_latest_price": 40_000_000.0,
+        "dust_broker_notional_krw": 4_000.0,
+        "dust_local_notional_krw": 4_000.0,
+        "dust_broker_qty_is_dust": 0,
+        "dust_local_qty_is_dust": 0,
+        "dust_broker_notional_is_dust": 1,
+        "dust_local_notional_is_dust": 1,
+        "dust_residual_summary": (
+            "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+            "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+        ),
+    }
+    runtime_state.record_reconcile_result(success=True, metadata=metadata)
+
+    conn = ensure_db(str(tmp_path / "sell_min_notional_only.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=min_notional_residue_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+    conn.close()
+
+    normalized = build_position_state_model(
+        raw_qty_open=min_notional_residue_qty,
+        metadata_raw=metadata,
+        raw_total_asset_qty=min_notional_residue_qty,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=min_notional_residue_qty,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    ).normalized_exposure
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        40_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="min_notional_residue_cleanup",
+        exit_rule_name="exit_signal",
+    )
+
+    conn = ensure_db(str(tmp_path / "sell_min_notional_only.sqlite"))
+    order_count = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+    event_count = conn.execute("SELECT COUNT(*) AS n FROM order_events").fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, summary, context_json
+        FROM order_suppressions
+        WHERE strategy_name='dust_exit_test' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert normalized.raw_total_asset_qty == pytest.approx(min_notional_residue_qty)
+    assert normalized.open_exposure_qty == pytest.approx(0.0)
+    assert normalized.dust_tracking_qty == pytest.approx(min_notional_residue_qty)
+    assert normalized.sellable_executable_lot_count == 0
+    assert normalized.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.exit_allowed is False
+    assert normalized.exit_block_reason == "dust_only_remainder"
+    assert normalized.terminal_state == "dust_only"
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert order_count == 0
+    assert event_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    context = json.loads(str(suppression_row["context_json"]))
+    assert context["raw_total_asset_qty"] == pytest.approx(min_notional_residue_qty)
+    assert context["sell_submit_lot_count"] == 0
+    assert context["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert any("reason_code=DUST_RESIDUAL_SUPPRESSED" in msg for msg in notifications)
+
+
+@pytest.mark.fast_regression
 def test_adjust_sell_order_qty_for_dust_safety_snaps_tiny_min_qty_boundary_upward():
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)

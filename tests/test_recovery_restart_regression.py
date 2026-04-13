@@ -737,6 +737,120 @@ def test_reconcile_preserves_fee_residue_as_dust_only_restart_authority(isolated
     assert lot_snapshot.dust_tracking_qty == pytest.approx(fee_residue_qty)
 
 
+@pytest.mark.lot_native_regression_gate
+def test_restart_reconcile_keeps_open_exposure_dust_tracking_and_recovery_required_distinct(
+    isolated_db,
+    monkeypatch,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (0.00045, 0.00045),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 1, "restart_open_exposure", 1_700_002_300_000, 40_000_000.0, 0.0004, 4, 0, "lot-native", "open_exposure"),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (settings.PAIR, 2, "restart_dust_tracking", 1_700_002_360_000, 40_000_000.0, 0.00005, 0, 1, "lot-native", "dust_tracking"),
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    startup_blocker_before = evaluate_startup_safety_gate()
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.00045))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        order_row = conn.execute(
+            "SELECT status, exchange_order_id, last_error FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    startup_blocker_after = evaluate_startup_safety_gate()
+
+    assert startup_blocker_before is not None
+    assert "submit_unknown_orders=1" in startup_blocker_before
+    assert authority.raw_total_asset_qty == pytest.approx(0.00045)
+    assert authority.open_exposure_qty == pytest.approx(0.0004)
+    assert authority.dust_tracking_qty == pytest.approx(0.00005)
+    assert authority.open_lot_count == 4
+    assert authority.dust_tracking_lot_count == 1
+    assert authority.sellable_executable_lot_count == 4
+    assert authority.sellable_executable_qty == pytest.approx(0.0004)
+    assert authority.exit_allowed is True
+    assert authority.terminal_state == "open_exposure"
+    assert authority.recovery_blocked is True
+    assert authority.recovery_required_count == 1
+    assert authority.recovery_block_reason == "recovery_required_present"
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(0.00045)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0004)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.00005)
+    assert order_row is not None
+    assert order_row["status"] == "RECOVERY_REQUIRED"
+    assert order_row["exchange_order_id"] is None
+    assert "manual recovery required" in str(order_row["last_error"])
+    assert startup_blocker_after is not None
+    assert "recovery_required_orders=1" in startup_blocker_after
+
+
 def test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)

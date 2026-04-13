@@ -1312,6 +1312,97 @@ def test_authority_boundary_sell_lifecycle_uses_open_exposure_lots_and_keeps_dus
     assert float(lifecycle_row[0]["matched_qty"]) == pytest.approx(0.5)
 
 
+@pytest.mark.lot_native_regression_gate
+def test_dust_tracking_residue_is_excluded_from_realized_lifecycle_matching(tmp_path):
+    conn = ensure_db(str(tmp_path / "lifecycle_dust_exclusion.sqlite"))
+    base_ts = 1_700_001_050_000
+    pair = str(settings.PAIR)
+
+    _record_order(conn, client_order_id="entry_open", side="BUY", qty_req=1.0, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="entry_open",
+        side="BUY",
+        fill_id="fill_entry_open",
+        fill_ts=base_ts,
+        price=100.0,
+        qty=1.0,
+        fee=0.1,
+        strategy_name="sma_with_filter",
+        entry_decision_id=311,
+        note="entry_open",
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (pair, 999, "entry_dust", base_ts + 1_000, 100.0, 0.00009193, 0, 1, DUST_TRACKING_LOT_STATE),
+    )
+    conn.commit()
+
+    _record_order(conn, client_order_id="exit_sell", side="SELL", qty_req=0.5, ts_ms=base_ts + 2_000)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="exit_sell",
+        side="SELL",
+        fill_id="fill_exit_sell",
+        fill_ts=base_ts + 2_000,
+        price=110.0,
+        qty=0.5,
+        fee=0.05,
+        strategy_name="sma_with_filter",
+        entry_decision_id=311,
+        exit_decision_id=411,
+        exit_reason="take_profit",
+        exit_rule_name="signal_exit",
+        note="exit_sell",
+    )
+
+    summary = summarize_position_lots(conn, pair=pair)
+    lifecycle_row = conn.execute(
+        """
+        SELECT entry_client_order_id, exit_client_order_id, matched_qty, gross_pnl, fee_total, net_pnl
+        FROM trade_lifecycles
+        ORDER BY id ASC
+        """
+    ).fetchone()
+    dust_row = conn.execute(
+        """
+        SELECT qty_open, executable_lot_count, dust_tracking_lot_count
+        FROM open_position_lots
+        WHERE entry_client_order_id='entry_dust'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert lifecycle_row is not None
+    assert lifecycle_row["entry_client_order_id"] == "entry_open"
+    assert lifecycle_row["exit_client_order_id"] == "exit_sell"
+    assert float(lifecycle_row["matched_qty"]) == pytest.approx(0.5)
+    assert float(lifecycle_row["gross_pnl"]) == pytest.approx(5.0)
+    assert float(lifecycle_row["fee_total"]) == pytest.approx(0.1)
+    assert float(lifecycle_row["net_pnl"]) == pytest.approx(4.9)
+    assert dust_row is not None
+    assert float(dust_row["qty_open"]) == pytest.approx(0.00009193)
+    assert int(dust_row["executable_lot_count"]) == 0
+    assert int(dust_row["dust_tracking_lot_count"]) == 1
+    assert summary.raw_open_exposure_qty == pytest.approx(0.5)
+    assert summary.dust_tracking_qty == pytest.approx(0.00009193)
+    assert summary.raw_total_asset_qty == pytest.approx(0.50009193)
+    assert summary.open_lot_count > 0
+    assert summary.dust_tracking_lot_count == 1
+
+
 def test_authority_boundary_sell_lifecycle_ignores_dust_tracking_even_if_it_is_above_min_qty(tmp_path):
     conn = ensure_db(str(tmp_path / "malformed_dust_tracking.sqlite"))
     base_ts = 1_700_001_100_000
