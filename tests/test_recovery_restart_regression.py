@@ -599,6 +599,71 @@ def _seed_dust_state(*, db_path: Path, asset_qty: float, close_price: float) -> 
         conn.close()
 
 
+def _seed_trade_residue_state(
+    *,
+    db_path: Path,
+    entry_client_order_id: str,
+    exit_client_order_id: str,
+    buy_qty: float,
+    sell_qty: float,
+    buy_price: float,
+    sell_price: float,
+    buy_fee: float,
+    sell_fee: float,
+    base_ts: int,
+) -> None:
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id=entry_client_order_id,
+            side="BUY",
+            qty_req=buy_qty,
+            price=buy_price,
+            ts_ms=base_ts,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id=entry_client_order_id,
+            side="BUY",
+            fill_id=f"{entry_client_order_id}_fill",
+            fill_ts=base_ts,
+            price=buy_price,
+            qty=buy_qty,
+            fee=buy_fee,
+            strategy_name="sma_with_filter",
+            entry_decision_id=501,
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id=exit_client_order_id,
+            side="SELL",
+            qty_req=sell_qty,
+            price=sell_price,
+            ts_ms=base_ts + 60_000,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id=exit_client_order_id,
+            side="SELL",
+            fill_id=f"{exit_client_order_id}_fill",
+            fill_ts=base_ts + 60_000,
+            price=sell_price,
+            qty=sell_qty,
+            fee=sell_fee,
+            strategy_name="sma_with_filter",
+            entry_decision_id=501,
+            exit_decision_id=502,
+            exit_reason="trim_to_dust",
+            exit_rule_name="partial_trim",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(isolated_db, monkeypatch):
     _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=40_000_000.0)
 
@@ -621,6 +686,104 @@ def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(i
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_resume_allowed"
     assert metadata["dust_classification"] == "harmless_dust"
     assert int(metadata["dust_partial_flatten_recent"]) == 1
+
+
+def test_reconcile_preserves_fee_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    fee_residue_qty = 0.00005
+    _seed_trade_residue_state(
+        db_path=isolated_db,
+        entry_client_order_id="fee_residue_entry",
+        exit_client_order_id="fee_residue_exit",
+        buy_qty=0.00085,
+        sell_qty=0.0008,
+        buy_price=40_000_000.0,
+        sell_price=41_000_000.0,
+        buy_fee=0.0,
+        sell_fee=0.0,
+        base_ts=1_700_002_100_000,
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=fee_residue_qty))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_lot_count == 1
+    assert authority.raw_total_asset_qty == pytest.approx(fee_residue_qty)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.dust_tracking_qty == pytest.approx(fee_residue_qty)
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.has_executable_exposure is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "dust_only_remainder"
+    assert authority.terminal_state == "dust_only"
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(fee_residue_qty)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(fee_residue_qty)
+
+
+def test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    rounded_residue_qty = 0.00001
+    _seed_trade_residue_state(
+        db_path=isolated_db,
+        entry_client_order_id="rounding_residue_entry",
+        exit_client_order_id="rounding_residue_exit",
+        buy_qty=0.00081,
+        sell_qty=0.0008,
+        buy_price=40_000_000.0,
+        sell_price=41_000_000.0,
+        buy_fee=0.0,
+        sell_fee=0.0,
+        base_ts=1_700_002_200_000,
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=rounded_residue_qty))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_lot_count == 1
+    assert authority.raw_total_asset_qty == pytest.approx(rounded_residue_qty)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.dust_tracking_qty == pytest.approx(rounded_residue_qty)
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.has_executable_exposure is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "dust_only_remainder"
+    assert authority.terminal_state == "dust_only"
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(rounded_residue_qty)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(rounded_residue_qty)
 
 
 def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_notional_is_also_dust(

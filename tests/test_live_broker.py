@@ -20,7 +20,9 @@ from bithumb_bot.broker.live import (
     validate_order,
     validate_pretrade,
 )
-from bithumb_bot.execution import record_order_if_missing
+from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.dust import build_position_state_model
+from bithumb_bot.lifecycle import summarize_position_lots
 from bithumb_bot.lifecycle import apply_fill_lifecycle
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.oms import payload_fingerprint
@@ -116,6 +118,39 @@ class _FakeBroker:
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         return []
+
+
+class _DustOnlyBalanceBroker(_FakeBroker):
+    def __init__(self, *, asset_available: float) -> None:
+        super().__init__()
+        self._asset_available = float(asset_available)
+
+    def get_balance(self) -> BrokerBalance:
+        return BrokerBalance(
+            cash_available=float(settings.START_CASH_KRW),
+            cash_locked=0.0,
+            asset_available=self._asset_available,
+            asset_locked=0.0,
+        )
+
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-dust-only", "SELL", "CANCELED", 0.0, 0.0, 0.0, 1, 1)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return []
+
+
+def _record_test_order(conn, *, client_order_id: str, side: str, qty_req: float, ts_ms: int) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side=side,
+        qty_req=qty_req,
+        submit_attempt_id=f"attempt_{client_order_id}",
+        price=None,
+        ts_ms=ts_ms,
+        status="NEW",
+    )
 
 
 class _CommitCheckingBroker(_FakeBroker):
@@ -4913,6 +4948,119 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert all("dust_resume_allowed=0" in msg for msg in notifications)
     monkeypatch.undo()
 
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_partial_exit_dust_residue_stays_suppressed_after_reconcile(
+    tmp_path,
+):
+    db_path = str(tmp_path / "sell_partial_exit_dust_reconcile.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    base_ts = 1_700_002_000_000
+    buy_qty = 0.00085
+    dust_qty = 0.00005
+    partial_exit_qty = 0.0008
+
+    conn = ensure_db(db_path)
+    _record_test_order(conn, client_order_id="partial_exit_entry", side="BUY", qty_req=buy_qty, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_exit_entry",
+        side="BUY",
+        fill_id="fill_partial_exit_entry",
+        fill_ts=base_ts,
+        price=100_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="dust_exit_test",
+        entry_decision_id=1001,
+    )
+    _record_test_order(
+        conn,
+        client_order_id="partial_exit_to_dust",
+        side="SELL",
+        qty_req=partial_exit_qty,
+        ts_ms=base_ts + 60_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="partial_exit_to_dust",
+        side="SELL",
+        fill_id="fill_partial_exit_to_dust",
+        fill_ts=base_ts + 60_000,
+        price=101_000_000.0,
+        qty=partial_exit_qty,
+        fee=0.0,
+        strategy_name="dust_exit_test",
+        entry_decision_id=1001,
+        exit_decision_id=1002,
+        exit_reason="trim_to_dust",
+        exit_rule_name="partial_trim",
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_DustOnlyBalanceBroker(asset_available=dust_qty))
+
+    conn = ensure_db(db_path)
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    conn.close()
+    normalized = build_position_state_model(
+        raw_qty_open=dust_qty,
+        metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+        raw_total_asset_qty=max(dust_qty, float(lot_snapshot.raw_total_asset_qty)),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        market_price=100_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    ).normalized_exposure
+
+    broker = _DustOnlyBalanceBroker(asset_available=dust_qty)
+    trade_first = live_execute_signal(
+        broker,
+        "SELL",
+        base_ts + 120_000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+    trade_second = live_execute_signal(
+        broker,
+        "SELL",
+        base_ts + 180_000,
+        100_000_000.0,
+        strategy_name="dust_exit_test",
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert lot_snapshot.open_lot_count == 0
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_lot_count == 1
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(dust_qty)
+    assert normalized.sellable_executable_lot_count == 0
+    assert normalized.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.has_executable_exposure is False
+    assert normalized.exit_allowed is False
+    assert normalized.terminal_state == "dust_only"
+    assert normalized.exit_block_reason == "dust_only_remainder"
+    assert trade_first is None
+    assert trade_second is None
+    assert broker.place_order_calls == 0
 
 @pytest.mark.fast_regression
 def test_live_execute_signal_sell_suppresses_harmless_dust_exit_without_order_row(monkeypatch, tmp_path):

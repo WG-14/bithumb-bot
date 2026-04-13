@@ -159,16 +159,21 @@ def paper_execute(
         cash, qty = get_portfolio(conn)
         rules = get_effective_order_rules(settings.PAIR).rules
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        raw_open_exposure_qty = float(lot_snapshot.raw_open_exposure_qty)
+        raw_total_asset_qty = max(float(qty), float(lot_snapshot.raw_total_asset_qty))
+        dust_tracking_qty = float(lot_snapshot.dust_tracking_qty)
         open_lot_count = int(lot_snapshot.open_lot_count)
         dust_tracking_lot_count = int(lot_snapshot.dust_tracking_lot_count)
         # Paper SELL must follow the same contract as live/operator paths:
-        # raw qty does not recreate executable lot authority.
+        # raw holdings stay observational; when lot-native snapshots exist they
+        # define executable vs dust semantics and aggregate qty must not
+        # recreate executable exposure.
         normalized_exposure = build_normalized_exposure(
-            raw_qty_open=float(qty),
+            raw_qty_open=raw_open_exposure_qty,
             dust_context=runtime_state.snapshot().last_reconcile_metadata,
-            raw_total_asset_qty=float(qty),
-            open_exposure_qty=float(qty),
-            dust_tracking_qty=0.0,
+            raw_total_asset_qty=raw_total_asset_qty,
+            open_exposure_qty=raw_open_exposure_qty,
+            dust_tracking_qty=dust_tracking_qty,
             reserved_exit_qty=summarize_reserved_exit_qty(conn, pair=settings.PAIR),
             open_lot_count=open_lot_count,
             dust_tracking_lot_count=dust_tracking_lot_count,
@@ -218,7 +223,10 @@ def paper_execute(
                 )
             )
             open_exposure_qty = float(
-                normalized_state.get("open_exposure_qty", decision_context.get("open_exposure_qty", qty))
+                normalized_state.get(
+                    "open_exposure_qty",
+                    decision_context.get("open_exposure_qty", raw_open_exposure_qty),
+                )
             )
         else:
             effective_flat = bool(normalized_exposure.effective_flat)
