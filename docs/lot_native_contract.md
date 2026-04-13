@@ -13,7 +13,7 @@ The code and tests now verify that:
 
 - canonical SELL quantity and SELL lot count are taken from lot-native state
 - the public SELL boundary still treats qty as derived from lot-native authority
-- compatibility and provenance residue remains an internal cleanup boundary rather than canonical authority
+- compatibility and provenance residue remains a fail-closed cleanup boundary rather than canonical authority
 
 The remaining work after that is explicit compatibility-boundary cleanup, not a
 change to canonical SELL semantic authority.
@@ -38,23 +38,27 @@ intact while the remaining declaration gap is closed.
 ### Current verified external contract
 
 The current verified external contract is that externally consumed SELL and
-reporting paths use lot-native state as semantic authority and do not expose
-compatibility or provenance as a primary field layer.
+reporting paths use lot-native state as semantic authority. That does not mean
+every fail-closed blocker or compatibility marker has already disappeared from
+all current semantic or emitted surfaces.
 
 For this batch, that means:
 
-- `decision_context` output no longer emits compatibility fallback authority or provenance residue
-- `reporting` primary summaries no longer preserve compatibility, truth-source, or provenance layers as primary fields
+- canonical SELL authority is `position_state.normalized_exposure.sellable_executable_lot_count`
+- qty remains derived from the normalized lot-native authority surface
+- fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still appear in current semantic outputs and current code paths
+- compatibility and provenance handling must remain non-authoritative even where fail-closed markers still exist
 
-This is the current external contract, not a statement that every internal
-compatibility/fail-closed path has already disappeared from the current code.
+This is the current external contract, not a statement that every compatibility
+or fail-closed path has already disappeared from emitted output or from the
+current code.
 
 ### Remaining explicit boundary
 
 The remaining non-P0 work is the internal compatibility boundary:
 
 - `decision_context` still contains internal fail-closed compatibility normalization while building canonical output
-- fail-closed `legacy_lot_metadata_missing` handling still exists in the current code path as a blocker/reason and fallback marker
+- fail-closed `legacy_lot_metadata_missing` handling still exists in the current code path as a blocker/reason and fallback marker, and may still be visible in current semantic outputs
 - diagnostic-only broker/reporting evidence may still retain source or truth-source metadata outside the primary semantic flow
 
 That remaining boundary must stay non-authoritative. It is cleanup scope, not
@@ -189,24 +193,17 @@ FAIL:
 The current PASS baseline keeps all of the following true at the same time:
 
 - the contract PASS baseline above remains intact
-- `decision_context` output no longer emits compatibility fallback authority or provenance
-- `decision_context` output no longer carries an explicit compatibility residue bucket
-- `reporting` primary summaries no longer preserve truth-source, provenance, or compatibility layers as primary fields
 - the executable SELL path remains lot-native and canonical at the boundary
 - recovery and lifecycle continue to fail closed for qty-only legacy rows without reintroducing semantic authority
-- fail-closed blocker paths such as `legacy_lot_metadata_missing` no longer remain in emitted or primary semantic surfaces
+- fail-closed blocker paths such as `legacy_lot_metadata_missing` may still remain visible in current semantic or emitted surfaces
 - internal fail-closed compatibility handling may still remain behind the normalized authority boundary
 
 This baseline fails if any of the following become true:
 
 - any executable SELL decision still depends on qty as authority
-- emitted `decision_context` payloads still expose compatibility fallback authority or provenance
-- emitted `decision_context` payloads still contain a compatibility residue bucket
-- primary reporting summaries still expose truth-source or provenance layers as primary fields
-- primary reporting summaries still expose compatibility layers as primary fields
 - `open_exposure` and `dust_tracking` are merged into a single executable inventory
 - recovery or lifecycle restores qty-only legacy rows as executable semantic authority
-- fail-closed `legacy_lot_metadata_missing` blocker or fallback residue still remains in a primary semantic or emitted surface
+- fail-closed blocker or compatibility handling becomes canonical SELL authority
 
 ## Remaining Internal Boundary
 
@@ -225,9 +222,7 @@ This document must describe the same external contract that the current code
 and tests verify:
 
 - canonical lot-native SELL authority remains intact at the boundary
-- emitted `decision_context` compatibility fallback/provenance residue is not a
-  primary semantic surface
-- `reporting` primary-flow truth-source/provenance residue is not a primary
-  semantic surface
+- fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still
+  appear in current semantic outputs
 - internal fail-closed compatibility handling may still remain behind the
   normalized authority boundary

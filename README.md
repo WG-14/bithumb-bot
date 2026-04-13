@@ -18,10 +18,13 @@ This bot uses lot-native executable position semantics.
 - `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
 - `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
+- Current terminal/operator-facing states include `open_exposure`, `reserved_exit_pending`, `dust_only`, `flat`, and `non_executable_position`.
 - `reserved_exit_pending` is a real normalized terminal state: executable exposure still exists, but normal SELL submission is blocked because the sellable lots are already reserved by open SELL orders.
+- `dust_only`, `flat`, and `non_executable_position` remain distinct normalized outcomes and should not be collapsed into qty-first state interpretation.
 - If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order.
 - Lot counts are the canonical executable state meaning.
 - Qty remains an exchange-interface and reporting value, derived from the lot-native state.
+- Current external/terminal authority is lot-native, but internal fail-closed compatibility and fallback handling still remains in code for legacy or non-executable cases.
 
 ## Quick Start
 

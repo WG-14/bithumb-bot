@@ -91,6 +91,11 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
 - `unresolved_open_order_count`: order lifecycle state is still unclear.
 - `recovery_required_count`: explicit recovery action is still required.
 - `last_reconcile_*`: the most recent reconciliation evidence.
+- Read the current lot/dust fields from the emitted status payload, not from older position booleans.
+- For entry/flat interpretation, start with:
+  - `entry_allowed`
+  - `effective_flat`
+  - `effective_flat_due_to_harmless_dust`
 - Dust terms:
   - Canonical current states are `no_dust`, `harmless_dust`, and `blocking_dust`.
   - `harmless_dust`: a small remainder that is policy-classified as harmless dust.
@@ -98,7 +103,7 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
   - `effective flat`: the remainder is treated as flat for the entry gate.
   - `resume allowed` / `new orders allowed`: policy flags that must be true before fresh BUYs are allowed.
 - `effective_flat_due_to_harmless_dust` does not prove a literal zero balance.
-- `dust_state`, `dust_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together, but they are not the primary SELL/exit authority layer.
+- `dust_state`, `dust_action` / `operator_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together, but they are not the primary SELL/exit authority layer.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.
 - `dust_min_qty` and `dust_min_notional_krw` are separate sellability gates.
 - For exit authority, check the lot-native fields first:
@@ -210,11 +215,11 @@ MODE=live DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite \
 - `dust_state=blocking_dust` means the remainder is not safely resumable.
 - Legacy labels such as `dangerous_dust` may still be normalized from older metadata, but operators should treat `blocking_dust` as the current canonical state name.
 - `unresolved_count > 0` or `recovery_required_count > 0` means the state is still recovery-related.
-- If `position.in_position=False` because of harmless dust, the entry gate has already accepted the remainder as flat.
+- If harmless dust is being treated as effectively flat, confirm that with `entry_allowed=1`, `effective_flat=1`, and `effective_flat_due_to_harmless_dust=1` rather than relying on older `position.in_position` style state expressions.
 - Do not use `dust_state` alone to infer whether a SELL or exit is currently allowed.
 - Use this order when you read the fields:
   1. restart gate
-  2. lot-native exit authority (`sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_block_reason`, normalized exposure fields)
+  2. lot-native exit authority (`sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, `exit_block_reason`, normalized exposure fields)
   3. dust policy and resume posture
   4. quantity cross-check
   5. exchange minimum cross-check
