@@ -106,6 +106,40 @@ _DOCUMENTED_PRIVATE_ERROR_MESSAGES: dict[str, tuple[str, str, str, bool, bool, b
 }
 
 
+@dataclass(frozen=True)
+class _SubmitPriceTickPolicy:
+    applies: bool
+    price_unit: float
+    reason: str
+
+
+def _resolve_submit_price_tick_policy(
+    *,
+    order_side: str,
+    price: float | None,
+    rules,
+) -> _SubmitPriceTickPolicy:
+    from .order_rules import side_price_unit
+
+    if price is None and str(order_side).upper() == "SELL":
+        return _SubmitPriceTickPolicy(
+            applies=False,
+            price_unit=0.0,
+            reason="market_sell_price_tick_non_applicable",
+        )
+    if price is None:
+        return _SubmitPriceTickPolicy(
+            applies=True,
+            price_unit=float(side_price_unit(rules=rules, side=order_side)),
+            reason="market_buy_notional_price_unit",
+        )
+    return _SubmitPriceTickPolicy(
+        applies=True,
+        price_unit=float(side_price_unit(rules=rules, side=order_side)),
+        reason="limit_price_unit",
+    )
+
+
 class BithumbAuthError(BrokerRejectError):
     def __init__(self, reason_code: str, message: str) -> None:
         super().__init__(message)
@@ -2099,12 +2133,16 @@ class BithumbBroker:
             normalize_limit_price_for_side,
             validate_order_chance_support,
             side_min_total_krw,
-            side_price_unit,
         )
 
         order_rules_resolution = get_effective_order_rules(market)
         rules = order_rules_resolution.rules
         order_side = "BUY" if normalized_side == "bid" else "SELL"
+        submit_price_tick_policy = _resolve_submit_price_tick_policy(
+            order_side=order_side,
+            price=price,
+            rules=rules,
+        )
         validate_order_chance_support(rules=rules, side=side, order_type=("price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")))
         if price is None and normalized_side == "ask":
             broker_precision_qty = self._truncate_volume(float(qty))
@@ -2170,7 +2208,7 @@ class BithumbBroker:
                 # submit field is the KRW notional derived from that lot quantity.
                 exchange_submit_field = "price"
                 exchange_submit_notional = self._decimal_from_value(effective_market_price) * self._decimal_from_value(internal_lot_qty)
-                bid_price_unit = self._decimal_from_value(side_price_unit(rules=rules, side=order_side))
+                bid_price_unit = self._decimal_from_value(submit_price_tick_policy.price_unit)
                 if bid_price_unit > 0:
                     exchange_submit_notional = (exchange_submit_notional / bid_price_unit).to_integral_value(rounding=ROUND_DOWN) * bid_price_unit
                 min_total = side_min_total_krw(rules=rules, side=order_side)
@@ -2200,7 +2238,7 @@ class BithumbBroker:
             if requested_limit_price <= 0:
                 raise BrokerRejectError(f"limit price must be > 0 (got {price})")
 
-            price_unit = side_price_unit(rules=rules, side=order_side)
+            price_unit = submit_price_tick_policy.price_unit
             normalized_limit_price = self._decimal_from_value(
                 normalize_limit_price_for_side(price=float(requested_limit_price), side=order_side, rules=rules)
             )
@@ -2245,6 +2283,9 @@ class BithumbBroker:
                 dust_qty=float(qty_split.dust_qty),
                 lot_count=int(qty_split.lot_count),
                 lot_size=float(lot_rules.lot_size),
+                submit_price_tick_applies=1 if submit_price_tick_policy.applies else 0,
+                submit_price_tick_unit=float(submit_price_tick_policy.price_unit),
+                submit_price_tick_reason=submit_price_tick_policy.reason,
                 canonical_query_string=canonical_payload,
                 payload_fields=",".join(payload.keys()),
             )

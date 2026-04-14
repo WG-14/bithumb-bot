@@ -2705,6 +2705,7 @@ def test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit(
             "entry_allowed": False,
             "effective_flat": False,
             "raw_qty_open": 0.00009997,
+            "raw_total_asset_qty": 0.00009997,
             "normalized_exposure_active": True,
             "normalized_exposure_qty": 0.00009997,
             "open_exposure_qty": 0.00009997,
@@ -2794,6 +2795,135 @@ def test_live_execute_signal_sell_treats_sub_min_residual_as_dust_before_submit(
         assert suppression_context["reason_code"] == DUST_RESIDUAL_SUPPRESSED
         assert suppression_context["exit_non_executable_reason"] in {"dust_only_remainder", "no_executable_exit_lot"}
     finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_exit_intent_true_but_quantity_blocked_suppresses_without_order_submit(tmp_path):
+    original = {
+        "DB_PATH": settings.DB_PATH,
+        "START_CASH_KRW": settings.START_CASH_KRW,
+        "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
+        "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
+        "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
+        "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
+        "MAX_ORDERBOOK_SPREAD_BPS": settings.MAX_ORDERBOOK_SPREAD_BPS,
+        "MAX_MARKET_SLIPPAGE_BPS": settings.MAX_MARKET_SLIPPAGE_BPS,
+        "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS": settings.LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS,
+    }
+    db_path = str(tmp_path / "sell_exit_intent_quantity_blocked.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    conn = ensure_db(db_path)
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_000_000_200,
+        strategy_name="exit_intent_blocked_test",
+        signal="SELL",
+        reason="exit_signal_present",
+        candle_ts=1_700_000_000_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "entry_allowed": False,
+            "effective_flat": False,
+            "raw_qty_open": 0.00009997,
+            "raw_total_asset_qty": 0.00009997,
+            "normalized_exposure_active": True,
+            "normalized_exposure_qty": 0.00009997,
+            "open_exposure_qty": 0.00009997,
+            "dust_tracking_qty": 0.0,
+            "exit": {
+                "intent": {
+                    "intent": "exit_open_exposure",
+                    "requires_execution_sizing": True,
+                }
+            },
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_total_asset_qty": 0.00009997,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.00009997,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 1,
+                    "reserved_exit_qty": 0.0,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_qty": 0.0,
+                    "sellable_executable_lot_count": 0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "dust_only_remainder",
+                    "terminal_state": "dust_only",
+                    "normalized_exposure_qty": 0.0,
+                    "normalized_exposure_active": False,
+                    "entry_allowed": False,
+                    "effective_flat": False,
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_residual_present": 0,
+            "dust_effective_flat": 0,
+            "dust_policy_reason": "none",
+        },
+    )
+
+    broker = _FakeBroker()
+    recorded: dict[str, object] = {}
+    original_recorder = live_module._record_sell_no_executable_exit_suppression
+    try:
+        live_module._record_sell_no_executable_exit_suppression = lambda **kwargs: recorded.update(kwargs) or True
+        trade = live_execute_signal(
+            broker,
+            "SELL",
+            1000,
+            100_000_000.0,
+            strategy_name="exit_intent_blocked_test",
+            decision_id=decision_id,
+            decision_reason="exit_signal_present",
+            exit_rule_name="exit_signal",
+        )
+
+        assert trade is None
+        assert broker.place_order_calls == 0
+
+        conn = ensure_db(db_path)
+        sell_order_count = conn.execute("SELECT COUNT(*) AS n FROM orders WHERE side='SELL'").fetchone()["n"]
+        conn.close()
+
+        assert sell_order_count == 0
+        assert recorded["strategy_name"] == "exit_intent_blocked_test"
+        assert recorded["decision_id"] == decision_id
+        assert recorded["decision_reason"] == "exit_signal_present"
+        assert recorded["exit_rule_name"] == "exit_signal"
+        assert float(recorded["market_price"]) == pytest.approx(100_000_000.0)
+        exit_sizing = recorded["exit_sizing"]
+        assert exit_sizing is not None
+        assert exit_sizing.allowed is False
+        assert exit_sizing.executable_lot_count == 0
+        assert exit_sizing.executable_qty == pytest.approx(0.0)
+        canonical_sell = recorded["canonical_sell"]
+        assert canonical_sell.sellable_executable_lot_count == 0
+        assert canonical_sell.exit_allowed is False
+        assert canonical_sell.submit_qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+    finally:
+        live_module._record_sell_no_executable_exit_suppression = original_recorder
         for key, value in original.items():
             object.__setattr__(settings, key, value)
 

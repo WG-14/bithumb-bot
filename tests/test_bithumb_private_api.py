@@ -15,6 +15,7 @@ from bithumb_bot.broker.bithumb import (
     BithumbPrivateAPI,
     BithumbOrderNotReadyError,
     BithumbRateLimitError,
+    _resolve_submit_price_tick_policy,
     _documented_private_error_descriptor,
     classify_private_api_error,
     classify_private_api_failure,
@@ -1737,6 +1738,18 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
         ),
         "client_order_id": "cid-mkt-unit",
     }
+
+
+def test_submit_price_tick_policy_marks_market_sell_non_applicable() -> None:
+    policy = _resolve_submit_price_tick_policy(
+        order_side="SELL",
+        price=None,
+        rules=SimpleNamespace(bid_price_unit=10.0, ask_price_unit=7.0),
+    )
+
+    assert policy.applies is False
+    assert policy.price_unit == pytest.approx(0.0)
+    assert policy.reason == "market_sell_price_tick_non_applicable"
 
 
 def test_recent_orders_includes_done_and_cancel_states(monkeypatch):

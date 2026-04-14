@@ -22,6 +22,7 @@ from .broker.paper import paper_execute
 from .broker.live import live_execute_signal, record_harmless_dust_exit_suppression
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
+from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
@@ -58,6 +59,7 @@ STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+_CANONICAL_SELL_SUBMIT_LOT_SOURCE = "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
 def compute_signal(
@@ -82,6 +84,34 @@ def compute_signal(
     payload = decision.as_dict()
     payload.setdefault("strategy", strategy.name)
     return payload
+
+
+def _canonical_harmless_dust_sell_preview(decision_context: dict[str, object] | None) -> dict[str, float | str] | None:
+    if not isinstance(decision_context, dict):
+        return None
+
+    canonical_exposure = resolve_canonical_position_exposure_snapshot(decision_context)
+    if bool(canonical_exposure.exit_allowed):
+        return None
+    if int(canonical_exposure.sellable_executable_lot_count) > 0:
+        return None
+
+    exit_block_reason = str(canonical_exposure.exit_block_reason or "").strip()
+    if exit_block_reason not in {"dust_only_remainder", "no_executable_exit_lot"}:
+        return None
+
+    requested_qty = max(0.0, float(canonical_exposure.raw_total_asset_qty))
+    if requested_qty <= 1e-12:
+        return None
+
+    return {
+        "requested_qty": requested_qty,
+        "normalized_qty": max(0.0, float(canonical_exposure.sellable_executable_qty)),
+        "raw_total_asset_qty": requested_qty,
+        "open_exposure_qty": max(0.0, float(canonical_exposure.open_exposure_qty)),
+        "dust_tracking_qty": max(0.0, float(canonical_exposure.dust_tracking_qty)),
+        "submit_qty_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
+    }
 
 
 @dataclass(frozen=True)
@@ -2311,8 +2341,10 @@ def run_loop(short_n: int, long_n: int) -> None:
             decision_reason_for_trade: str | None = None
             decision_exit_rule_name: str | None = None
             decision_strategy_name_for_trade: str | None = None
+            decision_context_for_trade: dict[str, object] | None = None
             try:
                 context = dict(r)
+                decision_context_for_trade = context
                 strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
@@ -2387,24 +2419,29 @@ def run_loop(short_n: int, long_n: int) -> None:
                         raise
                     trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
-                if r["signal"] == "SELL" and portfolio_qty > 0:
+                harmless_dust_preview = None
+                if r["signal"] == "SELL":
+                    harmless_dust_preview = _canonical_harmless_dust_sell_preview(decision_context_for_trade)
+                if harmless_dust_preview is not None:
                     suppression_conn = ensure_db()
                     try:
-                        suppression_preview = {
-                            "normalized_qty": portfolio_qty,
-                        }
                         if record_harmless_dust_exit_suppression(
                             conn=suppression_conn,
                             state=runtime_state.snapshot(),
                             signal=r["signal"],
                             side="SELL",
-                            requested_qty=portfolio_qty,
+                            requested_qty=float(harmless_dust_preview["requested_qty"]),
                             market_price=float(r["last_close"]),
-                            normalized_qty=float(suppression_preview["normalized_qty"]),
+                            normalized_qty=float(harmless_dust_preview["normalized_qty"]),
                             strategy_name=decision_strategy_name_for_trade,
                             decision_id=decision_id,
                             decision_reason=decision_reason_for_trade,
                             exit_rule_name=decision_exit_rule_name,
+                            submit_qty_source=str(harmless_dust_preview["submit_qty_source"]),
+                            position_state_source=str(harmless_dust_preview["submit_qty_source"]),
+                            raw_total_asset_qty=float(harmless_dust_preview["raw_total_asset_qty"]),
+                            open_exposure_qty=float(harmless_dust_preview["open_exposure_qty"]),
+                            dust_tracking_qty=float(harmless_dust_preview["dust_tracking_qty"]),
                         ):
                             suppression_conn.commit()
                             continue

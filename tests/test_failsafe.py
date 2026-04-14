@@ -631,6 +631,17 @@ def test_run_loop_live_harmless_dust_sell_suppresses_before_live_execution(monke
             "curr_s": 1.0,
             "curr_l": 0.5,
             "signal": "SELL",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_total_asset_qty": 0.00009193,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.00009193,
+                    "sellable_executable_qty": 0.0,
+                    "sellable_executable_lot_count": 0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "dust_only_remainder",
+                }
+            },
         },
     )
 
@@ -685,6 +696,60 @@ def test_run_loop_live_harmless_dust_sell_suppresses_before_live_execution(monke
     assert suppression_calls[0]["side"] == "SELL"
     assert suppression_calls[0]["requested_qty"] == pytest.approx(0.00009193)
     assert suppression_calls[0]["market_price"] == pytest.approx(100_000_000.0)
+    assert suppression_calls[0]["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
+def test_run_loop_live_sell_does_not_presuppress_when_canonical_sell_authority_is_executable(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00049193)
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100_000_000.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "SELL",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_total_asset_qty": 0.00049193,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.00009193,
+                    "sellable_executable_qty": 0.0004,
+                    "sellable_executable_lot_count": 1,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                }
+            },
+        },
+    )
+
+    suppression_calls: list[dict[str, object]] = []
+    live_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.record_harmless_dust_exit_suppression",
+        lambda **kwargs: suppression_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_calls.__setitem__("n", live_calls["n"] + 1) or None,
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+        },
+    )
+
+    run_loop(5, 20)
+
+    assert suppression_calls == []
+    assert live_calls["n"] == 1
 
 
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):

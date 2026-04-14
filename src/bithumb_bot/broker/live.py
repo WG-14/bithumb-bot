@@ -2207,6 +2207,11 @@ def record_harmless_dust_exit_suppression(
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
+    submit_qty_source: str | None = None,
+    position_state_source: str | None = None,
+    raw_total_asset_qty: float | None = None,
+    open_exposure_qty: float | None = None,
+    dust_tracking_qty: float | None = None,
 ) -> bool:
     """Public wrapper for harmless dust sell suppression.
 
@@ -2226,6 +2231,11 @@ def record_harmless_dust_exit_suppression(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
+        submit_qty_source=submit_qty_source,
+        position_state_source=position_state_source,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
     )
 
 
