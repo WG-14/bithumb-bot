@@ -949,6 +949,10 @@ def _build_canonical_sell_execution_view(
     normalized_exposure,
     decision_observability: dict[str, object],
 ) -> _CanonicalSellExecutionView:
+    # This is the SELL decision/sizing authority handoff into execution. It is
+    # sourced only from canonical normalized lot-native position state.
+    # Lifecycle matching, fill accounting, and qty-only observations may record
+    # what happened after the decision, but they must not supply SELL authority.
     return _CanonicalSellExecutionView(
         sellable_executable_lot_count=int(normalized_exposure.sellable_executable_lot_count),
         sellable_executable_qty=float(normalized_exposure.sellable_executable_qty),

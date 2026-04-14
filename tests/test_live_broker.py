@@ -4820,6 +4820,136 @@ def test_authority_boundary_live_execute_signal_sell_uses_exit_sizing_executable
 
 @pytest.mark.fast_regression
 @pytest.mark.lot_native_regression_gate
+def test_authority_boundary_live_execute_signal_sell_handoff_uses_canonical_normalized_lot_state_over_stale_qty_candidates(
+    monkeypatch,
+    tmp_path,
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_handoff_canonical_normalized.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    captured: dict[str, object] = {}
+
+    def _capture_sell_execution_sizing(**kwargs):
+        authority = kwargs["authority"]
+        captured["authority"] = authority
+        lot_qty = 0.0004
+        executable_qty = float(authority.sellable_executable_lot_count) * lot_qty
+        return SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            requested_qty=executable_qty,
+            executable_qty=executable_qty,
+            internal_lot_size=lot_qty,
+            intended_lot_count=int(authority.sellable_executable_lot_count),
+            executable_lot_count=int(authority.sellable_executable_lot_count),
+            qty_source="position_state.normalized_exposure.sellable_executable_lot_count",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+        )
+
+    monkeypatch.setattr(live_module, "build_sell_execution_sizing", _capture_sell_execution_sizing)
+
+    conn = ensure_db(str(tmp_path / "sell_handoff_canonical_normalized.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0036,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.0004, 1, 0, "lot-native", "open_exposure"),
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_000_000_200,
+        strategy_name="sell_handoff_test",
+        signal="SELL",
+        reason="partial_take_profit",
+        candle_ts=1_700_000_000_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "raw_qty_open": 0.0036,
+            "raw_total_asset_qty": 0.0036,
+            "open_exposure_qty": 0.0036,
+            "sellable_executable_qty": 0.0036,
+            "sellable_executable_lot_count": 9,
+            "normalized_exposure_active": True,
+            "normalized_exposure_qty": 0.0036,
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0036,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.0032,
+                    "open_lot_count": 1,
+                    "dust_tracking_lot_count": 8,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_qty": 0.0004,
+                    "sellable_executable_lot_count": 1,
+                    "effective_flat": False,
+                    "entry_allowed": False,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                    "normalized_exposure_active": True,
+                    "normalized_exposure_qty": 0.0004,
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="sell_handoff_test",
+        decision_id=decision_id,
+        decision_reason="partial_take_profit",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+    authority = captured["authority"]
+    assert authority.sellable_executable_lot_count == 1
+    assert authority.exit_allowed is True
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0004)
+    assert broker._last_qty != pytest.approx(0.0036)
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
 def test_lot_native_gate_live_execute_signal_sell_ignores_exit_sizing_qty_source_shadow(
     monkeypatch,
     tmp_path,

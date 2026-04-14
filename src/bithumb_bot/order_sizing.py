@@ -48,8 +48,11 @@ class ExecutionSizingPlan:
 class SellExecutionAuthority:
     """Canonical SELL authority surface for execution sizing.
 
-    The SELL path must accept lot-native authority, not raw aggregate qty.
-    Any qty used for execution remains derived from this lot-native input.
+    SELL decision eligibility and sizing must come from
+    `position_state.normalized_exposure.sellable_executable_lot_count`.
+    The SELL path must accept that lot-native authority, not raw aggregate qty
+    and not lifecycle/accounting lot matching. Any qty used for execution
+    remains derived from this lot-native input.
     """
 
     sellable_executable_lot_count: int

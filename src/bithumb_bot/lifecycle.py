@@ -627,6 +627,9 @@ def apply_fill_lifecycle(
         raise RuntimeError(f"unsupported lifecycle side: {side}")
 
     # SELL lifecycle consumes only the sellable open_exposure path.
+    # This is post-fill accounting/matching only; SELL decision eligibility and
+    # SELL sizing must already have been decided from
+    # position_state.normalized_exposure.sellable_executable_lot_count.
     # dust_tracking lots remain operator evidence and are never matched here.
     lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
     rows = _fetch_sellable_open_exposure_lots(conn, pair=str(pair))
