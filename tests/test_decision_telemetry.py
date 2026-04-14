@@ -313,6 +313,9 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["dust_tracking_qty"] == 0.00009563
     assert ctx["open_lot_count"] == 0
     assert ctx["sellable_executable_lot_count"] == 0
+    assert ctx["exit_allowed"] is False
+    assert ctx["exit_block_reason"] == "dust_only_remainder"
+    assert ctx["holding_authority_state"] == "dust_only"
     assert ctx["submit_lot_count"] == 0
     assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
     assert ctx["sell_qty_boundary_kind"] == "none"
@@ -323,6 +326,10 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert ctx["position_state"]["normalized_exposure"]["entry_gate_effective_flat"] is True
     assert ctx["position_state"]["normalized_exposure"]["holding_authority_state"] == "dust_only"
     assert ctx["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert ctx["position_state"]["normalized_exposure"]["has_executable_exposure"] is False
+    assert ctx["position_state"]["normalized_exposure"]["effective_flat"] is True
+    assert ctx["position_state"]["normalized_exposure"]["exit_allowed"] is False
+    assert ctx["position_state"]["normalized_exposure"]["exit_block_reason"] == "dust_only_remainder"
     assert _collect_residue_paths(ctx) == []
 
 

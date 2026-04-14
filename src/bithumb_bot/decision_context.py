@@ -32,6 +32,16 @@ _CANONICAL_SELL_QTY_DERIVATION = "position_state.normalized_exposure.sellable_ex
 
 @dataclass(frozen=True)
 class CanonicalPositionExposureSnapshot:
+    """Canonical lot-native authority plus entry-gate interpretation.
+
+    `effective_flat` / `entry_gate_effective_flat` are BUY-entry gate signals.
+    They are intentionally not executable position authority for SELL, recovery,
+    or flatness semantics. Those paths must continue to use the canonical lot-
+    native authority surface such as `holding_authority_state`,
+    `has_executable_exposure`, `exit_allowed`, and
+    `sellable_executable_lot_count`.
+    """
+
     dust_classification: str
     entry_allowed: bool
     effective_flat: bool
@@ -921,6 +931,8 @@ def resolve_canonical_position_exposure_snapshot(
     return CanonicalPositionExposureSnapshot(
         dust_classification=dust_classification,
         entry_allowed=bool(entry_allowed),
+        # Preserve the legacy field name, but keep it aligned with the explicit
+        # entry-gate interpretation rather than SELL/recovery authority.
         effective_flat=bool(effective_flat),
         entry_gate_effective_flat=bool(effective_flat),
         holding_authority_state=holding_authority_state,
