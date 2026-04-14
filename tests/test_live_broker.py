@@ -3988,7 +3988,8 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
     assert submit_evidence["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
     assert submit_evidence["submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
     assert submit_evidence["sell_submit_qty_source_truth_source"] == "derived:sellable_executable_qty"
-    assert submit_evidence["position_state_source"] == "derived:sellable_executable_lot_count"
+    assert submit_evidence["position_state_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert submit_evidence["position_state_source_truth_source"] == "derived:sellable_executable_lot_count"
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00029193)
     assert submit_evidence["open_exposure_qty"] == pytest.approx(0.0002)
     assert submit_evidence["dust_tracking_qty"] == pytest.approx(0.00009193)

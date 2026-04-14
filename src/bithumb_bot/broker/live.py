@@ -483,6 +483,7 @@ def _sell_submit_observability_fields(
     submit_qty_source: str,
     submit_lot_source: str,
     position_state_source: str,
+    position_state_source_truth_source: str,
     submit_qty_source_truth_source: str,
     submit_lot_source_truth_source: str,
     sell_qty_basis_qty_truth_source: str,
@@ -545,6 +546,7 @@ def _sell_submit_observability_fields(
         "sell_failure_detail": sell_failure_detail,
         "submit_qty_source": emitted_submit_qty_source,
         "position_state_source": position_state_source,
+        "position_state_source_truth_source": position_state_source_truth_source,
         "raw_total_asset_qty": float(raw_total_asset_qty),
         "open_exposure_qty": float(open_exposure_qty),
         "dust_tracking_qty": float(dust_tracking_qty),
@@ -2748,6 +2750,7 @@ def _submit_via_standard_path(
         submit_qty_source=submit_qty_source,
         submit_lot_source=str(decision_observability.get("sell_submit_lot_source") or decision_observability.get("submit_lot_source") or _CANONICAL_SELL_SUBMIT_LOT_SOURCE),
         position_state_source=position_state_source,
+        position_state_source_truth_source=sell_truth_source_fields["position_state_source_truth_source"],
         submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
         submit_lot_source_truth_source=sell_truth_source_fields["submit_lot_source_truth_source"],
         sell_qty_basis_qty_truth_source=sell_truth_source_fields["sell_qty_basis_qty_truth_source"],
@@ -3437,10 +3440,8 @@ def live_execute_signal(
                 "sell_qty_basis_source": str(normalized_exposure.sell_submit_lot_source),
                 "sell_qty_basis_source_truth_source": "derived:sellable_executable_lot_count",
                 "position_state": {"normalized_exposure": normalized_exposure.as_dict()},
-                "position_state_source": str(
-                    decision_observability.get("sell_submit_lot_source_truth_source")
-                    or "derived:sellable_executable_lot_count"
-                ),
+                "position_state_source": str(normalized_exposure.sell_submit_lot_source),
+                "position_state_source_truth_source": "derived:sellable_executable_lot_count",
             }
         )
 

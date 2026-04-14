@@ -1639,6 +1639,128 @@ def test_partial_exit_keeps_remaining_sell_authority_lot_native(tmp_path):
 
 
 @pytest.mark.lot_native_regression_gate
+def test_terminal_state_evaluates_after_authoritative_open_exposure_updates(tmp_path):
+    conn = ensure_db(str(tmp_path / "terminal_state_update_order.sqlite"))
+    lot_rules = _test_lot_rules()
+    base_ts = 1_700_001_260_000
+    executable_entry_qty = lot_count_to_qty(lot_count=2, lot_size=lot_rules.lot_size)
+    dust_qty = lot_rules.lot_size / 2.0
+    buy_qty = float(executable_entry_qty + dust_qty)
+    single_lot_exit_qty = lot_count_to_qty(lot_count=1, lot_size=lot_rules.lot_size)
+
+    _record_order(conn, client_order_id="ordered_entry", side="BUY", qty_req=buy_qty, ts_ms=base_ts)
+    apply_fill_and_trade(
+        conn,
+        client_order_id="ordered_entry",
+        side="BUY",
+        fill_id="fill_ordered_entry",
+        fill_ts=base_ts,
+        price=40_000_000.0,
+        qty=buy_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=705,
+    )
+
+    _record_order(
+        conn,
+        client_order_id="ordered_exit_1",
+        side="SELL",
+        qty_req=single_lot_exit_qty,
+        ts_ms=base_ts + 60_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="ordered_exit_1",
+        side="SELL",
+        fill_id="fill_ordered_exit_1",
+        fill_ts=base_ts + 60_000,
+        price=41_000_000.0,
+        qty=single_lot_exit_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=705,
+        exit_decision_id=706,
+        exit_reason="trim_once",
+        exit_rule_name="partial_trim",
+    )
+
+    pair = str(settings.PAIR)
+    after_first_summary = summarize_position_lots(conn, pair=pair)
+    after_first_normalized = build_position_state_model(
+        raw_qty_open=float(after_first_summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(after_first_summary.raw_total_asset_qty),
+        open_exposure_qty=float(after_first_summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(after_first_summary.dust_tracking_qty),
+        open_lot_count=int(after_first_summary.open_lot_count),
+        dust_tracking_lot_count=int(after_first_summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+
+    _record_order(
+        conn,
+        client_order_id="ordered_exit_2",
+        side="SELL",
+        qty_req=single_lot_exit_qty,
+        ts_ms=base_ts + 120_000,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="ordered_exit_2",
+        side="SELL",
+        fill_id="fill_ordered_exit_2",
+        fill_ts=base_ts + 120_000,
+        price=41_500_000.0,
+        qty=single_lot_exit_qty,
+        fee=0.0,
+        strategy_name="sma_with_filter",
+        entry_decision_id=705,
+        exit_decision_id=707,
+        exit_reason="trim_to_dust",
+        exit_rule_name="partial_trim",
+    )
+
+    after_second_summary = summarize_position_lots(conn, pair=pair)
+    after_second_normalized = build_position_state_model(
+        raw_qty_open=float(after_second_summary.raw_open_exposure_qty),
+        metadata_raw={},
+        raw_total_asset_qty=float(after_second_summary.raw_total_asset_qty),
+        open_exposure_qty=float(after_second_summary.raw_open_exposure_qty),
+        dust_tracking_qty=float(after_second_summary.dust_tracking_qty),
+        open_lot_count=int(after_second_summary.open_lot_count),
+        dust_tracking_lot_count=int(after_second_summary.dust_tracking_lot_count),
+        market_price=40_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    )
+    conn.close()
+
+    assert after_first_summary.open_lot_count == 1
+    assert after_first_summary.raw_open_exposure_qty == pytest.approx(single_lot_exit_qty)
+    assert after_first_summary.dust_tracking_lot_count == 1
+    assert after_first_summary.dust_tracking_qty == pytest.approx(dust_qty)
+    assert after_first_normalized.normalized_exposure.sellable_executable_lot_count == 1
+    assert after_first_normalized.normalized_exposure.exit_allowed is True
+    assert after_first_normalized.normalized_exposure.terminal_state != "dust_only"
+
+    assert after_second_summary.open_lot_count == 0
+    assert after_second_summary.raw_open_exposure_qty == pytest.approx(0.0)
+    assert after_second_summary.dust_tracking_lot_count == 1
+    assert after_second_summary.dust_tracking_qty == pytest.approx(dust_qty)
+    assert after_second_normalized.normalized_exposure.sellable_executable_lot_count == 0
+    assert after_second_normalized.normalized_exposure.exit_allowed is False
+    assert after_second_normalized.normalized_exposure.exit_block_reason == "dust_only_remainder"
+    assert after_second_normalized.normalized_exposure.terminal_state == "dust_only"
+
+
+@pytest.mark.lot_native_regression_gate
 def test_partial_exit_residue_crosses_into_dust_only_state(tmp_path):
     conn = ensure_db(str(tmp_path / "partial_exit_dust_only_residue.sqlite"))
     lot_rules = _test_lot_rules()
