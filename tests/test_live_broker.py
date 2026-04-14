@@ -3941,7 +3941,7 @@ def test_live_execute_signal_sell_blocks_when_qty_step_floor_would_leave_unsella
 
 
 @pytest.mark.fast_regression
-def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qty_and_excludes_dust_tracking(monkeypatch, tmp_path):
+def test_authority_boundary_live_execute_signal_sell_records_end_to_end_authority_flow_through_fill_and_reinterpretation(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_normalized_exposure_only.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
@@ -4105,6 +4105,7 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
         LIMIT 1
         """
     ).fetchone()
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
     conn.close()
 
     assert order_row is not None
@@ -4125,6 +4126,38 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
     assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.00029193)
     assert submit_evidence["open_exposure_qty"] == pytest.approx(0.0002)
     assert submit_evidence["dust_tracking_qty"] == pytest.approx(0.00009193)
+
+    assert lot_snapshot.lot_definition is not None
+    assert lot_snapshot.lot_definition.internal_lot_size is not None
+    post_fill_open_lot_count = int(
+        round(float(lot_snapshot.executable_open_exposure_qty) / float(lot_snapshot.lot_definition.internal_lot_size))
+    )
+
+    normalized = build_position_state_model(
+        raw_qty_open=float(lot_snapshot.executable_open_exposure_qty),
+        metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+        raw_total_asset_qty=float(lot_snapshot.raw_total_asset_qty),
+        open_exposure_qty=float(lot_snapshot.executable_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=post_fill_open_lot_count,
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        market_price=100_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    ).normalized_exposure
+
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0002)
+    assert lot_snapshot.executable_open_exposure_qty == pytest.approx(0.0)
+    assert post_fill_open_lot_count == 0
+    assert lot_snapshot.dust_tracking_lot_count == 1
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.00009193)
+    assert normalized.sellable_executable_lot_count == 0
+    assert normalized.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.exit_allowed is False
+    assert normalized.exit_block_reason == "dust_only_remainder"
+    assert normalized.terminal_state == "dust_only"
 
 
 @pytest.mark.fast_regression

@@ -1653,6 +1653,46 @@ def test_place_order_limit_buy_normalizes_off_tick_price_at_execution_boundary(m
         )(),
     )
     monkeypatch.setattr(
+        "bithumb_bot.order_sizing.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 10.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.order_sizing.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 10.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
         broker,
         "_post_private",
         lambda endpoint, payload, retry_safe=False: call.update(
@@ -1727,6 +1767,56 @@ def test_place_order_limit_sell_normalizes_off_tick_price_at_execution_boundary(
     assert call["payload"]["side"] == "ask"
     assert call["payload"]["volume"] == broker._format_volume(qty)
     assert call["payload"]["client_order_id"] == "cid-sell-unit"
+
+
+def test_place_order_limit_sell_tick_normalization_preserves_lot_native_submit_qty(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 10.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: call.update(
+            {"endpoint": endpoint, "payload": payload, "retry_safe": retry_safe}
+        ) or {"uuid": "sell-lot-authority-1"},
+    )
+
+    sell_qty = _exact_lot_qty(market_price=149_500_001.0, lot_count=2)
+
+    order = broker.place_order(
+        client_order_id="cid-sell-lot-authority",
+        side="SELL",
+        qty=sell_qty,
+        price=149_500_001,
+    )
+
+    assert order.exchange_order_id == "sell-lot-authority-1"
+    assert call["endpoint"] == "/v2/orders"
+    assert call["payload"]["price"] == broker._format_krw_amount(Decimal("149500010"))
+    assert call["payload"]["volume"] == broker._format_volume(sell_qty)
+    assert call["payload"]["volume"] != broker._format_volume(_exact_lot_qty(market_price=149_500_001.0, lot_count=1))
+    assert float(order.qty_req) == pytest.approx(sell_qty)
 
 
 def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):

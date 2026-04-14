@@ -10,6 +10,7 @@ from bithumb_bot.decision_context import (
     normalize_strategy_decision_context,
     resolve_canonical_position_exposure_snapshot,
 )
+from bithumb_bot.broker.order_rules import DerivedOrderConstraints, normalize_limit_price_for_side
 from bithumb_bot.dust import (
     DUST_TRACKING_LOT_STATE,
     OPEN_EXPOSURE_LOT_STATE,
@@ -82,6 +83,36 @@ def test_sell_suppression_categories_remain_normal_suppression_outcomes(
     assert plan.executable_lot_count == 0
     assert plan.block_reason == exit_block_reason
     assert plan.non_executable_reason == exit_block_reason
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
+def test_tick_normalization_does_not_override_dust_only_sell_suppression() -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_003.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=False,
+            exit_block_reason="dust_only_remainder",
+        ),
+    )
+    normalized_price = normalize_limit_price_for_side(
+        price=20_000_003.0,
+        side="SELL",
+        rules=DerivedOrderConstraints(
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=10.0,
+            min_notional_krw=5000.0,
+        ),
+    )
+
+    assert normalized_price == pytest.approx(20_000_010.0)
+    assert plan.allowed is False
+    assert plan.executable_lot_count == 0
+    assert plan.executable_qty == pytest.approx(0.0)
+    assert plan.block_reason == "dust_only_remainder"
     assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
