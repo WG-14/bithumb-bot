@@ -5024,6 +5024,91 @@ def test_flatten_position_dust_only_remainder_is_not_treated_as_executable_posit
     assert '"tracked_dust_qty": 9.629e-05' in state.last_flatten_position_summary or '"tracked_dust_qty": 0.00009629' in state.last_flatten_position_summary
 
 
+def test_flatten_position_recorded_buy_below_effective_min_qty_is_normal_noop(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    buy_qty = 0.00009629
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="entry_below_min",
+            side="BUY",
+            qty_req=buy_qty,
+            submit_attempt_id="attempt_entry_below_min",
+            price=100_000_000.0,
+            ts_ms=1_700_000_000_000,
+            status="FILLED",
+        )
+        trade = apply_fill_and_trade(
+            conn,
+            client_order_id="entry_below_min",
+            side="BUY",
+            fill_id="fill_entry_below_min",
+            fill_ts=1_700_000_000_000,
+            price=100_000_000.0,
+            qty=buy_qty,
+            fee=0.0,
+            strategy_name="sma_with_filter",
+            entry_decision_id=101,
+        )
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET cash_available=cash_krw, asset_available=asset_qty, asset_locked=0.0
+            WHERE id=1
+            """
+        )
+        conn.commit()
+        sell_orders_before = conn.execute("SELECT COUNT(*) AS n FROM orders WHERE side='SELL'").fetchone()
+    finally:
+        conn.close()
+
+    assert trade is not None
+    assert sell_orders_before is not None
+    assert int(sell_orders_before["n"]) == 0
+
+    broker = _FlattenBrokerSuccess()
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: broker)
+    monkeypatch.setattr(
+        "bithumb_bot.flatten.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
+    )
+
+    cmd_flatten_position(dry_run=False)
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        sell_orders_after = conn.execute("SELECT COUNT(*) AS n FROM orders WHERE side='SELL'").fetchone()
+    finally:
+        conn.close()
+
+    assert "no position to flatten" in out
+    assert broker.calls == []
+    assert sell_orders_after is not None
+    assert int(sell_orders_after["n"]) == 0
+    state = runtime_state.snapshot()
+    assert state.last_flatten_position_status == "no_position"
+    assert state.last_flatten_position_summary is not None
+    assert '"status": "no_position"' in state.last_flatten_position_summary
+    assert '"terminal_state": "dust_only"' in state.last_flatten_position_summary
+    assert '"executable_exposure_qty": 0.0' in state.last_flatten_position_summary
+    assert '"tracked_dust_qty": 9.629e-05' in state.last_flatten_position_summary or '"tracked_dust_qty": 0.00009629' in state.last_flatten_position_summary
+
+
 def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
     monkeypatch.setenv("MODE", "live")
@@ -5553,8 +5638,8 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "dust_operator_action=harmless_dust_tracked_resume_allowed" in health_out
     assert "dust_resume_allowed_by_policy=1" in health_out
     assert "dust_treat_as_flat=1" in health_out
-    assert "dust_broker_qty=0.00009629" in health_out
-    assert "dust_local_qty=0.00009629" in health_out
+    assert "dust_observed_broker_qty=0.00009629" in health_out
+    assert "dust_observed_local_qty=0.00009629" in health_out
     assert "dust_broker_local_match=1" in health_out
     assert "dust_qty_below_min=broker=1 local=1" in health_out
     assert "dust_notional_below_min=broker=0 local=0" in health_out
@@ -5579,8 +5664,12 @@ def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, cap
     assert "entry_allowed=1" in report_out
     assert "effective_flat_due_to_harmless_dust=1" in report_out
     assert (
-        "broker_qty=0.00009629 local_qty=0.00009629 delta_qty=0.00000000 "
+        "observed_broker_qty=0.00009629 observed_local_qty=0.00009629 delta_qty=0.00000000 "
         "min_qty=0.00010000 min_notional_krw=5000.0"
+    ) in report_out
+    assert (
+        "summary=observed_broker_qty=0.00009629 observed_local_qty=0.00009629 delta=0.00000000 "
+        "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 classification=harmless_dust"
     ) in report_out
     assert "qty_below_min=broker=1 local=1 notional_below_min=broker=0 local=0" in report_out
     assert "broker_local_match=1" in report_out

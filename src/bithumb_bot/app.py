@@ -103,6 +103,18 @@ def _format_rule_value_with_source(*, field: str, value: object, source: dict[st
     return f"{value} (source={rule_source_for(field, source)})"
 
 
+def _clarify_dust_observational_summary(summary: object | None) -> str:
+    text = str(summary or "").strip()
+    if not text:
+        return "none"
+    return (
+        text.replace("broker_qty=", "observed_broker_qty=")
+        .replace("local_qty=", "observed_local_qty=")
+        .replace("broker_notional_krw=", "observed_broker_notional_krw=")
+        .replace("local_notional_krw=", "observed_local_notional_krw=")
+    )
+
+
 def _closed_candle_cutoff_ts_ms(*, interval: str, now_ms: int | None = None) -> int | None:
     interval_sec = parse_interval_sec(interval)
     interval_ms = max(1, int(interval_sec)) * 1000
@@ -262,7 +274,7 @@ def cmd_status():
     print("  [RAW-HOLDINGS]")
     print(
         "    "
-        f"state={dust.state} broker_qty={dust.broker_qty:.8f} local_qty={dust.local_qty:.8f} "
+        f"state={dust.state} observed_broker_qty={dust.broker_qty:.8f} observed_local_qty={dust.local_qty:.8f} "
         f"delta_qty={dust.delta_qty:.8f} broker_local_match={1 if dust.broker_local_match else 0}"
     )
     print("  [NORMALIZED-EXPOSURE]")
@@ -765,8 +777,8 @@ def cmd_health() -> None:
     )
     print(
         "    "
-        f"dust_broker_qty={dust_view.broker_qty:.8f} "
-        f"dust_local_qty={dust_view.local_qty:.8f} "
+        f"dust_observed_broker_qty={dust_view.broker_qty:.8f} "
+        f"dust_observed_local_qty={dust_view.local_qty:.8f} "
         f"dust_delta_qty={dust_view.delta_qty:.8f} "
         f"dust_min_qty={dust_view.min_qty:.8f} "
         f"dust_min_notional_krw={dust_view.min_notional_krw:.1f} "
@@ -2358,8 +2370,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    operator_message={report.get('dust_operator_message') or 'none'}")
     print(
         "    "
-        f"broker_qty={float(report.get('dust_broker_qty') or 0.0):.8f} "
-        f"local_qty={float(report.get('dust_local_qty') or 0.0):.8f} "
+        f"observed_broker_qty={float(report.get('dust_broker_qty') or 0.0):.8f} "
+        f"observed_local_qty={float(report.get('dust_local_qty') or 0.0):.8f} "
         f"delta_qty={float(report.get('dust_delta_qty') or 0.0):.8f} "
         f"min_qty={float(report.get('dust_min_qty') or 0.0):.8f} "
         f"min_notional_krw={float(report.get('dust_min_notional_krw') or 0.0):.1f}"
@@ -2398,7 +2410,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"terminal_state={lot_exposure.terminal_state or 'none'} "
         f"exit_block_reason={lot_exposure.exit_block_reason or 'none'}"
     )
-    print(f"    summary={report.get('dust_residual_summary') or 'none'}")
+    print(f"    summary={_clarify_dust_observational_summary(report.get('dust_residual_summary'))}")
     recent_dust_unsellable_event = report.get("recent_dust_unsellable_event")
     print("  [P3.0a] recent_dust_unsellable_event")
     if recent_dust_unsellable_event:
