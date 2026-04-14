@@ -4126,6 +4126,169 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_runtime_path_preserves_authority_sequence_through_fill_reinterpretation(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "runtime_authority_sequence.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+    monkeypatch.setattr(
+        live_module,
+        "build_buy_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=20_000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0002,
+            internal_lot_size=0.0001,
+            intended_lot_count=2,
+            executable_lot_count=2,
+            qty_source="entry_sizing.budget",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+        ),
+    )
+
+    conn = ensure_db(str(tmp_path / "runtime_authority_sequence.sqlite"))
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=1_700_000_000_200,
+        strategy_name="runtime_authority_sequence",
+        signal="BUY",
+        reason="sma_golden_cross",
+        candle_ts=1_700_000_000_000,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "BUY",
+            "final_signal": "BUY",
+            "entry_allowed": True,
+            "effective_flat": True,
+            "raw_qty_open": 0.0,
+            "raw_total_asset_qty": 0.0,
+            "normalized_exposure_active": False,
+            "normalized_exposure_qty": 0.0,
+            "open_exposure_qty": 0.0,
+            "dust_tracking_qty": 0.0,
+            "has_executable_exposure": False,
+            "has_any_position_residue": False,
+            "has_non_executable_residue": False,
+            "has_dust_only_remainder": False,
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0,
+                    "raw_total_asset_qty": 0.0,
+                    "effective_flat": True,
+                    "entry_allowed": True,
+                    "normalized_exposure_active": False,
+                    "normalized_exposure_qty": 0.0,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "has_executable_exposure": False,
+                    "has_any_position_residue": False,
+                    "has_non_executable_residue": False,
+                    "has_dust_only_remainder": False,
+                    "terminal_state": "flat",
+                }
+            },
+        },
+    )
+    conn.commit()
+    conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_residual_present": 0,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "none",
+        },
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "BUY",
+        1000,
+        100_000_000.0,
+        strategy_name="runtime_authority_sequence",
+        decision_id=decision_id,
+        decision_reason="sma_golden_cross",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker._last_qty == pytest.approx(0.0002)
+
+    conn = ensure_db(str(tmp_path / "runtime_authority_sequence.sqlite"))
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    conn.close()
+
+    assert submit_attempt is not None
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["side"] == "BUY"
+    assert submit_evidence["order_qty"] == pytest.approx(0.0002)
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0002)
+    assert submit_evidence["intended_qty"] == pytest.approx(0.0002)
+    assert submit_evidence["raw_total_asset_qty"] == pytest.approx(0.0)
+    assert submit_evidence["open_exposure_qty"] == pytest.approx(0.0)
+    assert submit_evidence["dust_tracking_qty"] == pytest.approx(0.0)
+
+    normalized = build_position_state_model(
+        raw_qty_open=float(lot_snapshot.raw_open_exposure_qty),
+        metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+        raw_total_asset_qty=float(lot_snapshot.raw_total_asset_qty),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        market_price=100_000_000.0,
+        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    ).normalized_exposure
+
+    assert lot_snapshot.open_lot_count == 0
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_lot_count == 1
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0002)
+    assert normalized.sellable_executable_lot_count == 0
+    assert normalized.sellable_executable_qty == pytest.approx(0.0)
+    assert normalized.has_dust_only_remainder is True
+    assert normalized.exit_allowed is False
+    assert normalized.exit_block_reason == "dust_only_remainder"
+    assert normalized.terminal_state == "dust_only"
+
+
+@pytest.mark.fast_regression
 def test_authority_boundary_live_execute_signal_sell_does_not_sum_open_exposure_and_dust_tracking_for_submission(
     monkeypatch,
     tmp_path,

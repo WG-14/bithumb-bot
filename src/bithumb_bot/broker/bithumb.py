@@ -2242,14 +2242,16 @@ class BithumbBroker:
             normalized_limit_price = self._decimal_from_value(
                 normalize_limit_price_for_side(price=float(requested_limit_price), side=order_side, rules=rules)
             )
-            if price_unit > 0 and normalized_limit_price != requested_limit_price:
+            # Tick-size shaping is execution-owned payload normalization only.
+            # It must not alter side/qty authority that was decided upstream.
+            if normalized_limit_price <= 0:
                 raise BrokerRejectError(
-                    "limit price does not match side price_unit; explicit correction required: "
+                    "limit price normalization produced non-positive executable price: "
                     f"side={order_side} requested={format(requested_limit_price, 'f')} "
-                    f"price_unit={price_unit:.8f} suggested={format(normalized_limit_price, 'f')}"
+                    f"price_unit={price_unit:.8f} normalized={format(normalized_limit_price, 'f')}"
                 )
 
-            exchange_submit_notional = requested_limit_price * self._decimal_from_value(internal_lot_qty)
+            exchange_submit_notional = normalized_limit_price * self._decimal_from_value(internal_lot_qty)
             min_total = side_min_total_krw(rules=rules, side=order_side)
             if min_total > 0 and exchange_submit_notional < self._decimal_from_value(min_total):
                 raise BrokerRejectError(
@@ -2261,7 +2263,7 @@ class BithumbBroker:
                 side=normalized_side,
                 ord_type="limit",
                 volume=self._format_volume(exchange_submit_qty),
-                price=self._format_krw_amount(requested_limit_price),
+                price=self._format_krw_amount(normalized_limit_price),
                 client_order_id=validated_client_order_id,
             )
 

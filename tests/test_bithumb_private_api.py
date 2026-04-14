@@ -1627,9 +1627,10 @@ def test_place_order_rejects_when_client_order_id_and_coid_conflict(monkeypatch)
         broker.place_order(client_order_id="cid-primary", side="BUY", qty=_exact_lot_qty(market_price=149500000.0), price=149500000)
 
 
-def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkeypatch):
+def test_place_order_limit_buy_normalizes_off_tick_price_at_execution_boundary(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    call: dict[str, object] = {}
 
     monkeypatch.setattr(
         "bithumb_bot.broker.order_rules.get_effective_order_rules",
@@ -1651,9 +1652,81 @@ def test_place_order_limit_rejects_price_not_aligned_with_side_price_unit(monkey
             },
         )(),
     )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: call.update(
+            {"endpoint": endpoint, "payload": payload, "retry_safe": retry_safe}
+        ) or {"uuid": "buy-off-tick-1"},
+    )
 
-    with pytest.raises(BrokerRejectError, match="limit price does not match side price_unit"):
-        broker.place_order(client_order_id="cid-lmt-unit", side="BUY", qty=_exact_lot_qty(market_price=149500001.0), price=149500001)
+    qty = _exact_lot_qty(market_price=149500001.0)
+    order = broker.place_order(client_order_id="cid-lmt-unit", side="BUY", qty=qty, price=149500001)
+
+    assert order.exchange_order_id == "buy-off-tick-1"
+    assert call["endpoint"] == "/v2/orders"
+    assert call["payload"] == {
+        "market": "KRW-BTC",
+        "side": "bid",
+        "order_type": "limit",
+        "volume": broker._format_volume(qty),
+        "price": broker._format_krw_amount(Decimal("149500000")),
+        "client_order_id": "cid-lmt-unit",
+    }
+    assert call["payload"]["side"] == "bid"
+    assert call["payload"]["volume"] == broker._format_volume(qty)
+    assert call["payload"]["client_order_id"] == "cid-lmt-unit"
+
+
+def test_place_order_limit_sell_normalizes_off_tick_price_at_execution_boundary(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 10.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda endpoint, payload, retry_safe=False: call.update(
+            {"endpoint": endpoint, "payload": payload, "retry_safe": retry_safe}
+        ) or {"uuid": "sell-off-tick-1"},
+    )
+
+    qty = _exact_lot_qty(market_price=149500001.0)
+    order = broker.place_order(client_order_id="cid-sell-unit", side="SELL", qty=qty, price=149500001)
+
+    assert order.exchange_order_id == "sell-off-tick-1"
+    assert call["endpoint"] == "/v2/orders"
+    assert call["payload"] == {
+        "market": "KRW-BTC",
+        "side": "ask",
+        "order_type": "limit",
+        "volume": broker._format_volume(qty),
+        "price": broker._format_krw_amount(Decimal("149500010")),
+        "client_order_id": "cid-sell-unit",
+    }
+    assert call["payload"]["side"] == "ask"
+    assert call["payload"]["volume"] == broker._format_volume(qty)
+    assert call["payload"]["client_order_id"] == "cid-sell-unit"
 
 
 def test_place_order_limit_rejects_when_side_min_total_not_met(monkeypatch):
