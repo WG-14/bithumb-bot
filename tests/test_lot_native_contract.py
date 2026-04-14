@@ -409,6 +409,55 @@ def test_authority_boundary_decision_context_prefers_normalized_sell_authority_o
     assert snapshot.sell_qty_basis_qty == pytest.approx(0.0001)
 
 
+def test_normalize_strategy_decision_context_keeps_position_state_compatibility_fields_non_authoritative() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "open_exposure_qty": 0.0009,
+            "sellable_executable_qty": 0.0009,
+            "sellable_executable_lot_count": 9,
+            "position_state": {
+                "open_exposure_qty": 0.0009,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0009,
+                "sellable_executable_lot_count": 9,
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0002,
+                    "raw_total_asset_qty": 0.0002,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": 0.0001,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0001,
+                    "sellable_executable_lot_count": 1,
+                    "has_executable_exposure": True,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                    "terminal_state": "open_exposure",
+                },
+            },
+        },
+        signal="SELL",
+        reason="compatibility boundary",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=10,
+        candle_ts=10,
+        market_price=100_000_000.0,
+    )
+
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0002)
+    assert ctx["sellable_executable_qty"] == pytest.approx(0.0001)
+    assert ctx["sellable_executable_lot_count"] == 1
+    assert ctx["submit_lot_count"] == 1
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0001)
+    assert ctx["position_state"]["normalized_exposure"]["sellable_executable_lot_count"] == 1
+
+
 def test_authority_boundary_decision_context_fail_closes_position_state_exit_flags_without_normalized_lot_authority() -> None:
     snapshot = resolve_canonical_position_exposure_snapshot(
         {

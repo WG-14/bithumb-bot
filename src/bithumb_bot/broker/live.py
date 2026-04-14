@@ -1730,6 +1730,7 @@ def _record_sell_no_executable_exit_suppression(
     strategy_name_value = strategy_name or settings.STRATEGY_NAME
     strategy_context = f"{settings.MODE}:{strategy_name_value}:{settings.INTERVAL}"
     reason_code = DUST_RESIDUAL_SUPPRESSED
+    suppression_outcome = "execution_suppressed"
     sell_failure_category = _classify_sell_failure_category(reason_code=reason_code)
     sell_failure_detail = _sell_failure_detail_from_observability(sell_failure_category=sell_failure_category)
     truth_sources = _decision_truth_sources_payload(decision_observability)
@@ -1816,9 +1817,11 @@ def _record_sell_no_executable_exit_suppression(
         "decision_id": decision_id,
         "decision_reason": decision_reason,
         "exit_rule_name": exit_rule_name,
+        "suppression_outcome": suppression_outcome,
         "suppression_reason_code": reason_code,
         "suppression_reason": "decision_suppressed:exit_suppressed_by_quantity_rule",
         "suppression_summary": (
+            f"suppression_outcome={suppression_outcome};"
             "decision_suppressed:exit_suppressed_by_quantity_rule;"
             f"exit_non_executable_reason={exit_non_executable_reason};"
             f"sellable_executable_lot_count={executable_lot_count};"
@@ -1850,6 +1853,7 @@ def _record_sell_no_executable_exit_suppression(
         dust_action="manual_review_before_resume",
         dust_signature=exit_non_executable_reason,
         summary=(
+            f"suppression_outcome={suppression_outcome};"
             "decision_suppressed:exit_suppressed_by_quantity_rule;"
             f"exit_non_executable_reason={exit_non_executable_reason};"
             f"sellable_executable_qty={executable_qty:.12f}"
@@ -1890,7 +1894,11 @@ def _record_sell_no_executable_exit_suppression(
             operator_action="manual_review_before_resume",
             dust_qty_below_min="0",
             dust_notional_below_min="0",
-            reason=f"decision_suppressed:exit_suppressed_by_quantity_rule;exit_non_executable_reason={exit_non_executable_reason}",
+            reason=(
+                f"suppression_outcome={suppression_outcome};"
+                f"decision_suppressed:exit_suppressed_by_quantity_rule;"
+                f"exit_non_executable_reason={exit_non_executable_reason}"
+            ),
         )
     )
     return True
@@ -1963,6 +1971,7 @@ def _record_harmless_dust_exit_suppression(
     strategy_name_value = strategy_name or settings.STRATEGY_NAME
     strategy_context = f"{settings.MODE}:{strategy_name_value}:{settings.INTERVAL}"
     suppression_reason = "decision_suppressed:harmless_dust_exit"
+    suppression_outcome = "execution_suppressed"
     sell_failure_category = _classify_sell_failure_category(reason_code=DUST_RESIDUAL_SUPPRESSED)
     sell_failure_detail = _sell_failure_detail_from_observability(
         sell_failure_category=sell_failure_category,
@@ -1975,6 +1984,7 @@ def _record_harmless_dust_exit_suppression(
         },
     )
     suppression_summary = (
+        f"suppression_outcome={suppression_outcome};"
         f"{suppression_reason};{dust_context.compact_summary};"
         f"base_signal={decision_observability['base_signal']};final_signal={decision_observability['final_signal']};"
         f"entry_allowed={1 if bool(decision_observability['entry_allowed']) else 0};"
@@ -2091,6 +2101,7 @@ def _record_harmless_dust_exit_suppression(
         "decision_id": decision_id,
         "decision_reason": decision_reason,
         "exit_rule_name": exit_rule_name,
+        "suppression_outcome": suppression_outcome,
         "suppression_reason_code": DUST_RESIDUAL_SUPPRESSED,
         "suppression_reason": suppression_reason,
         "suppression_summary": suppression_summary,

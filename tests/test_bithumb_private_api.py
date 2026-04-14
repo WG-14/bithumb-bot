@@ -1813,6 +1813,58 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
     }
 
 
+def test_place_order_market_sell_marks_price_tick_non_applicable_at_execution_boundary(monkeypatch, caplog):
+    _configure_live()
+    broker = BithumbBroker()
+    call: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 10.0,
+                        "ask_price_unit": 7.0,
+                        "min_notional_krw": 5000.0,
+                    },
+                )(),
+            },
+        )(),
+    )
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"uuid": "mkt-sell-unit-1"}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(broker, "_truncate_volume", lambda value: float(value))
+
+    qty = _exact_lot_qty(market_price=100_000_000.0, lot_count=2)
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        broker.place_order(client_order_id="cid-mkt-sell-unit", side="SELL", qty=qty, price=None)
+
+    assert call["endpoint"] == "/v2/orders"
+    assert call["payload"] == {
+        "market": "KRW-BTC",
+        "side": "ask",
+        "order_type": "market",
+        "volume": broker._format_volume(qty),
+        "client_order_id": "cid-mkt-sell-unit",
+    }
+    assert "submit_price_tick_applies=0" in caplog.text
+    assert "submit_price_tick_unit=0.0" in caplog.text
+    assert "submit_price_tick_reason=market_sell_price_tick_non_applicable" in caplog.text
+
+
 def test_submit_price_tick_policy_marks_market_sell_non_applicable() -> None:
     policy = _resolve_submit_price_tick_policy(
         order_side="SELL",
