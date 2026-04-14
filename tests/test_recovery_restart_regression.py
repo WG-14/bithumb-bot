@@ -19,6 +19,7 @@ from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from bithumb_bot.oms import set_exchange_order_id, set_status
+from bithumb_bot.order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 from bithumb_bot.recovery import (
     RecoveryDisposition,
     RecoveryProgressState,
@@ -664,6 +665,67 @@ def _seed_trade_residue_state(
         conn.close()
 
 
+def _seed_reserved_exit_authority_state(
+    *,
+    db_path: Path,
+    asset_qty: float,
+    executable_lot_count: int,
+    reserved_sell_qty: float,
+    sell_status: str,
+    base_ts: int,
+) -> None:
+    conn = ensure_db(str(db_path))
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (asset_qty, asset_qty),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                1,
+                f"reserved_seed_{base_ts}",
+                base_ts,
+                40_000_000.0,
+                asset_qty,
+                executable_lot_count,
+                0,
+                "lot-native",
+                "open_exposure",
+            ),
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id=f"reserved_sell_{base_ts}",
+            side="SELL",
+            qty_req=reserved_sell_qty,
+            price=41_000_000.0,
+            ts_ms=base_ts + 60_000,
+            status=sell_status,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(isolated_db, monkeypatch):
     _seed_dust_state(db_path=isolated_db, asset_qty=0.00009629, close_price=40_000_000.0)
 
@@ -686,6 +748,108 @@ def test_reconcile_marks_equal_dust_with_recent_partial_flatten_as_resume_safe(i
     assert metadata["dust_policy_reason"] == "matched_harmless_dust_resume_allowed"
     assert metadata["dust_classification"] == "harmless_dust"
     assert int(metadata["dust_partial_flatten_recent"]) == 1
+
+
+@pytest.mark.lot_native_regression_gate
+def test_reserved_exit_authority_from_unresolved_sell_orders_fully_suppresses_new_sell_sizing(
+    isolated_db,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    _seed_reserved_exit_authority_state(
+        db_path=isolated_db,
+        asset_qty=0.0008,
+        executable_lot_count=2,
+        reserved_sell_qty=0.0008,
+        sell_status="NEW",
+        base_ts=1_700_002_090_000,
+    )
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    sizing = build_sell_execution_sizing(
+        pair=settings.PAIR,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            # Reserved exit is canonical SELL-submit authority: unresolved SELL
+            # orders reduce the lot count passed into execution sizing.
+            sellable_executable_lot_count=authority.sellable_executable_lot_count,
+            exit_allowed=authority.exit_allowed,
+            exit_block_reason=authority.exit_block_reason,
+        ),
+    )
+
+    assert lot_snapshot.open_lot_count == 2
+    assert reserved_exit_qty == pytest.approx(0.0008)
+    assert authority.reserved_exit_qty == pytest.approx(0.0008)
+    assert authority.reserved_exit_lot_count > 0
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "reserved_for_open_sell_orders"
+    assert authority.terminal_state == "reserved_exit_pending"
+    assert sizing.allowed is False
+    assert sizing.requested_qty == pytest.approx(0.0)
+    assert sizing.executable_qty == pytest.approx(0.0)
+    assert sizing.block_reason == "reserved_for_open_sell_orders"
+
+
+@pytest.mark.lot_native_regression_gate
+def test_reserved_exit_authority_from_unresolved_sell_orders_allows_only_unreserved_sell_remainder(
+    isolated_db,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    _seed_reserved_exit_authority_state(
+        db_path=isolated_db,
+        asset_qty=0.0012,
+        executable_lot_count=3,
+        reserved_sell_qty=0.0004,
+        sell_status="PARTIAL",
+        base_ts=1_700_002_095_000,
+    )
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    sizing = build_sell_execution_sizing(
+        pair=settings.PAIR,
+        market_price=40_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=authority.sellable_executable_lot_count,
+            exit_allowed=authority.exit_allowed,
+            exit_block_reason=authority.exit_block_reason,
+        ),
+    )
+
+    assert reserved_exit_qty == pytest.approx(0.0004)
+    assert authority.open_lot_count == 3
+    assert authority.reserved_exit_qty == pytest.approx(0.0004)
+    assert authority.reserved_exit_lot_count == 1
+    assert authority.sellable_executable_lot_count == 2
+    assert authority.sellable_executable_qty == pytest.approx(0.0008)
+    assert authority.exit_allowed is True
+    assert authority.exit_block_reason == "none"
+    assert authority.terminal_state == "open_exposure"
+    assert sizing.allowed is True
+    assert sizing.intended_lot_count == 2
+    assert sizing.executable_lot_count == 2
+    assert sizing.requested_qty == pytest.approx(0.0008)
+    assert sizing.executable_qty == pytest.approx(0.0008)
 
 
 def test_reconcile_preserves_fee_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
