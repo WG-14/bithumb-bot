@@ -738,6 +738,84 @@ def test_reconcile_preserves_fee_residue_as_dust_only_restart_authority(isolated
 
 
 @pytest.mark.lot_native_regression_gate
+def test_restart_reconcile_residual_account_asset_closed_strategy_exposure_stays_non_executable(
+    isolated_db,
+    monkeypatch,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    residual_qty = 0.00005
+    _seed_trade_residue_state(
+        db_path=isolated_db,
+        entry_client_order_id="restart_closed_exposure_entry",
+        exit_client_order_id="restart_closed_exposure_exit",
+        buy_qty=0.00085,
+        sell_qty=0.0008,
+        buy_price=40_000_000.0,
+        sell_price=41_000_000.0,
+        buy_fee=0.0,
+        sell_fee=0.0,
+        base_ts=1_700_002_150_000,
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=residual_qty))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    authority_surface = authority.as_dict()
+    interpretation = build_position_state_model(
+        raw_qty_open=authority.raw_total_asset_qty,
+        metadata_raw=_latest_reconcile_metadata(),
+        raw_total_asset_qty=authority.raw_total_asset_qty,
+        open_exposure_qty=authority.open_exposure_qty,
+        dust_tracking_qty=authority.dust_tracking_qty,
+        reserved_exit_qty=authority.reserved_exit_qty,
+        open_lot_count=authority.open_lot_count,
+        dust_tracking_lot_count=authority.dust_tracking_lot_count,
+    ).state_interpretation
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        sell_order_count = int(
+            conn.execute("SELECT COUNT(*) FROM orders WHERE side='SELL'").fetchone()[0]
+        )
+        submit_attempt_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM order_events WHERE event_type='submit_attempt_recorded'"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+    assert authority.raw_total_asset_qty == pytest.approx(residual_qty)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_qty == pytest.approx(residual_qty)
+    assert authority.dust_tracking_lot_count == 1
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.has_executable_exposure is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "dust_only_remainder"
+    assert authority.terminal_state == "dust_only"
+    assert authority_surface["holding_authority_state"] == "dust_only"
+    assert authority_surface["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert interpretation.exit_submit_expected is False
+    assert interpretation.operator_outcome == "tracked_unsellable_residual"
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(residual_qty)
+    assert sell_order_count == 1
+    assert submit_attempt_count == 0
+
+
+@pytest.mark.lot_native_regression_gate
 def test_restart_reconcile_keeps_open_exposure_dust_tracking_and_recovery_required_distinct(
     isolated_db,
     monkeypatch,
@@ -905,6 +983,101 @@ def test_restart_reconcile_keeps_large_holdings_without_lot_metadata_blocked_not
     assert lot_snapshot.raw_total_asset_qty == pytest.approx(0.0)
     assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
     assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+
+
+@pytest.mark.lot_native_regression_gate
+def test_restart_reconcile_incomplete_lot_authority_keeps_qty_only_holdings_fail_closed_and_blocked(
+    isolated_db,
+    monkeypatch,
+):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (0.0008, 0.0008),
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="missing_lot_authority_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="RECOVERY_REQUIRED",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=0.0008))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    authority_surface = authority.as_dict()
+    interpretation = build_position_state_model(
+        raw_qty_open=authority.raw_total_asset_qty,
+        metadata_raw=_latest_reconcile_metadata(),
+        raw_total_asset_qty=authority.raw_total_asset_qty,
+        open_exposure_qty=authority.open_exposure_qty,
+        dust_tracking_qty=authority.dust_tracking_qty,
+        reserved_exit_qty=authority.reserved_exit_qty,
+        open_lot_count=authority.open_lot_count,
+        dust_tracking_lot_count=authority.dust_tracking_lot_count,
+    ).state_interpretation
+    gate_reason = evaluate_startup_safety_gate()
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        sell_order_count = int(conn.execute("SELECT COUNT(*) FROM orders WHERE side='SELL'").fetchone()[0])
+        submit_attempt_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM order_events WHERE event_type='submit_attempt_recorded'"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+    assert authority.raw_total_asset_qty == pytest.approx(0.0008)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.dust_tracking_qty == pytest.approx(0.0)
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_lot_count == 0
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.has_executable_exposure is False
+    assert authority.has_dust_only_remainder is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "legacy_lot_metadata_missing"
+    assert authority.terminal_state == "non_executable_position"
+    assert authority.authority_gap_reason == "authority_missing_recovery_required"
+    assert authority.recovery_blocked is True
+    assert authority.recovery_required_count == 1
+    assert authority.recovery_block_reason == "recovery_required_present"
+    assert authority_surface["holding_authority_state"] == "non_executable_position"
+    assert authority_surface["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert interpretation.exit_submit_expected is False
+    assert "manual recovery is required" in interpretation.operator_message
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(0.0)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+    assert gate_reason is not None
+    assert "recovery_required_orders=1" in gate_reason
+    assert sell_order_count == 0
+    assert submit_attempt_count == 0
 
 
 def test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority(isolated_db, monkeypatch):
