@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from bithumb_bot.broker.live import (
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.dust import build_position_state_model
-from bithumb_bot.lifecycle import summarize_position_lots
+from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from bithumb_bot.lifecycle import apply_fill_lifecycle
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.oms import payload_fingerprint
@@ -4083,6 +4084,7 @@ def test_authority_boundary_live_execute_signal_sell_uses_normalized_exposure_qt
     assert trade is not None
     assert broker.place_order_calls == 1
     assert broker._last_qty == pytest.approx(0.0002)
+    assert broker._last_price is None
 
     conn = ensure_db(str(tmp_path / "sell_normalized_exposure_only.sqlite"))
     order_row = conn.execute(
@@ -6248,6 +6250,13 @@ def test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_su
     assert broker.place_order_calls == 0
 
     conn = ensure_db(str(tmp_path / "sell_no_executable_exit.sqlite"))
+    submit_attempt_recorded_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        """
+    ).fetchone()["n"]
     order_events = conn.execute(
         """
         SELECT COUNT(*) AS n
@@ -6266,6 +6275,7 @@ def test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_su
     ).fetchone()
     conn.close()
 
+    assert submit_attempt_recorded_count == 0
     assert order_events == 0
     assert suppression_row is not None
     assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
@@ -6276,6 +6286,8 @@ def test_live_execute_signal_sell_no_executable_exit_suppresses_before_broker_su
     assert suppression_context["sell_submit_lot_count"] == 0
     assert suppression_context["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
     assert suppression_context["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert suppression_context["exit_non_executable_reason"] == "dust_only_remainder"
+    assert suppression_context["exit_sizing_block_reason"] == "dust_only_remainder"
     assert any("suppression_outcome=execution_suppressed" in msg for msg in notifications)
     assert any("event=decision_suppressed" in msg for msg in notifications)
 
@@ -6572,6 +6584,226 @@ def test_live_execute_signal_sell_reserved_exit_state_submits_only_unreserved_lo
     assert attempted_order is not None
     assert attempted_order["status"] == "FAILED"
     assert float(attempted_order["qty_req"]) == pytest.approx(buy_qty - reserved_exit_qty)
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_reserved_exit_pending_remains_explicit_no_submit_outcome(
+    monkeypatch, tmp_path, caplog
+):
+    db_path = str(tmp_path / "sell_reserved_exit_pending.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+    lot_rules = build_market_lot_rules(
+        market_id="BTC_KRW",
+        market_price=100_000_000.0,
+        rules=SimpleNamespace(
+            min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+            qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+            min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+            max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        ),
+        source_mode="derived",
+    )
+    buy_qty = lot_count_to_qty(lot_count=1, lot_size=lot_rules.lot_size)
+    base_ts = int(time.time() * 1000)
+
+    conn = ensure_db(db_path)
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=buy_qty,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            settings.PAIR,
+            1,
+            "entry_reserved_full",
+            base_ts,
+            100_000_000.0,
+            buy_qty,
+            1,
+            0,
+            "lot-native",
+            "open_exposure",
+        ),
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="reserved_exit_full",
+        side="SELL",
+        qty_req=buy_qty,
+        symbol=settings.PAIR,
+        price=100_000_000.0,
+        ts_ms=base_ts + 200,
+        status="NEW",
+    )
+    decision_id = record_strategy_decision(
+        conn,
+        decision_ts=base_ts + 250,
+        strategy_name="reserved_exit_pending_test",
+        signal="SELL",
+        reason="trim_after_partial_exit",
+        candle_ts=base_ts + 150,
+        market_price=100_000_000.0,
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "entry_allowed": False,
+            "effective_flat": False,
+            "raw_qty_open": buy_qty,
+            "raw_total_asset_qty": buy_qty,
+            "open_exposure_qty": buy_qty,
+            "dust_tracking_qty": 0.0,
+            "sellable_executable_lot_count": 0,
+            "sellable_executable_qty": 0.0,
+            "reserved_exit_qty": buy_qty,
+            "reserved_exit_lot_count": 1,
+            "exit_allowed": False,
+            "exit_block_reason": "reserved_for_open_sell_orders",
+            "terminal_state": "reserved_exit_pending",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_qty_open": buy_qty,
+                    "raw_total_asset_qty": buy_qty,
+                    "open_exposure_qty": buy_qty,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 1,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": buy_qty,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0,
+                    "sellable_executable_lot_count": 0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "reserved_for_open_sell_orders",
+                    "terminal_state": "reserved_exit_pending",
+                    "normalized_exposure_qty": buy_qty,
+                    "normalized_exposure_active": True,
+                    "entry_allowed": False,
+                    "effective_flat": False,
+                }
+            },
+        },
+    )
+
+    before_live_sell_orders = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM orders
+        WHERE client_order_id LIKE 'live_%' AND side='SELL'
+        """
+    ).fetchone()["n"]
+    before_submit_attempt_recorded = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        """
+    ).fetchone()["n"]
+    before_submit_events = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type IN ('submit_attempt_preflight', 'submit_attempt_recorded', 'submit_blocked')
+        """
+    ).fetchone()["n"]
+    before_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    before_reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    conn.commit()
+    conn.close()
+
+    assert before_reserved_exit_qty == pytest.approx(buy_qty)
+
+    broker = _DustOnlyBalanceBroker(asset_available=buy_qty)
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        trade = live_execute_signal(
+            broker,
+            "SELL",
+            base_ts + 300,
+            100_000_000.0,
+            strategy_name="reserved_exit_pending_test",
+            decision_id=decision_id,
+            decision_reason="trim_after_partial_exit",
+            exit_rule_name="exit_signal",
+        )
+
+    conn = ensure_db(db_path)
+    after_live_sell_orders = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM orders
+        WHERE client_order_id LIKE 'live_%' AND side='SELL'
+        """
+    ).fetchone()["n"]
+    after_submit_attempt_recorded = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        """
+    ).fetchone()["n"]
+    after_submit_events = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type IN ('submit_attempt_preflight', 'submit_attempt_recorded', 'submit_blocked')
+        """
+    ).fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, summary, context_json
+        FROM order_suppressions
+        WHERE strategy_name='reserved_exit_pending_test' AND signal='SELL'
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    after_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    after_reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    conn.close()
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert after_live_sell_orders == before_live_sell_orders
+    assert after_submit_attempt_recorded == before_submit_attempt_recorded
+    assert after_submit_events == before_submit_events
+    assert after_reserved_exit_qty == pytest.approx(before_reserved_exit_qty)
+    assert after_snapshot.open_lot_count == before_snapshot.open_lot_count
+    assert after_snapshot.dust_tracking_lot_count == before_snapshot.dust_tracking_lot_count
+    assert suppression_row is None
+    assert "exit inventory already reserved" in caplog.text
+    assert "reason=reserved_for_open_sell_orders" in caplog.text
+    assert "reserved_exit_qty=" in caplog.text
 
 def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(monkeypatch):
     original = {
