@@ -25,6 +25,7 @@ from .broker.base import BrokerError
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
+from .fee_gap_repair import build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .dust import (
@@ -338,12 +339,21 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
     except (TypeError, ValueError):
         fee_gap_adjustment_count = 0
 
+    conn = ensure_db()
+    try:
+        fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+    if not bool(fee_gap_preview.get("needs_repair")):
+        return None
+
     return _resume_blocker(
         code="FEE_GAP_RECOVERY_REQUIRED",
         detail=(
             "fee-related cash drift detected during reconcile: "
             f"material_zero_fee_fill_count={zero_fee_fill_count} "
-            f"fee_gap_adjustment_count={fee_gap_adjustment_count}"
+            f"fee_gap_adjustment_count={fee_gap_adjustment_count} "
+            f"fee_gap_accounting_repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)}"
         ),
         reason_code="FEE_GAP_RECOVERY_REQUIRED",
         summary="fee-related accounting inconsistency requires manual recovery",
@@ -833,11 +843,17 @@ def evaluate_startup_safety_gate() -> str | None:
             fee_gap_adjustment_count = max(0, int(reconcile_metadata.get("fee_gap_adjustment_count", 0) or 0))
         except (TypeError, ValueError):
             fee_gap_adjustment_count = 0
-        reasons.append(
-            "fee_gap_recovery_required="
-            f"{fee_gap_recovery_required}"
-            f"(adjustments={fee_gap_adjustment_count})"
-        )
+        conn = ensure_db()
+        try:
+            fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
+        finally:
+            conn.close()
+        if bool(fee_gap_preview.get("needs_repair")):
+            reasons.append(
+                "fee_gap_recovery_required="
+                f"{fee_gap_recovery_required}"
+                f"(adjustments={fee_gap_adjustment_count})"
+            )
 
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])
     if submit_unknown_without_exchange_count > 0:
@@ -1180,9 +1196,9 @@ def build_resume_guidance(
         resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
     elif "FEE_GAP_RECOVERY_REQUIRED" in blocker_codes:
         operator_next_action = "manual_fee_gap_recovery_required"
-        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_command = "uv run python bot.py fee-gap-accounting-repair"
         recommended_next_action = (
-            "Do not resume live trading. Review material zero-fee fills and repair the ledger/accounting state before resuming."
+            "Do not resume live trading. Review the fee-gap preview and record an explicit fee-gap accounting repair before resuming."
         )
         resume_blocked_reason = "resume blocked by fee-related accounting inconsistency"
     elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
@@ -1230,6 +1246,8 @@ def build_resume_guidance(
             return "uv run python bot.py record-external-cash-adjustment --help"
         if code == "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED":
             return "uv run python bot.py manual-flat-accounting-repair"
+        if code == "FEE_GAP_RECOVERY_REQUIRED":
+            return "uv run python bot.py fee-gap-accounting-repair"
         if code == "BALANCE_SPLIT_MISMATCH":
             if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
                 return "uv run python bot.py reconcile"
@@ -1401,9 +1419,12 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
 
     manual_flat_repair_needed = False
     manual_flat_repair_detail = "not_checked"
+    fee_gap_repair_needed = False
+    fee_gap_repair_detail = "not_checked"
     conn = ensure_db()
     try:
         manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
+        fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
         conn.close()
     manual_flat_repair_needed = bool(manual_flat_preview.get("safe_to_apply"))
@@ -1411,6 +1432,13 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
         f"needed={1 if manual_flat_repair_needed else 0} "
         f"safe_to_apply={1 if bool(manual_flat_preview.get('safe_to_apply')) else 0} "
         f"reason={manual_flat_preview.get('eligibility_reason') or 'none'}"
+    )
+    fee_gap_repair_needed = bool(fee_gap_preview.get("needs_repair"))
+    fee_gap_repair_detail = (
+        f"needed={1 if fee_gap_repair_needed else 0} "
+        f"safe_to_apply={1 if bool(fee_gap_preview.get('safe_to_apply')) else 0} "
+        f"repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)} "
+        f"reason={fee_gap_preview.get('eligibility_reason') or 'none'}"
     )
 
     return [
@@ -1455,6 +1483,11 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             "manual-flat accounting repair",
             not manual_flat_repair_needed,
             manual_flat_repair_detail,
+        ),
+        (
+            "fee-gap accounting repair",
+            not fee_gap_repair_needed,
+            fee_gap_repair_detail,
         ),
     ]
 

@@ -21,6 +21,7 @@ from .db_core import (
     compute_accounting_replay,
     ensure_db,
     get_external_cash_adjustment_summary,
+    get_fee_gap_accounting_repair_summary,
     get_manual_flat_accounting_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
@@ -58,6 +59,7 @@ from .broker.base import BrokerBalance, BrokerOrder
 from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
+from .fee_gap_repair import apply_fee_gap_accounting_repair, build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .markets import canonical_market_with_raw
@@ -544,6 +546,8 @@ def cmd_health() -> None:
     external_cash_adjustment_summary = None
     manual_flat_repair_summary = None
     manual_flat_repair_preview = None
+    fee_gap_repair_summary = None
+    fee_gap_repair_preview = None
     conn = ensure_db()
     try:
         row = conn.execute(
@@ -561,6 +565,8 @@ def cmd_health() -> None:
         external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
         manual_flat_repair_summary = get_manual_flat_accounting_repair_summary(conn)
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
+        fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
+        fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
         conn.close()
     if row is not None:
@@ -643,6 +649,21 @@ def cmd_health() -> None:
     resume_allowed, resume_blockers = evaluate_resume_eligibility()
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
     resume_blocker_reason_codes = [str(getattr(blocker, "reason_code", blocker.code)) for blocker in resume_blockers]
+    health = get_health_status()
+    state_label = "running"
+    if bool(health["halt_new_orders_blocked"]):
+        state_label = "halted"
+    elif not bool(health["trading_enabled"]):
+        state_label = "paused"
+
+    current_halt_reason = "none"
+    halt_reason_for_summary = "none"
+    if health["halt_reason_code"] or health["last_disable_reason"]:
+        halt_reason_for_summary = str(health["halt_reason_code"] or "-")
+        current_halt_reason = (
+            f"code={health['halt_reason_code'] or '-'} "
+            f"reason={health['last_disable_reason'] or '-'}"
+        )
     can_resume_label = "true" if bool(resume_allowed) else "false"
     blockers_label = ", ".join(resume_blocker_codes) if resume_blocker_codes else "none"
     blocker_reason_codes_label = ", ".join(resume_blocker_reason_codes) if resume_blocker_reason_codes else "none"
@@ -849,6 +870,14 @@ def cmd_health() -> None:
         f"repair_count={int(manual_flat_repair_summary.get('repair_count') or 0) if isinstance(manual_flat_repair_summary, dict) else 0} "
         f"reason={manual_flat_repair_preview.get('eligibility_reason') if isinstance(manual_flat_repair_preview, dict) else 'none'}"
     )
+    print(
+        "    "
+        "fee_gap_accounting_repair="
+        f"needed={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('needs_repair')) else 0} "
+        f"safe_to_apply={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('safe_to_apply')) else 0} "
+        f"repair_count={int(fee_gap_repair_summary.get('repair_count') or 0) if isinstance(fee_gap_repair_summary, dict) else 0} "
+        f"reason={fee_gap_repair_preview.get('eligibility_reason') if isinstance(fee_gap_repair_preview, dict) else 'none'}"
+    )
 
     print("  [RISK-SNAPSHOT]")
     print(
@@ -1015,6 +1044,18 @@ def cmd_health() -> None:
         "  manual_flat_accounting_repair_reason="
         f"{manual_flat_repair_preview.get('eligibility_reason') if isinstance(manual_flat_repair_preview, dict) else 'none'}"
     )
+    print(
+        "  fee_gap_accounting_repair_needed="
+        f"{1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('needs_repair')) else 0}"
+    )
+    print(
+        "  fee_gap_accounting_repair_safe_to_apply="
+        f"{1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('safe_to_apply')) else 0}"
+    )
+    print(
+        "  fee_gap_accounting_repair_reason="
+        f"{fee_gap_repair_preview.get('eligibility_reason') if isinstance(fee_gap_repair_preview, dict) else 'none'}"
+    )
 
 
 def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
@@ -1076,6 +1117,7 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         "manual_flat_accounting_repair_count": int(replay["manual_flat_accounting_repair_count"]),
         "manual_flat_accounting_repair_cash_total": float(replay["manual_flat_accounting_repair_cash_total"]),
         "manual_flat_accounting_repair_asset_total": float(replay["manual_flat_accounting_repair_asset_total"]),
+        "fee_gap_accounting_repair_count": int(replay["fee_gap_accounting_repair_count"]),
         "dup_fill_count": int(replay["dup_fill_count"]),
         "consistent": consistent,
     }
@@ -1099,6 +1141,7 @@ def cmd_audit_ledger() -> None:
     print(f"  manual_flat_accounting_repair_count={int(replay['manual_flat_accounting_repair_count'])}")
     print(f"  manual_flat_accounting_repair_cash_total={float(replay['manual_flat_accounting_repair_cash_total']):,.3f}")
     print(f"  manual_flat_accounting_repair_asset_total={float(replay['manual_flat_accounting_repair_asset_total']):.10f}")
+    print(f"  fee_gap_accounting_repair_count={int(replay['fee_gap_accounting_repair_count'])}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
 
     if not bool(replay["consistent"]):
@@ -2109,6 +2152,21 @@ def _load_recovery_report(
         "eligibility_reason": "not_checked",
         "recommended_command": "uv run python bot.py recovery-report",
     }
+    fee_gap_repair_summary = {
+        "repair_count": 0,
+        "last_event_ts": None,
+        "last_repair_key": None,
+        "last_source": None,
+        "last_reason": None,
+        "last_repair_basis": None,
+        "last_note": None,
+    }
+    fee_gap_repair_preview = {
+        "needs_repair": False,
+        "safe_to_apply": False,
+        "eligibility_reason": "not_checked",
+        "recommended_command": "uv run python bot.py recovery-report",
+    }
     conn = ensure_db()
     try:
         recent_dust_unsellable_event = conn.execute(
@@ -2133,6 +2191,8 @@ def _load_recovery_report(
         external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
         manual_flat_repair_summary = get_manual_flat_accounting_repair_summary(conn)
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
+        fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
+        fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
         conn.close()
     candidate_report: list[dict[str, object]] = []
@@ -2230,6 +2290,8 @@ def _load_recovery_report(
         "recent_external_cash_adjustment": external_cash_adjustment_summary,
         "manual_flat_accounting_repair_preview": manual_flat_repair_preview,
         "manual_flat_accounting_repair_summary": manual_flat_repair_summary,
+        "fee_gap_accounting_repair_preview": fee_gap_repair_preview,
+        "fee_gap_accounting_repair_summary": fee_gap_repair_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
@@ -2438,6 +2500,17 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"reason={manual_flat_repair_preview.get('eligibility_reason') or 'none'}"
     )
     print(f"    command={manual_flat_repair_preview.get('recommended_command') or 'none'}")
+    fee_gap_repair_preview = report.get("fee_gap_accounting_repair_preview") or {}
+    fee_gap_repair_summary = report.get("fee_gap_accounting_repair_summary") or {}
+    print("  [P3.0d] fee_gap_accounting_repair")
+    print(
+        "    "
+        f"needed={1 if bool(fee_gap_repair_preview.get('needs_repair')) else 0} "
+        f"safe_to_apply={1 if bool(fee_gap_repair_preview.get('safe_to_apply')) else 0} "
+        f"repair_count={int(fee_gap_repair_summary.get('repair_count') or 0)} "
+        f"reason={fee_gap_repair_preview.get('eligibility_reason') or 'none'}"
+    )
+    print(f"    command={fee_gap_repair_preview.get('recommended_command') or 'none'}")
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")
@@ -2692,6 +2765,75 @@ def cmd_manual_flat_accounting_repair(*, apply: bool = False, confirm: bool = Fa
         f"event_ts={kst_str(int(repair['event_ts']))} "
         f"cash_delta={float(repair['cash_delta']):,.3f} "
         f"asset_qty_delta={float(repair['asset_qty_delta']):.10f}"
+    )
+    print(
+        "  "
+        f"remaining_needs_repair={1 if bool(post_preview['needs_repair']) else 0} "
+        f"safe_to_apply={1 if bool(post_preview['safe_to_apply']) else 0} "
+        f"eligibility_reason={post_preview['eligibility_reason']}"
+    )
+
+
+def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False, note: str | None = None) -> None:
+    conn = ensure_db()
+    try:
+        preview = build_fee_gap_accounting_repair_preview(conn)
+        repair_summary = get_fee_gap_accounting_repair_summary(conn)
+        print("[FEE-GAP-ACCOUNTING-REPAIR] preview")
+        print(
+            "  "
+            f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
+            f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
+            f"already_repaired={1 if bool(preview['already_repaired']) else 0} "
+            f"eligibility_reason={preview['eligibility_reason']}"
+        )
+        print(
+            "  "
+            f"material_zero_fee_fill_count={int(preview['material_zero_fee_fill_count'])} "
+            f"fee_gap_adjustment_count={int(preview['fee_gap_adjustment_count'])} "
+            f"fee_gap_adjustment_total_krw={float(preview['fee_gap_adjustment_total_krw']):,.3f}"
+        )
+        print(
+            "  "
+            f"open_order_count={int(preview['open_order_count'])} "
+            f"recovery_required_count={int(preview['recovery_required_count'])} "
+            f"open_lot_count={int(preview['open_lot_count'])} "
+            f"dust_tracking_lot_count={int(preview['dust_tracking_lot_count'])} "
+            f"reserved_exit_qty={float(preview['reserved_exit_qty']):.10f}"
+        )
+        print(
+            "  "
+            f"last_reconcile_status={preview['last_reconcile_status']} "
+            f"last_reconcile_reason_code={preview['last_reconcile_reason_code']} "
+            "existing_fee_gap_accounting_repairs="
+            f"{int(repair_summary.get('repair_count') or 0)}"
+        )
+        print(f"  recommended_command={preview['recommended_command']}")
+
+        if not apply:
+            print("[FEE-GAP-ACCOUNTING-REPAIR] dry-run: no changes applied")
+            return
+
+        if not bool(preview["safe_to_apply"]):
+            print("[FEE-GAP-ACCOUNTING-REPAIR] refused: unsafe repair request")
+            raise SystemExit(1)
+        if not confirm:
+            print("[FEE-GAP-ACCOUNTING-REPAIR] confirmation required: re-run with --apply --yes")
+            raise SystemExit(1)
+
+        result = apply_fee_gap_accounting_repair(conn, note=note)
+        post_preview = build_fee_gap_accounting_repair_preview(conn)
+        repair = result["repair"]
+    finally:
+        conn.close()
+
+    print("[FEE-GAP-ACCOUNTING-REPAIR] applied")
+    print(
+        "  "
+        f"created={1 if bool(repair.get('created')) else 0} "
+        f"repair_key={repair['repair_key']} "
+        f"event_ts={kst_str(int(repair['event_ts']))} "
+        f"reason={repair['reason']}"
     )
     print(
         "  "
@@ -3515,6 +3657,15 @@ def main(argv: list[str] | None = None) -> int:
     cash_drift_report.add_argument("--recent-limit", type=int, default=5)
     cash_drift_report.add_argument("--json", action="store_true")
 
+    fee_gap_accounting_repair = sub.add_parser(
+        "fee-gap-accounting-repair",
+        help="preview or apply explicit fee-gap accounting recovery",
+        description="Record an explicit bounded fee-gap accounting repair for reconcile-detected historical zero-fee fill drift.",
+    )
+    fee_gap_accounting_repair.add_argument("--apply", action="store_true")
+    fee_gap_accounting_repair.add_argument("--yes", action="store_true")
+    fee_gap_accounting_repair.add_argument("--note")
+
     external_cash_adjustment = sub.add_parser(
         "record-external-cash-adjustment",
         help="record an external cash adjustment event",
@@ -3633,6 +3784,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.cmd == "cash-drift-report":
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
+    elif args.cmd == "fee-gap-accounting-repair":
+        cmd_fee_gap_accounting_repair(
+            apply=bool(args.apply),
+            confirm=bool(args.yes),
+            note=str(args.note) if args.note is not None else None,
+        )
     elif args.cmd == "record-external-cash-adjustment":
         cmd_record_external_cash_adjustment(
             event_ts=int(args.event_ts),

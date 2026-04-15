@@ -31,9 +31,11 @@ from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ensure_db,
+    get_fee_gap_accounting_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
     record_external_cash_adjustment,
+    record_manual_flat_accounting_repair,
     set_portfolio_breakdown,
 )
 from bithumb_bot.engine import (
@@ -43,7 +45,7 @@ from bithumb_bot.engine import (
     evaluate_resume_eligibility,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.oms import set_exchange_order_id, set_status
+from bithumb_bot.oms import add_fill, set_exchange_order_id, set_status
 from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.recovery import reconcile_with_broker
@@ -56,6 +58,7 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
     original_live_dry_run = settings.LIVE_DRY_RUN
     original_start_cash = settings.START_CASH_KRW
     original_db_path = settings.DB_PATH
+    original_live_fill_fee_alert_min_notional_krw = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
 
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "MODE", "paper")
@@ -67,6 +70,11 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
         object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
         object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(
+            settings,
+            "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW",
+            original_live_fill_fee_alert_min_notional_krw,
+        )
 
 
 def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
@@ -158,6 +166,99 @@ def _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch: pytest.MonkeyP
         success=True,
         reason_code="RECONCILE_OK",
         metadata={"balance_split_mismatch_count": 0},
+    )
+
+
+def _seed_fee_gap_accounting_candidate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manual_flat_repaired: bool = True,
+) -> None:
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="fee_gap_buy",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=1_700_000_000_000,
+            status="NEW",
+        )
+        add_fill(
+            conn=conn,
+            client_order_id="fee_gap_buy",
+            fill_id="fee_gap_buy_fill_1",
+            fill_ts=1_700_000_000_100,
+            price=100_000_000.0,
+            qty=0.001,
+            fee=0.0,
+        )
+        set_status("fee_gap_buy", "FILLED", conn=conn)
+        record_external_cash_adjustment(
+            conn,
+            event_ts=1_700_000_000_200,
+            currency="KRW",
+            delta_amount=-50.0,
+            source="accounts_v1_rest_snapshot",
+            reason="reconcile_fee_gap_cash_drift",
+            broker_snapshot_basis={
+                "balance_source": "accounts_v1_rest_snapshot",
+                "observed_ts_ms": 1_700_000_000_200,
+                "broker_cash_total": 999_950.0,
+                "local_cash_total": 1_000_000.0,
+            },
+            correlation_metadata={"fee_gap_recovery_required": 1},
+            note="cash drift inferred from reconcile balance snapshot; material zero-fee fill history present",
+            adjustment_key="fee-gap-adjustment-1",
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW - 50.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        if manual_flat_repaired:
+            record_manual_flat_accounting_repair(
+                conn,
+                event_ts=1_700_000_000_300,
+                asset_qty_delta=-0.001,
+                cash_delta=100_000.0,
+                source="manual_flat_recovery",
+                reason="manual_flat_accounting_repair",
+                repair_basis={
+                    "event_type": "manual_flat_accounting_repair",
+                    "portfolio_cash_basis": settings.START_CASH_KRW - 50.0,
+                    "portfolio_qty_basis": 0.0,
+                },
+                note="flat position confirmed before fee-gap repair",
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "material_zero_fee_fill_count": 1,
+            "material_zero_fee_fill_latest_ts": 1_700_000_000_100,
+            "fee_gap_adjustment_count": 1,
+            "fee_gap_adjustment_total_krw": -50.0,
+            "fee_gap_adjustment_latest_event_ts": 1_700_000_000_200,
+            "fee_gap_recovery_required": 1,
+            "external_cash_adjustment_reason": "reconcile_fee_gap_cash_drift",
+        },
+        now_epoch_sec=0.0,
     )
 
 
@@ -382,6 +483,114 @@ def test_manual_flat_accounting_repair_converges_recovery_surfaces(tmp_path, mon
     checklist_out = capsys.readouterr().out
     assert "PASS    manual-flat accounting repair:" in checklist_out
     assert "safe_to_resume=1" in checklist_out
+
+
+def test_fee_gap_accounting_repair_preview_is_non_mutating(tmp_path, monkeypatch, capsys):
+    _seed_fee_gap_accounting_candidate(tmp_path, monkeypatch)
+
+    app_main(["fee-gap-accounting-repair"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM fee_gap_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert "[FEE-GAP-ACCOUNTING-REPAIR] preview" in out
+    assert "needs_repair=1" in out
+    assert "safe_to_apply=1" in out
+    assert "[FEE-GAP-ACCOUNTING-REPAIR] dry-run: no changes applied" in out
+    assert repair_count == 0
+
+
+def test_fee_gap_accounting_repair_requires_explicit_confirmation(tmp_path, monkeypatch, capsys):
+    _seed_fee_gap_accounting_candidate(tmp_path, monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        app_main(["fee-gap-accounting-repair", "--apply"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM fee_gap_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert exc.value.code == 1
+    assert "confirmation required" in out
+    assert repair_count == 0
+
+
+def test_fee_gap_accounting_repair_refuses_when_manual_flat_is_still_pending(tmp_path, monkeypatch, capsys):
+    _seed_fee_gap_accounting_candidate(tmp_path, monkeypatch, manual_flat_repaired=False)
+
+    with pytest.raises(SystemExit) as exc:
+        app_main(["fee-gap-accounting-repair", "--apply", "--yes"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM fee_gap_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert exc.value.code == 1
+    assert "unsafe repair request" in out
+    assert "manual_flat_accounting_repair_pending=" in out
+    assert repair_count == 0
+
+
+def test_fee_gap_accounting_repair_converges_recovery_surfaces(tmp_path, monkeypatch, capsys):
+    _seed_fee_gap_accounting_candidate(tmp_path, monkeypatch)
+    monkeypatch.setattr("bithumb_bot.app._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr(
+        "bithumb_bot.app.build_broker_with_auth_diagnostics",
+        lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
+    )
+
+    cmd_recovery_report()
+    report_before = capsys.readouterr().out
+    assert "blocker=FEE_GAP_RECOVERY_REQUIRED" in report_before
+    assert "action=manual_fee_gap_recovery_required" in report_before
+
+    app_main(["fee-gap-accounting-repair", "--apply", "--yes", "--note", "reviewed historical zero-fee fills"])
+    apply_out = capsys.readouterr().out
+    assert "[FEE-GAP-ACCOUNTING-REPAIR] applied" in apply_out
+    assert "remaining_needs_repair=0" in apply_out
+
+    app_main(["audit-ledger"])
+    audit_out = capsys.readouterr().out
+    assert "fee_gap_accounting_repair_count=1" in audit_out
+    assert "[AUDIT-LEDGER] OK" in audit_out
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "fee_gap_accounting_repair_needed=0" in health_out
+    assert "fee_gap_accounting_repair_safe_to_apply=0" in health_out
+    assert "blocker_reason_codes=none" in health_out
+    assert "blockers=none" in health_out
+
+    cmd_recovery_report()
+    report_after = capsys.readouterr().out
+    assert "[P3.0d] fee_gap_accounting_repair" in report_after
+    assert "needed=0" in report_after
+    assert "repair_count=1" in report_after
+    assert "blocker_reason_codes=none" in report_after
+    assert "blockers=none" in report_after
+
+    cmd_restart_checklist()
+    checklist_out = capsys.readouterr().out
+    assert "PASS    fee-gap accounting repair:" in checklist_out
+    assert "safe_to_resume=1" in checklist_out
+
+    conn = ensure_db()
+    try:
+        summary = get_fee_gap_accounting_repair_summary(conn)
+    finally:
+        conn.close()
+    assert summary["repair_count"] == 1
+    assert summary["last_reason"] == "fee_gap_accounting_repair"
 
 
 def _insert_order(
@@ -3614,6 +3823,8 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "recent_external_cash_adjustment",
         "manual_flat_accounting_repair_preview",
         "manual_flat_accounting_repair_summary",
+        "fee_gap_accounting_repair_preview",
+        "fee_gap_accounting_repair_summary",
         "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",
