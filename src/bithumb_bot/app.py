@@ -2214,7 +2214,7 @@ def _load_recovery_report(
         "unprocessed_remote_open_orders": unprocessed_remote_open_orders,
         "remote_known_unresolved_verification_summary": remote_known_unresolved_verification_summary,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
-        **dust_fields,
+        **{key: value for key, value in dust_fields.items() if key != "dust_threshold_basis"},
         "recent_dust_unsellable_event": (
             {
                 "event_ts": int(recent_dust_unsellable_event["event_ts"]),

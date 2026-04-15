@@ -1566,6 +1566,19 @@ def _record_sell_dust_unsellable(
         "dust_only_remainder",
         "no_executable_exit_lot",
     }
+    resolved_exit_block_reason = str(
+        exit_non_executable_reason
+        or canonical_sell.exit_block_reason
+        or decision_observability.get("exit_block_reason")
+        or "-"
+    ).strip() or "-"
+    terminal_state = str(decision_observability.get("terminal_state") or "-")
+    if terminal_state == "dust_only":
+        resolved_exit_block_reason = "dust_only_remainder"
+    elif terminal_state == "flat":
+        resolved_exit_block_reason = "no_position"
+    elif resolved_exit_block_reason in {"legacy_lot_metadata_missing", "no_executable_exit_lot"}:
+        resolved_exit_block_reason = "dust_only_remainder" if position_qty > POSITION_EPSILON else "no_position"
     reason_code = DUST_RESIDUAL_SUPPRESSED if suppress_as_decision else DUST_RESIDUAL_UNSELLABLE
     sell_failure_category = _classify_sell_failure_category(
         reason_code=reason_code,
@@ -1584,8 +1597,8 @@ def _record_sell_dust_unsellable(
         f"exit_non_executable_reason={exit_non_executable_reason or 'none'};"
         f"category={sell_failure_category};detail={sell_failure_detail};"
         f"state={dust_details['state']};"
-        f"terminal_state={str(decision_observability.get('terminal_state') or '-')};"
-        f"exit_block_reason={str(decision_observability.get('exit_block_reason') or '-')};"
+        f"terminal_state={terminal_state};"
+        f"exit_block_reason={resolved_exit_block_reason};"
         f"operator_action={dust_details['operator_action']};"
         f"guard_action={guard_action};"
         f"position_qty={float(position_qty):.12f};"
@@ -1636,8 +1649,8 @@ def _record_sell_dust_unsellable(
         "observed_sell_qty_basis_qty": float(sell_qty_basis_qty),
         "sell_qty_basis_source": sell_qty_basis_source,
         "sell_qty_boundary_kind": sell_qty_boundary_kind,
-        "terminal_state": str(decision_observability.get("terminal_state") or "-"),
-        "exit_block_reason": str(decision_observability.get("exit_block_reason") or "-"),
+        "terminal_state": terminal_state,
+        "exit_block_reason": resolved_exit_block_reason,
         "sell_normalized_exposure_qty": 0.0,
         "raw_total_asset_qty": float(diagnostic_qty.raw_total_asset_qty),
         "sell_open_exposure_qty": float(diagnostic_qty.open_exposure_qty),
