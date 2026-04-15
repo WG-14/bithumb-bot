@@ -6968,6 +6968,424 @@ def test_live_execute_signal_sell_reserved_exit_pending_remains_explicit_no_subm
     assert "reason=reserved_for_open_sell_orders" in caplog.text
     assert "reserved_exit_qty=" in caplog.text
 
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+@pytest.mark.parametrize(
+    ("state_name", "asset_available", "lot_row", "reconcile_metadata", "expected_stage_calls", "expected_place_orders", "expected_submit_attempts"),
+    [
+        (
+            "open_exposure",
+            0.0002,
+            (0.0002, 2, 0, "open_exposure"),
+            {"dust_residual_present": 0},
+            ["position_state", "intent", "feasibility", "execution"],
+            1,
+            1,
+        ),
+        (
+            "flat",
+            0.0,
+            None,
+            {"dust_residual_present": 0},
+            ["position_state", "intent"],
+            0,
+            0,
+        ),
+        (
+            "dust_only",
+            0.00009193,
+            (0.00009193, 0, 1, "dust_tracking"),
+            {
+                "dust_residual_present": 1,
+                "dust_classification": "blocking_dust",
+                "dust_effective_flat": 0,
+                "dust_policy_reason": "dangerous_dust_operator_review_required",
+                "dust_residual_summary": "classification=blocking_dust harmless_dust=0 effective_flat=0",
+            },
+            ["position_state", "intent"],
+            0,
+            0,
+        ),
+    ],
+)
+def test_live_execute_signal_sell_runtime_flow_varies_by_normalized_state(
+    monkeypatch,
+    tmp_path,
+    state_name,
+    asset_available,
+    lot_row,
+    reconcile_metadata,
+    expected_stage_calls,
+    expected_place_orders,
+    expected_submit_attempts,
+):
+    db_path = str(tmp_path / f"flow_{state_name}.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata=reconcile_metadata)
+
+    conn = ensure_db(db_path)
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=asset_available,
+        asset_locked=0.0,
+    )
+    if lot_row is not None:
+        qty_open, executable_lot_count, dust_tracking_lot_count, position_state = lot_row
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                1,
+                f"entry_{state_name}",
+                1_700_000_000_000,
+                100_000_000.0,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                "lot-native",
+                position_state,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    stage_calls: list[str] = []
+
+    original_position_state = live_module._determine_live_execution_position_state
+    original_intent = live_module._determine_live_execution_intent
+    original_feasibility = live_module._evaluate_live_execution_feasibility
+    original_execution = live_module._execute_live_submission_and_application
+
+    def _record_position_state(*args, **kwargs):
+        stage_calls.append("position_state")
+        return original_position_state(*args, **kwargs)
+
+    def _record_intent(*args, **kwargs):
+        stage_calls.append("intent")
+        return original_intent(*args, **kwargs)
+
+    def _record_feasibility(*args, **kwargs):
+        stage_calls.append("feasibility")
+        return original_feasibility(*args, **kwargs)
+
+    def _record_execution(*args, **kwargs):
+        stage_calls.append("execution")
+        return original_execution(*args, **kwargs)
+
+    monkeypatch.setattr(live_module, "_determine_live_execution_position_state", _record_position_state)
+    monkeypatch.setattr(live_module, "_determine_live_execution_intent", _record_intent)
+    monkeypatch.setattr(live_module, "_evaluate_live_execution_feasibility", _record_feasibility)
+    monkeypatch.setattr(live_module, "_execute_live_submission_and_application", _record_execution)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name=f"flow_{state_name}",
+        decision_reason=f"flow_{state_name}",
+        exit_rule_name="exit_signal",
+    )
+
+    conn = ensure_db(db_path)
+    live_sell_order_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM orders
+        WHERE client_order_id LIKE 'live_%' AND side='SELL'
+        """
+    ).fetchone()["n"]
+    submit_attempt_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        """
+    ).fetchone()["n"]
+    conn.close()
+
+    assert stage_calls == expected_stage_calls
+    assert broker.place_order_calls == expected_place_orders
+    assert submit_attempt_count == expected_submit_attempts
+    assert live_sell_order_count == expected_submit_attempts
+    if state_name == "open_exposure":
+        assert trade is not None
+    else:
+        assert trade is None
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_reserved_exit_stops_before_execution_stage(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "reserved_exit_flow.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+    lot_rules = build_market_lot_rules(
+        market_id="BTC_KRW",
+        market_price=100_000_000.0,
+        rules=SimpleNamespace(
+            min_qty=float(settings.LIVE_MIN_ORDER_QTY),
+            qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+            min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+            max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        ),
+        source_mode="derived",
+    )
+    buy_qty = lot_count_to_qty(lot_count=1, lot_size=lot_rules.lot_size)
+    base_ts = int(time.time() * 1000)
+
+    conn = ensure_db(db_path)
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=buy_qty,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            settings.PAIR,
+            1,
+            "entry_reserved_full",
+            base_ts,
+            100_000_000.0,
+            buy_qty,
+            1,
+            0,
+            "lot-native",
+            "open_exposure",
+        ),
+    )
+    record_order_if_missing(
+        conn,
+        client_order_id="reserved_exit_full",
+        side="SELL",
+        qty_req=buy_qty,
+        symbol=settings.PAIR,
+        price=100_000_000.0,
+        ts_ms=base_ts + 200,
+        status="NEW",
+    )
+    conn.commit()
+    conn.close()
+
+    execution_calls = {"count": 0}
+    original_execution = live_module._execute_live_submission_and_application
+
+    def _record_execution(*args, **kwargs):
+        execution_calls["count"] += 1
+        return original_execution(*args, **kwargs)
+
+    monkeypatch.setattr(live_module, "_execute_live_submission_and_application", _record_execution)
+
+    broker = _DustOnlyBalanceBroker(asset_available=buy_qty)
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        base_ts + 300,
+        100_000_000.0,
+        strategy_name="reserved_exit_flow",
+        decision_reason="reserved exit blocks",
+        exit_rule_name="exit_signal",
+    )
+
+    conn = ensure_db(db_path)
+    submit_attempt_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type IN ('submit_attempt_preflight', 'submit_attempt_recorded', 'submit_blocked')
+        """
+    ).fetchone()["n"]
+    conn.close()
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert execution_calls["count"] == 0
+    assert submit_attempt_count == 0
+
+
+@pytest.mark.fast_regression
+@pytest.mark.lot_native_regression_gate
+def test_live_execute_signal_sell_orderability_constraint_stops_before_execution_stage(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "sell_orderability_flow.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+
+    conn = ensure_db(db_path)
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0002,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (settings.PAIR, 1, "entry_open", 1_700_000_000_000, 100_000_000.0, 0.0002, 2, 0, "lot-native", "open_exposure"),
+    )
+    conn.commit()
+    conn.close()
+
+    execution_calls = {"count": 0}
+    original_execution = live_module._execute_live_submission_and_application
+
+    def _record_execution(*args, **kwargs):
+        execution_calls["count"] += 1
+        return original_execution(*args, **kwargs)
+
+    def _block_on_step(*, qty: float, market_price: float) -> float:
+        raise SellDustGuardError(
+            "order qty below minimum after step normalization",
+            details={
+                "state": "blocking_dust",
+                "operator_action": "manual_review_before_resume",
+                "position_qty": float(qty),
+                "normalized_qty": 0.0,
+                "requested_qty": float(qty),
+                "min_qty": 0.0001,
+                "sell_notional_krw": 0.0,
+                "min_notional_krw": 0.0,
+                "qty_below_min": 1,
+                "normalized_non_positive": 1,
+                "normalized_below_min": 1,
+                "notional_below_min": 0,
+                "qty_step": 0.0001,
+                "max_qty_decimals": 8,
+                "dust_scope": "position_qty",
+                "dust_signature": "flow-test-orderability",
+                "notify_dust_state": "blocking_dust",
+                "notify_dust_action": "manual_review_before_resume",
+                "new_orders_allowed": 0,
+                "resume_allowed": 0,
+                "treat_as_flat": 0,
+            },
+        )
+
+    monkeypatch.setattr(live_module, "_execute_live_submission_and_application", _record_execution)
+    monkeypatch.setattr(live_module, "adjust_sell_order_qty_for_dust_safety", _block_on_step)
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="orderability_flow",
+        decision_reason="step constraint",
+        exit_rule_name="exit_signal",
+    )
+
+    conn = ensure_db(db_path)
+    submit_attempt_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        """
+    ).fetchone()["n"]
+    suppression_row = conn.execute(
+        """
+        SELECT reason_code, summary
+        FROM order_suppressions
+        WHERE reason_code=?
+        ORDER BY updated_ts DESC
+        LIMIT 1
+        """,
+        (DUST_RESIDUAL_UNSELLABLE,),
+    ).fetchone()
+    conn.close()
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert execution_calls["count"] == 0
+    assert submit_attempt_count == 0
+    assert suppression_row is not None
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_UNSELLABLE
+
 def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(monkeypatch):
     original = {
         "LIVE_DRY_RUN": bool(settings.LIVE_DRY_RUN),
