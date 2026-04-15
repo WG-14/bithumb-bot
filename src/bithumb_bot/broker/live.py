@@ -4533,7 +4533,7 @@ def _execute_live_submission_and_application(
             submit_qty_source=feasibility.submit_qty_source,
             position_state_source=str(decision_observability["position_state_source"]),
             decision_reason_code=str(lot_sizing.decision_reason_code),
-            budget_krw=float(lot_sizing.budget_krw),
+            budget_krw=float(getattr(lot_sizing, "budget_krw", 0.0)),
             requested_qty=float(lot_sizing.requested_qty),
             internal_lot_size=float(lot_sizing.internal_lot_size),
             effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
