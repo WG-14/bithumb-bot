@@ -258,6 +258,53 @@ def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
     assert any("event=live_fill_fee_anomaly" in msg for msg in alerts)
 
 
+def test_apply_fill_rejects_materially_sized_live_missing_fee_without_partial_commit(tmp_path) -> None:
+    db_path = tmp_path / "fill_live_missing_fee_rejected.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
+    original_mode = settings.MODE
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="o-live-missing-fee",
+            side="BUY",
+            qty_req=0.02,
+            price=100000000.0,
+            ts_ms=1000,
+        )
+
+        with pytest.raises(RuntimeError, match="missing fill fee for materially sized live fill"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="o-live-missing-fee",
+                side="BUY",
+                fill_id="fill-live-missing-fee",
+                fill_ts=1001,
+                price=100000000.0,
+                qty=0.02,
+                fee=None,
+            )
+
+        fill_count = conn.execute("SELECT COUNT(*) FROM fills WHERE client_order_id='o-live-missing-fee'").fetchone()[0]
+        trade_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+        qty_filled = conn.execute(
+            "SELECT qty_filled FROM orders WHERE client_order_id='o-live-missing-fee'"
+        ).fetchone()["qty_filled"]
+    finally:
+        conn.close()
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
+
+    assert fill_count == 0
+    assert trade_count == 0
+    assert float(qty_filled) == 0.0
+
+
 def test_apply_fill_does_not_warn_for_live_positive_fee(tmp_path, caplog):
     db_path = tmp_path / "fill_live_positive_fee_no_warning.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))

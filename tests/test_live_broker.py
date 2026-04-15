@@ -1746,7 +1746,7 @@ def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks
 
     assert row is not None
     assert row["status"] == "RECOVERY_REQUIRED"
-    assert "strict fee validation blocked fill aggregation" in str(row["last_error"])
+    assert "material fee validation blocked fill aggregation" in str(row["last_error"])
     assert any("event=recovery_required_transition" in msg for msg in notifications)
 
 

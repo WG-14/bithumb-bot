@@ -15,6 +15,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .lifecycle import summarize_position_lots
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
+_HEALTH_SUMMARY_MAX_LEN = 1400
 
 
 def _clip(v: str | None, max_len: int = 500) -> str | None:
@@ -26,7 +27,7 @@ def _clip(v: str | None, max_len: int = 500) -> str | None:
 def _json_with_size_limit(
     payload: dict[str, object] | None,
     *,
-    max_len: int = 1000,
+    max_len: int = _HEALTH_SUMMARY_MAX_LEN,
     preserve_keys: tuple[str, ...] = (),
 ) -> str | None:
     if payload is None:
@@ -286,14 +287,14 @@ def _persist_state(state: RuntimeState) -> None:
                     _clip(state.last_reconcile_status),
                     _clip(state.last_reconcile_error),
                     _clip(state.last_reconcile_reason_code),
-                    _clip(state.last_reconcile_metadata, max_len=1000),
+                    _clip(state.last_reconcile_metadata, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     state.last_cancel_open_orders_epoch_sec,
                     _clip(state.last_cancel_open_orders_trigger),
                     _clip(state.last_cancel_open_orders_status),
-                    _clip(state.last_cancel_open_orders_summary, max_len=1000),
+                    _clip(state.last_cancel_open_orders_summary, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     state.last_flatten_position_epoch_sec,
                     _clip(state.last_flatten_position_status),
-                    _clip(state.last_flatten_position_summary, max_len=1000),
+                    _clip(state.last_flatten_position_summary, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     1 if state.emergency_flatten_blocked else 0,
                     _clip(state.emergency_flatten_block_reason),
                     _clip(state.startup_gate_reason),
@@ -552,7 +553,7 @@ def record_reconcile_result(
 
     payload = _json_with_size_limit(
         metadata,
-        max_len=1000,
+        max_len=_HEALTH_SUMMARY_MAX_LEN,
         preserve_keys=(
             "balance_source",
             "balance_observed_ts_ms",
@@ -567,6 +568,13 @@ def record_reconcile_result(
             "external_cash_adjustment_key",
             "external_cash_adjustment_reason",
             "external_cash_adjustment_residual_krw",
+            "material_zero_fee_fill_count",
+            "material_zero_fee_fill_notional_krw",
+            "material_zero_fee_fill_latest_ts",
+            "fee_gap_recovery_required",
+            "fee_gap_adjustment_count",
+            "fee_gap_adjustment_total_krw",
+            "fee_gap_adjustment_latest_event_ts",
             "dust_state",
             "dust_classification",
             "dust_residual_present",
@@ -632,7 +640,7 @@ def record_cancel_open_orders_result(
         _STATE.last_cancel_open_orders_epoch_sec = float(ts)
         _STATE.last_cancel_open_orders_trigger = _clip(trigger)
         _STATE.last_cancel_open_orders_status = _clip(status)
-        _STATE.last_cancel_open_orders_summary = _clip(payload, max_len=1000)
+        _STATE.last_cancel_open_orders_summary = _clip(payload, max_len=_HEALTH_SUMMARY_MAX_LEN)
         _persist_state(_STATE)
 
 
@@ -656,7 +664,7 @@ def record_flatten_position_result(
         _sync_state_from_persisted_locked()
         _STATE.last_flatten_position_epoch_sec = float(ts)
         _STATE.last_flatten_position_status = _clip(status)
-        _STATE.last_flatten_position_summary = _clip(payload, max_len=1000)
+        _STATE.last_flatten_position_summary = _clip(payload, max_len=_HEALTH_SUMMARY_MAX_LEN)
         if str(status) in {"failed", "started"}:
             _STATE.emergency_flatten_blocked = True
             _STATE.emergency_flatten_block_reason = _clip(
@@ -695,7 +703,7 @@ def set_startup_gate_reason(reason: str | None) -> None:
             existing_metadata["startup_gate_blocked"] = True
             _STATE.last_reconcile_metadata = _json_with_size_limit(
                 existing_metadata,
-                max_len=1000,
+                max_len=_HEALTH_SUMMARY_MAX_LEN,
                 preserve_keys=(
                     "startup_gate_reason",
                     "startup_gate_blocked",
@@ -712,6 +720,13 @@ def set_startup_gate_reason(reason: str | None) -> None:
                     "external_cash_adjustment_key",
                     "external_cash_adjustment_reason",
                     "external_cash_adjustment_residual_krw",
+                    "material_zero_fee_fill_count",
+                    "material_zero_fee_fill_notional_krw",
+                    "material_zero_fee_fill_latest_ts",
+                    "fee_gap_recovery_required",
+                    "fee_gap_adjustment_count",
+                    "fee_gap_adjustment_total_krw",
+                    "fee_gap_adjustment_latest_event_ts",
                     "dust_state",
                     "dust_classification",
                     "dust_residual_present",
@@ -746,7 +761,7 @@ def set_startup_gate_reason(reason: str | None) -> None:
             existing_metadata.pop("startup_gate_reason", None)
             existing_metadata.pop("startup_gate_blocked", None)
             _STATE.last_reconcile_metadata = (
-                _json_with_size_limit(existing_metadata, max_len=1000)
+                _json_with_size_limit(existing_metadata, max_len=_HEALTH_SUMMARY_MAX_LEN)
                 if existing_metadata
                 else None
             )

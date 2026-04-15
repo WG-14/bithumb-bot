@@ -198,11 +198,17 @@ def apply_fill_and_trade(
     qty_value = float(qty)
     fill_id_value = fill_id or "-"
     notional_value = price_value * qty_value if math.isfinite(price_value) and math.isfinite(qty_value) else 0.0
+    material_notional_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    if settings.MODE == "live" and fee is None and math.isfinite(notional_value) and notional_value >= material_notional_threshold:
+        raise RuntimeError(
+            "missing fill fee for materially sized live fill: "
+            f"client_order_id={client_order_id} fill_id={fill_id_value} notional={notional_value:.12g}"
+        )
     fee_ratio_value: float | None = None
     if notional_value > eps and math.isfinite(fee_value):
         fee_ratio_value = fee_value / notional_value
 
-    min_notional = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    min_notional = material_notional_threshold
     min_fee_ratio = max(0.0, float(settings.LIVE_FILL_FEE_RATIO_MIN))
     max_fee_ratio = max(min_fee_ratio, float(settings.LIVE_FILL_FEE_RATIO_MAX))
     should_check_live_fee_anomaly = (

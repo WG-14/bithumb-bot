@@ -3902,6 +3902,31 @@ def test_resume_eligibility_keeps_unresolved_open_order_block_even_when_dust_is_
     assert "BLOCKING_DUST_REVIEW_REQUIRED" not in blocker_codes
 
 
+def test_resume_eligibility_blocks_fee_gap_recovery_required_state(tmp_path):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "material_zero_fee_fill_count": 2,
+            "fee_gap_adjustment_count": 1,
+            "fee_gap_recovery_required": 1,
+        },
+    )
+
+    eligible, blockers = evaluate_resume_eligibility()
+    state = runtime_state.snapshot()
+
+    assert eligible is False
+    assert [b.code for b in blockers] == ["FEE_GAP_RECOVERY_REQUIRED"]
+    assert state.resume_gate_blocked is True
+    assert state.resume_gate_reason is not None
+    assert "FEE_GAP_RECOVERY_REQUIRED" in state.resume_gate_reason
+
+
 def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):
     _set_tmp_db(tmp_path)
     runtime_state.enable_trading()

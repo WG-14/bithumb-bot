@@ -310,6 +310,36 @@ def _classify_balance_split_blocker(metadata: dict[str, object]) -> ResumeBlocke
     )
 
 
+def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlocker | None:
+    try:
+        fee_gap_recovery_required = int(metadata.get("fee_gap_recovery_required", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_recovery_required = 0
+    if fee_gap_recovery_required <= 0:
+        return None
+
+    try:
+        zero_fee_fill_count = max(0, int(metadata.get("material_zero_fee_fill_count", 0) or 0))
+    except (TypeError, ValueError):
+        zero_fee_fill_count = 0
+    try:
+        fee_gap_adjustment_count = max(0, int(metadata.get("fee_gap_adjustment_count", 0) or 0))
+    except (TypeError, ValueError):
+        fee_gap_adjustment_count = 0
+
+    return _resume_blocker(
+        code="FEE_GAP_RECOVERY_REQUIRED",
+        detail=(
+            "fee-related cash drift detected during reconcile: "
+            f"material_zero_fee_fill_count={zero_fee_fill_count} "
+            f"fee_gap_adjustment_count={fee_gap_adjustment_count}"
+        ),
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        summary="fee-related accounting inconsistency requires manual recovery",
+        overridable=False,
+    )
+
+
 def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
     if not metadata_raw:
         return 0
@@ -963,6 +993,9 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                     overridable=False,
                 )
             reasons.append(blocker_reason)
+        fee_gap_blocker = _classify_fee_gap_recovery_blocker(reconcile_meta)
+        if fee_gap_blocker is not None:
+            reasons.append(fee_gap_blocker)
 
     gate_reason = None
     if reasons:
@@ -1038,6 +1071,13 @@ def build_resume_guidance(
             "Record the missing external cash adjustment evidence, then rerun reconcile before resuming."
         )
         resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
+    elif "FEE_GAP_RECOVERY_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_fee_gap_recovery_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Do not resume live trading. Review material zero-fee fills and repair the ledger/accounting state before resuming."
+        )
+        resume_blocked_reason = "resume blocked by fee-related accounting inconsistency"
     elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
         if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
             operator_next_action = "reconcile_after_external_adjustment"

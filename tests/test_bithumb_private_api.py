@@ -3485,8 +3485,15 @@ def test_get_fills_rejects_missing_or_invalid_trade_fee(monkeypatch, trade_row, 
         broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
 
 
-@pytest.mark.parametrize("trade_row", [{"fee": ""}, {"fee": None}, {}])
-def test_get_fills_tolerates_missing_or_empty_trade_fee(monkeypatch, trade_row):
+@pytest.mark.parametrize(
+    ("trade_row", "expected_error"),
+    [
+        ({"fee": ""}, "empty fee field 'fee' for materially sized fill"),
+        ({"fee": None}, "empty fee field 'fee' for materially sized fill"),
+        ({}, "missing fee field for materially sized fill"),
+    ],
+)
+def test_get_fills_rejects_materially_sized_missing_or_empty_trade_fee(monkeypatch, trade_row, expected_error):
     _configure_live()
     broker = BithumbBroker()
 
@@ -3510,10 +3517,8 @@ def test_get_fills_tolerates_missing_or_empty_trade_fee(monkeypatch, trade_row):
         },
     )
 
-    fills = broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
-
-    assert len(fills) == 1
-    assert fills[0].fee == pytest.approx(0.0)
+    with pytest.raises(BrokerRejectError, match=expected_error):
+        broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
 
 
 def test_get_fills_allows_trade_zero_fee_value(monkeypatch, caplog):
@@ -3653,7 +3658,7 @@ def test_get_fills_fee_parsing_regression_tolerates_empty_values(monkeypatch, fe
 
     trade = {
         "uuid": "t-empty-fee",
-        "price": "149000000",
+        "price": "1000",
         "volume": "0.02",
         "created_at": "2024-01-01T00:00:00+00:00",
         "fee": fee_value,
@@ -3663,7 +3668,7 @@ def test_get_fills_fee_parsing_regression_tolerates_empty_values(monkeypatch, fe
         "_get_private",
         lambda endpoint, params, retry_safe=False: {
             "uuid": "filled-empty-fee",
-            "price": "149000000",
+            "price": "1000",
             "volume": "0.02",
             "executed_volume": "0.02",
             "state": "done",

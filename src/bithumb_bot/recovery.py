@@ -50,6 +50,7 @@ REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
 REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVERY"
+REASON_FEE_GAP_RECOVERY_REQUIRED = "FEE_GAP_RECOVERY_REQUIRED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
@@ -110,6 +111,13 @@ def classify_recovery_outcome(
             disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
             progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
             reason="startup gate remains blocked",
+        )
+
+    if int(metadata.get("fee_gap_recovery_required", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
+            reason="fee-related cash drift requires manual accounting recovery",
         )
 
     if int(metadata.get("recent_fill_applied", 0)) > 0:
@@ -1406,6 +1414,64 @@ def _clear_reconcile_halt_if_safe(
     runtime_state.set_resume_gate(blocked=False, reason=None)
 
 
+def _material_zero_fee_fill_summary(
+    conn,
+    *,
+    observed_ts_ms: int | None,
+) -> dict[str, int | float]:
+    min_notional = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    if min_notional <= 0:
+        return {
+            "material_zero_fee_fill_count": 0,
+            "material_zero_fee_fill_notional_krw": 0.0,
+            "material_zero_fee_fill_latest_ts": 0,
+        }
+
+    params: list[object] = [min_notional]
+    observed_filter = ""
+    if observed_ts_ms is not None and int(observed_ts_ms) > 0:
+        observed_filter = "AND fill_ts <= ?"
+        params.append(int(observed_ts_ms))
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS fill_count,
+            COALESCE(SUM(price * qty), 0.0) AS total_notional,
+            COALESCE(MAX(fill_ts), 0) AS latest_fill_ts
+        FROM fills
+        WHERE price > 0
+          AND qty > 0
+          AND ABS(COALESCE(fee, 0.0)) <= 1e-12
+          AND (price * qty) >= ?
+          {observed_filter}
+        """,
+        tuple(params),
+    ).fetchone()
+    return {
+        "material_zero_fee_fill_count": int(row["fill_count"] or 0),
+        "material_zero_fee_fill_notional_krw": float(row["total_notional"] or 0.0),
+        "material_zero_fee_fill_latest_ts": int(row["latest_fill_ts"] or 0),
+    }
+
+
+def _fee_gap_adjustment_history_summary(conn) -> dict[str, int | float]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS adjustment_count,
+            COALESCE(SUM(delta_amount), 0.0) AS total_delta,
+            COALESCE(MAX(event_ts), 0) AS latest_event_ts
+        FROM external_cash_adjustments
+        WHERE reason='reconcile_fee_gap_cash_drift'
+        """
+    ).fetchone()
+    return {
+        "fee_gap_adjustment_count": int(row["adjustment_count"] or 0),
+        "fee_gap_adjustment_total_krw": float(row["total_delta"] or 0.0),
+        "fee_gap_adjustment_latest_event_ts": int(row["latest_event_ts"] or 0),
+    }
+
+
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
@@ -1430,6 +1496,11 @@ def reconcile_with_broker(broker: Broker) -> None:
         "dust_residual_present": 0,
         "dust_residual_allow_resume": 0,
         "dust_policy_reason": "no_dust_residual",
+        "material_zero_fee_fill_count": 0,
+        "material_zero_fee_fill_latest_ts": 0,
+        "fee_gap_recovery_required": 0,
+        "fee_gap_adjustment_count": 0,
+        "fee_gap_adjustment_latest_event_ts": 0,
     }
     try:
         init_portfolio(conn)
@@ -1736,6 +1807,13 @@ def reconcile_with_broker(broker: Broker) -> None:
             local_asset_available=local_asset_available,
             local_asset_locked=local_asset_locked,
         )
+        zero_fee_fill_summary = _material_zero_fee_fill_summary(
+            conn,
+            observed_ts_ms=int(balance_snapshot.observed_ts_ms or 0),
+        )
+        metadata["material_zero_fee_fill_count"] = int(zero_fee_fill_summary["material_zero_fee_fill_count"])
+        metadata["material_zero_fee_fill_notional_krw"] = float(zero_fee_fill_summary["material_zero_fee_fill_notional_krw"])
+        metadata["material_zero_fee_fill_latest_ts"] = int(zero_fee_fill_summary["material_zero_fee_fill_latest_ts"])
         external_cash_adjustment = None
         should_record_external_cash_adjustment = (
             abs(cash_delta) > CASH_SPLIT_ABS_TOL
@@ -1748,6 +1826,10 @@ def reconcile_with_broker(broker: Broker) -> None:
             and "asset_locked" not in pre_adjustment_mismatch_summary
         )
         if should_record_external_cash_adjustment:
+            fee_gap_drift_detected = (
+                int(zero_fee_fill_summary["material_zero_fee_fill_count"]) > 0
+                and abs(cash_delta) > CASH_SPLIT_ABS_TOL
+            )
             adjustment_key = _external_cash_adjustment_key(
                 balance_source=str(balance_snapshot.source_id or "-"),
                 broker_cash_available=broker_cash_available,
@@ -1770,7 +1852,7 @@ def reconcile_with_broker(broker: Broker) -> None:
                 currency="KRW",
                 delta_amount=cash_delta,
                 source=str(balance_snapshot.source_id or "reconcile"),
-                reason="reconcile_cash_drift",
+                reason=("reconcile_fee_gap_cash_drift" if fee_gap_drift_detected else "reconcile_cash_drift"),
                 broker_snapshot_basis={
                     "key_version": CASH_ADJUSTMENT_KEY_VERSION,
                     "balance_source": str(balance_snapshot.source_id or "-"),
@@ -1784,13 +1866,20 @@ def reconcile_with_broker(broker: Broker) -> None:
                     "local_cash_total": local_cash_total,
                     "cash_delta": cash_delta,
                     "reconcile_reason_code": reason_code,
+                    "material_zero_fee_fill_count": int(zero_fee_fill_summary["material_zero_fee_fill_count"]),
+                    "material_zero_fee_fill_notional_krw": float(zero_fee_fill_summary["material_zero_fee_fill_notional_krw"]),
                 },
                 correlation_metadata={
                     "remote_open_order_found": int(metadata["remote_open_order_found"]),
                     "recent_fill_applied": int(metadata["recent_fill_applied"]),
                     "invalid_fill_price_blocked": int(metadata["invalid_fill_price_blocked"]),
+                    "fee_gap_recovery_required": 1 if fee_gap_drift_detected else 0,
                 },
-                note="cash drift inferred from reconcile balance snapshot",
+                note=(
+                    "cash drift inferred from reconcile balance snapshot; material zero-fee fill history present"
+                    if fee_gap_drift_detected
+                    else "cash drift inferred from reconcile balance snapshot"
+                ),
                 adjustment_key=adjustment_key,
             )
             metadata["external_cash_adjustment_count"] = 1
@@ -1821,6 +1910,14 @@ def reconcile_with_broker(broker: Broker) -> None:
             local_asset_locked = float(adjusted_asset_locked)
             local_cash_total = adjusted_cash_total
             portfolio_cash_available = local_cash_available
+        fee_gap_adjustment_history = _fee_gap_adjustment_history_summary(conn)
+        metadata["fee_gap_adjustment_count"] = int(fee_gap_adjustment_history["fee_gap_adjustment_count"])
+        metadata["fee_gap_adjustment_total_krw"] = float(fee_gap_adjustment_history["fee_gap_adjustment_total_krw"])
+        metadata["fee_gap_adjustment_latest_event_ts"] = int(fee_gap_adjustment_history["fee_gap_adjustment_latest_event_ts"])
+        if int(metadata["fee_gap_adjustment_count"]) > 0:
+            metadata["fee_gap_recovery_required"] = 1
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
             asset_locked = local_asset_locked
 

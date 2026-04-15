@@ -15,7 +15,7 @@ from bithumb_bot.db_core import (
     record_external_cash_adjustment,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.engine import evaluate_startup_safety_gate, _classify_balance_split_blocker
+from bithumb_bot.engine import evaluate_resume_eligibility, evaluate_startup_safety_gate, _classify_balance_split_blocker
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot import runtime_state
 from bithumb_bot.reporting import cmd_cash_drift_report, fetch_cash_drift_report
@@ -258,8 +258,90 @@ def test_reconcile_records_external_cash_adjustment_for_cash_only_drift(tmp_path
     assert trade_count == 0
     assert fill_count == 0
     assert metadata["external_cash_adjustment_count"] == 1
-    assert metadata["external_cash_adjustment_delta_krw"] == pytest.approx(50.0)
-    assert metadata["external_cash_adjustment_total_krw"] == pytest.approx(50.0)
+
+
+def test_reconcile_marks_fee_related_cash_drift_and_blocks_recovery_state(tmp_path) -> None:
+    db_path = tmp_path / "reconcile_fee_gap_cash_drift.sqlite"
+    original_db_path = settings.DB_PATH
+    original_start_cash = settings.START_CASH_KRW
+    original_mode = settings.MODE
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+    class _FeeGapDriftBroker(_VariableCashDriftBroker):
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(
+                cash_available=899_950.0,
+                cash_locked=0.0,
+                asset_available=0.001,
+                asset_locked=0.0,
+            )
+
+    try:
+        conn = ensure_db(str(db_path))
+        try:
+            init_portfolio(conn)
+            record_order_if_missing(
+                conn,
+                client_order_id="fee_gap_buy_1",
+                side="BUY",
+                qty_req=0.001,
+                price=100_000_000.0,
+                ts_ms=1_700_000_000_000,
+                status="NEW",
+            )
+            apply_fill_and_trade(
+                conn,
+                client_order_id="fee_gap_buy_1",
+                side="BUY",
+                fill_id="fee_gap_buy_1_fill",
+                fill_ts=1_700_000_000_100,
+                price=100_000_000.0,
+                qty=0.001,
+                fee=0.0,
+                note="historical zero-fee live fill",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        runtime_state.record_reconcile_result(success=True, reason_code=None, metadata=None, now_epoch_sec=0.0)
+        reconcile_with_broker(_FeeGapDriftBroker(cash_available=899_950.0))
+        eligible, blockers = evaluate_resume_eligibility()
+
+        conn = ensure_db(str(db_path))
+        try:
+            adjustment = conn.execute(
+                """
+                SELECT reason, note
+                FROM external_cash_adjustments
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            metadata_raw = conn.execute(
+                "SELECT last_reconcile_metadata FROM bot_health WHERE id=1"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    finally:
+        object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
+
+    metadata = json.loads(str(metadata_raw))
+    assert adjustment["reason"] == "reconcile_fee_gap_cash_drift"
+    assert "material zero-fee fill history present" in str(adjustment["note"])
+    assert metadata["external_cash_adjustment_reason"] == "reconcile_fee_gap_cash_drift"
+    assert metadata["material_zero_fee_fill_count"] == 1
+    assert metadata["fee_gap_recovery_required"] == 1
+    assert metadata["external_cash_adjustment_delta_krw"] == pytest.approx(-50.0)
+    assert metadata["external_cash_adjustment_total_krw"] == pytest.approx(-50.0)
+    assert eligible is False
+    assert "FEE_GAP_RECOVERY_REQUIRED" in [b.code for b in blockers]
     assert metadata["external_cash_adjustment_residual_krw"] == pytest.approx(0.0)
     assert evaluate_startup_safety_gate() is None
 

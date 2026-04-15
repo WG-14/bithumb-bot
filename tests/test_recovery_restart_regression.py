@@ -1293,6 +1293,55 @@ def test_reconcile_preserves_rounding_residue_as_dust_only_restart_authority(iso
     assert lot_snapshot.dust_tracking_qty == pytest.approx(rounded_residue_qty)
 
 
+def test_reconcile_classifies_reviewed_below_min_residual_lot_as_dust_only_restart_authority(isolated_db, monkeypatch):
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    reviewed_residual_qty = 0.00009997
+    _seed_trade_residue_state(
+        db_path=isolated_db,
+        entry_client_order_id="reviewed_residual_entry",
+        exit_client_order_id="reviewed_residual_exit",
+        buy_qty=0.00089997,
+        sell_qty=0.0008,
+        buy_price=40_000_000.0,
+        sell_price=41_000_000.0,
+        buy_fee=0.0,
+        sell_fee=0.0,
+        base_ts=1_700_002_250_000,
+    )
+    monkeypatch.setattr(
+        recovery_module,
+        "get_effective_order_rules",
+        lambda _pair: _resolved_order_rules(min_qty=0.0001, min_notional_krw=0.0),
+    )
+
+    reconcile_with_broker(_DustBalanceBroker(asset_available=reviewed_residual_qty))
+
+    authority = _load_reconciled_position_authority(db_path=isolated_db)
+    conn = ensure_db(str(isolated_db))
+    try:
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert authority.raw_total_asset_qty == pytest.approx(reviewed_residual_qty)
+    assert authority.open_exposure_qty == pytest.approx(0.0)
+    assert authority.dust_tracking_qty == pytest.approx(reviewed_residual_qty)
+    assert authority.open_lot_count == 0
+    assert authority.dust_tracking_lot_count == 1
+    assert authority.sellable_executable_lot_count == 0
+    assert authority.sellable_executable_qty == pytest.approx(0.0)
+    assert authority.has_executable_exposure is False
+    assert authority.exit_allowed is False
+    assert authority.exit_block_reason == "dust_only_remainder"
+    assert authority.terminal_state == "dust_only"
+    assert lot_snapshot.raw_total_asset_qty == pytest.approx(reviewed_residual_qty)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(reviewed_residual_qty)
+
+
 def test_reconcile_marks_equal_dust_without_recent_flatten_as_resume_safe_when_notional_is_also_dust(
     isolated_db,
     monkeypatch,

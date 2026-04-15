@@ -1798,17 +1798,28 @@ class BithumbBroker:
         price: float | None,
         strict: bool = False,
     ) -> float:
+        material_notional_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+        fill_notional = 0.0
+        if qty is not None and price is not None:
+            fill_notional = max(0.0, float(qty)) * max(0.0, float(price))
+        material_fee_validation_required = fill_notional >= material_notional_threshold > 0.0
         fee_keys = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
         present_keys = [key for key in fee_keys if key in row]
         log_payload = self._sanitize_debug_value(
             {
                 "context": context,
                 "fill_hint_id": row.get("uuid") or row.get("id") or row.get("order_id"),
+                "fill_notional": fill_notional,
+                "material_fee_validation_required": material_fee_validation_required,
                 "present_fee_keys": present_keys,
                 "fee_values": {key: row.get(key) for key in present_keys},
             }
         )
         if not present_keys:
+            if strict and material_fee_validation_required:
+                raise BrokerRejectError(
+                    f"/v1/order.{context} schema mismatch: missing fee field for materially sized fill"
+                )
             RUN_LOG.warning(format_log_kv("[FILL_FEE] missing fee key", payload=log_payload))
             return 0.0
 
@@ -1817,6 +1828,10 @@ class BithumbBroker:
             parsed = self._to_float(raw, default=None)
             if parsed is None:
                 if raw in (None, "") or (isinstance(raw, str) and raw.strip().lower() in {"null", "none"}):
+                    if strict and material_fee_validation_required:
+                        raise BrokerRejectError(
+                            f"/v1/order.{context} schema mismatch: empty fee field '{key}' for materially sized fill"
+                        )
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] empty fee value", payload=log_payload, fee_key=key))
                     continue
                 if strict:
@@ -1836,7 +1851,7 @@ class BithumbBroker:
                 row.get(key) not in (None, "") and not (isinstance(row.get(key), str) and str(row.get(key)).strip().lower() in {"null", "none"})
                 for key in present_keys
             )
-            if has_non_empty_fee:
+            if has_non_empty_fee or material_fee_validation_required:
                 raise BrokerRejectError(f"/v1/order.{context} schema mismatch: unable to parse fee field")
         RUN_LOG.warning(format_log_kv("[FILL_FEE] unable to parse any fee value", payload=log_payload))
         return 0.0

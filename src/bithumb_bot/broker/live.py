@@ -379,6 +379,14 @@ def _aggregate_fills_for_apply(
                 )
             )
             notify(alert_message)
+            raise FillFeeStrictModeError(
+                "material fee validation blocked fill aggregation: "
+                f"context={context} invalid_fee_count={invalid_fee_count} "
+                f"invalid_fee_notional={invalid_fee_notional:.12g} "
+                f"aggregate_notional={aggregate_notional:.12g} "
+                f"max_invalid_fill_notional={max_invalid_fill_notional:.12g} "
+                f"threshold_notional={hard_alert_min_notional:.12g}"
+            )
 
         strict_violation = (
             strict_mode_enabled
