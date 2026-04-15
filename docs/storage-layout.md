@@ -343,9 +343,16 @@ Persisted schema-backed base fields in `open_position_lots`:
 - `position_semantic_basis`: stored semantic basis and must remain `lot-native`.
 - `lot_semantic_version`, `internal_lot_size`, `lot_min_qty`, `lot_qty_step`, `lot_min_notional_krw`, `lot_max_qty_decimals`, and `lot_rule_source_mode`: stored lot-rule metadata for interpretation and recovery.
 
+Normalized runtime holding states are a separate interpretation layer. They are
+computed from persisted lot rows plus reservation and dust logic, and current
+normalized states include `open_exposure`, `reserved_exit_pending`,
+`dust_only`, `flat`, and `non_executable_position`. Those normalized states are
+not additional stored `open_position_lots.position_state` row values.
+
 Trigger-enforced storage invariants:
 
 - `open_position_lots` is protected by insert/update validation triggers; it is not just an interpretation-layer convention.
+- These trigger guarantees are necessary storage-integrity checks, but they are not sufficient by themselves to prove final runtime SELL authority. Final SELL authority still depends on the separate normalized holding/exit materialization step.
 - Negative `executable_lot_count` and `dust_tracking_lot_count` values are rejected.
 - For lot-native rows with positive `qty_open`, `position_state='open_exposure'` requires positive `executable_lot_count` and zero `dust_tracking_lot_count`, while `position_state='dust_tracking'` requires the inverse.
 - For lot-native rows with positive `qty_open` and positive `internal_lot_size`, `qty_open` must equal the authoritative lot count multiplied by `internal_lot_size` for the active state bucket.
@@ -356,7 +363,7 @@ Current schema-time legacy-row normalization:
 - During schema setup, rows with missing or blank `position_semantic_basis` are backfilled to `lot-native`.
 - Rows with missing or blank `position_state` are backfilled to `open_exposure`.
 - Existing positive-qty rows are normalized so `open_exposure` rows have at least one `executable_lot_count` and `dust_tracking` rows have at least one `dust_tracking_lot_count` when those legacy lot-count fields were blank or non-positive.
-- This schema-time backfill is compatibility normalization for pre-existing rows; it does not promote qty-only legacy data to final SELL authority.
+- This schema-time backfill is compatibility and fail-closed normalization for pre-existing rows. It keeps older rows readable under the current storage contract, but it does not canonically reconstruct lot-native SELL semantics from qty-only legacy data or promote qty-only legacy data to final SELL authority.
 
 Derived / interpreted outputs from the lot-state and dust interpretation layer:
 

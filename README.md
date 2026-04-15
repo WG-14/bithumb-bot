@@ -18,13 +18,17 @@ This bot uses lot-native executable position semantics.
 - `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
 - `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
-- Current terminal/operator-facing states include `open_exposure`, `reserved_exit_pending`, `dust_only`, `flat`, and `non_executable_position`.
+- `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They do not define SELL authority, recovery authority, or executable-position authority.
+- Current SELL and recovery authority must be read from `holding_authority_state`, `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`.
+- Persisted lot-state row values remain `open_exposure` and `dust_tracking`.
+- Current terminal/operator-facing normalized holding states are computed on top of persisted lot rows plus reservation and dust logic, and include `open_exposure`, `reserved_exit_pending`, `dust_only`, `flat`, and `non_executable_position`.
 - `reserved_exit_pending` is a real normalized terminal state: executable exposure still exists, but normal SELL submission is blocked because the sellable lots are already reserved by open SELL orders.
 - `dust_only`, `flat`, and `non_executable_position` remain distinct normalized outcomes and should not be collapsed into qty-first state interpretation.
 - If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order.
 - Lot counts are the canonical executable state meaning.
-- Qty remains an exchange-interface and reporting value, derived from the lot-native state.
-- Current external/terminal authority is lot-native, but internal fail-closed compatibility and fallback handling still remains in code for legacy or non-executable cases.
+- Qty remains non-authoritative, but it is still operationally required as a derived surface for broker payloads, sell-boundary handling, and reporting.
+- Alias qty fields such as `position_qty`, `submit_payload_qty`, and `normalized_exposure_qty` may still appear in emitted/reporting context, but they are derived or compatibility/reporting surfaces and are not canonical SELL authority inputs.
+- Current external/terminal SELL authority is lot-native, but current context materialization still passes through compatibility-aware fail-closed normalization for legacy or non-executable cases.
 
 ## Quick Start
 

@@ -317,6 +317,7 @@ Derived / interpreted outputs from the lot-state and dust interpretation layer:
 - `dust_tracking_qty`: interpreted operator-only residual quantity materialized from the dust-tracking lot state.
 - `sellable_executable_qty`: interpreted sell-submit quantity derived from sellable executable lot count, not a persisted column.
 - `sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, and `exit_block_reason`: normalized execution/reporting authority fields materialized from persisted lot rows plus reservation and dust interpretation; they are not direct `open_position_lots` storage columns.
+- Storage-level checks and schema normalization are necessary inputs to that materialization, but they are not by themselves proof of final runtime SELL authority.
 
 Practical routing rules:
 
