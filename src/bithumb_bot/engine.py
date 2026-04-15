@@ -26,6 +26,7 @@ from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .dust import (
     DustClassification,
     DustState,
@@ -900,6 +901,27 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             )
         )
 
+    if not startup_gate_reason and not state.halt_new_orders_blocked and not state.halt_state_unresolved:
+        conn = ensure_db()
+        try:
+            manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
+        finally:
+            conn.close()
+        if bool(manual_flat_preview.get("safe_to_apply")):
+            reasons.append(
+                _resume_blocker(
+                    code="MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED",
+                    detail=(
+                        f"manual-flat accounting repair pending: {manual_flat_preview.get('eligibility_reason')}; "
+                        f"cash_delta={float(manual_flat_preview.get('cash_delta') or 0.0):.3f} "
+                        f"asset_qty_delta={float(manual_flat_preview.get('asset_qty_delta') or 0.0):.10f}"
+                    ),
+                    reason_code="MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED",
+                    summary="manual-flat accounting repair required",
+                    overridable=False,
+                )
+            )
+
     if startup_gate_reason:
         startup_blocker_reason_code, startup_blocker_summary = _classify_startup_gate_reason(
             startup_gate_reason,
@@ -1128,6 +1150,13 @@ def build_resume_guidance(
             "Do not resume trading. Holdings exist but canonical lot authority is missing; repair or explicitly recover the position state first."
         )
         resume_blocked_reason = "resume blocked by missing lot authority"
+    elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_flat_accounting_repair_required"
+        recommended_command = "uv run python bot.py manual-flat-accounting-repair"
+        recommended_next_action = (
+            "Do not resume trading. The runtime is flat, but accounting replay still needs an explicit manual-flat repair event."
+        )
+        resume_blocked_reason = "resume blocked pending manual-flat accounting repair"
     elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
         operator_next_action = "review_harmless_dust_policy"
         recommended_command = "uv run python bot.py recovery-report --json"
@@ -1199,6 +1228,8 @@ def build_resume_guidance(
             return "uv run python bot.py reconcile"
         if code == "EXTERNAL_CASH_ADJUSTMENT_REQUIRED":
             return "uv run python bot.py record-external-cash-adjustment --help"
+        if code == "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED":
+            return "uv run python bot.py manual-flat-accounting-repair"
         if code == "BALANCE_SPLIT_MISMATCH":
             if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
                 return "uv run python bot.py reconcile"
@@ -1368,6 +1399,20 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
         and "HALT_RISK_OPEN_POSITION" not in blocker_codes
     )
 
+    manual_flat_repair_needed = False
+    manual_flat_repair_detail = "not_checked"
+    conn = ensure_db()
+    try:
+        manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+    manual_flat_repair_needed = bool(manual_flat_preview.get("safe_to_apply"))
+    manual_flat_repair_detail = (
+        f"needed={1 if manual_flat_repair_needed else 0} "
+        f"safe_to_apply={1 if bool(manual_flat_preview.get('safe_to_apply')) else 0} "
+        f"reason={manual_flat_preview.get('eligibility_reason') or 'none'}"
+    )
+
     return [
         (
             "unresolved/recovery-required orders",
@@ -1405,6 +1450,11 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             "last reconcile",
             last_reconcile_ok,
             last_reconcile_summary,
+        ),
+        (
+            "manual-flat accounting repair",
+            not manual_flat_repair_needed,
+            manual_flat_repair_detail,
         ),
     ]
 

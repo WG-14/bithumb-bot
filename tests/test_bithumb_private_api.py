@@ -1153,6 +1153,31 @@ def test_accounts_rest_balance_allows_missing_base_on_live_armed_flat_start(monk
     assert diag["flat_start_allowed"] is True
 
 
+def test_accounts_rest_balance_allows_missing_base_on_live_unarmed_flat_recovery_path(monkeypatch):
+    _configure_live()
+    monkeypatch.setattr(
+        "bithumb_bot.broker.balance_source._default_flat_start_safety_check",
+        lambda: (True, "flat_start_safe"),
+    )
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+        ],
+    )
+
+    balance = broker.get_balance()
+    diag = broker.get_accounts_validation_diagnostics()
+
+    assert balance.asset_available == 0.0
+    assert balance.asset_locked == 0.0
+    assert diag["preflight_outcome"] == "pass_no_position_allowed"
+    assert diag["base_currency_missing_policy"] == "allow_flat_start_when_no_open_or_unresolved_exposure"
+    assert diag["flat_start_allowed"] is True
+
+
 def test_accounts_rest_balance_blocks_missing_base_on_live_armed_when_unresolved_exists(monkeypatch):
     _configure_live()
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
@@ -1174,6 +1199,28 @@ def test_accounts_rest_balance_blocks_missing_base_on_live_armed_when_unresolved
     diag = broker.get_accounts_validation_diagnostics()
     assert diag["flat_start_allowed"] is False
     assert diag["flat_start_reason"] == "local_unresolved_or_open_orders=1"
+
+
+def test_accounts_rest_balance_blocks_missing_base_on_live_unarmed_when_not_flat(monkeypatch):
+    _configure_live()
+    monkeypatch.setattr(
+        "bithumb_bot.broker.balance_source._default_flat_start_safety_check",
+        lambda: (False, "local_position_present=0.100000000000"),
+    )
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "25"},
+        ],
+    )
+
+    with pytest.raises(BrokerRejectError, match="missing base currency row 'BTC'"):
+        broker.get_balance()
+    diag = broker.get_accounts_validation_diagnostics()
+    assert diag["flat_start_allowed"] is False
+    assert diag["flat_start_reason"] == "local_position_present=0.100000000000"
 
 
 def test_order_chance_uses_private_v1_endpoint(monkeypatch):

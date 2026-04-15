@@ -23,6 +23,7 @@ from .decision_context import (
 # operator evidence only. Keep the schema aligned with that routing contract.
 _OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
 EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
+MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE = "manual_flat_accounting_repair"
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
 
@@ -407,6 +408,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manual_flat_accounting_repairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'manual_flat_accounting_repair'
+                CHECK (event_type = 'manual_flat_accounting_repair'),
+            event_ts INTEGER NOT NULL,
+            asset_qty_delta REAL NOT NULL,
+            cash_delta REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            repair_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
     _ensure_column(conn, "trades", "client_order_id", "client_order_id TEXT")
     _ensure_column(conn, "trades", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trades", "entry_decision_id", "entry_decision_id INTEGER")
@@ -434,6 +453,35 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "external_cash_adjustments", "correlation_metadata", "correlation_metadata TEXT")
     _ensure_column(conn, "external_cash_adjustments", "note", "note TEXT")
+    _ensure_column(conn, "manual_flat_accounting_repairs", "repair_key", "repair_key TEXT")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'manual_flat_accounting_repair'",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "asset_qty_delta",
+        "asset_qty_delta REAL NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "cash_delta",
+        "cash_delta REAL NOT NULL DEFAULT 0",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "manual_flat_accounting_repairs", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "repair_basis",
+        "repair_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "note", "note TEXT")
 
     conn.execute(
         """
@@ -451,6 +499,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_external_cash_adjustments_currency_ts
         ON external_cash_adjustments(currency, event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_manual_flat_accounting_repairs_event_ts
+        ON manual_flat_accounting_repairs(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_flat_accounting_repairs_key
+        ON manual_flat_accounting_repairs(repair_key)
         """
     )
 
@@ -1461,6 +1521,133 @@ def _external_cash_adjustment_key(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _manual_flat_accounting_repair_key(
+    *,
+    event_ts: int,
+    asset_qty_delta: float,
+    cash_delta: float,
+    source: str,
+    reason: str,
+    repair_basis: str,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE,
+        "event_ts": int(event_ts),
+        "asset_qty_delta": f"{normalize_asset_qty(asset_qty_delta):.12f}",
+        "cash_delta": f"{normalize_cash_amount(cash_delta):.8f}",
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "repair_basis": str(repair_basis).strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int]:
+    init_portfolio(conn)
+    total_fee = 0.0
+    external_cash_adjustment_total = 0.0
+    external_cash_adjustment_count = 0
+    manual_flat_repair_cash_total = 0.0
+    manual_flat_repair_asset_total = 0.0
+    manual_flat_repair_count = 0
+    dup_fill_count = 0
+
+    seen_fill_keys: set[tuple[str, int, float, float]] = set()
+    fills = conn.execute(
+        """
+        SELECT f.client_order_id, f.fill_ts, f.price, f.qty, f.fee, o.side
+        FROM fills f
+        JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.fill_ts ASC, f.id ASC
+        """
+    ).fetchall()
+
+    fill_rows: list[tuple[str, float, float, float | None]] = []
+    for row in fills:
+        key = (
+            str(row["client_order_id"]),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(row["qty"]),
+        )
+        if key in seen_fill_keys:
+            dup_fill_count += 1
+        seen_fill_keys.add(key)
+
+        fee = float(row["fee"]) if row["fee"] is not None else None
+        total_fee += float(fee or 0.0)
+        fill_rows.append((str(row["side"]), float(row["price"]), float(row["qty"]), fee))
+
+    cash_available, cash_locked, asset_available, asset_locked, cash, qty = replay_fill_portfolio_snapshot(
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=fill_rows,
+    )
+
+    adjustments = conn.execute(
+        """
+        SELECT adjustment_key, delta_amount
+        FROM external_cash_adjustments
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_adjustment_keys: set[str] = set()
+    for row in adjustments:
+        key = str(row["adjustment_key"])
+        if key in seen_adjustment_keys:
+            continue
+        seen_adjustment_keys.add(key)
+        delta_amount = normalize_cash_amount(row["delta_amount"])
+        external_cash_adjustment_total = normalize_cash_amount(external_cash_adjustment_total + delta_amount)
+        external_cash_adjustment_count += 1
+        cash = normalize_cash_amount(cash + delta_amount)
+        cash_available = normalize_cash_amount(cash_available + delta_amount)
+
+    repairs = conn.execute(
+        """
+        SELECT repair_key, cash_delta, asset_qty_delta
+        FROM manual_flat_accounting_repairs
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_repair_keys: set[str] = set()
+    for row in repairs:
+        key = str(row["repair_key"])
+        if key in seen_repair_keys:
+            continue
+        seen_repair_keys.add(key)
+        cash_delta = normalize_cash_amount(row["cash_delta"])
+        asset_qty_delta = normalize_asset_qty(row["asset_qty_delta"])
+        manual_flat_repair_cash_total = normalize_cash_amount(manual_flat_repair_cash_total + cash_delta)
+        manual_flat_repair_asset_total = normalize_asset_qty(manual_flat_repair_asset_total + asset_qty_delta)
+        manual_flat_repair_count += 1
+        cash = normalize_cash_amount(cash + cash_delta)
+        cash_available = normalize_cash_amount(cash_available + cash_delta)
+        qty = normalize_asset_qty(qty + asset_qty_delta)
+        asset_available = normalize_asset_qty(asset_available + asset_qty_delta)
+
+    return {
+        "replay_cash": cash,
+        "replay_qty": qty,
+        "replay_cash_available": cash_available,
+        "replay_cash_locked": cash_locked,
+        "replay_asset_available": asset_available,
+        "replay_asset_locked": asset_locked,
+        "fee_total": total_fee,
+        "external_cash_adjustment_count": external_cash_adjustment_count,
+        "external_cash_adjustment_total": external_cash_adjustment_total,
+        "manual_flat_accounting_repair_count": manual_flat_repair_count,
+        "manual_flat_accounting_repair_cash_total": manual_flat_repair_cash_total,
+        "manual_flat_accounting_repair_asset_total": manual_flat_repair_asset_total,
+        "dup_fill_count": dup_fill_count,
+    }
+
+
 def record_external_cash_adjustment(
     conn: sqlite3.Connection,
     *,
@@ -1636,6 +1823,131 @@ def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, 
         "last_correlation_metadata": (
             str(last["correlation_metadata"]) if last is not None and last["correlation_metadata"] is not None else None
         ),
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_manual_flat_accounting_repair(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    asset_qty_delta: float,
+    cash_delta: float,
+    source: str,
+    reason: str,
+    repair_basis: dict[str, Any] | str,
+    note: str | None = None,
+    repair_key: str | None = None,
+) -> dict[str, Any]:
+    basis_text = (
+        json.dumps(repair_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(repair_basis, dict)
+        else str(repair_basis)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    asset_qty_delta_value = normalize_asset_qty(asset_qty_delta)
+    cash_delta_value = normalize_cash_amount(cash_delta)
+    if abs(asset_qty_delta_value) <= 1e-12 and abs(cash_delta_value) <= 1e-8:
+        raise RuntimeError("manual-flat accounting repair delta is zero")
+
+    key = repair_key or _manual_flat_accounting_repair_key(
+        event_ts=int(event_ts),
+        asset_qty_delta=asset_qty_delta_value,
+        cash_delta=cash_delta_value,
+        source=source_text,
+        reason=reason_text,
+        repair_basis=basis_text,
+        note=note,
+    )
+
+    existing = conn.execute(
+        """
+        SELECT id, repair_key, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        FROM manual_flat_accounting_repairs
+        WHERE repair_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "repair_key": str(existing["repair_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "asset_qty_delta": float(existing["asset_qty_delta"]),
+            "cash_delta": float(existing["cash_delta"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "repair_basis": str(existing["repair_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO manual_flat_accounting_repairs(
+            repair_key, event_type, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE,
+            int(event_ts),
+            asset_qty_delta_value,
+            cash_delta_value,
+            source_text,
+            reason_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "repair_key": key,
+        "event_ts": int(event_ts),
+        "asset_qty_delta": asset_qty_delta_value,
+        "cash_delta": cash_delta_value,
+        "source": source_text,
+        "reason": reason_text,
+        "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_manual_flat_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS repair_count,
+            COALESCE(SUM(asset_qty_delta), 0.0) AS asset_qty_total,
+            COALESCE(SUM(cash_delta), 0.0) AS cash_total
+        FROM manual_flat_accounting_repairs
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT repair_key, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        FROM manual_flat_accounting_repairs
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "repair_count": int(row["repair_count"] if row else 0),
+        "asset_qty_total": float(row["asset_qty_total"] if row else 0.0),
+        "cash_total": float(row["cash_total"] if row else 0.0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_asset_qty_delta": float(last["asset_qty_delta"]) if last is not None else None,
+        "last_cash_delta": float(last["cash_delta"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
         "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
     }
 

@@ -29,7 +29,13 @@ from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown, init_portfolio, record_external_cash_adjustment
+from bithumb_bot.db_core import (
+    ensure_db,
+    get_portfolio_breakdown,
+    init_portfolio,
+    record_external_cash_adjustment,
+    set_portfolio_breakdown,
+)
 from bithumb_bot.engine import (
     ResumeBlocker,
     build_resume_guidance,
@@ -106,6 +112,53 @@ def _patch_cash_drift_broker(monkeypatch: pytest.MonkeyPatch, *, cash_available:
             )
 
     monkeypatch.setattr("bithumb_bot.reporting.BithumbBroker", lambda: _CashDriftBroker())
+
+
+def _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch: pytest.MonkeyPatch, *, cleaned_lots: bool = True) -> None:
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="manual_flat_buy",
+            side="BUY",
+            qty_req=0.01,
+            price=100.0,
+            ts_ms=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="manual_flat_buy",
+            side="BUY",
+            fill_id="manual_flat_fill_1",
+            fill_ts=2,
+            price=100.0,
+            qty=0.01,
+            fee=0.0,
+        )
+        set_status("manual_flat_buy", "FILLED", conn=conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        if cleaned_lots:
+            conn.execute("DELETE FROM open_position_lots")
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={"balance_split_mismatch_count": 0},
+    )
 
 
 def test_cash_drift_report_shows_explained_delta_from_external_adjustments(tmp_path, monkeypatch, capsys):
@@ -233,6 +286,102 @@ def test_record_external_cash_adjustment_command_creates_event_without_trade(tmp
     assert float(portfolio["cash_available"]) == pytest.approx(settings.START_CASH_KRW + 77.5)
     assert float(portfolio["cash_locked"]) == pytest.approx(0.0)
     assert trade_count == 0
+
+
+def test_manual_flat_accounting_repair_preview_is_non_mutating(tmp_path, monkeypatch, capsys):
+    _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch)
+
+    app_main(["manual-flat-accounting-repair"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM manual_flat_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert "[MANUAL-FLAT-ACCOUNTING-REPAIR] preview" in out
+    assert "needs_repair=1" in out
+    assert "safe_to_apply=1" in out
+    assert "[MANUAL-FLAT-ACCOUNTING-REPAIR] dry-run: no changes applied" in out
+    assert repair_count == 0
+
+
+def test_manual_flat_accounting_repair_requires_explicit_confirmation(tmp_path, monkeypatch, capsys):
+    _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch)
+
+    with pytest.raises(SystemExit) as exc:
+        app_main(["manual-flat-accounting-repair", "--apply"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM manual_flat_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert exc.value.code == 1
+    assert "confirmation required" in out
+    assert repair_count == 0
+
+
+def test_manual_flat_accounting_repair_refuses_when_lot_residue_remains(tmp_path, monkeypatch, capsys):
+    _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch, cleaned_lots=False)
+
+    with pytest.raises(SystemExit) as exc:
+        app_main(["manual-flat-accounting-repair", "--apply", "--yes"])
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        repair_count = conn.execute("SELECT COUNT(*) FROM manual_flat_accounting_repairs").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert exc.value.code == 1
+    assert "unsafe repair request" in out
+    assert "lot_residue_present=" in out
+    assert repair_count == 0
+
+
+def test_manual_flat_accounting_repair_converges_recovery_surfaces(tmp_path, monkeypatch, capsys):
+    _seed_manual_flat_accounting_candidate(tmp_path, monkeypatch)
+    monkeypatch.setattr("bithumb_bot.app._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr(
+        "bithumb_bot.app.build_broker_with_auth_diagnostics",
+        lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
+    )
+
+    cmd_recovery_report()
+    report_before = capsys.readouterr().out
+    assert "blocker=MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in report_before
+
+    app_main(["manual-flat-accounting-repair", "--apply", "--yes", "--note", "broker-side manual flat"])
+    apply_out = capsys.readouterr().out
+    assert "[MANUAL-FLAT-ACCOUNTING-REPAIR] applied" in apply_out
+    assert "remaining_needs_repair=0" in apply_out
+
+    app_main(["audit-ledger"])
+    audit_out = capsys.readouterr().out
+    assert "manual_flat_accounting_repair_count=1" in audit_out
+    assert "[AUDIT-LEDGER] OK" in audit_out
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "manual_flat_accounting_repair_needed=0" in health_out
+    assert "manual_flat_accounting_repair_safe_to_apply=0" in health_out
+
+    cmd_recovery_report()
+    report_after = capsys.readouterr().out
+    assert "[P3.0c] manual_flat_accounting_repair" in report_after
+    assert "needed=0" in report_after
+    assert "repair_count=1" in report_after
+    assert "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" not in report_after
+
+    cmd_restart_checklist()
+    checklist_out = capsys.readouterr().out
+    assert "PASS    manual-flat accounting repair:" in checklist_out
+    assert "safe_to_resume=1" in checklist_out
 
 
 def _insert_order(
@@ -3463,6 +3612,8 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "effective_flat_due_to_harmless_dust",
         "recent_dust_unsellable_event",
         "recent_external_cash_adjustment",
+        "manual_flat_accounting_repair_preview",
+        "manual_flat_accounting_repair_summary",
         "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",

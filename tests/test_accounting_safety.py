@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
+from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ensure_db,
@@ -14,6 +15,7 @@ from bithumb_bot.db_core import (
 )
 from bithumb_bot.execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot import runtime_state
 
 
 class _AvailableOnlyBalanceBroker:
@@ -51,6 +53,52 @@ class _AvailableOnlyBalanceBroker:
 class _SplitBalanceBroker(_AvailableOnlyBalanceBroker):
     def get_balance(self) -> BrokerBalance:
         return BrokerBalance(cash_available=900.0, cash_locked=100.0, asset_available=0.4, asset_locked=0.1)
+
+
+def test_reconcile_allows_missing_base_currency_row_when_live_state_is_flat(tmp_path, monkeypatch):
+    db_path = tmp_path / "reconcile_missing_base_flat.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "BITHUMB_WS_MYASSET_ENABLED", False)
+    object.__setattr__(settings, "START_CASH_KRW", 1000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.balance_source._default_flat_start_safety_check",
+        lambda: (True, "flat_start_safe"),
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _pair: "KRW-BTC")
+    broker = BithumbBroker()
+    monkeypatch.setattr(
+        broker,
+        "_get_private",
+        lambda endpoint, params, retry_safe=False: [
+            {"currency": "KRW", "balance": "1000", "locked": "0"},
+        ],
+    )
+    monkeypatch.setattr(broker, "get_open_orders", lambda **_kwargs: [])
+    monkeypatch.setattr(broker, "get_recent_orders", lambda **_kwargs: [])
+    monkeypatch.setattr(broker, "get_recent_fills", lambda **_kwargs: [])
+
+    reconcile_with_broker(broker)
+
+    state = runtime_state.snapshot()
+    assert state.last_reconcile_status == "ok"
+    assert state.last_reconcile_reason_code == "RECONCILE_OK"
 
 
 def test_partial_fill_sequence_preserves_locked_aware_accounting(tmp_path):

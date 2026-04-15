@@ -89,7 +89,6 @@ class AccountsV1BalanceSource:
         self._allow_missing_base_on_flat_start = bool(
             str(settings.MODE).strip().lower() == "live"
             and not bool(settings.LIVE_DRY_RUN)
-            and bool(settings.LIVE_REAL_ORDER_ARMED)
         )
         self._flat_start_allowed = False
         self._flat_start_reason = "not_checked"
@@ -156,14 +155,12 @@ class AccountsV1BalanceSource:
     def fetch_snapshot(self) -> BalanceSnapshot:
         observed_ts_ms = self._now_ms()
         allow_missing_base = self._allow_missing_base
-        if self._allow_missing_base_on_flat_start:
-            self._flat_start_allowed, self._flat_start_reason = self._evaluate_flat_start_safety()
-            allow_missing_base = self._flat_start_allowed
+        if self._allow_missing_base:
+            self._flat_start_allowed = False
+            self._flat_start_reason = "dry_run_unarmed_allowance"
         else:
             self._flat_start_allowed = False
-            self._flat_start_reason = (
-                "dry_run_unarmed_allowance" if self._allow_missing_base else "not_applicable"
-            )
+            self._flat_start_reason = "not_applicable"
         try:
             response = self._fetch_accounts_raw()
         except Exception as exc:
@@ -194,6 +191,12 @@ class AccountsV1BalanceSource:
         parsed_accounts = None
         try:
             parsed_accounts = self._parse_accounts_response(response)
+            if (
+                self._allow_missing_base_on_flat_start
+                and self._order_currency not in parsed_accounts.balances
+            ):
+                self._flat_start_allowed, self._flat_start_reason = self._evaluate_flat_start_safety()
+                allow_missing_base = self._flat_start_allowed
             pair_balances = self._select_pair_balances(
                 parsed_accounts,
                 order_currency=self._order_currency,
@@ -281,9 +284,14 @@ class AccountsV1BalanceSource:
 def _default_flat_start_safety_check() -> tuple[bool, str]:
     from .. import runtime_state
 
-    db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    try:
+        db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return False, f"flat_start_local_state_unavailable({type(exc).__name__}: {detail})"
+
     try:
         unresolved_row = conn.execute(
             """
