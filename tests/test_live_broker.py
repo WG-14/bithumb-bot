@@ -27,6 +27,7 @@ from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_ex
 from bithumb_bot.lifecycle import apply_fill_lifecycle
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.oms import payload_fingerprint
+from bithumb_bot.order_sizing import BuyExecutionAuthority
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision, set_portfolio_breakdown
 from bithumb_bot.reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
@@ -3316,6 +3317,8 @@ def test_canonical_sell_submit_source_returns_typed_lot_native_authority_value()
     assert source.value == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
+# SELL authority-boundary enforcement for observational qty paths.
+
 @pytest.mark.fast_regression
 @pytest.mark.lot_native_regression_gate
 def test_lot_native_gate_sell_dust_unsellable_rejects_observational_qty_authority(monkeypatch, tmp_path) -> None:
@@ -3513,6 +3516,106 @@ def test_live_execute_signal_buy_does_not_floor_market_buy_spend_via_qty_step(tm
     # 20,000 / 100,000,000 = 0.0002. If qty-step flooring leaked into market BUY,
     # this would collapse to 0.0001 and halve the KRW notional (regression).
     assert broker._last_qty == pytest.approx(0.0002)
+
+
+# BUY execution handoff and market submit sizing.
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing(tmp_path, monkeypatch):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_authority.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    captured: dict[str, object] = {}
+
+    def _capture_buy_execution_sizing(**kwargs):
+        captured["authority"] = kwargs.get("authority")
+        return SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=20_000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0002,
+            internal_lot_size=0.0001,
+            intended_lot_count=2,
+            executable_lot_count=2,
+            qty_source="entry.intent_lot_count",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+            buy_authority=kwargs.get("authority"),
+        )
+
+    monkeypatch.setattr(live_module, "build_buy_execution_sizing", _capture_buy_execution_sizing)
+
+    conn = ensure_db(str(tmp_path / "market_buy_authority.sqlite"))
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1000,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "entry_allowed_truth_source": "position_state.normalized_exposure.entry_allowed",
+                "effective_flat": True,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "raw_qty_open": 0.0,
+                "raw_total_asset_qty": 0.0,
+                "open_exposure_qty": 0.0,
+                "dust_tracking_qty": 0.0,
+                "has_executable_exposure": False,
+                "has_any_position_residue": False,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(
+        broker,
+        "BUY",
+        1000,
+        100_000_000.0,
+        decision_id=decision_id,
+        decision_reason="sma golden cross",
+    )
+
+    assert trade is not None
+    assert isinstance(captured["authority"], BuyExecutionAuthority)
+    assert captured["authority"] == BuyExecutionAuthority(
+        entry_allowed=True,
+        entry_allowed_truth_source="context.entry_allowed",
+    )
 
 
 @pytest.mark.fast_regression

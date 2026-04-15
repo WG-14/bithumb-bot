@@ -16,7 +16,12 @@ from ..decision_context import load_recorded_strategy_decision_context
 from .. import runtime_state
 from ..dust import build_normalized_exposure
 from ..lifecycle import summarize_position_lots, summarize_reserved_exit_qty
-from ..order_sizing import SellExecutionAuthority, build_buy_execution_sizing, build_sell_execution_sizing
+from ..order_sizing import (
+    BuyExecutionAuthority,
+    SellExecutionAuthority,
+    build_buy_execution_sizing,
+    build_sell_execution_sizing,
+)
 from .order_rules import get_effective_order_rules
 from ..oms import (
     build_client_order_id,
@@ -263,6 +268,10 @@ def paper_execute(
                     entry.get("intent")
                     if isinstance((entry := decision_context.get("entry")), dict)
                     else None
+                ),
+                authority=BuyExecutionAuthority(
+                    entry_allowed=bool(entry_allowed),
+                    entry_allowed_truth_source="paper.decision_context.entry_allowed",
                 ),
             )
             if not entry_sizing.allowed:

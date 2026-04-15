@@ -5,6 +5,7 @@ import pytest
 from bithumb_bot.config import settings
 from bithumb_bot.lifecycle import LotDefinitionSnapshot, LOT_SEMANTIC_VERSION_V1
 from bithumb_bot.order_sizing import (
+    BuyExecutionAuthority,
     SellExecutionAuthority,
     build_buy_execution_sizing,
     build_sell_execution_sizing,
@@ -59,6 +60,8 @@ def test_buy_execution_sizing_finalizes_order_qty_from_entry_budget(sizing_rule_
     assert plan.decision_reason_code == "none"
 
 
+# BUY execution authority and sizing handoff.
+
 def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_sizing(
     sizing_rule_overrides,
 ) -> None:
@@ -87,6 +90,26 @@ def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_s
     assert plan.decision_reason_code == "no_executable_entry_lot"
 
 
+def test_buy_execution_sizing_preserves_typed_buy_authority_handoff(
+    sizing_rule_overrides,
+) -> None:
+    authority = BuyExecutionAuthority(
+        entry_allowed=True,
+        entry_allowed_truth_source="position_state.normalized_exposure.entry_allowed",
+    )
+
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20000.0,
+        market_price=20_000_000.0,
+        authority=authority,
+    )
+
+    assert plan.allowed is True
+    assert plan.buy_authority == authority
+    assert plan.buy_authority is authority
+
+
 def test_buy_execution_sizing_does_not_reserve_fee_budget_before_qty_rounding(sizing_rule_overrides) -> None:
     plan = build_buy_execution_sizing(
         pair="BTC_KRW",
@@ -102,6 +125,8 @@ def test_buy_execution_sizing_does_not_reserve_fee_budget_before_qty_rounding(si
     assert plan.executable_qty <= plan.requested_qty
     assert plan.executable_qty == pytest.approx(plan.requested_qty)
 
+
+# SELL execution authority and lot-native submit sizing.
 
 def test_sell_execution_sizing_finalizes_order_qty_from_sellable_inventory(sizing_rule_overrides) -> None:
     plan = build_sell_execution_sizing(

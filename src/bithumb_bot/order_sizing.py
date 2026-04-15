@@ -25,6 +25,20 @@ class EntryExecutionIntent:
 
 
 @dataclass(frozen=True)
+class BuyExecutionAuthority:
+    """Canonical BUY authority surface for execution sizing handoff.
+
+    BUY execution eligibility remains decided upstream by the canonical
+    position-state entry gate. This typed handoff makes that authority explicit
+    without changing current sizing behavior, which still derives executable qty
+    from entry intent plus current market lot rules.
+    """
+
+    entry_allowed: bool
+    entry_allowed_truth_source: str
+
+
+@dataclass(frozen=True)
 class ExecutionSizingPlan:
     side: str
     allowed: bool
@@ -42,6 +56,7 @@ class ExecutionSizingPlan:
     qty_step: float
     min_notional_krw: float
     non_executable_reason: str
+    buy_authority: BuyExecutionAuthority | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +181,15 @@ def _parse_entry_execution_intent(
     )
 
 
+def _parse_buy_execution_authority(
+    *,
+    authority: BuyExecutionAuthority | None,
+) -> BuyExecutionAuthority | None:
+    if isinstance(authority, BuyExecutionAuthority):
+        return authority
+    return None
+
+
 def build_buy_execution_sizing(
     *,
     pair: str,
@@ -173,8 +197,10 @@ def build_buy_execution_sizing(
     market_price: float,
     fee_rate: float | None = None,
     entry_intent: EntryExecutionIntent | dict[str, Any] | None = None,
+    authority: BuyExecutionAuthority | None = None,
 ) -> ExecutionSizingPlan:
     resolved_intent = _parse_entry_execution_intent(pair=pair, entry_intent=entry_intent)
+    resolved_authority = _parse_buy_execution_authority(authority=authority)
     gross_budget = max(0.0, float(cash_krw)) * float(resolved_intent.budget_fraction_of_cash)
     if float(resolved_intent.max_budget_krw) > 0:
         gross_budget = min(gross_budget, float(resolved_intent.max_budget_krw))
@@ -196,6 +222,7 @@ def build_buy_execution_sizing(
             qty_step=0.0,
             min_notional_krw=0.0,
             non_executable_reason="non_positive_entry_budget",
+            buy_authority=resolved_authority,
         )
     rules = get_effective_order_rules(pair).rules
     lot_rules = build_market_lot_rules(
@@ -232,6 +259,7 @@ def build_buy_execution_sizing(
         qty_step=float(lot_rules.qty_step),
         min_notional_krw=float(lot_rules.min_notional_krw),
         non_executable_reason="executable" if allowed else "no_executable_entry_lot",
+        buy_authority=resolved_authority,
     )
 
 

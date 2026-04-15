@@ -30,6 +30,8 @@ pytestmark = pytest.mark.fast_regression
 # Authority boundary regression suite.
 
 
+# Canonical SELL authority and submit sizing.
+
 def test_authority_boundary_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_count() -> None:
     plan = build_sell_execution_sizing(
         pair="BTC_KRW",
@@ -116,6 +118,8 @@ def test_tick_normalization_does_not_override_dust_only_sell_suppression() -> No
     assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
+# Lot-native state and authority contract declarations.
+
 def test_authority_boundary_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separate() -> None:
     contract = lot_state_quantity_contract()
 
@@ -196,6 +200,8 @@ def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qt
     assert model.state_interpretation.operator_outcome == "tracked_unsellable_residual"
     assert model.state_interpretation.exit_submit_expected is False
 
+
+# Reserved-exit SELL authority boundary behavior.
 
 @pytest.mark.lot_native_regression_gate
 def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:

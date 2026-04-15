@@ -54,7 +54,12 @@ from .order_rules import get_effective_order_rules, side_min_total_krw
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
-from ..order_sizing import SellExecutionAuthority, build_buy_execution_sizing, build_sell_execution_sizing
+from ..order_sizing import (
+    BuyExecutionAuthority,
+    SellExecutionAuthority,
+    build_buy_execution_sizing,
+    build_sell_execution_sizing,
+)
 from ..oms import (
     MAX_CLIENT_ORDER_ID_LENGTH,
     build_client_order_id,
@@ -128,6 +133,36 @@ class _SellDiagnosticQtyView:
     raw_total_asset_qty: float
     open_exposure_qty: float
     dust_tracking_qty: float
+
+
+@dataclass(frozen=True)
+class _CanonicalSellSubmitObservability:
+    submit_qty_source: str
+    submit_lot_source: str
+    submit_lot_count: int
+    normalized_qty: float
+    position_state_source: str
+    position_state_source_truth_source: str
+    submit_qty_source_truth_source: str
+    submit_lot_source_truth_source: str
+
+
+@dataclass(frozen=True)
+class _ObservedSellSubmitTelemetry:
+    position_qty: float
+    submit_payload_qty: float
+    raw_total_asset_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    sell_qty_basis_qty: float
+    sell_qty_basis_source: str
+    sell_qty_basis_qty_truth_source: str
+    sell_qty_basis_source_truth_source: str
+    sell_qty_boundary_kind: str
+    sell_qty_boundary_kind_truth_source: str
+    sell_normalized_exposure_qty_truth_source: str
+    sell_open_exposure_qty_truth_source: str
+    sell_dust_tracking_qty_truth_source: str
 
 
 @dataclass(frozen=True)
@@ -521,28 +556,8 @@ def _sell_truth_source_fields(
 def _sell_submit_observability_fields(
     *,
     decision_observability: dict[str, object] | None = None,
-    submit_qty_source: str,
-    submit_lot_source: str,
-    position_state_source: str,
-    position_state_source_truth_source: str,
-    submit_qty_source_truth_source: str,
-    submit_lot_source_truth_source: str,
-    sell_qty_basis_qty_truth_source: str,
-    sell_qty_basis_source_truth_source: str,
-    sell_qty_boundary_kind_truth_source: str,
-    sell_normalized_exposure_qty_truth_source: str,
-    sell_open_exposure_qty_truth_source: str,
-    sell_dust_tracking_qty_truth_source: str,
-    position_qty: float,
-    submit_payload_qty: float,
-    submit_lot_count: int,
-    normalized_qty: float,
-    raw_total_asset_qty: float,
-    open_exposure_qty: float,
-    dust_tracking_qty: float,
-    sell_qty_basis_qty: float,
-    sell_qty_basis_source: str,
-    sell_qty_boundary_kind: str,
+    canonical_submit: _CanonicalSellSubmitObservability,
+    observed_inputs: _ObservedSellSubmitTelemetry,
     sell_failure_category: str = "none",
     sell_failure_detail: str = "none",
 ) -> dict[str, object]:
@@ -553,44 +568,44 @@ def _sell_submit_observability_fields(
     )
     emitted_submit_qty_source = (
         _CANONICAL_SELL_SUBMIT_QTY_SOURCE
-        if submit_qty_source == _CANONICAL_SELL_SUBMIT_LOT_SOURCE
-        else submit_qty_source
+        if canonical_submit.submit_qty_source == _CANONICAL_SELL_SUBMIT_LOT_SOURCE
+        else canonical_submit.submit_qty_source
     )
     return {
-        "observed_position_qty": float(position_qty),
-        "observed_submit_payload_qty": float(submit_payload_qty),
-        "submit_payload_qty": float(submit_payload_qty),
-        "submit_lot_count": int(submit_lot_count),
+        "observed_position_qty": float(observed_inputs.position_qty),
+        "observed_submit_payload_qty": float(observed_inputs.submit_payload_qty),
+        "submit_payload_qty": float(observed_inputs.submit_payload_qty),
+        "submit_lot_count": int(canonical_submit.submit_lot_count),
         "sell_submit_qty_source": emitted_submit_qty_source,
-        "submit_qty_source_truth_source": submit_qty_source_truth_source,
-        "submit_lot_source": submit_lot_source,
-        "submit_lot_source_truth_source": submit_lot_source_truth_source,
-        "sell_submit_lot_source": submit_lot_source,
-        "sell_submit_lot_source_truth_source": submit_lot_source_truth_source,
-        "sell_submit_lot_count": int(submit_lot_count),
-        "sell_submit_lot_count_truth_source": submit_lot_source_truth_source,
-        "sell_submit_qty_source_truth_source": submit_qty_source_truth_source,
-        "observed_sell_qty_basis_qty": float(sell_qty_basis_qty),
-        "sell_qty_basis_qty_truth_source": sell_qty_basis_qty_truth_source,
-        "sell_qty_basis_source": sell_qty_basis_source,
-        "sell_qty_basis_source_truth_source": sell_qty_basis_source_truth_source,
-        "sell_qty_boundary_kind": sell_qty_boundary_kind,
-        "sell_qty_boundary_kind_truth_source": sell_qty_boundary_kind_truth_source,
+        "submit_qty_source_truth_source": canonical_submit.submit_qty_source_truth_source,
+        "submit_lot_source": canonical_submit.submit_lot_source,
+        "submit_lot_source_truth_source": canonical_submit.submit_lot_source_truth_source,
+        "sell_submit_lot_source": canonical_submit.submit_lot_source,
+        "sell_submit_lot_source_truth_source": canonical_submit.submit_lot_source_truth_source,
+        "sell_submit_lot_count": int(canonical_submit.submit_lot_count),
+        "sell_submit_lot_count_truth_source": canonical_submit.submit_lot_source_truth_source,
+        "sell_submit_qty_source_truth_source": canonical_submit.submit_qty_source_truth_source,
+        "observed_sell_qty_basis_qty": float(observed_inputs.sell_qty_basis_qty),
+        "sell_qty_basis_qty_truth_source": observed_inputs.sell_qty_basis_qty_truth_source,
+        "sell_qty_basis_source": observed_inputs.sell_qty_basis_source,
+        "sell_qty_basis_source_truth_source": observed_inputs.sell_qty_basis_source_truth_source,
+        "sell_qty_boundary_kind": observed_inputs.sell_qty_boundary_kind,
+        "sell_qty_boundary_kind_truth_source": observed_inputs.sell_qty_boundary_kind_truth_source,
         "operator_action": operator_action,
-        "sell_normalized_exposure_qty": float(normalized_qty),
-        "sell_normalized_exposure_qty_truth_source": sell_normalized_exposure_qty_truth_source,
-        "sell_open_exposure_qty": float(open_exposure_qty),
-        "sell_open_exposure_qty_truth_source": sell_open_exposure_qty_truth_source,
-        "sell_dust_tracking_qty": float(dust_tracking_qty),
-        "sell_dust_tracking_qty_truth_source": sell_dust_tracking_qty_truth_source,
+        "sell_normalized_exposure_qty": float(canonical_submit.normalized_qty),
+        "sell_normalized_exposure_qty_truth_source": observed_inputs.sell_normalized_exposure_qty_truth_source,
+        "sell_open_exposure_qty": float(observed_inputs.open_exposure_qty),
+        "sell_open_exposure_qty_truth_source": observed_inputs.sell_open_exposure_qty_truth_source,
+        "sell_dust_tracking_qty": float(observed_inputs.dust_tracking_qty),
+        "sell_dust_tracking_qty_truth_source": observed_inputs.sell_dust_tracking_qty_truth_source,
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
         "submit_qty_source": emitted_submit_qty_source,
-        "position_state_source": position_state_source,
-        "position_state_source_truth_source": position_state_source_truth_source,
-        "raw_total_asset_qty": float(raw_total_asset_qty),
-        "open_exposure_qty": float(open_exposure_qty),
-        "dust_tracking_qty": float(dust_tracking_qty),
+        "position_state_source": canonical_submit.position_state_source,
+        "position_state_source_truth_source": canonical_submit.position_state_source_truth_source,
+        "raw_total_asset_qty": float(observed_inputs.raw_total_asset_qty),
+        "open_exposure_qty": float(observed_inputs.open_exposure_qty),
+        "dust_tracking_qty": float(observed_inputs.dust_tracking_qty),
     }
 
 
@@ -2811,32 +2826,42 @@ def _submit_via_standard_path(
         decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
     )
-    sell_observability = _sell_submit_observability_fields(
-        decision_observability=decision_observability,
+    canonical_sell_submit = _CanonicalSellSubmitObservability(
         submit_qty_source=submit_qty_source,
-        submit_lot_source=str(decision_observability.get("sell_submit_lot_source") or decision_observability.get("submit_lot_source") or _CANONICAL_SELL_SUBMIT_LOT_SOURCE),
+        submit_lot_source=str(
+            decision_observability.get("sell_submit_lot_source")
+            or decision_observability.get("submit_lot_source")
+            or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
+        ),
+        submit_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+        normalized_qty=qty,
         position_state_source=position_state_source,
         position_state_source_truth_source=sell_truth_source_fields["position_state_source_truth_source"],
         submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
         submit_lot_source_truth_source=sell_truth_source_fields["submit_lot_source_truth_source"],
+    )
+    observed_sell_telemetry = _ObservedSellSubmitTelemetry(
+        position_qty=position_qty,
+        submit_payload_qty=qty,
+        raw_total_asset_qty=raw_total_asset_qty,
+        open_exposure_qty=open_exposure_qty,
+        dust_tracking_qty=dust_tracking_qty,
+        sell_qty_basis_qty=float(decision_observability.get("sell_qty_basis_qty") or open_exposure_qty),
+        sell_qty_basis_source=str(submit_qty_source or decision_observability.get("sell_qty_basis_source") or "-"),
         sell_qty_basis_qty_truth_source=sell_truth_source_fields["sell_qty_basis_qty_truth_source"],
         sell_qty_basis_source_truth_source=sell_truth_source_fields["sell_qty_basis_source_truth_source"],
+        sell_qty_boundary_kind=str(decision_observability.get("sell_qty_boundary_kind") or "none"),
         sell_qty_boundary_kind_truth_source=sell_truth_source_fields["sell_qty_boundary_kind_truth_source"],
         sell_normalized_exposure_qty_truth_source=sell_truth_source_fields[
             "sell_normalized_exposure_qty_truth_source"
         ],
         sell_open_exposure_qty_truth_source=sell_truth_source_fields["sell_open_exposure_qty_truth_source"],
         sell_dust_tracking_qty_truth_source=sell_truth_source_fields["sell_dust_tracking_qty_truth_source"],
-        position_qty=position_qty,
-        submit_payload_qty=qty,
-        submit_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
-        normalized_qty=qty,
-        raw_total_asset_qty=raw_total_asset_qty,
-        open_exposure_qty=open_exposure_qty,
-        dust_tracking_qty=dust_tracking_qty,
-        sell_qty_basis_qty=float(decision_observability.get("sell_qty_basis_qty") or open_exposure_qty),
-        sell_qty_basis_source=str(submit_qty_source or decision_observability.get("sell_qty_basis_source") or "-"),
-        sell_qty_boundary_kind=str(decision_observability.get("sell_qty_boundary_kind") or "none"),
+    )
+    sell_observability = _sell_submit_observability_fields(
+        decision_observability=decision_observability,
+        canonical_submit=canonical_sell_submit,
+        observed_inputs=observed_sell_telemetry,
         sell_failure_category="none",
         sell_failure_detail="none",
     )
@@ -3627,6 +3652,12 @@ def _determine_live_execution_intent(
             market_price=float(market_price),
             fee_rate=float(settings.LIVE_FEE_RATE_ESTIMATE),
             entry_intent=decision_observability.get("entry_intent"),
+            authority=BuyExecutionAuthority(
+                entry_allowed=bool(decision_observability["entry_allowed"]),
+                entry_allowed_truth_source=str(
+                    decision_observability.get("entry_allowed_truth_source") or "-"
+                ),
+            ),
         )
         if not entry_sizing.allowed:
             RUN_LOG.info(
