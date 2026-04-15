@@ -13,18 +13,20 @@ The repository is optimized for:
 ## Position State Model
 
 This bot uses lot-native executable position semantics.
+The notes in this section describe the current implementation and its compatibility/reporting surfaces; they should not be read as a claim that every conceptual authority layer is already fully unified in code and emitted context.
 
 - `open_exposure` is the canonical lot-native executable exposure.
 - `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
 - `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
-- `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They do not define SELL authority, recovery authority, or executable-position authority.
-- Current SELL and recovery authority must be read from `holding_authority_state`, `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`.
+- `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They are not proof of zero holdings and do not define SELL authority, recovery authority, executable-position authority, recovery completeness, literal flatness, or restart safety.
+- In the current implementation, SELL authority is grounded in `build_position_state_model()` outputs such as `normalized_exposure.sellable_executable_lot_count`, `normalized_exposure.exit_allowed`, `normalized_exposure.exit_block_reason`, `normalized_exposure.terminal_state`, and operator diagnostics. `holding_authority_state` may still appear in emitted context as a compatibility/conceptual alias of terminal state, but it is not the sole canonical authority surface.
+- Resume/recovery authority is a separate safety layer. In the current implementation it is determined from reconcile outcomes, runtime health, unresolved or recovery-required order state, halt conditions, dust resume policy, and explicit resume-eligibility checks; SELL authority or harmless dust alone is not sufficient to resume trading.
 - Persisted lot-state row values remain `open_exposure` and `dust_tracking`.
 - Current terminal/operator-facing normalized holding states are computed on top of persisted lot rows plus reservation and dust logic, and include `open_exposure`, `reserved_exit_pending`, `dust_only`, `flat`, and `non_executable_position`.
 - `reserved_exit_pending` is a real normalized terminal state: executable exposure still exists, but normal SELL submission is blocked because the sellable lots are already reserved by open SELL orders.
 - `dust_only`, `flat`, and `non_executable_position` remain distinct normalized outcomes and should not be collapsed into qty-first state interpretation.
-- If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order.
+- If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order. In the current implementation, that suppression is an observable/reportable outcome that can carry reason-coded telemetry and operator-facing reporting context; it is not just an invisible strategy no-op.
 - Lot counts are the canonical executable state meaning.
 - Qty remains non-authoritative, but it is still operationally required as a derived surface for broker payloads, sell-boundary handling, and reporting.
 - Alias qty fields such as `position_qty`, `submit_payload_qty`, and `normalized_exposure_qty` may still appear in emitted/reporting context, but they are derived or compatibility/reporting surfaces and are not canonical SELL authority inputs.
@@ -53,7 +55,7 @@ uv run python -m bithumb_bot <command>
 uv run python bot.py <command>
 ```
 
-The `project.scripts` entry in `pyproject.toml` defines the canonical CLI.
+The `project.scripts` entry in `pyproject.toml` defines the canonical CLI. Current operator-facing output and recovery guidance may still reference `uv run python bot.py <command>` as a compatibility surface.
 
 ## Env Loading Rules
 
@@ -157,6 +159,10 @@ Expected artifact placement:
 - `LIVE_DRY_RUN=true` is the safe starting point for live bring-up and post-change validation.
 - `LIVE_REAL_ORDER_ARMED=true` is required before real orders are allowed.
 - Live preflight must fail fast when required limits, notifier configuration, or safety inputs are missing.
+- Current implementation runtime order is safety-first: preflight and startup reconcile/gate checks run before the steady-state loop, and each live loop iteration passes through runtime health, unresolved-order, halt, and submission-gate checks before strategy decision and submit-or-suppress handling.
+- Current implementation strategy decisions are evaluated from guarded closed-candle input; incomplete, stale, or duplicate runtime candle input is skipped rather than treated as a fresh decision trigger.
+- Recovery remains an operator-mediated workflow: commands such as `reconcile`, `recover-order`, and `resume` are explicit safety-gated procedures, not automatic recovery purely from passive state inspection.
+- Current implementation risk handling is not limited to signal-time entry rejection; depending on runtime state it may also retain or trigger halt, cancel/reconcile, or flatten-position intervention paths.
 - Do not merge paper and live storage.
 - Do not weaken live preflight or emergency-stop behavior.
 
