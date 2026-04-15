@@ -31,7 +31,7 @@ batch:
 - dust-only remainder, boundary-below-min, and no executable exit are normal suppression outcomes
 - open_exposure and dust_tracking stay separate on the SELL path
 - qty-only legacy rows fail closed in recovery and lifecycle
-- `legacy_lot_metadata_missing` no longer defines the desired semantic authority model, but it still exists in fail-closed blocker and compatibility-fallback paths
+- `legacy_lot_metadata_missing` no longer defines the desired semantic authority model, but it still exists as an internal fail-closed blocker or compatibility-fallback marker
 
 These premises are not the finish line. They are the baseline that must stay
 intact while the remaining declaration gap is closed.
@@ -42,30 +42,30 @@ The current verified external contract is narrower than full migration
 completion: the public SELL authority boundary is lot-native, and public SELL
 qty remains derived from that lot-native authority. That does not mean every
 fail-closed blocker or compatibility marker has already disappeared from all
-current semantic or emitted surfaces.
+internal fail-closed or diagnostic-only paths.
 
 Current materialization paths still include compatibility-aware fail-closed
-normalization while building the emitted or recorded context. That
+normalization while building internal or diagnostic context. That
 normalization remains an adapter layer only; it does not displace the
 lot-native canonical SELL authority surface.
 
 For this batch, that means:
 
 - canonical SELL authority at the public boundary is `position_state.normalized_exposure.sellable_executable_lot_count`
-- qty remains derived from the normalized lot-native authority surface
-- fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still appear in current semantic outputs and current code paths
+- qty remains a derived materialization from the normalized lot-native authority surface
+- fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still appear in internal fail-closed paths and current code paths, while recovery/lifecycle summary surfaces still fail closed without restoring executable authority
 - compatibility and provenance handling must remain non-authoritative even where fail-closed markers still exist
 
 This is the current external contract, not a statement that every compatibility
-or fail-closed path has already disappeared from emitted output or from the
-current code.
+or fail-closed path has already disappeared from internal code paths or
+diagnostic-only outputs.
 
 ### Remaining explicit boundary
 
 The remaining non-P0 work is the internal compatibility boundary:
 
-- `decision_context` still contains compatibility-aware fail-closed normalization while materializing canonical output
-- fail-closed `legacy_lot_metadata_missing` handling still exists in the current code path as a blocker/reason and fallback marker, and may still be visible in current semantic outputs
+- `decision_context` still contains compatibility-aware fail-closed normalization while materializing non-authoritative consumer output
+- fail-closed `legacy_lot_metadata_missing` handling still exists in the current code path as an internal or intermediate blocker/reason and fallback marker
 - diagnostic-only broker/reporting evidence may still retain source or truth-source metadata outside the primary semantic flow
 
 That remaining boundary must stay non-authoritative. It is cleanup scope, not
@@ -73,25 +73,28 @@ semantic authority.
 
 ## Canonical Authority
 
-- Singular shared contract surface:
+- Shared semantic authority:
   - executable authority: `position_state.normalized_exposure.open_lot_count`
   - SELL authority: `position_state.normalized_exposure.sellable_executable_lot_count`
   - BUY authority: `position_state.normalized_exposure.entry_allowed`
   - entry-gate flatness signal: `position_state.normalized_exposure.effective_flat` and `entry_gate_effective_flat`
-  - current materialized holding/exit authority: `holding_authority_state`, `exit_allowed`, `exit_block_reason`, and `sellable_executable_lot_count`
   - internal normalized flatness model: `position_state.normalized_exposure.terminal_state`
   - dust authority: `position_state.normalized_exposure.dust_tracking_lot_count`
   - reserved exit authority: `position_state.normalized_exposure.reserved_exit_lot_count`
   - qty semantic authority: none; qty remains derived only
   - legacy qty-only recovery: fail closed
+- Consumer surfaces built from that semantic authority:
+  - execution handoff: SELL submission authority comes from `position_state.normalized_exposure.sellable_executable_lot_count`, and qty handoff fields remain derived only
+  - recovery/lifecycle summary surface: the materialized interpretation label `holding_authority_state` together with `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`
+  - decision/reporting materialization surface: derived qty fields and compatibility aliases may be emitted or recorded as non-authoritative materializations
 - `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They must not be used as SELL authority, recovery authority, or executable-position authority.
-- Current SELL and recovery interpretation must be taken from the lot-native holding/exit authority fields `holding_authority_state`, `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`.
-- Canonical authority fields are the lot-native holding and exit fields above. They are the semantic authority surface for SELL and recovery interpretation.
-- Derived qty materialization fields such as `sellable_executable_qty` and `open_exposure_qty` remain operational outputs derived from lot-native authority for broker payloads and reporting.
+- Current recovery and lifecycle interpretation should be read from the materialized holding/exit summary fields `holding_authority_state`, `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`; `holding_authority_state` is an interpretive label derived from the underlying lot counts and exit flags, not a root authority field. Qty-only legacy rows still fail closed there and can resolve to non-executable or no-open-lot summary outcomes without regaining executable SELL authority.
+- Canonical authority remains the lot-native semantic authority surface above; execution, recovery/lifecycle summaries, and decision/reporting materializations are distinct consumer surfaces built from it.
+- Derived qty materialization fields such as `sellable_executable_qty` and `open_exposure_qty` remain operational outputs re-materialized from lot-native authority via lot sizing for broker payloads and reporting.
 - Legacy/reporting compatibility aliases such as `position_qty`, `submit_payload_qty`, and `normalized_exposure_qty` may still appear in emitted or recorded context, but they are non-authoritative alias surfaces and must not be promoted to canonical SELL authority.
 - The final authority for executable SELL quantity is the canonical sellable lot count.
-- `requested_qty`, `executable_qty`, and submitted SELL order quantity must be derived from that lot count.
-- `qty` fields are non-authoritative derived values, not semantic SELL authority. They are still operationally required for broker interfacing, boundary handling, compatibility materialization, and reporting, even when the emitted context still includes qty aliases alongside canonical lot-native fields.
+- `requested_qty`, `executable_qty`, and submitted SELL order quantity must be re-materialized from that lot count via lot sizing.
+- `qty` fields are non-authoritative derived values, not semantic SELL authority. They are still operationally required for broker interfacing, execution handoff, compatibility materialization, and reporting, even when the emitted context still includes qty aliases alongside canonical lot-native fields.
 - `sellable_qty` or any other qty-like snapshot value does not have semantic authority over the SELL boundary.
 
 ## Developer Guardrail
@@ -101,7 +104,7 @@ When extending the SELL path, keep this implementation boundary explicit:
 - Authoritative SELL path:
   - `src/bithumb_bot/decision_context.py`
   - canonical lot-native SELL authority is resolved from `position_state.normalized_exposure.sellable_executable_lot_count`
-  - canonical SELL qty remains derived from `position_state.normalized_exposure.sellable_executable_qty`
+  - canonical SELL qty is re-materialized from that lot count via lot sizing; `position_state.normalized_exposure.sellable_executable_qty` is a derived handoff field, not the authority source
 - Non-authoritative surfaces:
   - fail-closed compatibility fallback handling in `decision_context.py` is an adapter boundary only
   - qty normalization and dust-guard helpers in `src/bithumb_bot/broker/live.py` are observational/support-only and must not become SELL authority inputs
@@ -161,6 +164,7 @@ The following outcomes are suppression outcomes, not submit failures:
 
 These outcomes mean the SELL path should suppress submission or exit processing cleanly.
 They do not mean the system failed to submit a valid SELL order.
+`reserved_for_open_sell_orders` is a distinct normal reserved-exit suppression path: executable exposure still exists, but normal SELL submission remains blocked because open SELL orders already reserved the sellable lots.
 
 ## State Semantics
 
@@ -169,8 +173,9 @@ They do not mean the system failed to submit a valid SELL order.
 - `reserved_exit` means open executable lots already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the executable SELL lot count after applying the lot-native state rules.
 - `reserved_exit_pending` means executable exposure exists but the current sellable lot count is zero because open SELL orders already reserved that inventory.
+- `reserved_for_open_sell_orders` is the corresponding block/suppression interpretation for that reserved-exit-pending path, and it is distinct from dust-only remainder, `no_executable_exit_lot`, and fail-closed non-executable position outcomes.
 - `terminal_state` remains part of the internal normalized position-state model.
-- Current recorded/materialized flatness and exit interpretation should be read from `holding_authority_state` together with `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`, not from qty aggregation.
+- Current recorded/materialized flatness and exit interpretation should be read from the derived interpretation label `holding_authority_state` together with `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`, not from qty aggregation.
 - `open_exposure` and `dust_tracking` must not be merged into a single SELL executable inventory.
 
 ## Batch Evaluation
@@ -210,7 +215,7 @@ The current PASS baseline keeps all of the following true at the same time:
 - the contract PASS baseline above remains intact
 - the executable SELL path remains lot-native and canonical at the boundary
 - recovery and lifecycle continue to fail closed for qty-only legacy rows without reintroducing semantic authority
-- fail-closed blocker paths such as `legacy_lot_metadata_missing` may still remain visible in current semantic or emitted surfaces
+- fail-closed blocker paths such as `legacy_lot_metadata_missing` may still remain visible in internal or diagnostic-only surfaces
 - internal fail-closed compatibility handling may still remain behind the normalized authority boundary
 
 This baseline fails if any of the following become true:
@@ -238,6 +243,6 @@ and tests verify:
 
 - canonical lot-native SELL authority remains intact at the boundary
 - fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still
-  appear in current semantic outputs
+  appear in internal fail-closed paths
 - internal fail-closed compatibility handling may still remain behind the
   normalized authority boundary
