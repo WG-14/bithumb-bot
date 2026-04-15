@@ -5,6 +5,9 @@ import pytest
 from bithumb_bot.config import settings
 from bithumb_bot.lifecycle import LotDefinitionSnapshot, LOT_SEMANTIC_VERSION_V1
 from bithumb_bot.order_sizing import (
+    BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS,
+    BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO,
+    BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
     BuyExecutionAuthority,
     SellExecutionAuthority,
     build_buy_execution_sizing,
@@ -125,8 +128,8 @@ def test_buy_execution_sizing_returns_direct_reason_for_non_positive_budget(
     )
 
     assert plan.allowed is False
-    assert plan.block_reason == "non_positive_entry_budget"
-    assert plan.decision_reason_code == "non_positive_entry_budget"
+    assert plan.block_reason == BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET
+    assert plan.decision_reason_code == BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET
 
 
 def test_buy_execution_sizing_returns_direct_reason_for_min_notional_miss(
@@ -148,8 +151,8 @@ def test_buy_execution_sizing_returns_direct_reason_for_min_notional_miss(
 
     assert plan.allowed is False
     assert plan.requested_qty == pytest.approx(0.0002)
-    assert plan.block_reason == "entry_min_notional_miss"
-    assert plan.decision_reason_code == "entry_min_notional_miss"
+    assert plan.block_reason == BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS
+    assert plan.decision_reason_code == BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS
 
 
 def test_buy_execution_sizing_returns_direct_reason_when_exchange_rounding_zeroes_qty(
@@ -164,8 +167,8 @@ def test_buy_execution_sizing_returns_direct_reason_when_exchange_rounding_zeroe
     assert plan.allowed is False
     assert plan.requested_qty == pytest.approx(0.000025)
     assert plan.executable_qty == pytest.approx(0.0)
-    assert plan.block_reason == "entry_qty_rounded_to_zero_after_exchange_constraints"
-    assert plan.decision_reason_code == "entry_qty_rounded_to_zero_after_exchange_constraints"
+    assert plan.block_reason == BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO
+    assert plan.decision_reason_code == BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO
 
 
 def test_buy_execution_sizing_preserves_typed_buy_authority_handoff(

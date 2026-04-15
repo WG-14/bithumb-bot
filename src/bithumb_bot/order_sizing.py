@@ -13,6 +13,10 @@ from .lot_model import build_market_lot_rules, lot_count_to_qty
 
 _DECIMAL_ZERO = Decimal("0")
 
+BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET = "non_positive_entry_budget"
+BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS = "entry_min_notional_miss"
+BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO = "entry_qty_rounded_to_zero_after_exchange_constraints"
+
 
 @dataclass(frozen=True)
 class EntryExecutionIntent:
@@ -246,8 +250,8 @@ def build_buy_execution_sizing(
         return ExecutionSizingPlan(
             side="BUY",
             allowed=False,
-            block_reason="non_positive_entry_budget",
-            decision_reason_code="non_positive_entry_budget",
+            block_reason=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
+            decision_reason_code=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
             budget_krw=float(gross_budget),
             requested_qty=0.0,
             executable_qty=0.0,
@@ -259,7 +263,7 @@ def build_buy_execution_sizing(
             min_qty=0.0,
             qty_step=0.0,
             min_notional_krw=0.0,
-            non_executable_reason="non_positive_entry_budget",
+            non_executable_reason=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
             buy_authority=resolved_authority,
         )
     if not math.isfinite(float(market_price)) or float(market_price) <= 0.0:
@@ -324,13 +328,13 @@ def build_buy_execution_sizing(
     )
     if executable_qty <= DUST_POSITION_EPS:
         allowed = False
-        entry_reason = "entry_qty_rounded_to_zero_after_exchange_constraints"
+        entry_reason = BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO
     elif float(rules.min_qty) > 0.0 and executable_qty + DUST_POSITION_EPS < float(rules.min_qty):
         allowed = False
         entry_reason = "entry_min_qty_miss"
     elif float(rules.min_notional_krw) > 0.0 and (executable_qty * float(market_price)) + DUST_POSITION_EPS < float(rules.min_notional_krw):
         allowed = False
-        entry_reason = "entry_min_notional_miss"
+        entry_reason = BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS
     else:
         allowed = True
         entry_reason = "none"

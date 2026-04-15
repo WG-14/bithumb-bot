@@ -27,7 +27,7 @@ from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_ex
 from bithumb_bot.lifecycle import apply_fill_lifecycle
 from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.oms import payload_fingerprint
-from bithumb_bot.order_sizing import BuyExecutionAuthority
+from bithumb_bot.order_sizing import BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS, BuyExecutionAuthority
 from bithumb_bot.db_core import ensure_db, init_portfolio, record_strategy_decision, set_portfolio_breakdown
 from bithumb_bot.reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
@@ -3635,8 +3635,8 @@ def test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics(tmp_pa
     def _blocked_buy_execution_sizing(**kwargs):
         return SimpleNamespace(
             allowed=False,
-            block_reason="entry_min_notional_miss",
-            decision_reason_code="entry_min_notional_miss",
+            block_reason=BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS,
+            decision_reason_code=BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS,
             budget_krw=4000.0,
             requested_qty=0.0002,
             executable_qty=0.0,
@@ -3648,7 +3648,7 @@ def test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics(tmp_pa
             min_qty=0.0001,
             qty_step=0.0001,
             min_notional_krw=5000.0,
-            non_executable_reason="entry_min_notional_miss",
+            non_executable_reason=BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS,
             buy_authority=kwargs.get("authority"),
             internal_lot_is_exchange_inflated=True,
             internal_lot_would_block_buy=True,
@@ -3711,9 +3711,14 @@ def test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics(tmp_pa
     assert trade is None
     assert broker.place_order_calls == 0
     assert "[ORDER_SKIP] entry sizing blocked" in caplog.text
-    assert "decision_reason_code=entry_min_notional_miss" in caplog.text
+    assert f"reason={BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS}" in caplog.text
+    assert f"decision_reason_code={BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS}" in caplog.text
     assert "budget_krw=4000.0" in caplog.text
     assert "requested_qty=" in caplog.text
+    assert "internal_lot_size=" in caplog.text
+    assert "effective_min_trade_qty=" in caplog.text
+    assert "min_qty=" in caplog.text
+    assert "qty_step=" in caplog.text
     assert "min_notional_krw=5000.0" in caplog.text
     assert "internal_lot_is_exchange_inflated=1" in caplog.text
     assert "internal_lot_would_block_buy=1" in caplog.text

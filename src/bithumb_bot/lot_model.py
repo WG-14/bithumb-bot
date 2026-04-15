@@ -8,6 +8,9 @@ from .config import settings
 
 _DECIMAL_ZERO = Decimal("0")
 DUST_POSITION_EPS = 1e-12
+# Fallback lot modeling floor for dust/executable-lot normalization only.
+# It is not the BUY entry permission gate: BUY allow/deny is decided later
+# from exchange-constrained executable quantity plus minimum-constraint checks.
 STATIC_FALLBACK_INTERNAL_LOT_SIZE = 0.0004
 
 
@@ -89,6 +92,13 @@ def derive_internal_lot_size(
     exit_slippage_bps: float = 0.0,
     exit_buffer_ratio: float = 0.0,
 ) -> float:
+    """Derive the internal lot size used for lot-native modeling.
+
+    This helper preserves a stable internal lot size for executable/dust
+    interpretation even when exchange rules are sparse. It does not decide BUY
+    permission. BUY allow/deny remains an execution-sizing outcome based on the
+    exchange-constrained executable quantity and minimum constraints.
+    """
     from .dust import build_executable_lot
 
     probe = build_executable_lot(
@@ -111,6 +121,9 @@ def derive_internal_lot_size(
         float(min_qty),
     )
     if lot_size <= DUST_POSITION_EPS:
+        # Preserve a non-zero modeling lot size when exchange inputs are too
+        # sparse to derive one. This fallback does not authorize BUY entry;
+        # the BUY gate is enforced later from executable_qty and exchange mins.
         lot_size = max(float(settings.LIVE_MIN_ORDER_QTY or 0.0), STATIC_FALLBACK_INTERNAL_LOT_SIZE)
     elif float(qty_step) > DUST_POSITION_EPS and lot_size <= float(qty_step) * 10.0:
         # Keep a one-step buffer so newly opened exposure stays safely executable
