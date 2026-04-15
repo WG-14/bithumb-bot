@@ -179,6 +179,16 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
     reason = str(startup_gate_reason or "").strip()
     if not reason:
         return "-", "no startup gate blocker"
+    if "position_authority_gap=" in reason:
+        return (
+            "POSITION_AUTHORITY_RECOVERY_REQUIRED",
+            "lot authority is missing; manual recovery required",
+        )
+    if "fee_gap_recovery_required=" in reason:
+        return (
+            "FEE_GAP_RECOVERY_REQUIRED",
+            "fee-related accounting inconsistency requires manual recovery",
+        )
     if int(state.recovery_required_count) > 0 or "recovery_required_orders=" in reason:
         return (
             BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
@@ -706,6 +716,12 @@ def evaluate_startup_safety_gate() -> str | None:
     runtime_state.refresh_open_order_health()
     state = runtime_state.snapshot()
     now_ms = int(time.time() * 1000)
+    reconcile_metadata: dict[str, object] = {}
+    if state.last_reconcile_metadata:
+        try:
+            reconcile_metadata = json.loads(str(state.last_reconcile_metadata))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            reconcile_metadata = {}
 
     conn = ensure_db()
     try:
@@ -776,6 +792,52 @@ def evaluate_startup_safety_gate() -> str | None:
     if state.recovery_required_count > status_counts["recovery_required"]:
         reasons.append(f"recovery_required_orders={state.recovery_required_count}")
 
+    portfolio_conn = ensure_db()
+    try:
+        portfolio_row = portfolio_conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
+        lot_snapshot = summarize_position_lots(portfolio_conn, pair=settings.PAIR)
+    finally:
+        portfolio_conn.close()
+
+    portfolio_asset_qty = float(portfolio_row["asset_qty"] if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0)
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    normalized_position = build_position_state_model(
+        raw_qty_open=portfolio_asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            portfolio_asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    ).normalized_exposure
+    if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
+        reasons.append(
+            "position_authority_gap="
+            f"{normalized_position.authority_gap_reason}"
+            f"(terminal_state={normalized_position.terminal_state})"
+        )
+
+    try:
+        fee_gap_recovery_required = int(reconcile_metadata.get("fee_gap_recovery_required", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_recovery_required = 0
+    if fee_gap_recovery_required > 0:
+        try:
+            fee_gap_adjustment_count = max(0, int(reconcile_metadata.get("fee_gap_adjustment_count", 0) or 0))
+        except (TypeError, ValueError):
+            fee_gap_adjustment_count = 0
+        reasons.append(
+            "fee_gap_recovery_required="
+            f"{fee_gap_recovery_required}"
+            f"(adjustments={fee_gap_adjustment_count})"
+        )
+
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])
     if submit_unknown_without_exchange_count > 0:
         reasons.append(
@@ -796,6 +858,8 @@ def evaluate_startup_safety_gate() -> str | None:
             stale_new_partial=status_counts["stale_new_partial"],
             unresolved_open_orders=state.unresolved_open_order_count,
             runtime_recovery_required=state.recovery_required_count,
+            fee_gap_recovery_required=fee_gap_recovery_required,
+            position_authority_gap_reason=normalized_position.authority_gap_reason or "-",
             submit_unknown_without_exchange_id=submit_unknown_without_exchange_count,
             stray_remote_open_orders=stray_remote_open_count,
             gate_blocked=bool(reasons),
@@ -870,15 +934,16 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
             startup_gate_reason,
             state=state,
         )
-        reasons.append(
-            _resume_blocker(
-                code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
-                detail="latest reconcile reported ok but startup safety gate still blocks resume",
-                reason_code=startup_blocker_reason_code,
-                summary=startup_blocker_summary,
-                overridable=False,
+        if startup_blocker_reason_code != "FEE_GAP_RECOVERY_REQUIRED":
+            reasons.append(
+                _resume_blocker(
+                    code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+                    detail="latest reconcile reported ok but startup safety gate still blocks resume",
+                    reason_code=startup_blocker_reason_code,
+                    summary=startup_blocker_summary,
+                    overridable=False,
+                )
             )
-        )
 
     dust_context_for_halt = _reconcile_dust_context(state.last_reconcile_metadata)
     dust_resume_blocker = _dust_residual_resume_blocker(dust_context_for_halt)
@@ -915,11 +980,17 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
 
     if state.halt_new_orders_blocked:
         open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+        # Preserve the original halt exposure signal as a fail-closed fallback
+        # when current lot-native reconstruction can only classify the holdings
+        # as a non-executable authority gap.
+        open_orders_present = bool(open_orders_present or state.halt_open_orders_present)
+        position_present = bool(position_present or state.halt_position_present)
         dust_context = _reconcile_dust_context(state.last_reconcile_metadata)
         is_risk_exposure_halt = (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
         dust_exposure_only = bool(
             not open_orders_present
             and position_present
+            and bool(dust_context["present"])
             and bool(dust_context["effective_flat"])
         )
         if open_orders_present or (position_present and not dust_exposure_only):
@@ -1050,6 +1121,13 @@ def build_resume_guidance(
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
         recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
         resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_RECOVERY_REQUIRED" for b in blocker_list):
+        operator_next_action = "manual_position_authority_recovery_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Do not resume trading. Holdings exist but canonical lot authority is missing; repair or explicitly recover the position state first."
+        )
+        resume_blocked_reason = "resume blocked by missing lot authority"
     elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
         operator_next_action = "review_harmless_dust_policy"
         recommended_command = "uv run python bot.py recovery-report --json"

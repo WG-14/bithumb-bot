@@ -210,7 +210,7 @@ def test_apply_fill_rejects_non_positive_price_without_partial_commit(tmp_path):
     assert float(qty_filled) == 0.0
 
 
-def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
+def test_apply_fill_rejects_material_live_zero_fee(tmp_path, caplog):
     db_path = tmp_path / "fill_live_zero_fee_warning.sqlite"
     object.__setattr__(settings, "DB_PATH", str(db_path))
     object.__setattr__(settings, "START_CASH_KRW", 3_000_000.0)
@@ -234,28 +234,25 @@ def test_apply_fill_warns_for_live_zero_fee(tmp_path, caplog):
         )
 
         with caplog.at_level("WARNING", logger="bithumb_bot.execution"):
-            apply_fill_and_trade(
-                conn,
-                client_order_id="o-live-zero-fee",
-                side="BUY",
-                fill_id="fill-live-zero-fee",
-                fill_ts=1001,
-                price=100000000.0,
-                qty=0.02,
-                fee=0.0,
-            )
+            with pytest.raises(RuntimeError, match="zero fill fee blocked for materially sized live fill"):
+                apply_fill_and_trade(
+                    conn,
+                    client_order_id="o-live-zero-fee",
+                    side="BUY",
+                    fill_id="fill-live-zero-fee",
+                    fill_ts=1001,
+                    price=100000000.0,
+                    qty=0.02,
+                    fee=0.0,
+                )
     finally:
         conn.close()
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
         observability_module.notify = original_notify
 
-    assert "live_fill_fee_anomaly" in caplog.text
-    assert "anomaly_type=zero_fee" in caplog.text
-    assert "client_order_id=o-live-zero-fee" in caplog.text
-    assert "fill_id=fill-live-zero-fee" in caplog.text
-    assert "side=BUY" in caplog.text
-    assert any("event=live_fill_fee_anomaly" in msg for msg in alerts)
+    assert "live_fill_fee_anomaly" not in caplog.text
+    assert alerts == []
 
 
 def test_apply_fill_rejects_materially_sized_live_missing_fee_without_partial_commit(tmp_path) -> None:

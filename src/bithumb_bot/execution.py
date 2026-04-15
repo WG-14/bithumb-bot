@@ -21,6 +21,10 @@ from .oms import add_fill, create_order, set_exchange_order_id, set_status
 _LOG = logging.getLogger(__name__)
 
 
+class LiveFillFeeValidationError(RuntimeError):
+    """Raised when a materially sized live fill cannot be persisted safely."""
+
+
 def order_fill_tolerance(qty_req: float | None = None) -> float:
     """Return the fill matching tolerance used by ledger-side overfill checks.
 
@@ -200,8 +204,18 @@ def apply_fill_and_trade(
     notional_value = price_value * qty_value if math.isfinite(price_value) and math.isfinite(qty_value) else 0.0
     material_notional_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
     if settings.MODE == "live" and fee is None and math.isfinite(notional_value) and notional_value >= material_notional_threshold:
-        raise RuntimeError(
+        raise LiveFillFeeValidationError(
             "missing fill fee for materially sized live fill: "
+            f"client_order_id={client_order_id} fill_id={fill_id_value} notional={notional_value:.12g}"
+        )
+    if (
+        settings.MODE == "live"
+        and math.isfinite(notional_value)
+        and notional_value >= material_notional_threshold
+        and abs(fee_value) <= eps
+    ):
+        raise LiveFillFeeValidationError(
+            "zero fill fee blocked for materially sized live fill: "
             f"client_order_id={client_order_id} fill_id={fill_id_value} notional={notional_value:.12g}"
         )
     fee_ratio_value: float | None = None

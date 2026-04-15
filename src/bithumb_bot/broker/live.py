@@ -11,7 +11,7 @@ from enum import Enum
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..decision_context import resolve_canonical_position_exposure_snapshot
-from ..execution import apply_fill_and_trade, record_order_if_missing
+from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
 from ..dust import (
     DustState,
     build_dust_display_context,
@@ -4578,7 +4578,7 @@ def _execute_live_submission_and_application(
             side=feasibility.side,
             context="_submit_via_standard_path",
         )
-    except FillFeeStrictModeError as exc:
+    except (FillFeeStrictModeError, LiveFillFeeValidationError) as exc:
         from_status = str(order.status or "NEW")
         _mark_recovery_required(
             conn=conn,

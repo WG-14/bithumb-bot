@@ -3921,10 +3921,87 @@ def test_resume_eligibility_blocks_fee_gap_recovery_required_state(tmp_path):
     state = runtime_state.snapshot()
 
     assert eligible is False
-    assert [b.code for b in blockers] == ["FEE_GAP_RECOVERY_REQUIRED"]
+    assert [b.code for b in blockers] == ["STARTUP_SAFETY_GATE_BLOCKED", "FEE_GAP_RECOVERY_REQUIRED"]
+    assert [b.reason_code for b in blockers] == ["FEE_GAP_RECOVERY_REQUIRED", "FEE_GAP_RECOVERY_REQUIRED"]
     assert state.resume_gate_blocked is True
     assert state.resume_gate_reason is not None
     assert "FEE_GAP_RECOVERY_REQUIRED" in state.resume_gate_reason
+
+
+def test_recovery_report_surfaces_fee_gap_contamination_as_distinct_blocker(tmp_path):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "material_zero_fee_fill_count": 2,
+            "fee_gap_adjustment_count": 1,
+            "fee_gap_recovery_required": 1,
+        },
+    )
+
+    report = _load_recovery_report()
+
+    assert report["resume_allowed"] is False
+    assert report["can_resume"] is False
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
+    assert "FEE_GAP_RECOVERY_REQUIRED" in report["resume_blocker_reason_codes"]
+    assert report["primary_blocker_reason_code"] == "FEE_GAP_RECOVERY_REQUIRED"
+    assert report["operator_next_action"] == "manual_fee_gap_recovery_required"
+    assert report["resume_blocked_reason"] == "resume blocked by fee-related accounting inconsistency"
+
+
+def test_recovery_report_surfaces_position_authority_gap_as_distinct_blocker(tmp_path):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET asset_qty=?, asset_available=?, asset_locked=0.0
+            WHERE id=1
+            """,
+            (0.0008, 0.0008),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+            "dust_broker_qty": 0.0008,
+            "dust_local_qty": 0.0008,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 0,
+            "dust_local_qty_is_dust": 0,
+            "dust_qty_gap_small": 1,
+        },
+    )
+
+    report = _load_recovery_report()
+
+    assert report["resume_allowed"] is False
+    assert report["can_resume"] is False
+    assert "STARTUP_SAFETY_GATE_BLOCKED" in report["resume_blockers"]
+    assert "POSITION_AUTHORITY_RECOVERY_REQUIRED" in report["resume_blocker_reason_codes"]
+    assert report["primary_blocker_reason_code"] == "POSITION_AUTHORITY_RECOVERY_REQUIRED"
+    assert report["operator_next_action"] == "manual_position_authority_recovery_required"
+    assert report["resume_blocked_reason"] == "resume blocked by missing lot authority"
 
 
 def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):

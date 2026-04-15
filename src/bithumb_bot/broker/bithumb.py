@@ -1843,6 +1843,10 @@ class BithumbBroker:
             if fee < 0:
                 raise BrokerRejectError(f"/v1/order.{context} schema mismatch: negative fee field '{key}'={raw}")
             if fee == 0.0 and (qty or 0.0) > 0 and price is not None and price > 0:
+                if strict and material_fee_validation_required:
+                    raise BrokerRejectError(
+                        f"/v1/order.{context} schema mismatch: zero fee field '{key}' for materially sized fill"
+                    )
                 RUN_LOG.warning(format_log_kv("[FILL_FEE] resolved zero fee", payload=log_payload, fee_key=key))
             return fee
 

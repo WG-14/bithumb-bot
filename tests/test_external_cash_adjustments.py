@@ -13,9 +13,11 @@ from bithumb_bot.db_core import (
     get_external_cash_adjustment_summary,
     init_portfolio,
     record_external_cash_adjustment,
+    set_portfolio_breakdown,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.engine import evaluate_resume_eligibility, evaluate_startup_safety_gate, _classify_balance_split_blocker
+from bithumb_bot.oms import add_fill, set_status
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot import runtime_state
 from bithumb_bot.reporting import cmd_cash_drift_report, fetch_cash_drift_report
@@ -292,16 +294,24 @@ def test_reconcile_marks_fee_related_cash_drift_and_blocks_recovery_state(tmp_pa
                 ts_ms=1_700_000_000_000,
                 status="NEW",
             )
-            apply_fill_and_trade(
-                conn,
+            # Seed representative historical contamination directly. This test models
+            # a pre-existing live ledger defect, not a currently accepted live write.
+            add_fill(
+                conn=conn,
                 client_order_id="fee_gap_buy_1",
-                side="BUY",
                 fill_id="fee_gap_buy_1_fill",
                 fill_ts=1_700_000_000_100,
                 price=100_000_000.0,
                 qty=0.001,
                 fee=0.0,
-                note="historical zero-fee live fill",
+            )
+            set_status("fee_gap_buy_1", "FILLED", conn=conn)
+            set_portfolio_breakdown(
+                conn,
+                cash_available=900_000.0,
+                cash_locked=0.0,
+                asset_available=0.001,
+                asset_locked=0.0,
             )
             conn.commit()
         finally:
@@ -310,6 +320,7 @@ def test_reconcile_marks_fee_related_cash_drift_and_blocks_recovery_state(tmp_pa
         runtime_state.record_reconcile_result(success=True, reason_code=None, metadata=None, now_epoch_sec=0.0)
         reconcile_with_broker(_FeeGapDriftBroker(cash_available=899_950.0))
         eligible, blockers = evaluate_resume_eligibility()
+        startup_reason = evaluate_startup_safety_gate()
 
         conn = ensure_db(str(db_path))
         try:
@@ -343,7 +354,8 @@ def test_reconcile_marks_fee_related_cash_drift_and_blocks_recovery_state(tmp_pa
     assert eligible is False
     assert "FEE_GAP_RECOVERY_REQUIRED" in [b.code for b in blockers]
     assert metadata["external_cash_adjustment_residual_krw"] == pytest.approx(0.0)
-    assert evaluate_startup_safety_gate() is None
+    assert startup_reason is not None
+    assert "fee_gap_recovery_required=1" in startup_reason
 
 
 def test_reconcile_cash_adjustment_clears_prior_cash_mismatch_blocker(tmp_path):

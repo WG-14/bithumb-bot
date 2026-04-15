@@ -30,7 +30,7 @@ from .db_core import (
     set_portfolio_breakdown,
 )
 from .dust import build_dust_display_context, build_position_state_model, classify_dust_residual, dust_qty_gap_tolerance
-from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
 from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
@@ -891,18 +891,29 @@ def _apply_recent_fills(
             blocked_invalid_price += 1
             continue
 
-        apply_fill_and_trade(
-            conn,
-            client_order_id=local_id,
-            side=str(local["side"]),
-            fill_id=fill.fill_id,
-            fill_ts=fill.fill_ts,
-            price=fill.price,
-            qty=fill.qty,
-            fee=fill.fee,
-            note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
-            allow_entry_decision_fallback=False,
-        )
+        try:
+            apply_fill_and_trade(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=fill.fee,
+                note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
+                allow_entry_decision_fallback=False,
+            )
+        except LiveFillFeeValidationError as exc:
+            _mark_recovery_required_with_reason(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                from_status=str(local["status"]),
+                reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                reason=f"recent fill fee validation blocked ledger apply; manual recovery required ({exc})",
+            )
+            continue
         applied = True
 
         order_row = conn.execute(
@@ -1641,19 +1652,41 @@ def reconcile_with_broker(broker: Broker) -> None:
                     )
                 )
             prev_status = row["status"]
-            set_status(oid, remote.status, conn=conn)
-            if prev_status != remote.status:
-                notify(
-                    format_event(
-                        "reconcile_status_change",
-                        client_order_id=oid,
-                        exchange_order_id=remote.exchange_order_id,
-                        side=row["side"],
-                        status=remote.status,
-                        reason=f"from={prev_status}",
+            defer_terminal_fill_status = str(remote.status) == "FILLED"
+            if not defer_terminal_fill_status:
+                set_status(oid, remote.status, conn=conn)
+                if prev_status != remote.status:
+                    notify(
+                        format_event(
+                            "reconcile_status_change",
+                            client_order_id=oid,
+                            exchange_order_id=remote.exchange_order_id,
+                            side=row["side"],
+                            status=remote.status,
+                            reason=f"from={prev_status}",
+                        )
                     )
+            try:
+                fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
+            except BrokerRejectError as exc:
+                if "fee" not in str(exc).lower():
+                    raise
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
+                    from_status=remote.status,
+                    reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                    reason=(
+                        "reconcile blocked: fill fee validation failed; "
+                        f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                        f"manual recovery required ({type(exc).__name__}: {exc})"
+                    ),
                 )
-            fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
+                metadata["fee_gap_recovery_required"] = 1
+                if reason_code == REASON_RECONCILE_OK:
+                    reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
+                continue
             invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
             if invalid_fill is not None:
                 reason = (
@@ -1673,19 +1706,52 @@ def reconcile_with_broker(broker: Broker) -> None:
                 if reason_code == REASON_RECONCILE_OK:
                     reason_code = REASON_RECENT_FILL_INVALID_PRICE
                 continue
+            fill_apply_blocked = False
             for fill in fills:
-                apply_fill_and_trade(
-                    conn,
-                    client_order_id=oid,
-                    side=row["side"],
-                    fill_id=fill.fill_id,
-                    fill_ts=fill.fill_ts,
-                    price=fill.price,
-                    qty=fill.qty,
-                    fee=fill.fee,
-                    note=f"reconcile exchange_order_id={remote.exchange_order_id}",
-                    allow_entry_decision_fallback=False,
-                )
+                try:
+                    apply_fill_and_trade(
+                        conn,
+                        client_order_id=oid,
+                        side=row["side"],
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=fill.fee,
+                        note=f"reconcile exchange_order_id={remote.exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+                except LiveFillFeeValidationError as exc:
+                    _mark_recovery_required_with_reason(
+                        conn,
+                        client_order_id=oid,
+                        side=str(row["side"]),
+                        from_status=remote.status,
+                        reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                        reason=(
+                            "reconcile blocked: fill fee validation failed during ledger apply; "
+                            f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                            f"fill_id={fill.fill_id}; manual recovery required ({exc})"
+                        ),
+                    )
+                    metadata["fee_gap_recovery_required"] = 1
+                    if reason_code == REASON_RECONCILE_OK:
+                        reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
+                    fill_apply_blocked = True
+                    break
+            if defer_terminal_fill_status and not fill_apply_blocked:
+                set_status(oid, remote.status, conn=conn)
+                if prev_status != remote.status:
+                    notify(
+                        format_event(
+                            "reconcile_status_change",
+                            client_order_id=oid,
+                            exchange_order_id=remote.exchange_order_id,
+                            side=row["side"],
+                            status=remote.status,
+                            reason=f"from={prev_status}",
+                        )
+                    )
 
         remote_open = _get_open_orders_for_known_ids(
             broker,

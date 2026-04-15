@@ -3521,7 +3521,7 @@ def test_get_fills_rejects_materially_sized_missing_or_empty_trade_fee(monkeypat
         broker.get_fills(client_order_id="cid-1", exchange_order_id="filled-1")
 
 
-def test_get_fills_allows_trade_zero_fee_value(monkeypatch, caplog):
+def test_get_fills_rejects_materially_sized_trade_zero_fee_value(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
 
@@ -3545,12 +3545,8 @@ def test_get_fills_allows_trade_zero_fee_value(monkeypatch, caplog):
         },
     )
 
-    with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
-        fills = broker.get_fills(client_order_id="cid-zero-fee", exchange_order_id="filled-zero-fee")
-
-    assert len(fills) == 1
-    assert fills[0].fee == pytest.approx(0.0)
-    assert any("resolved zero fee" in rec.message for rec in caplog.records)
+    with pytest.raises(BrokerRejectError, match="zero fee field 'fee' for materially sized fill"):
+        broker.get_fills(client_order_id="cid-zero-fee", exchange_order_id="filled-zero-fee")
 
 
 @pytest.mark.parametrize("fee_key", ["fee", "paid_fee", "commission", "trade_fee"])

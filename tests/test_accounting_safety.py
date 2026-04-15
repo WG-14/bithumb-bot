@@ -12,7 +12,7 @@ from bithumb_bot.db_core import (
     record_external_cash_adjustment,
     set_portfolio_breakdown,
 )
-from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.recovery import reconcile_with_broker
 
 
@@ -159,6 +159,55 @@ def test_apply_fill_and_trade_tolerates_tiny_negative_cash_available_dust(tmp_pa
     assert asset_available == pytest.approx(1.0)
     assert asset_locked == pytest.approx(0.0)
     assert qty_filled == pytest.approx(1.0)
+
+
+def test_apply_fill_and_trade_blocks_material_zero_fee_live_fill(tmp_path):
+    db_path = tmp_path / "material_zero_fee_live.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 50_000_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="live_buy_zero_fee",
+            side="BUY",
+            qty_req=0.1,
+            price=100_000_000.0,
+            ts_ms=1,
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=0.0,
+            cash_locked=50_000_000.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+
+        with pytest.raises(LiveFillFeeValidationError, match="zero fill fee blocked for materially sized live fill"):
+            apply_fill_and_trade(
+                conn,
+                client_order_id="live_buy_zero_fee",
+                side="BUY",
+                fill_id="live-fill-zero-fee",
+                fill_ts=10,
+                price=100_000_000.0,
+                qty=0.1,
+                fee=0.0,
+            )
+
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='live_buy_zero_fee'"
+        ).fetchone()["cnt"]
+        trade_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM trades WHERE client_order_id='live_buy_zero_fee'"
+        ).fetchone()["cnt"]
+    finally:
+        conn.close()
+
+    assert fill_count == 0
+    assert trade_count == 0
 
 
 def test_apply_fill_and_trade_tolerates_tiny_negative_asset_available_dust(tmp_path):

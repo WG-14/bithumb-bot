@@ -118,6 +118,24 @@ class _RecentFillBroker(_NoopBroker):
         ]
 
 
+class _RecentSellZeroFeeBroker(_NoopBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(client_order_id, exchange_order_id or "ex-zero-fee", "SELL", "FILLED", 100000000.0, 0.1, 0.1, 1, 1)
+
+    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+        return [
+            BrokerFill(
+                client_order_id=str(client_order_id or ""),
+                fill_id="fill-zero-fee",
+                fill_ts=220,
+                price=100000000.0,
+                qty=0.1,
+                fee=0.0,
+                exchange_order_id=str(exchange_order_id or "ex-zero-fee"),
+            )
+        ]
+
+
 class _AggregateDuplicateFillBroker(_NoopBroker):
     def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
         return BrokerOrder(client_order_id, exchange_order_id or "ex-dup", "BUY", "FILLED", 100.0, 1.0, 1.0, 1, 2)
@@ -1131,6 +1149,7 @@ def test_restart_reconcile_keeps_large_holdings_without_lot_metadata_blocked_not
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
     finally:
         conn.close()
+    gate_reason = evaluate_startup_safety_gate()
 
     assert authority.raw_total_asset_qty == pytest.approx(0.0008)
     assert authority.open_exposure_qty == pytest.approx(0.0)
@@ -1147,6 +1166,8 @@ def test_restart_reconcile_keeps_large_holdings_without_lot_metadata_blocked_not
     assert lot_snapshot.raw_total_asset_qty == pytest.approx(0.0)
     assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
     assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+    assert gate_reason is not None
+    assert "position_authority_gap=authority_missing_recovery_required" in gate_reason
 
 
 @pytest.mark.lot_native_regression_gate
@@ -2332,6 +2353,73 @@ def test_reconcile_repeated_recent_sell_missing_price_pattern_never_writes_zero_
         conn.close()
 
     assert zero_price_reconcile_trades == 0
+
+
+def test_reconcile_recent_sell_zero_fee_blocks_ledger_and_sets_recovery_required(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="reconcile_sell_zero_fee",
+            side="SELL",
+            qty_req=0.1,
+            price=100000000.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("reconcile_sell_zero_fee", "ex-zero-fee", conn=conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="seed_buy_zero_fee",
+            side="BUY",
+            qty_req=0.1,
+            price=100.0,
+            ts_ms=80,
+            status="FILLED",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="seed_buy_zero_fee",
+            side="BUY",
+            fill_id="seed-buy-zero-fee",
+            fill_ts=90,
+            price=100.0,
+            qty=0.1,
+            fee=0.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    object.__setattr__(settings, "MODE", "live")
+    reconcile_with_broker(_RecentSellZeroFeeBroker())
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='reconcile_sell_zero_fee'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) FROM fills WHERE client_order_id='reconcile_sell_zero_fee'"
+        ).fetchone()[0]
+        trade_count = conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE note LIKE 'reconcile%' AND client_order_id='reconcile_sell_zero_fee'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    state = runtime_state.snapshot()
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert "fee validation" in str(row["last_error"])
+    assert "manual recovery required" in str(row["last_error"])
+    assert fill_count == 0
+    assert trade_count == 0
+    assert state.last_reconcile_reason_code == "FEE_GAP_RECOVERY_REQUIRED"
+    assert state.last_reconcile_metadata is not None
+    assert '"fee_gap_recovery_required": 1' in state.last_reconcile_metadata
+    assert evaluate_startup_safety_gate() is not None
 
 
 def test_reconcile_failure_after_local_write_records_original_error_without_locked_db(isolated_db):
