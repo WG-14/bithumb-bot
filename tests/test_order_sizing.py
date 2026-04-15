@@ -50,13 +50,13 @@ def test_buy_execution_sizing_finalizes_order_qty_from_entry_budget(sizing_rule_
 
     assert plan.side == "BUY"
     assert plan.allowed is True
-    assert plan.qty_source == "entry.intent_lot_count"
+    assert plan.qty_source == "entry.intent_budget_exchange_constraints"
     assert plan.budget_krw == pytest.approx(10000.0)
     assert plan.requested_qty == pytest.approx(0.0005)
     assert plan.internal_lot_size == pytest.approx(0.0004)
     assert plan.intended_lot_count == 1
     assert plan.executable_lot_count == 1
-    assert plan.executable_qty == pytest.approx(0.0004)
+    assert plan.executable_qty == pytest.approx(0.0005)
     assert plan.decision_reason_code == "none"
 
 
@@ -68,26 +68,104 @@ def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_s
     plan = build_buy_execution_sizing(
         pair="BTC_KRW",
         cash_krw=20000.0,
-        market_price=20_000_000.0,
+        market_price=10_000_000.0,
         entry_intent={
             "pair": "BTC_KRW",
             "intent": "enter_open_exposure",
             "budget_model": "cash_fraction_capped_by_max_order_krw",
             "budget_fraction_of_cash": 0.25,
+            "max_budget_krw": 5000.0,
+            "requires_execution_sizing": True,
+        },
+    )
+
+    assert plan.allowed is True
+    assert plan.budget_krw == pytest.approx(5000.0)
+    assert plan.requested_qty == pytest.approx(0.0005)
+    assert plan.executable_qty == pytest.approx(0.0005)
+    assert plan.internal_lot_size > plan.executable_qty
+    assert plan.intended_lot_count == 0
+    assert plan.executable_lot_count == 0
+    assert plan.block_reason == "none"
+    assert plan.decision_reason_code == "none"
+
+
+def test_buy_execution_sizing_exposes_buffered_internal_lot_without_restoring_buy_gate(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20000.0,
+        market_price=10_000_000.0,
+        entry_intent={
+            "pair": "BTC_KRW",
+            "intent": "enter_open_exposure",
+            "budget_model": "cash_fraction_capped_by_max_order_krw",
+            "budget_fraction_of_cash": 0.25,
+            "max_budget_krw": 5000.0,
+            "requires_execution_sizing": True,
+        },
+    )
+
+    assert plan.allowed is True
+    assert plan.executable_qty == pytest.approx(0.0005)
+    assert plan.internal_lot_is_exchange_inflated is True
+    assert plan.internal_lot_would_block_buy is True
+    assert plan.intended_lot_count == 0
+    assert plan.executable_lot_count == 0
+
+
+def test_buy_execution_sizing_returns_direct_reason_for_non_positive_budget(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=0.0,
+        market_price=20_000_000.0,
+    )
+
+    assert plan.allowed is False
+    assert plan.block_reason == "non_positive_entry_budget"
+    assert plan.decision_reason_code == "non_positive_entry_budget"
+
+
+def test_buy_execution_sizing_returns_direct_reason_for_min_notional_miss(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20000.0,
+        market_price=20_000_000.0,
+        entry_intent={
+            "pair": "BTC_KRW",
+            "intent": "enter_open_exposure",
+            "budget_model": "cash_fraction_capped_by_max_order_krw",
+            "budget_fraction_of_cash": 0.2,
             "max_budget_krw": 4000.0,
             "requires_execution_sizing": True,
         },
     )
 
     assert plan.allowed is False
-    assert plan.budget_krw == pytest.approx(4000.0)
     assert plan.requested_qty == pytest.approx(0.0002)
+    assert plan.block_reason == "entry_min_notional_miss"
+    assert plan.decision_reason_code == "entry_min_notional_miss"
+
+
+def test_buy_execution_sizing_returns_direct_reason_when_exchange_rounding_zeroes_qty(
+    sizing_rule_overrides,
+) -> None:
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=1_000.0,
+        market_price=20_000_000.0,
+    )
+
+    assert plan.allowed is False
+    assert plan.requested_qty == pytest.approx(0.000025)
     assert plan.executable_qty == pytest.approx(0.0)
-    assert plan.internal_lot_size == pytest.approx(0.0004)
-    assert plan.intended_lot_count == 0
-    assert plan.executable_lot_count == 0
-    assert plan.block_reason == "no_executable_entry_lot"
-    assert plan.decision_reason_code == "no_executable_entry_lot"
+    assert plan.block_reason == "entry_qty_rounded_to_zero_after_exchange_constraints"
+    assert plan.decision_reason_code == "entry_qty_rounded_to_zero_after_exchange_constraints"
 
 
 def test_buy_execution_sizing_preserves_typed_buy_authority_handoff(
@@ -107,6 +185,26 @@ def test_buy_execution_sizing_preserves_typed_buy_authority_handoff(
 
     assert plan.allowed is True
     assert plan.buy_authority == authority
+    assert plan.buy_authority is authority
+
+
+def test_buy_execution_authority_is_informational_handoff_only(
+    sizing_rule_overrides,
+) -> None:
+    authority = BuyExecutionAuthority(
+        entry_allowed=False,
+        entry_allowed_truth_source="position_state.normalized_exposure.entry_allowed",
+    )
+
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=20000.0,
+        market_price=20_000_000.0,
+        authority=authority,
+    )
+
+    assert plan.allowed is True
+    assert plan.executable_qty == pytest.approx(0.0005)
     assert plan.buy_authority is authority
 
 

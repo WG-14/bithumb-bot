@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,10 +28,11 @@ class EntryExecutionIntent:
 class BuyExecutionAuthority:
     """Canonical BUY authority surface for execution sizing handoff.
 
-    BUY execution eligibility remains decided upstream by the canonical
-    position-state entry gate. This typed handoff makes that authority explicit
-    without changing current sizing behavior, which still derives executable qty
-    from entry intent plus current market lot rules.
+    BUY entry authorization remains an upstream position-state decision.
+    This typed object is carried through sizing as informational provenance
+    only: it records the upstream gate outcome and truth source, but it is not
+    itself the BUY quantity gate and it does not override exchange-constrained
+    sizing outcomes.
     """
 
     entry_allowed: bool
@@ -57,6 +58,8 @@ class ExecutionSizingPlan:
     min_notional_krw: float
     non_executable_reason: str
     buy_authority: BuyExecutionAuthority | None = None
+    internal_lot_is_exchange_inflated: bool = False
+    internal_lot_would_block_buy: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,41 @@ def _build_default_entry_execution_intent(*, pair: str) -> EntryExecutionIntent:
         max_budget_krw=float(settings.MAX_ORDER_KRW),
         requires_execution_sizing=True,
     )
+
+
+def _exchange_qty_step(*, qty_step: float, min_qty: float, max_qty_decimals: int) -> float:
+    normalized_step = max(0.0, float(qty_step))
+    if normalized_step > DUST_POSITION_EPS:
+        return normalized_step
+    normalized_min_qty = max(0.0, float(min_qty))
+    if normalized_min_qty > DUST_POSITION_EPS:
+        return normalized_min_qty
+    normalized_decimals = max(0, int(max_qty_decimals))
+    if normalized_decimals > 0:
+        return 1.0 / (10**normalized_decimals)
+    return 0.0
+
+
+def _floor_qty_to_exchange_constraints(*, qty: float, qty_step: float, max_qty_decimals: int) -> float:
+    normalized_qty = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    normalized_step = max(_DECIMAL_ZERO, _decimal_from_number(qty_step))
+    if normalized_step > _DECIMAL_ZERO:
+        normalized_qty = (normalized_qty / normalized_step).to_integral_value(rounding=ROUND_FLOOR) * normalized_step
+    quantizer = Decimal("1").scaleb(-max(0, int(max_qty_decimals))) if int(max_qty_decimals) > 0 else None
+    if quantizer is not None:
+        normalized_qty = normalized_qty.quantize(quantizer, rounding=ROUND_FLOOR)
+    return max(0.0, float(normalized_qty))
+
+
+def _ceil_qty_to_exchange_constraints(*, qty: float, qty_step: float, max_qty_decimals: int) -> float:
+    normalized_qty = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    normalized_step = max(_DECIMAL_ZERO, _decimal_from_number(qty_step))
+    if normalized_step > _DECIMAL_ZERO:
+        normalized_qty = (normalized_qty / normalized_step).to_integral_value(rounding=ROUND_CEILING) * normalized_step
+    quantizer = Decimal("1").scaleb(-max(0, int(max_qty_decimals))) if int(max_qty_decimals) > 0 else None
+    if quantizer is not None:
+        normalized_qty = normalized_qty.quantize(quantizer, rounding=ROUND_CEILING)
+    return max(0.0, float(normalized_qty))
 
 
 def compute_feasible_entry_lot_count(
@@ -204,12 +242,12 @@ def build_buy_execution_sizing(
     gross_budget = max(0.0, float(cash_krw)) * float(resolved_intent.budget_fraction_of_cash)
     if float(resolved_intent.max_budget_krw) > 0:
         gross_budget = min(gross_budget, float(resolved_intent.max_budget_krw))
-    if gross_budget <= 0.0 or not math.isfinite(float(market_price)) or float(market_price) <= 0.0:
+    if gross_budget <= 0.0:
         return ExecutionSizingPlan(
             side="BUY",
             allowed=False,
             block_reason="non_positive_entry_budget",
-            decision_reason_code="entry_suppressed_by_budget",
+            decision_reason_code="non_positive_entry_budget",
             budget_krw=float(gross_budget),
             requested_qty=0.0,
             executable_qty=0.0,
@@ -224,6 +262,26 @@ def build_buy_execution_sizing(
             non_executable_reason="non_positive_entry_budget",
             buy_authority=resolved_authority,
         )
+    if not math.isfinite(float(market_price)) or float(market_price) <= 0.0:
+        return ExecutionSizingPlan(
+            side="BUY",
+            allowed=False,
+            block_reason="invalid_market_price",
+            decision_reason_code="invalid_market_price",
+            budget_krw=float(gross_budget),
+            requested_qty=0.0,
+            executable_qty=0.0,
+            internal_lot_size=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            qty_source="entry.intent_budget_krw",
+            effective_min_trade_qty=0.0,
+            min_qty=0.0,
+            qty_step=0.0,
+            min_notional_krw=0.0,
+            non_executable_reason="invalid_market_price",
+            buy_authority=resolved_authority,
+        )
     rules = get_effective_order_rules(pair).rules
     lot_rules = build_market_lot_rules(
         market_id=pair,
@@ -234,14 +292,48 @@ def build_buy_execution_sizing(
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
     requested_qty = float(_decimal_from_number(gross_budget) / _decimal_from_number(market_price))
-    intended_lot_count = compute_feasible_entry_lot_count(
-        budget_krw=float(gross_budget),
-        market_price=float(market_price),
-        lot_rules=lot_rules,
+    effective_qty_step = _exchange_qty_step(
+        qty_step=float(rules.qty_step),
+        min_qty=float(rules.min_qty),
+        max_qty_decimals=int(rules.max_qty_decimals),
     )
-    executable_qty = lot_count_to_qty(lot_count=intended_lot_count, lot_size=lot_rules.lot_size)
-    allowed = bool(intended_lot_count >= 1 and executable_qty > DUST_POSITION_EPS)
-    entry_reason = "none" if allowed else "no_executable_entry_lot"
+    executable_qty = _floor_qty_to_exchange_constraints(
+        qty=float(requested_qty),
+        qty_step=float(effective_qty_step),
+        max_qty_decimals=int(rules.max_qty_decimals),
+    )
+    effective_min_trade_qty = max(
+        max(0.0, float(rules.min_qty)),
+        _ceil_qty_to_exchange_constraints(
+            qty=(
+                float(rules.min_notional_krw) / float(market_price)
+                if float(rules.min_notional_krw) > 0.0
+                else 0.0
+            ),
+            qty_step=float(effective_qty_step),
+            max_qty_decimals=int(rules.max_qty_decimals),
+        ),
+    )
+    intended_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(requested_qty), rounding=ROUND_FLOOR)))
+    executable_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(executable_qty), rounding=ROUND_FLOOR)))
+    internal_lot_is_exchange_inflated = bool(float(lot_rules.lot_size) > float(effective_min_trade_qty) + DUST_POSITION_EPS)
+    internal_lot_would_block_buy = bool(
+        executable_qty > DUST_POSITION_EPS
+        and intended_lot_count <= 0
+        and lot_count_to_qty(lot_count=intended_lot_count, lot_size=lot_rules.lot_size) <= DUST_POSITION_EPS
+    )
+    if executable_qty <= DUST_POSITION_EPS:
+        allowed = False
+        entry_reason = "entry_qty_rounded_to_zero_after_exchange_constraints"
+    elif float(rules.min_qty) > 0.0 and executable_qty + DUST_POSITION_EPS < float(rules.min_qty):
+        allowed = False
+        entry_reason = "entry_min_qty_miss"
+    elif float(rules.min_notional_krw) > 0.0 and (executable_qty * float(market_price)) + DUST_POSITION_EPS < float(rules.min_notional_krw):
+        allowed = False
+        entry_reason = "entry_min_notional_miss"
+    else:
+        allowed = True
+        entry_reason = "none"
     return ExecutionSizingPlan(
         side="BUY",
         allowed=allowed,
@@ -252,14 +344,16 @@ def build_buy_execution_sizing(
         executable_qty=float(executable_qty if allowed else 0.0),
         internal_lot_size=float(lot_rules.lot_size),
         intended_lot_count=int(intended_lot_count),
-        executable_lot_count=int(intended_lot_count if allowed else 0),
-        qty_source="entry.intent_lot_count",
-        effective_min_trade_qty=float(lot_rules.executable_min_qty),
+        executable_lot_count=int(executable_lot_count if allowed else 0),
+        qty_source="entry.intent_budget_exchange_constraints",
+        effective_min_trade_qty=float(effective_min_trade_qty),
         min_qty=float(lot_rules.min_qty),
         qty_step=float(lot_rules.qty_step),
         min_notional_krw=float(lot_rules.min_notional_krw),
-        non_executable_reason="executable" if allowed else "no_executable_entry_lot",
+        non_executable_reason="executable" if allowed else entry_reason,
         buy_authority=resolved_authority,
+        internal_lot_is_exchange_inflated=internal_lot_is_exchange_inflated,
+        internal_lot_would_block_buy=internal_lot_would_block_buy,
     )
 
 

@@ -3619,6 +3619,107 @@ def test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing(tmp_path, 
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics(tmp_path, monkeypatch, caplog):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_log.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    def _blocked_buy_execution_sizing(**kwargs):
+        return SimpleNamespace(
+            allowed=False,
+            block_reason="entry_min_notional_miss",
+            decision_reason_code="entry_min_notional_miss",
+            budget_krw=4000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0,
+            internal_lot_size=0.0004,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            qty_source="entry.intent_budget_exchange_constraints",
+            effective_min_trade_qty=0.0003,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5000.0,
+            non_executable_reason="entry_min_notional_miss",
+            buy_authority=kwargs.get("authority"),
+            internal_lot_is_exchange_inflated=True,
+            internal_lot_would_block_buy=True,
+        )
+
+    monkeypatch.setattr(live_module, "build_buy_execution_sizing", _blocked_buy_execution_sizing)
+
+    conn = ensure_db(str(tmp_path / "market_buy_log.sqlite"))
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1000,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "entry_allowed_truth_source": "context.entry_allowed",
+                "effective_flat": True,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "raw_qty_open": 0.0,
+                "raw_total_asset_qty": 0.0,
+                "open_exposure_qty": 0.0,
+                "dust_tracking_qty": 0.0,
+                "has_executable_exposure": False,
+                "has_any_position_residue": False,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _FakeBroker()
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        trade = live_execute_signal(
+            broker,
+            "BUY",
+            1000,
+            100_000_000.0,
+            decision_id=decision_id,
+            decision_reason="sma golden cross",
+        )
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert "[ORDER_SKIP] entry sizing blocked" in caplog.text
+    assert "decision_reason_code=entry_min_notional_miss" in caplog.text
+    assert "budget_krw=4000.0" in caplog.text
+    assert "requested_qty=" in caplog.text
+    assert "min_notional_krw=5000.0" in caplog.text
+    assert "internal_lot_is_exchange_inflated=1" in caplog.text
+    assert "internal_lot_would_block_buy=1" in caplog.text
+
+
+@pytest.mark.fast_regression
 def test_live_execute_signal_buy_adjusts_dust_creating_entry_qty(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_safe.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
