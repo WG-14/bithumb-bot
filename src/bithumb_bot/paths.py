@@ -307,7 +307,7 @@ def resolve_managed_path(kind: str, manager: PathManager) -> Path:
         "runtime-state": manager.runtime_state_path(),
         "data-dir": manager.data_dir(),
         "primary-db": manager.primary_db_path(),
-        "reports-ops-dir": manager.data_dir() / "reports" / "ops",
+        "reports-ops-dir": manager.data_dir() / "reports" / "ops_report",
         "reports-dir": manager.data_dir() / "reports",
         "trades-dir": manager.data_dir() / "trades",
         "derived-dir": manager.data_dir() / "derived",

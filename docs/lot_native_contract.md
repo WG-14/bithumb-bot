@@ -37,14 +37,15 @@ intact while the remaining declaration gap is closed.
 
 ### Current verified external contract
 
-The current verified external contract is that externally consumed SELL and
-reporting paths use lot-native state as semantic authority. That does not mean
-every fail-closed blocker or compatibility marker has already disappeared from
-all current semantic or emitted surfaces.
+The current verified external contract is narrower than full migration
+completion: the public SELL authority boundary is lot-native, and public SELL
+qty remains derived from that lot-native authority. That does not mean every
+fail-closed blocker or compatibility marker has already disappeared from all
+current semantic or emitted surfaces.
 
 For this batch, that means:
 
-- canonical SELL authority is `position_state.normalized_exposure.sellable_executable_lot_count`
+- canonical SELL authority at the public boundary is `position_state.normalized_exposure.sellable_executable_lot_count`
 - qty remains derived from the normalized lot-native authority surface
 - fail-closed blocker reasons such as `legacy_lot_metadata_missing` may still appear in current semantic outputs and current code paths
 - compatibility and provenance handling must remain non-authoritative even where fail-closed markers still exist

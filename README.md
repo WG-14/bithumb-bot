@@ -60,7 +60,8 @@ The `project.scripts` entry in `pyproject.toml` defines the canonical CLI.
 - The supported runtime modes are `paper` and `live`.
 - `MODE=paper` uses `BITHUMB_ENV_FILE_PAPER` when `BITHUMB_ENV_FILE` is not set.
 - `MODE=test` only appears here as an env-selection compatibility edge case in the helper logic; it is not a normal operator/runtime mode.
-- Healthcheck and live-operation commands must fail fast when the explicit env file is missing.
+- Explicit env files remain the operating standard for healthcheck and live-operation commands.
+- Bootstrap loads the selected explicit env file opportunistically; if the file is missing, later config validation still fails when required settings are absent.
 
 Example:
 
@@ -68,7 +69,7 @@ Example:
 BITHUMB_ENV_FILE=.env uv run bithumb-bot health
 ```
 
-Runtime artifacts must live outside the repository under env-injected runtime roots.
+Runtime artifacts must not be written into the repository. In `MODE=live`, every managed runtime root must be explicitly configured as an absolute repository-external path. In `MODE=paper`, `PathManager` falls back to the default runtime root under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot` when a managed root is unset.
 
 ## Common Commands
 
@@ -82,6 +83,7 @@ uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
+uv run bithumb-bot strategy-report
 uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
 uv run bithumb-bot run --short 7 --long 30
@@ -124,12 +126,14 @@ Authoritative references:
 
 Rules:
 
-- All runtime roots must be injected through env: `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, `BACKUP_ROOT`, and `ARCHIVE_ROOT`.
+- In `MODE=live`, `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, and `BACKUP_ROOT` must be injected through env as absolute repository-external roots.
+- In `MODE=paper`, those managed roots default under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot` when unset; explicit overrides may still be supplied.
+- `ARCHIVE_ROOT` defaults to the same runtime root's `archive/` subtree when unset in both modes, and in `MODE=live` an explicit `ARCHIVE_ROOT` must still be absolute and repository-external.
 - Managed subtrees such as `run/<mode>`, `data/<mode>/*`, `logs/<mode>/*`, and `backup/<mode>/*` must be resolved through `PathManager`.
-- `DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`, and `SNAPSHOT_ROOT` are compatibility overrides only.
+- `DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`, and `SNAPSHOT_ROOT` are legacy compatibility override surfaces documented for the current storage contract; do not infer broader or newer override support from this list.
 - In `MODE=live`, these overrides must still be absolute, repository-external, and mode-correct.
 - Live helper scripts and deployment helpers should consult `PathManager` rather than inventing their own path scheme.
-- Runtime artifacts belong under the env-injected runtime roots, not in the repository.
+- Runtime artifacts belong under the managed runtime roots, not in the repository.
 
 Expected artifact placement:
 

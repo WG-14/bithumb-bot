@@ -218,6 +218,8 @@ Managed root location rules:
 - `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, and `BACKUP_ROOT` are separate managed roots.
 - `ARCHIVE_ROOT` is a separate managed root when archive storage is enabled.
 - Bucket classification stays the same regardless of where the managed roots are mounted.
+- In `MODE=paper`, unset `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, and `BACKUP_ROOT` fall back under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot`.
+- In both modes, unset `ARCHIVE_ROOT` falls back to the default runtime root's `archive/` subtree.
 - Live managed roots must be absolute paths.
 - Live managed roots must be repository-external.
 - Live managed roots must not overlap.
@@ -233,14 +235,14 @@ Live mode requirements:
 
 ## Compatibility Overrides
 
-The following env vars are compatibility overrides:
+The following env vars are the current documented compatibility override surfaces:
 
 - `DB_PATH`
 - `RUN_LOCK_PATH`
 - `BACKUP_DIR`
 - `SNAPSHOT_ROOT`
 
-These overrides must remain compatible with the storage contract:
+These documented compatibility overrides must remain compatible with the storage contract:
 
 - They must resolve to the correct mode-specific bucket.
 - They must be absolute paths.
@@ -291,6 +293,21 @@ Persisted schema-backed fields:
 - `position_state`: stored lot-state classification. Current values are `open_exposure` and `dust_tracking`.
 - `position_semantic_basis`: stored semantic basis and must remain `lot-native`.
 - `lot_semantic_version`, `internal_lot_size`, `lot_min_qty`, `lot_qty_step`, `lot_min_notional_krw`, `lot_max_qty_decimals`, and `lot_rule_source_mode`: stored lot-rule metadata used during interpretation, recovery, and reporting.
+
+Trigger-enforced storage invariants:
+
+- `open_position_lots` is a trigger-protected storage contract, not only a reporting or interpretation convention.
+- Negative `executable_lot_count` and `dust_tracking_lot_count` values are rejected.
+- For lot-native rows with positive `qty_open`, `position_state='open_exposure'` requires positive `executable_lot_count` and zero `dust_tracking_lot_count`, while `position_state='dust_tracking'` requires zero `executable_lot_count` and positive `dust_tracking_lot_count`.
+- For lot-native rows with positive `qty_open` and positive `internal_lot_size`, `qty_open` must match the active lot-count authority multiplied by `internal_lot_size`.
+- Zero-qty rows must not retain lot authority; both lot-count columns must be zero when `qty_open <= 1e-12`.
+
+Current schema-time legacy-row normalization:
+
+- During schema setup, rows with missing or blank `position_semantic_basis` are backfilled to `lot-native`.
+- Rows with missing or blank `position_state` are backfilled to `open_exposure`.
+- Existing positive-qty rows are normalized so `open_exposure` rows have at least one `executable_lot_count` and `dust_tracking` rows have at least one `dust_tracking_lot_count` when legacy lot-count fields were blank or non-positive.
+- This backfill keeps older rows compatible with the current storage contract without changing the normalized SELL authority boundary.
 
 Derived / interpreted outputs from the lot-state and dust interpretation layer:
 

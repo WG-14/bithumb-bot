@@ -53,6 +53,12 @@ Managed roots:
 - `BACKUP_ROOT`
 - `ARCHIVE_ROOT` when archive storage is enabled
 
+Current paper/default behavior:
+
+- When `MODE=paper` and `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, or `BACKUP_ROOT` are unset, `PathManager` falls back to the default runtime root under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot`.
+- When `ARCHIVE_ROOT` is unset, both `paper` and `live` use the default runtime root's `archive/` subtree.
+- Explicit paper overrides may still be supplied, but the preferred operator layout remains repository-external absolute paths.
+
 Current live contract:
 
 - Every managed live root must be explicitly set to an absolute path.
@@ -123,7 +129,7 @@ ARCHIVE_ROOT/
 
 ## Allowed Overrides
 
-These env vars are compatibility overrides only, not new path conventions:
+These env vars are the current documented compatibility override surfaces for this storage contract, not new path conventions or a guarantee of broader override support:
 
 - `DB_PATH`
 - `RUN_LOCK_PATH`
@@ -161,7 +167,7 @@ Path creation and path resolution must use the shared path layer:
 
 ## Runtime Roots
 
-Recommended live/runtime shape: choose separate absolute roots and pass them through the managed env vars.
+Recommended live/runtime shape: choose separate absolute roots and pass them through the managed env vars. This is required in `MODE=live` and remains the preferred operator layout in `MODE=paper`, even though paper can fall back to the default runtime root when roots are unset.
 
 Example:
 
@@ -336,6 +342,21 @@ Persisted schema-backed base fields in `open_position_lots`:
 - `position_state`: stored lot-state classification. Current values are `open_exposure` and `dust_tracking`.
 - `position_semantic_basis`: stored semantic basis and must remain `lot-native`.
 - `lot_semantic_version`, `internal_lot_size`, `lot_min_qty`, `lot_qty_step`, `lot_min_notional_krw`, `lot_max_qty_decimals`, and `lot_rule_source_mode`: stored lot-rule metadata for interpretation and recovery.
+
+Trigger-enforced storage invariants:
+
+- `open_position_lots` is protected by insert/update validation triggers; it is not just an interpretation-layer convention.
+- Negative `executable_lot_count` and `dust_tracking_lot_count` values are rejected.
+- For lot-native rows with positive `qty_open`, `position_state='open_exposure'` requires positive `executable_lot_count` and zero `dust_tracking_lot_count`, while `position_state='dust_tracking'` requires the inverse.
+- For lot-native rows with positive `qty_open` and positive `internal_lot_size`, `qty_open` must equal the authoritative lot count multiplied by `internal_lot_size` for the active state bucket.
+- Zero-qty rows must not retain lot authority; both lot-count columns must be zero when `qty_open <= 1e-12`.
+
+Current schema-time legacy-row normalization:
+
+- During schema setup, rows with missing or blank `position_semantic_basis` are backfilled to `lot-native`.
+- Rows with missing or blank `position_state` are backfilled to `open_exposure`.
+- Existing positive-qty rows are normalized so `open_exposure` rows have at least one `executable_lot_count` and `dust_tracking` rows have at least one `dust_tracking_lot_count` when those legacy lot-count fields were blank or non-positive.
+- This schema-time backfill is compatibility normalization for pre-existing rows; it does not promote qty-only legacy data to final SELL authority.
 
 Derived / interpreted outputs from the lot-state and dust interpretation layer:
 

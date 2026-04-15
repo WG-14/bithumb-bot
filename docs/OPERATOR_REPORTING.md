@@ -10,7 +10,10 @@ This document helps operators answer:
 Canonical commands:
 
 - `ops-report`
+- `decision-telemetry`
 - `fee-diagnostics`
+- `strategy-report`
+- `cash-drift-report`
 - `experiment-report`
 
 ## 1. Required Environment
@@ -53,16 +56,51 @@ sudo -u <service-user> BITHUMB_ENV_FILE=/etc/bithumb-bot/bithumb-bot.live.env uv
 
 The default output is `stdout`. Redirect to a file only when the output itself is needed as an artifact.
 
-## 3. Live Read Checklist
+## 3. Current `ops-report` Surface
+
+`ops-report` emits a combined operator snapshot to `stdout` and writes the JSON artifact under `DATA_ROOT/<mode>/reports/ops_report/`.
+
+Current sections and payload groups:
+
+- `[OPS-REPORT]`: top-level operator recovery summary, lot/dust authority view, balance/accounts diagnostics, recent external cash adjustment summary, runtime-state snapshot, and run-lock status.
+- `[ORDER-RULE-SNAPSHOT]`: current buy/sell rule values together with their source metadata, or an explicit load failure.
+- `[STRATEGY-SUMMARY]`: per-strategy order/fill counts, notionals, fee totals, and the current `pnl_proxy_deprecated` compatibility field.
+- `[RECENT-STRATEGY-ORDER-FILL-FLOW]`: recent order-event flow with submission reason, sell-boundary diagnostics, and operator-facing notes.
+- `[RECENT-SELL-SUPPRESSIONS]`: recent SELL suppression outcomes including suppression category/detail, lot count, qty boundary inputs, dust/operator action, and summary text.
+- `[RECENT-STRATEGY-DECISION-FLOW]`: recent strategy decisions with raw/base/final signals, entry gating, normalized exposure diagnostics, sell-boundary fields, and final reason text.
+- `[RECENT-TRADES-OPERATIONS]`: recent trade ledger operations and rolling fee total.
+- `[FEE-DIAGNOSTICS-SNAPSHOT]`: compact fee/fill and round-trip diagnostics included alongside the ops snapshot.
+
+Key operator-facing payload surfaces:
+
+- `operator_recovery_summary`
+- `recent_sell_suppressions`
+- `recent_decision_flow`
+- `order_rule_snapshot`
+- `balance_source_diagnostics`
+- `recent_external_cash_adjustment`
+- `runtime_state_snapshot`
+- `run_lock`
+
+## 4. Live Read Checklist
 
 1. Run `ops-report`.
-2. Check `[STRATEGY-SUMMARY]`.
+2. Check `[OPS-REPORT]`.
+   - Review `operator_recovery_summary` first.
+   - Confirm the current lot-native exit authority, dust posture, balance/accounts diagnostic, runtime-state snapshot, and `run_lock`.
+3. Check `[ORDER-RULE-SNAPSHOT]`.
+   - Confirm the current min-qty, step, min-notional, and BUY/SELL rule sources.
+4. Check `[RECENT-SELL-SUPPRESSIONS]`.
+   - Review recent suppression categories, sell-boundary details, and operator-action text.
+5. Check `[RECENT-STRATEGY-DECISION-FLOW]`.
+   - Review the latest base/raw/final decision path, entry gating, and sell-boundary diagnostics.
+6. Check `[STRATEGY-SUMMARY]`.
    - Compare `order_count` and `fill_count`.
    - Confirm `pnl_proxy = sell_notional - buy_notional - fee_total`.
-3. Check `[RECENT-STRATEGY-ORDER-FILL-FLOW]`.
+7. Check `[RECENT-STRATEGY-ORDER-FILL-FLOW]`.
    - Review the latest order events by time.
    - Confirm `submission_reason_code` and `message(note)` are correct.
-4. Check `[RECENT-TRADES-OPERATIONS]`.
+8. Check `[RECENT-TRADES-OPERATIONS]`.
    - Review `fee`, `cash_after`, `asset_after`, and `note`.
 
 ## 3-0. `/v1/accounts` Preflight Interpretation
