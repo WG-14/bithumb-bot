@@ -539,6 +539,80 @@ def test_config_strategy_min_expected_edge_ratio_defaults_and_override() -> None
     assert float(proc_override.stdout.strip()) == 0.0021
 
 
+def test_config_sma_cost_edge_defaults_follow_legacy_baseline() -> None:
+    env_default = dict(os.environ)
+    env_default["MODE"] = "paper"
+    env_default.pop("SMA_COST_EDGE_ENABLED", None)
+    env_default.pop("SMA_COST_EDGE_MIN_RATIO", None)
+    env_default["STRATEGY_MIN_EXPECTED_EDGE_RATIO"] = "0.0021"
+    env_default["PYTHONPATH"] = "src"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.SMA_COST_EDGE_ENABLED, c.settings.SMA_COST_EDGE_MIN_RATIO)",
+        ],
+        env=env_default,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    enabled, ratio = proc.stdout.strip().split()
+    assert enabled == "True"
+    assert float(ratio) == 0.0021
+
+
+def test_config_sma_cost_edge_env_override_and_validation() -> None:
+    env_override = dict(os.environ)
+    env_override["MODE"] = "paper"
+    env_override["SMA_COST_EDGE_ENABLED"] = "false"
+    env_override["SMA_COST_EDGE_MIN_RATIO"] = "0.0042"
+    env_override["PYTHONPATH"] = "src"
+
+    proc_ok = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import bithumb_bot.config as c; print(c.settings.SMA_COST_EDGE_ENABLED, c.settings.SMA_COST_EDGE_MIN_RATIO)",
+        ],
+        env=env_override,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_ok.returncode == 0
+    enabled, ratio = proc_ok.stdout.strip().split()
+    assert enabled == "False"
+    assert float(ratio) == 0.0042
+
+    env_bad_bool = dict(env_override)
+    env_bad_bool["SMA_COST_EDGE_ENABLED"] = "maybe"
+    proc_bad_bool = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c"],
+        env=env_bad_bool,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_bad_bool.returncode != 0
+    assert "SMA_COST_EDGE_ENABLED must be a boolean value" in proc_bad_bool.stderr
+
+    env_bad_ratio = dict(env_override)
+    env_bad_ratio["SMA_COST_EDGE_MIN_RATIO"] = "-0.1"
+    proc_bad_ratio = subprocess.run(
+        [sys.executable, "-c", "import bithumb_bot.config as c"],
+        env=env_bad_ratio,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_bad_ratio.returncode != 0
+    assert "SMA_COST_EDGE_MIN_RATIO must be a finite value >= 0" in proc_bad_ratio.stderr
+
+
 def test_config_strategy_exit_min_take_profit_ratio_defaults_and_override() -> None:
     env_default = dict(os.environ)
     env_default["MODE"] = "paper"

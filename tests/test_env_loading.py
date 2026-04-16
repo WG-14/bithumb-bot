@@ -108,3 +108,14 @@ def test_live_fill_fee_strict_env_is_loaded(monkeypatch):
         assert reloaded.settings.LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW == 250000.0
     finally:
         importlib.reload(config_module)
+
+
+def test_describe_explicit_env_file_reports_source_key(monkeypatch):
+    monkeypatch.delenv("BITHUMB_ENV_FILE", raising=False)
+    monkeypatch.setenv("BITHUMB_ENV_FILE_LIVE", "/tmp/live.env")
+
+    summary = bootstrap.describe_explicit_env_file("live")
+
+    assert summary.env_file == "/tmp/live.env"
+    assert summary.source_key == "BITHUMB_ENV_FILE_LIVE"
+    assert summary.loaded is False

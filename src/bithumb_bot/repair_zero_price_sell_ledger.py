@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import resolve_db_path, settings
-from .db_core import ensure_db, init_portfolio, set_portfolio_breakdown
+from .db_core import (
+    ensure_db,
+    init_portfolio,
+    portfolio_asset_total,
+    portfolio_cash_total,
+    replay_fill_portfolio_snapshot,
+    set_portfolio_breakdown,
+)
 
 EPS = 1e-10
 
@@ -151,8 +158,6 @@ def _validate_targets(conn: sqlite3.Connection) -> list[str]:
 
 
 def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
-    cash = float(settings.START_CASH_KRW)
-    qty = 0.0
     rows = conn.execute(
         """
         SELECT o.side, f.price, f.qty, f.fee
@@ -161,25 +166,24 @@ def _ledger_replay_from_fills(conn: sqlite3.Connection) -> tuple[float, float]:
         ORDER BY f.fill_ts ASC, f.id ASC
         """
     ).fetchall()
-    for row in rows:
-        side = str(row["side"])
-        price = float(row["price"])
-        fill_qty = float(row["qty"])
-        fee = float(row["fee"])
-        if side == "BUY":
-            cash -= (price * fill_qty) + fee
-            qty += fill_qty
-        elif side == "SELL":
-            cash += (price * fill_qty) - fee
-            qty -= fill_qty
-        else:
-            raise RepairValidationError(f"invalid side in fills replay: {side}")
+    (
+        _cash_available,
+        _cash_locked,
+        _asset_available,
+        _asset_locked,
+        cash,
+        qty,
+    ) = replay_fill_portfolio_snapshot(
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=((str(row["side"]), float(row["price"]), float(row["qty"]), float(row["fee"]) if row["fee"] is not None else None) for row in rows),
+    )
     return cash, qty
 
 
 def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str, float | int]], float, float]:
-    cash = float(settings.START_CASH_KRW)
-    qty = 0.0
     diffs: list[dict[str, float | int]] = []
 
     rows = conn.execute(
@@ -190,26 +194,36 @@ def _recompute_trade_snapshots(conn: sqlite3.Connection) -> tuple[list[dict[str,
         """
     ).fetchall()
 
+    replay_rows: list[tuple[str, float, float, float | None]] = []
     for row in rows:
         trade_id = int(row["id"])
         side = str(row["side"])
         price = float(row["price"])
         trade_qty = float(row["qty"])
-        fee = float(row["fee"])
+        fee = float(row["fee"]) if row["fee"] is not None else None
 
-        if side == "BUY":
-            cash -= (price * trade_qty) + fee
-            qty += trade_qty
-        elif side == "SELL":
-            cash += (price * trade_qty) - fee
-            qty -= trade_qty
-        else:
+        if side not in ("BUY", "SELL"):
             raise RepairValidationError(f"invalid trade side for id={trade_id}: {side}")
+        replay_rows.append((side, price, trade_qty, fee))
 
-        if cash < -1e-6:
-            raise RepairValidationError(f"negative cash produced while replaying trades at id={trade_id}: {cash}")
-        if qty < -1e-10:
-            raise RepairValidationError(f"negative asset produced while replaying trades at id={trade_id}: {qty}")
+    cash = settings.START_CASH_KRW
+    qty = 0.0
+    for idx, row in enumerate(rows):
+        trade_id = int(row["id"])
+        (
+            _cash_available,
+            _cash_locked,
+            _asset_available,
+            _asset_locked,
+            cash,
+            qty,
+        ) = replay_fill_portfolio_snapshot(
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+            rows=replay_rows[: idx + 1],
+        )
 
         old_cash_after = float(row["cash_after"])
         old_asset_after = float(row["asset_after"])
@@ -248,8 +262,14 @@ def run_repair(*, db_path: str | None = None, apply: bool = False, backup_path: 
             "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
         ).fetchone()
         _require(portfolio_row is not None, "portfolio row(id=1) missing")
-        pre_portfolio_cash = float(portfolio_row["cash_available"]) + float(portfolio_row["cash_locked"])
-        pre_portfolio_qty = float(portfolio_row["asset_available"]) + float(portfolio_row["asset_locked"])
+        pre_portfolio_cash = portfolio_cash_total(
+            cash_available=float(portfolio_row["cash_available"]),
+            cash_locked=float(portfolio_row["cash_locked"]),
+        )
+        pre_portfolio_qty = portfolio_asset_total(
+            asset_available=float(portfolio_row["asset_available"]),
+            asset_locked=float(portfolio_row["asset_locked"]),
+        )
         print(
             "[REPAIR] precheck "
             f"replay_cash={pre_replay_cash:.8f} replay_qty={pre_replay_qty:.12f} "
@@ -294,8 +314,14 @@ def run_repair(*, db_path: str | None = None, apply: bool = False, backup_path: 
             "SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
         ).fetchone()
         _require(post_portfolio is not None, "portfolio row missing after repair")
-        post_portfolio_cash = float(post_portfolio["cash_available"]) + float(post_portfolio["cash_locked"])
-        post_portfolio_qty = float(post_portfolio["asset_available"]) + float(post_portfolio["asset_locked"])
+        post_portfolio_cash = portfolio_cash_total(
+            cash_available=float(post_portfolio["cash_available"]),
+            cash_locked=float(post_portfolio["cash_locked"]),
+        )
+        post_portfolio_qty = portfolio_asset_total(
+            asset_available=float(post_portfolio["asset_available"]),
+            asset_locked=float(post_portfolio["asset_locked"]),
+        )
 
         cash_match = math.isclose(post_replay_cash, post_portfolio_cash, abs_tol=1e-6)
         qty_match = math.isclose(post_replay_qty, post_portfolio_qty, abs_tol=1e-10)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from bithumb_bot.config import settings
 from bithumb_bot.paths import PathManager
 
 
@@ -104,3 +105,67 @@ def managed_runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict
         "runtime_root": str(runtime_root),
         "db_path": str(db_path),
     }
+
+
+@pytest.fixture
+def relaxed_test_order_rules() -> None:
+    original_rules = {
+        "MIN_ORDER_NOTIONAL_KRW": float(settings.MIN_ORDER_NOTIONAL_KRW),
+        "LIVE_MIN_ORDER_QTY": float(settings.LIVE_MIN_ORDER_QTY),
+        "LIVE_ORDER_QTY_STEP": float(settings.LIVE_ORDER_QTY_STEP),
+        "LIVE_ORDER_MAX_QTY_DECIMALS": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+    }
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    try:
+        yield
+    finally:
+        for key, value in original_rules.items():
+            object.__setattr__(settings, key, value)
+
+
+@pytest.fixture(autouse=True)
+def _restore_settings_state():
+    """Keep direct settings mutations from leaking across test modules."""
+    from bithumb_bot.broker import order_rules as _order_rules
+
+    keys = [
+        "MODE",
+        "DB_PATH",
+        "START_CASH_KRW",
+        "BUY_FRACTION",
+        "MAX_ORDER_KRW",
+        "FEE_RATE",
+        "LIVE_FEE_RATE_ESTIMATE",
+        "MAX_ORDERBOOK_SPREAD_BPS",
+        "MAX_MARKET_SLIPPAGE_BPS",
+        "MIN_ORDER_NOTIONAL_KRW",
+        "PRETRADE_BALANCE_BUFFER_BPS",
+        "LIVE_DRY_RUN",
+        "LIVE_REAL_ORDER_ARMED",
+        "BITHUMB_API_KEY",
+        "BITHUMB_API_SECRET",
+        "MAX_DAILY_LOSS_KRW",
+        "KILL_SWITCH",
+        "MAX_OPEN_ORDER_AGE_SEC",
+        "LIVE_MIN_ORDER_QTY",
+        "LIVE_ORDER_QTY_STEP",
+        "LIVE_ORDER_MAX_QTY_DECIMALS",
+        "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS",
+        "LIVE_PRICE_REFERENCE_MAX_AGE_SEC",
+        "LIVE_FILL_FEE_STRICT_MODE",
+        "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW",
+        "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW",
+        "LIVE_ALLOW_ORDER_RULE_FALLBACK",
+        "PAIR",
+    ]
+    original = {key: getattr(settings, key) for key in keys if hasattr(settings, key)}
+    _order_rules._cached_rules.clear()
+    try:
+        yield
+    finally:
+        for key, value in original.items():
+            object.__setattr__(settings, key, value)
+        _order_rules._cached_rules.clear()

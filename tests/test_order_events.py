@@ -1,8 +1,24 @@
 from __future__ import annotations
 
+import pytest
+
 from bithumb_bot.db_core import ensure_db
-from bithumb_bot.oms import add_fill, create_order, record_status_transition, record_submit_started, set_exchange_order_id, set_status, validate_status_transition
+from bithumb_bot.oms import (
+    add_fill,
+    create_order,
+    record_order_suppression,
+    record_status_transition,
+    record_submit_attempt,
+    record_submit_started,
+    set_exchange_order_id,
+    set_status,
+    validate_status_transition,
+)
+from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.observability import safety_event
+
+
+pytestmark = pytest.mark.fast_regression
 
 
 def test_order_events_written_for_major_transitions(tmp_path):
@@ -107,6 +123,62 @@ def test_intent_event_persists_submit_intent_metadata(tmp_path):
     assert row["payload_fingerprint"] is None
 
 
+def test_submit_started_event_persists_submit_attempt_metadata(tmp_path):
+    db_path = tmp_path / "order_events_submit_started.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_submit_started",
+            submit_attempt_id="attempt_started",
+            side="SELL",
+            qty_req=0.25,
+            price=123456.0,
+            status="PENDING_SUBMIT",
+            ts_ms=1234567890,
+            conn=conn,
+        )
+        record_submit_started(
+            "o_submit_started",
+            conn=conn,
+            submit_attempt_id="attempt_started",
+            symbol="ETH_KRW",
+            side="SELL",
+            qty=0.25,
+            mode="live",
+        )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT
+                client_order_id,
+                submit_attempt_id,
+                symbol,
+                side,
+                qty,
+                mode,
+                order_status,
+                message
+            FROM order_events
+            WHERE client_order_id='o_submit_started' AND event_type='submit_started'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["client_order_id"] == "o_submit_started"
+    assert row["submit_attempt_id"] == "attempt_started"
+    assert row["symbol"] == "ETH_KRW"
+    assert row["side"] == "SELL"
+    assert float(row["qty"]) == 0.25
+    assert row["mode"] == "live"
+    assert row["order_status"] == "PENDING_SUBMIT"
+    assert "submit intent staged before broker dispatch" in str(row["message"])
+
+
 def test_order_lifecycle_reconstructable_in_timestamp_order(tmp_path):
     db_path = tmp_path / "order_events_timeline.sqlite"
     conn = ensure_db(str(db_path))
@@ -206,6 +278,10 @@ def test_validate_status_transition_allows_only_whitelisted_paths():
     assert allowed is True
     assert reason is None
 
+    allowed, reason = validate_status_transition(from_status="NEW", to_status="CANCEL_REQUESTED")
+    assert allowed is True
+    assert reason is None
+
     allowed, reason = validate_status_transition(from_status="FILLED", to_status="NEW")
     assert allowed is False
     assert "disallowed status transition" in str(reason)
@@ -291,3 +367,118 @@ def test_critical_safety_event_payloads_include_common_fields():
     assert "state_from=SUBMIT_UNKNOWN" in recovery_msg
     assert "state_to=RECOVERY_REQUIRED" in recovery_msg
     assert "severity=CRITICAL" in recovery_msg
+
+
+def test_submit_attempt_event_persists_custom_dust_unsellable_reason_code(tmp_path):
+    db_path = tmp_path / "order_events_dust_reason.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_dust_reason",
+            submit_attempt_id="attempt_dust",
+            side="SELL",
+            qty_req=0.00009,
+            price=100000000.0,
+            status="FAILED",
+            ts_ms=1000,
+            conn=conn,
+        )
+        record_submit_attempt(
+            conn=conn,
+            client_order_id="o_dust_reason",
+            submit_attempt_id="attempt_dust",
+            symbol="KRW-BTC",
+            side="SELL",
+            qty=0.00009,
+            price=100000000.0,
+            submit_ts=1001,
+            payload_fingerprint="dust-fingerprint",
+            broker_response_summary="blocked_before_submit:dust_residual_unsellable",
+            submission_reason_code=DUST_RESIDUAL_UNSELLABLE,
+            exception_class=None,
+            timeout_flag=False,
+            submit_evidence='{"state":"EXIT_PARTIAL_LEFT_DUST"}',
+            exchange_order_id_obtained=False,
+            order_status="FAILED",
+        )
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT event_type, order_status, side, qty, price, submission_reason_code, broker_response_summary
+            FROM order_events
+            WHERE client_order_id='o_dust_reason' AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    assert row["event_type"] == "submit_attempt_recorded"
+    assert row["order_status"] == "FAILED"
+    assert row["side"] == "SELL"
+    assert float(row["qty"]) == 0.00009
+    assert float(row["price"]) == 100000000.0
+    assert row["submission_reason_code"] == DUST_RESIDUAL_UNSELLABLE
+    assert row["broker_response_summary"] == "blocked_before_submit:dust_residual_unsellable"
+
+
+def test_order_suppression_records_without_order_row_and_dedups(tmp_path):
+    db_path = tmp_path / "order_suppression.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        suppression_kwargs = dict(
+            suppression_key="dust-suppression-key",
+            event_kind="decision_suppressed",
+            mode="live",
+            strategy_context="live:dust_exit:1m",
+            strategy_name="dust_exit",
+            signal="SELL",
+            side="SELL",
+            reason_code=DUST_RESIDUAL_SUPPRESSED,
+            reason="decision_suppressed:harmless_dust_exit",
+            requested_qty=0.00009193,
+            normalized_qty=0.00009193,
+            market_price=100000000.0,
+            decision_id=101,
+            decision_reason="partial_take_profit",
+            exit_rule_name="exit_signal",
+            dust_present=True,
+            dust_allow_resume=True,
+            dust_effective_flat=True,
+            dust_state="harmless_dust",
+            dust_action="harmless_dust_tracked_resume_allowed",
+            dust_signature="dust_scope=position_qty|position_qty=0.00009193",
+            qty_below_min=True,
+            normalized_non_positive=False,
+            normalized_below_min=True,
+            notional_below_min=False,
+            summary="decision_suppressed:harmless_dust_exit;state=harmless_dust",
+            context={"dust_signature": "dust_scope=position_qty|position_qty=0.00009193"},
+            conn=conn,
+        )
+        record_order_suppression(**suppression_kwargs)
+        record_order_suppression(**suppression_kwargs)
+        conn.commit()
+
+        order_row = conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()
+        suppression_row = conn.execute(
+            """
+            SELECT event_kind, reason_code, seen_count, dust_state, dust_action
+            FROM order_suppressions
+            WHERE suppression_key='dust-suppression-key'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert order_row is not None
+    assert int(order_row["n"]) == 0
+    assert suppression_row is not None
+    assert suppression_row["event_kind"] == "decision_suppressed"
+    assert suppression_row["reason_code"] == DUST_RESIDUAL_SUPPRESSED
+    assert int(suppression_row["seen_count"]) == 2
+    assert suppression_row["dust_state"] == "harmless_dust"
+    assert suppression_row["dust_action"] == "harmless_dust_tracked_resume_allowed"

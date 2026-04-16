@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import math
 import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from statistics import median
 from typing import Any
+from pathlib import Path
 
 from .analytics_context import (
     _load_context_json,
@@ -13,11 +15,39 @@ from .analytics_context import (
     normalize_analysis_context_from_lifecycle_row,
 )
 from .config import PATH_MANAGER, settings
+from .decision_context import resolve_canonical_position_exposure_snapshot
 from .broker.order_rules import get_effective_order_rules, rule_source_for
-from .db_core import ensure_db
+from .reason_codes import (
+    DUST_RESIDUAL_SUPPRESSED,
+    DUST_RESIDUAL_UNSELLABLE,
+    RISKY_ORDER_BLOCK,
+    classify_sell_failure_category,
+    SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
+    SELL_FAILURE_CATEGORY_DUST_RESIDUAL_UNSELLABLE,
+    SELL_FAILURE_CATEGORY_DUST_SUPPRESSION,
+    SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
+    SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD,
+    SELL_FAILURE_CATEGORY_SUBMISSION_HALT,
+    SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
+    SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE,
+    SELL_FAILURE_CATEGORY_UNKNOWN,
+    sell_failure_detail_from_category,
+)
+from .db_core import (
+    ensure_db,
+    get_external_cash_adjustment_summary,
+    init_portfolio,
+    normalize_asset_qty,
+    normalize_cash_amount,
+    portfolio_asset_total,
+    portfolio_cash_total,
+)
+from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
+from .lifecycle import summarize_reserved_exit_qty
 from .markets import canonical_market_with_raw
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
+from .run_lock import read_run_lock_status
 from .broker.bithumb import BithumbBroker
 
 
@@ -91,12 +121,505 @@ class FeeDiagnosticSummary:
 
 @dataclass
 class DecisionTelemetrySummary:
+    """Operator-facing telemetry summary; qty fields are diagnostic, not authority."""
+
+    base_signal: str
     decision_type: str
+    raw_signal: str
+    final_signal: str
+    buy_flow_state: str
+    entry_blocked: bool
+    entry_allowed: bool
+    block_reason: str
+    dust_classification: str
+    effective_flat: bool
+    raw_qty_open: float
+    raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
+    sell_qty_basis_qty: float
+    sell_qty_boundary_kind: str
+    sell_submit_lot_count: int
+    sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
     strategy_name: str
     pair: str
     interval: str
-    block_reason: str
     count: int
+
+
+def _format_external_cash_adjustment_summary(summary: dict[str, object] | None) -> str:
+    if not summary or int(summary.get("adjustment_count") or 0) <= 0:
+        return "none"
+    last_event_ts = summary.get("last_event_ts")
+    last_event = kst_str(int(last_event_ts)) if last_event_ts is not None else "none"
+    last_delta = summary.get("last_delta_amount")
+    last_delta_text = (
+        f"{float(last_delta):.3f}" if isinstance(last_delta, (int, float)) else "-"
+    )
+    return (
+        f"count={int(summary.get('adjustment_count') or 0)} "
+        f"total={float(summary.get('adjustment_total') or 0.0):.3f} "
+        f"last_delta={last_delta_text} "
+        f"last_event={last_event} "
+        f"present=1 "
+        f"key={summary.get('last_adjustment_key') or '-'} "
+        f"source={summary.get('last_source') or '-'} "
+        f"reason={summary.get('last_reason') or '-'}"
+    )
+
+
+def _summarize_external_cash_adjustment_json(raw: str | None, *, keys: list[str]) -> str:
+    if raw is None:
+        return "-"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return str(raw)
+    if not isinstance(parsed, dict):
+        return str(raw)
+    pieces: list[str] = []
+    for key in keys:
+        if key not in parsed:
+            continue
+        value = parsed.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            pieces.append(f"{key}={1 if value else 0}")
+        elif isinstance(value, (int, float)):
+            pieces.append(f"{key}={float(value):.3f}")
+        else:
+            pieces.append(f"{key}={value}")
+    return " ".join(pieces) if pieces else str(raw)
+
+
+def _summarize_external_cash_adjustment_basis(raw: str | None) -> str:
+    return _summarize_external_cash_adjustment_json(
+        raw,
+        keys=[
+            "balance_source",
+            "observed_ts_ms",
+            "asset_ts_ms",
+            "broker_cash_available",
+            "broker_cash_locked",
+            "broker_cash_total",
+            "local_cash_available",
+            "local_cash_locked",
+            "local_cash_total",
+            "cash_delta",
+            "reconcile_reason_code",
+        ],
+    )
+
+
+def _summarize_external_cash_adjustment_correlation(raw: str | None) -> str:
+    return _summarize_external_cash_adjustment_json(
+        raw,
+        keys=[
+            "remote_open_order_found",
+            "recent_fill_applied",
+            "invalid_fill_price_blocked",
+            "unresolved_open_order_count",
+            "submit_unknown_count",
+            "recovery_required_count",
+        ],
+    )
+
+
+def _replay_trade_only_cash(conn: sqlite3.Connection) -> dict[str, float | int]:
+    init_portfolio(conn)
+    cash = normalize_cash_amount(settings.START_CASH_KRW)
+    qty = normalize_asset_qty(0.0)
+    dup_fill_count = 0
+    seen_fill_keys: set[tuple[str, int, float, float]] = set()
+
+    fills = conn.execute(
+        """
+        SELECT f.client_order_id, f.fill_ts, f.price, f.qty, f.fee, o.side
+        FROM fills f
+        JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.fill_ts ASC, f.id ASC
+        """
+    ).fetchall()
+
+    for row in fills:
+        key = (
+            str(row["client_order_id"]),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(row["qty"]),
+        )
+        if key in seen_fill_keys:
+            dup_fill_count += 1
+        seen_fill_keys.add(key)
+
+        fill_price = normalize_cash_amount(row["price"])
+        fill_qty = normalize_asset_qty(row["qty"])
+        fee = normalize_cash_amount(row["fee"])
+        side = str(row["side"])
+        if side == "BUY":
+            cash = normalize_cash_amount(cash - ((fill_price * fill_qty) + fee))
+            qty = normalize_asset_qty(qty + fill_qty)
+        elif side == "SELL":
+            cash = normalize_cash_amount(cash + ((fill_price * fill_qty) - fee))
+            qty = normalize_asset_qty(qty - fill_qty)
+
+    return {
+        "trade_cash_krw": cash,
+        "trade_asset_qty": qty,
+        "dup_fill_count": dup_fill_count,
+    }
+
+
+def _fetch_recent_external_cash_adjustments(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT adjustment_key, event_ts, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
+        FROM external_cash_adjustments
+        ORDER BY event_ts DESC, id DESC
+        LIMIT ?
+        """,
+        (max(0, int(limit)),),
+    ).fetchall()
+    return [
+        {
+            "adjustment_key": str(row["adjustment_key"]),
+            "event_ts": int(row["event_ts"]),
+            "delta_amount": float(row["delta_amount"]),
+            "source": str(row["source"]),
+            "reason": str(row["reason"]),
+            "broker_snapshot_basis": str(row["broker_snapshot_basis"]),
+            "broker_snapshot_basis_summary": _summarize_external_cash_adjustment_basis(
+                str(row["broker_snapshot_basis"])
+            ),
+            "correlation_metadata": (
+                str(row["correlation_metadata"]) if row["correlation_metadata"] is not None else None
+            ),
+            "correlation_metadata_summary": _summarize_external_cash_adjustment_correlation(
+                str(row["correlation_metadata"]) if row["correlation_metadata"] is not None else None
+            ),
+            "note": str(row["note"]) if row["note"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
+def _broker_cash_snapshot() -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "source": None,
+        "observed_ts_ms": None,
+        "asset_ts_ms": None,
+        "cash_available": None,
+        "cash_locked": None,
+        "cash_krw": None,
+        "error": None,
+    }
+    try:
+        broker = BithumbBroker()
+        get_snapshot = getattr(broker, "get_balance_snapshot", None)
+        if callable(get_snapshot):
+            balance_snapshot = get_snapshot()
+            balance = balance_snapshot.balance
+            snapshot.update(
+                {
+                    "source": str(getattr(balance_snapshot, "source_id", None) or "-"),
+                    "observed_ts_ms": int(getattr(balance_snapshot, "observed_ts_ms", 0) or 0),
+                    "asset_ts_ms": int(getattr(balance_snapshot, "asset_ts_ms", 0) or 0),
+                    "cash_available": float(balance.cash_available),
+                    "cash_locked": float(balance.cash_locked),
+                    "cash_krw": portfolio_cash_total(
+                        cash_available=float(balance.cash_available),
+                        cash_locked=float(balance.cash_locked),
+                    ),
+                }
+            )
+            return snapshot
+
+        get_balance = getattr(broker, "get_balance", None)
+        if callable(get_balance):
+            balance = get_balance()
+            snapshot.update(
+                {
+                    "source": "legacy_balance_api",
+                    "observed_ts_ms": 0,
+                    "asset_ts_ms": 0,
+                    "cash_available": float(balance.cash_available),
+                    "cash_locked": float(balance.cash_locked),
+                    "cash_krw": portfolio_cash_total(
+                        cash_available=float(balance.cash_available),
+                        cash_locked=float(balance.cash_locked),
+                    ),
+                }
+            )
+            return snapshot
+
+        raise AttributeError("broker does not provide get_balance/get_balance_snapshot")
+    except Exception as exc:
+        snapshot["error"] = f"{type(exc).__name__}: {exc}"
+        return snapshot
+
+
+def fetch_cash_drift_report(
+    conn: sqlite3.Connection,
+    *,
+    recent_limit: int = 5,
+) -> dict[str, object]:
+    generated_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    trade_replay = _replay_trade_only_cash(conn)
+    portfolio_row = conn.execute(
+        """
+        SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+        FROM portfolio
+        WHERE id=1
+        """
+    ).fetchone()
+    if portfolio_row is None:
+        raise RuntimeError("portfolio row missing while building cash drift report")
+
+    local_cash_krw = portfolio_cash_total(
+        cash_available=float(portfolio_row["cash_available"]),
+        cash_locked=float(portfolio_row["cash_locked"]),
+    )
+    local_asset_qty = portfolio_asset_total(
+        asset_available=float(portfolio_row["asset_available"]),
+        asset_locked=float(portfolio_row["asset_locked"]),
+    )
+    trade_cash_krw = float(trade_replay["trade_cash_krw"])
+    adjustment_summary = get_external_cash_adjustment_summary(conn)
+    recent_adjustments = _fetch_recent_external_cash_adjustments(conn, limit=recent_limit)
+    external_cash_adjustment_total_krw = float(adjustment_summary["adjustment_total"])
+    explained_local_cash_krw = normalize_cash_amount(trade_cash_krw + external_cash_adjustment_total_krw)
+    explained_delta_krw = normalize_cash_amount(local_cash_krw - trade_cash_krw)
+    local_ledger_consistent = math.isclose(local_cash_krw, explained_local_cash_krw, abs_tol=1e-6)
+    local_asset_consistent = math.isclose(
+        local_asset_qty,
+        float(trade_replay["trade_asset_qty"]),
+        abs_tol=1e-12,
+    )
+    broker = _broker_cash_snapshot()
+    broker_cash_krw = broker.get("cash_krw")
+    broker_local_delta_krw = (
+        normalize_cash_amount(float(broker_cash_krw) - local_cash_krw)
+        if broker_cash_krw is not None
+        else None
+    )
+    broker_vs_explained_delta_krw = (
+        normalize_cash_amount(float(broker_cash_krw) - explained_local_cash_krw)
+        if broker_cash_krw is not None
+        else None
+    )
+
+    return {
+        "mode": settings.MODE,
+        "db_path": settings.DB_PATH,
+        "generated_at_epoch_ms": generated_at_ms,
+        "generated_at_utc": datetime.fromtimestamp(generated_at_ms / 1000, tz=timezone.utc).isoformat(timespec="seconds"),
+        "report_path": str(PATH_MANAGER.cash_drift_report_path()),
+        "broker": broker,
+        "local": {
+            "cash_krw": local_cash_krw,
+            "asset_qty": local_asset_qty,
+            "cash_without_external_adjustments_krw": trade_cash_krw,
+            "asset_without_external_adjustments_qty": float(trade_replay["trade_asset_qty"]),
+            "consistent": bool(local_ledger_consistent and local_asset_consistent),
+            "dup_fill_count": int(trade_replay["dup_fill_count"]),
+        },
+        "cash_drift": {
+            "explained_delta_krw": explained_delta_krw,
+            "explained_local_cash_krw": explained_local_cash_krw,
+            "external_cash_adjustment_total_krw": external_cash_adjustment_total_krw,
+            "external_cash_adjustment_count": int(adjustment_summary["adjustment_count"]),
+            "broker_local_delta_krw": broker_local_delta_krw,
+            "unexplained_residual_delta_krw": broker_vs_explained_delta_krw,
+        },
+        "recent_adjustments": recent_adjustments,
+    }
+
+
+def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> None:
+    conn = ensure_db()
+    try:
+        report = fetch_cash_drift_report(conn, recent_limit=max(1, int(recent_limit)))
+    finally:
+        conn.close()
+
+    write_json_atomic(PATH_MANAGER.cash_drift_report_path(), report)
+
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        return
+
+    broker = report.get("broker") or {}
+    local = report.get("local") or {}
+    cash_drift = report.get("cash_drift") or {}
+    recent_adjustments = report.get("recent_adjustments") or []
+    broker_error = broker.get("error")
+    broker_cash = broker.get("cash_krw")
+    broker_local_delta = cash_drift.get("broker_local_delta_krw")
+    unexplained_residual_delta = cash_drift.get("unexplained_residual_delta_krw")
+
+    print("[CASH-DRIFT-REPORT]")
+    broker_cash_line = (
+        f"  broker_cash={float(broker_cash):,.3f}"
+        if broker_cash is not None
+        else "  broker_cash=none"
+    )
+    local_cash_line = (
+        f"  local_cash={float(local.get('cash_krw') or 0.0):,.3f} "
+        f"ledger_cash_without_adjustments={float(local.get('cash_without_external_adjustments_krw') or 0.0):,.3f}"
+    )
+    print(f"{broker_cash_line} {local_cash_line}")
+    if broker_error:
+        print(f"  broker_error={broker_error}")
+    broker_local_delta_text = (
+        f"{float(broker_local_delta):,.3f}" if broker_local_delta is not None else "none"
+    )
+    unexplained_residual_delta_text = (
+        f"{float(unexplained_residual_delta):,.3f}"
+        if unexplained_residual_delta is not None
+        else "none"
+    )
+    print(
+        "  "
+        f"external_cash_adjustment_total={float(cash_drift.get('external_cash_adjustment_total_krw') or 0.0):,.3f} "
+        f"explained_delta={float(cash_drift.get('explained_delta_krw') or 0.0):,.3f} "
+        f"broker_local_delta={broker_local_delta_text} "
+        f"unexplained_residual_delta={unexplained_residual_delta_text}"
+    )
+    print(
+        "  "
+        f"local_ledger_consistent={1 if bool(local.get('consistent')) else 0} "
+        f"dup_fill_count={int(local.get('dup_fill_count') or 0)} "
+        f"recent_adjustment_count={int(cash_drift.get('external_cash_adjustment_count') or 0)}"
+    )
+    if not recent_adjustments:
+        print("  recent_adjustments=none")
+    else:
+        print("  recent_adjustments:")
+        for item in recent_adjustments:
+            event_ts = item.get("event_ts")
+            event_label = kst_str(int(event_ts)) if event_ts is not None else "none"
+            note = item.get("note") or "-"
+            correlation_metadata = item.get("correlation_metadata_summary") or item.get("correlation_metadata") or "-"
+            basis_summary = item.get("broker_snapshot_basis_summary") or item.get("broker_snapshot_basis") or "-"
+            print(
+                "    "
+                f"event_ts={event_label} adjustment_key={item.get('adjustment_key') or '-'} "
+                f"delta={float(item.get('delta_amount') or 0.0):,.3f} "
+                f"source={item.get('source') or '-'} reason={item.get('reason') or '-'} note={note} "
+                f"basis={basis_summary} correlation_metadata={correlation_metadata}"
+            )
+    raw_qty_open: float
+    raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
+    submit_qty_source: str
+    sell_submit_qty_source: str
+    sell_submit_lot_source: str
+    sell_submit_lot_count: int
+    sell_submit_lot_source_truth_source: str | None
+    sell_submit_lot_count_truth_source: str | None
+    sell_qty_basis_qty: float
+    sell_qty_basis_source: str
+    sell_qty_boundary_kind: str
+    sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
+    position_state_source: str
+    raw_qty_open_truth_source: str
+    raw_total_asset_qty_truth_source: str
+    position_qty_truth_source: str
+    submit_payload_qty_truth_source: str
+    normalized_exposure_active_truth_source: str
+    normalized_exposure_qty_truth_source: str
+    open_exposure_qty_truth_source: str
+    dust_tracking_qty_truth_source: str
+    submit_qty_source_truth_source: str
+    position_state_source_truth_source: str
+    entry_allowed_truth_source: str
+    effective_flat_truth_source: str
+    strategy_name: str
+    pair: str
+    interval: str
+    count: int
+
+
+@dataclass
+class RecentDecisionFlowSummary:
+    """Recent decision/reporting view; sell qty fields remain non-authoritative diagnostics."""
+
+    decision_id: int
+    decision_ts: int
+    strategy_name: str
+    decision_type: str
+    base_signal: str
+    raw_signal: str
+    final_signal: str
+    buy_flow_state: str
+    entry_blocked: bool
+    entry_allowed: bool
+    effective_flat: bool
+    raw_qty_open: float
+    raw_total_asset_qty: float
+    position_qty: float
+    submit_payload_qty: float
+    normalized_exposure_active: bool
+    normalized_exposure_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    sell_open_exposure_qty: float
+    sell_dust_tracking_qty: float
+    sell_submit_lot_count: int
+    sell_qty_basis_qty: float
+    sell_qty_boundary_kind: str
+    sell_normalized_exposure_qty: float
+    sell_failure_category: str
+    sell_failure_detail: str
+    block_reason: str
+    reason: str
+
+
+@dataclass
+class SellSuppressionSummary:
+    """Suppression report surface; qty snapshots document the event but do not grant authority."""
+
+    event_ts: int
+    strategy_name: str
+    signal: str
+    side: str
+    reason_code: str
+    suppression_category: str
+    sell_submit_lot_count: int
+    sell_qty_basis_qty: float | None
+    sell_qty_boundary_kind: str | None
+    requested_qty: float | None
+    normalized_qty: float | None
+    market_price: float | None
+    open_exposure_qty: float | None
+    dust_tracking_qty: float | None
+    sell_failure_detail: str | None
+    dust_state: str | None
+    dust_action: str | None
+    operator_action: str | None
+    summary: str | None
 
 
 @dataclass
@@ -463,9 +986,72 @@ def _fetch_recent_flow(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.
             oe.order_status,
             oe.side,
             oe.price,
-            oe.qty,
+            oe.qty AS order_events_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.order_qty'),
+                json_extract(oe.submit_evidence, '$.normalized_qty'),
+                oe.qty
+            ) AS submit_payload_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.normalized_qty'),
+                oe.qty
+            ) AS normalized_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.raw_total_asset_qty'),
+                json_extract(oe.submit_evidence, '$.raw_qty_open'),
+                0.0
+            ) AS raw_total_asset_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_position_qty'),
+                json_extract(oe.submit_evidence, '$.position_qty'),
+                oe.qty,
+                0.0
+            ) AS position_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_submit_payload_qty'),
+                json_extract(oe.submit_evidence, '$.submit_payload_qty'),
+                oe.qty,
+                0.0
+            ) AS submit_payload_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.open_exposure_qty'),
+                0.0
+            ) AS open_exposure_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.dust_tracking_qty'),
+                0.0
+            ) AS dust_tracking_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_open_exposure_qty'),
+                json_extract(oe.submit_evidence, '$.open_exposure_qty'),
+                0.0
+            ) AS sell_open_exposure_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_dust_tracking_qty'),
+                json_extract(oe.submit_evidence, '$.dust_tracking_qty'),
+                0.0
+            ) AS sell_dust_tracking_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.observed_sell_qty_basis_qty'),
+                json_extract(oe.submit_evidence, '$.sell_qty_basis_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_failure_detail'),
+                '-'
+            ) AS sell_failure_detail,
+            COALESCE(
+                json_extract(oe.submit_evidence, '$.sell_failure_category'),
+                json_extract(oe.submit_evidence, '$.decision_summary.sell_failure_category'),
+                '-'
+            ) AS sell_failure_category,
             oe.submission_reason_code,
             oe.message,
+            oe.submit_evidence,
             oid.strategy_context
         FROM order_events oe
         LEFT JOIN order_intent_dedup oid ON oid.client_order_id = oe.client_order_id
@@ -486,6 +1072,498 @@ def _fetch_recent_trade_ops(conn: sqlite3.Connection, *, limit: int) -> list[sql
         """,
         (int(limit),),
     ).fetchall()
+
+
+def _fetch_recent_sell_suppressions(conn: sqlite3.Connection, *, limit: int) -> list[SellSuppressionSummary]:
+    rows = conn.execute(
+        """
+        SELECT
+            event_ts,
+            strategy_name,
+            signal,
+            side,
+            reason_code,
+            COALESCE(
+                json_extract(context_json, '$.sell_failure_category'),
+                json_extract(context_json, '$.sell_failure_detail'),
+                '-'
+            ) AS sell_failure_category,
+            COALESCE(
+                CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.sellable_executable_lot_count') AS INTEGER),
+                0
+            ) AS sell_submit_lot_count,
+            COALESCE(
+                json_extract(context_json, '$.observed_sell_qty_basis_qty'),
+                json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            requested_qty,
+            normalized_qty,
+            market_price,
+            COALESCE(
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                0.0
+            ) AS open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.dust_tracking_qty'),
+                json_extract(context_json, '$.sell_dust_tracking_qty'),
+                0.0
+            ) AS dust_tracking_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_failure_detail'),
+                json_extract(context_json, '$.sell_failure_category'),
+                reason
+            ) AS sell_failure_detail,
+            COALESCE(
+                json_extract(context_json, '$.operator_action'),
+                json_extract(context_json, '$.dust_action'),
+                json_extract(context_json, '$.dust_operator_action'),
+                '-'
+            ) AS operator_action,
+            dust_state,
+            dust_action,
+            summary
+        FROM order_suppressions
+        WHERE side='SELL'
+        ORDER BY event_ts DESC, updated_ts DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    summaries: list[SellSuppressionSummary] = []
+    for row in rows:
+        summaries.append(
+            SellSuppressionSummary(
+                event_ts=int(row["event_ts"] or 0),
+                strategy_name=str(row["strategy_name"] or "<unknown>"),
+                signal=str(row["signal"] or "-"),
+                side=str(row["side"] or "SELL"),
+                reason_code=str(row["reason_code"] or "-"),
+                suppression_category=_sell_failure_category_from_observability(
+                    submission_reason_code=str(row["reason_code"] or ""),
+                    message=str(row["summary"] or ""),
+                    submit_evidence=None,
+                    dust_details={
+                        "sell_failure_category": row["sell_failure_category"],
+                        "sell_qty_boundary_kind": str(row["sell_qty_boundary_kind"] or ""),
+                        "sell_qty_basis_qty": row["sell_qty_basis_qty"],
+                        "sell_failure_detail": row["sell_failure_detail"],
+                        "reason_code": row["reason_code"],
+                        "summary": row["summary"],
+                    },
+                ),
+                sell_submit_lot_count=int(row["sell_submit_lot_count"] or 0),
+                sell_qty_basis_qty=(float(row["sell_qty_basis_qty"]) if row["sell_qty_basis_qty"] is not None else None),
+                sell_qty_boundary_kind=(str(row["sell_qty_boundary_kind"]) if row["sell_qty_boundary_kind"] is not None else None),
+                requested_qty=(float(row["requested_qty"]) if row["requested_qty"] is not None else None),
+                normalized_qty=(float(row["normalized_qty"]) if row["normalized_qty"] is not None else None),
+                market_price=(float(row["market_price"]) if row["market_price"] is not None else None),
+                open_exposure_qty=(float(row["open_exposure_qty"]) if row["open_exposure_qty"] is not None else None),
+                dust_tracking_qty=(float(row["dust_tracking_qty"]) if row["dust_tracking_qty"] is not None else None),
+                sell_failure_detail=str(row["sell_failure_detail"] or "-"),
+                operator_action=(str(row["operator_action"]) if row["operator_action"] is not None else None),
+                dust_state=(str(row["dust_state"]) if row["dust_state"] is not None else None),
+                dust_action=(str(row["dust_action"]) if row["dust_action"] is not None else None),
+                summary=(str(row["summary"]) if row["summary"] is not None else None),
+            )
+        )
+    return summaries
+
+
+def _derive_buy_flow_state(*, raw_signal: str, final_signal: str, entry_blocked: bool) -> str:
+    raw = str(raw_signal or "").strip().upper()
+    final = str(final_signal or "").strip().upper()
+    if raw == "BUY":
+        if final == "BUY":
+            return "BUY_BLOCKED" if entry_blocked else "BUY_SUBMIT"
+        if final == "HOLD":
+            return "BUY_BLOCKED" if entry_blocked else "BUY_NO_OP"
+        return f"BUY_{final or 'UNKNOWN'}"
+    if raw == "SELL":
+        if final == "SELL":
+            return "SELL_SUPPRESSED" if entry_blocked else "SELL_SUBMIT"
+        if final == "HOLD":
+            return "SELL_SUPPRESSED" if entry_blocked else "SELL_NO_OP"
+        return f"SELL_{final or 'UNKNOWN'}"
+    return final or "UNKNOWN"
+
+
+def _load_json_dict(raw_json: str | None) -> dict[str, object]:
+    if not raw_json:
+        return {}
+    try:
+        value = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _sell_failure_category_from_observability(
+    *,
+    submission_reason_code: str | None,
+    message: str | None,
+    submit_evidence: str | None,
+    dust_details: dict[str, object] | None = None,
+) -> str:
+    evidence = _load_json_dict(submit_evidence)
+    detail_text = " ".join(
+        part
+        for part in (
+            str(submission_reason_code or "").strip(),
+            str(message or "").strip(),
+            str(evidence.get("reason") or "").strip(),
+            str(evidence.get("summary") or "").strip(),
+            str(evidence.get("sell_failure_category") or "").strip(),
+            str(evidence.get("sell_failure_detail") or "").strip(),
+        )
+        if part
+    ).lower()
+    if str(submission_reason_code or "").strip() == RISKY_ORDER_BLOCK:
+        if "unresolved_risk_gate" in detail_text or "reason_detail_code=open_order_timeout" in detail_text:
+            return SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE
+        if "submission_halt" in detail_text or "runtime halted" in detail_text:
+            return SELL_FAILURE_CATEGORY_SUBMISSION_HALT
+    return classify_sell_failure_category(
+        reason_code=submission_reason_code,
+        reason=message,
+        error_summary=str(evidence.get("error_summary") or None) if evidence else None,
+        dust_details={
+            **evidence,
+            **(dust_details or {}),
+        },
+    )
+
+def fetch_recent_decision_flow(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[RecentDecisionFlowSummary]:
+    rows = conn.execute(
+        """
+        SELECT
+            id AS decision_id,
+            decision_ts,
+            strategy_name,
+            context_json,
+            COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
+            COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
+            COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
+            COALESCE(json_extract(context_json, '$.final_signal'), signal) AS final_signal,
+            COALESCE(
+                CAST(json_extract(context_json, '$.entry_blocked') AS INTEGER),
+                CASE
+                    WHEN COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) IN ('BUY', 'SELL')
+                     AND COALESCE(json_extract(context_json, '$.final_signal'), signal) != COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal)
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS entry_blocked,
+            COALESCE(
+                CAST(json_extract(context_json, '$.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.entry_allowed') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                0
+            ) AS entry_allowed,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.entry_block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.entry_reason'), ''),
+                NULLIF(json_extract(context_json, '$.reason'), ''),
+                reason
+            ) AS block_reason,
+            COALESCE(
+                json_extract(context_json, '$.dust_classification'),
+                json_extract(context_json, '$.position_gate.dust_classification'),
+                json_extract(context_json, '$.position_gate.dust_state'),
+                ''
+            ) AS dust_classification,
+            COALESCE(
+                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.effective_flat') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                0
+            ) AS effective_flat,
+            COALESCE(
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                json_extract(context_json, '$.position_state.raw_qty_open'),
+                json_extract(context_json, '$.raw_qty_open'),
+                json_extract(context_json, '$.position_gate.raw_qty_open'),
+                0.0
+            ) AS raw_qty_open,
+            COALESCE(
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_state.raw_total_asset_qty'),
+                json_extract(context_json, '$.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_gate.raw_total_asset_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.raw_qty_open'),
+                json_extract(context_json, '$.raw_qty_open'),
+                0.0
+            ) AS raw_total_asset_qty,
+            COALESCE(
+                json_extract(context_json, '$.observed_position_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                json_extract(context_json, '$.position_qty'),
+                0.0
+            ) AS position_qty,
+            COALESCE(
+                json_extract(context_json, '$.observed_submit_payload_qty'),
+                json_extract(context_json, '$.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.submit_payload_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                0.0
+            ) AS submit_payload_qty,
+            COALESCE(
+                CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                        0.0
+                    ) > 0
+                    AND COALESCE(
+                        CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                        0
+                    ) = 0
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS normalized_exposure_active,
+            COALESCE(
+                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                CASE
+                    WHEN COALESCE(
+                        CAST(json_extract(context_json, '$.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_state.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_active') AS INTEGER),
+                        CAST(json_extract(context_json, '$.position_gate.normalized_exposure_active') AS INTEGER),
+                        CASE
+                            WHEN COALESCE(
+                                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                                json_extract(context_json, '$.open_exposure_qty'),
+                                json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                                json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                                0.0
+                            ) > 0
+                            AND COALESCE(
+                                CAST(json_extract(context_json, '$.effective_flat') AS INTEGER),
+                                CAST(json_extract(context_json, '$.position_gate.effective_flat_due_to_harmless_dust') AS INTEGER),
+                                0
+                            ) = 0
+                            THEN 1
+                            ELSE 0
+                        END
+                    ) = 1
+                    THEN COALESCE(
+                        json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.open_exposure_qty'),
+                        json_extract(context_json, '$.open_exposure_qty'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.position_qty'),
+                        json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                        0.0
+                    )
+                    ELSE 0.0
+                END
+            ) AS normalized_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.position_state.normalized_exposure.open_exposure_qty'),
+                json_extract(context_json, '$.position_state.open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.position_gate.open_exposure_qty'),
+                0.0
+            ) AS open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.position_state.normalized_exposure.dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
+                json_extract(context_json, '$.position_gate.dust_tracking_qty'),
+                0.0
+            ) AS dust_tracking_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_open_exposure_qty'),
+                json_extract(context_json, '$.position_state.sell_open_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_open_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                0.0
+            ) AS sell_open_exposure_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_dust_tracking_qty'),
+                json_extract(context_json, '$.dust_tracking_qty'),
+                0.0
+            ) AS sell_dust_tracking_qty,
+            COALESCE(
+                json_extract(context_json, '$.observed_sell_qty_basis_qty'),
+                json_extract(context_json, '$.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.sell_qty_basis_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_basis_qty'),
+                0.0
+            ) AS sell_qty_basis_qty,
+            COALESCE(
+                json_extract(context_json, '$.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind'),
+                'none'
+            ) AS sell_qty_boundary_kind,
+            COALESCE(
+                CAST(json_extract(context_json, '$.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.sell_submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_state.normalized_exposure.submit_lot_count') AS INTEGER),
+                CAST(json_extract(context_json, '$.position_gate.submit_lot_count') AS INTEGER),
+                0
+            ) AS sell_submit_lot_count,
+            COALESCE(
+                json_extract(context_json, '$.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.sell_normalized_exposure_qty'),
+                json_extract(context_json, '$.position_state.normalized_exposure.normalized_exposure_qty'),
+                json_extract(context_json, '$.position_gate.normalized_exposure_qty'),
+                json_extract(context_json, '$.open_exposure_qty'),
+                json_extract(context_json, '$.normalized_exposure_qty'),
+                0.0
+            ) AS sell_normalized_exposure_qty,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_category,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.decision_summary.sell_failure_detail'), 'none'),
+                NULLIF(json_extract(context_json, '$.sell_failure_category'), 'none'),
+                CASE
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'remainder_after_sell' THEN 'remainder_dust_guard'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'min_qty' THEN 'boundary_below_min'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'qty_step' THEN 'qty_step_mismatch'
+                    WHEN COALESCE(
+                        json_extract(context_json, '$.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.sell_qty_boundary_kind'),
+                        json_extract(context_json, '$.position_state.normalized_exposure.sell_qty_boundary_kind')
+                    ) = 'dust_mismatch' THEN 'unsafe_dust_mismatch_dust'
+                    ELSE NULL
+                END,
+                'none'
+            ) AS sell_failure_detail
+        FROM (
+            SELECT *
+            FROM strategy_decisions
+            ORDER BY decision_ts DESC, id DESC
+            LIMIT ?
+        ) recent
+        ORDER BY decision_ts DESC, decision_id DESC
+        """,
+        (int(max(1, limit)),),
+    ).fetchall()
+    summaries: list[RecentDecisionFlowSummary] = []
+    for row in rows:
+        context = _load_json_dict(str(row["context_json"] or ""))
+        exposure = resolve_canonical_position_exposure_snapshot(context)
+        summaries.append(
+            RecentDecisionFlowSummary(
+                decision_id=int(row["decision_id"]),
+                decision_ts=int(row["decision_ts"] or 0),
+                strategy_name=str(row["strategy_name"]),
+                decision_type=str(row["decision_type"]),
+                base_signal=str(row["base_signal"]),
+                raw_signal=str(row["raw_signal"]),
+                final_signal=str(row["final_signal"]),
+                buy_flow_state=_derive_buy_flow_state(
+                    raw_signal=str(row["raw_signal"]),
+                    final_signal=str(row["final_signal"]),
+                    entry_blocked=bool(row["entry_blocked"]),
+                ),
+                entry_blocked=bool(row["entry_blocked"]),
+                entry_allowed=bool(row["entry_allowed"]),
+                effective_flat=bool(row["effective_flat"]),
+                raw_qty_open=float(exposure.raw_qty_open),
+                raw_total_asset_qty=float(exposure.raw_total_asset_qty),
+                position_qty=float(exposure.position_qty),
+                submit_payload_qty=float(exposure.submit_payload_qty),
+                normalized_exposure_active=bool(exposure.normalized_exposure_active),
+                normalized_exposure_qty=float(exposure.normalized_exposure_qty),
+                open_exposure_qty=float(exposure.open_exposure_qty),
+                dust_tracking_qty=float(exposure.dust_tracking_qty),
+                sell_open_exposure_qty=float(exposure.sell_open_exposure_qty),
+                sell_dust_tracking_qty=float(exposure.sell_dust_tracking_qty),
+                sell_qty_basis_qty=float(exposure.sell_qty_basis_qty),
+                sell_qty_boundary_kind=str(exposure.sell_qty_boundary_kind),
+                sell_submit_lot_count=int(exposure.sell_submit_lot_count),
+                sell_normalized_exposure_qty=float(exposure.sell_normalized_exposure_qty),
+                sell_failure_category=str(row["sell_failure_category"]),
+                sell_failure_detail=str(row["sell_failure_detail"]),
+                block_reason=str(row["block_reason"]),
+                reason=str(row["block_reason"]),
+            )
+        )
+    return summaries
 
 
 def _fetch_recent_fills_with_side(conn: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
@@ -526,39 +1604,154 @@ def fetch_decision_telemetry_summary(
 ) -> list[DecisionTelemetrySummary]:
     rows = conn.execute(
         """
-        SELECT
-            COALESCE(json_extract(context_json, '$.decision_type'), signal) AS decision_type,
-            COALESCE(json_extract(context_json, '$.strategy_name'), strategy_name, '<unknown>') AS strategy_name,
-            COALESCE(json_extract(context_json, '$.pair'), '<unknown>') AS pair,
-            COALESCE(json_extract(context_json, '$.interval'), '<unknown>') AS interval,
-            COALESCE(
-                json_extract(context_json, '$.block_reason'),
-                json_extract(context_json, '$.entry_reason'),
-                reason
-            ) AS block_reason,
-            COUNT(*) AS decision_count
-        FROM (
-            SELECT *
-            FROM strategy_decisions
-            ORDER BY decision_ts DESC, id DESC
-            LIMIT ?
-        ) recent
-        GROUP BY decision_type, strategy_name, pair, interval, block_reason
-        ORDER BY decision_count DESC, decision_type ASC, strategy_name ASC, pair ASC, interval ASC
+        SELECT signal, reason, strategy_name, context_json
+        FROM strategy_decisions
+        ORDER BY decision_ts DESC, id DESC
+        LIMIT ?
         """,
         (int(max(1, limit)),),
     ).fetchall()
-    return [
-        DecisionTelemetrySummary(
-            decision_type=str(row["decision_type"]),
-            strategy_name=str(row["strategy_name"]),
-            pair=str(row["pair"]),
-            interval=str(row["interval"]),
-            block_reason=str(row["block_reason"]),
-            count=int(row["decision_count"] or 0),
+
+    def _derived_sell_failure(kind: str) -> str | None:
+        if kind == "remainder_after_sell":
+            return SELL_FAILURE_CATEGORY_REMAINDER_DUST_GUARD
+        if kind == "min_qty":
+            return SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN
+        if kind == "qty_step":
+            return SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH
+        if kind == "dust_mismatch":
+            return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
+        return None
+
+    grouped: dict[tuple[object, ...], int] = {}
+    for row in rows:
+        try:
+            context = json.loads(str(row["context_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+
+        exposure = resolve_canonical_position_exposure_snapshot(context)
+        base_signal = str(context.get("base_signal") or context.get("raw_signal") or row["signal"])
+        decision_type = str(context.get("decision_type") or row["signal"])
+        raw_signal = str(context.get("raw_signal") or context.get("base_signal") or row["signal"])
+        final_signal = str(context.get("final_signal") or row["signal"])
+        entry_blocked = bool(
+            context.get("entry_blocked")
+            if "entry_blocked" in context
+            else raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
         )
-        for row in rows
+        block_reason = str(
+            context.get("entry_block_reason")
+            or context.get("block_reason")
+            or context.get("entry_reason")
+            or context.get("reason")
+            or row["reason"]
+        )
+        strategy_name = str(context.get("strategy_name") or row["strategy_name"] or "<unknown>")
+        pair = str(context.get("pair") or "<unknown>")
+        interval = str(context.get("interval") or "<unknown>")
+        sell_failure_category = str(
+            context.get("sell_failure_category")
+            or context.get("decision_summary", {}).get("sell_failure_category")
+            or _derived_sell_failure(exposure.sell_qty_boundary_kind)
+            or "none"
+        )
+        sell_failure_detail = str(
+            context.get("sell_failure_detail")
+            or context.get("decision_summary", {}).get("sell_failure_detail")
+            or (
+                sell_failure_category
+                if sell_failure_category != "none"
+                else _derived_sell_failure(exposure.sell_qty_boundary_kind) or "none"
+            )
+        )
+
+        key = (
+            base_signal,
+            decision_type,
+            raw_signal,
+            final_signal,
+            entry_blocked,
+            exposure.entry_allowed,
+            strategy_name,
+            pair,
+            interval,
+            block_reason,
+            exposure.dust_classification,
+            exposure.effective_flat,
+            exposure.raw_qty_open,
+            exposure.raw_total_asset_qty,
+            exposure.position_qty,
+            exposure.submit_payload_qty,
+            exposure.normalized_exposure_active,
+            exposure.normalized_exposure_qty,
+            exposure.open_exposure_qty,
+            exposure.dust_tracking_qty,
+            exposure.sell_open_exposure_qty,
+            exposure.sell_dust_tracking_qty,
+            exposure.sell_qty_basis_qty,
+            exposure.sell_qty_boundary_kind,
+            sell_failure_category,
+            sell_failure_detail,
+            exposure.sell_submit_lot_count,
+            exposure.sell_normalized_exposure_qty,
+        )
+        grouped[key] = grouped.get(key, 0) + 1
+
+    summaries = [
+        DecisionTelemetrySummary(
+            base_signal=str(key[0]),
+            decision_type=str(key[1]),
+            raw_signal=str(key[2]),
+            final_signal=str(key[3]),
+            buy_flow_state=_derive_buy_flow_state(
+                raw_signal=str(key[2]),
+                final_signal=str(key[3]),
+                entry_blocked=bool(key[4]),
+            ),
+            entry_blocked=bool(key[4]),
+            entry_allowed=bool(key[5]),
+            block_reason=str(key[9]),
+            dust_classification=str(key[10]),
+            effective_flat=bool(key[11]),
+            raw_qty_open=float(key[12]),
+            raw_total_asset_qty=float(key[13]),
+            position_qty=float(key[14]),
+            submit_payload_qty=float(key[15]),
+            normalized_exposure_active=bool(key[16]),
+            normalized_exposure_qty=float(key[17]),
+            open_exposure_qty=float(key[18]),
+            dust_tracking_qty=float(key[19]),
+            sell_open_exposure_qty=float(key[20]),
+            sell_dust_tracking_qty=float(key[21]),
+            sell_qty_basis_qty=float(key[22]),
+            sell_qty_boundary_kind=str(key[23]),
+            sell_submit_lot_count=int(key[26]),
+            sell_normalized_exposure_qty=float(key[27]),
+            sell_failure_category=str(key[24]),
+            sell_failure_detail=str(key[25]),
+            strategy_name=str(key[6]),
+            pair=str(key[7]),
+            interval=str(key[8]),
+            count=count,
+        )
+        for key, count in grouped.items()
     ]
+    summaries.sort(
+        key=lambda item: (
+            -item.count,
+            item.decision_type,
+            item.base_signal,
+            item.raw_signal,
+            item.final_signal,
+            item.strategy_name,
+            item.pair,
+            item.interval,
+        )
+    )
+    return summaries
 
 
 def _extract_blocked_filters(context_json: str | None) -> list[str]:
@@ -1476,7 +2669,7 @@ def cmd_strategy_report(
         except RuntimeError as exc:
             print("[STRATEGY-PERFORMANCE-REPORT]")
             print(f"  schema_error={exc}")
-            print("  tip: 최신 스키마로 마이그레이션하거나 최신 DB를 사용하세요.")
+            print("  tip: ?????됰Ŧ???????????????????????뀀??????곌퇈猷??????????????쇰뮛?????산뭣???????됰Ŧ???????????????????????????????轅붽틓?????????????μ떜媛?걫?疫뀀툙????????????????됰Ŧ???????????DB???????????븐뼐??????????????ㅼ굣????")
             return
     finally:
         conn.close()
@@ -1611,7 +2804,7 @@ def cmd_strategy_report(
 
     if not stats:
         print("  no matched trade_lifecycles rows")
-        print("  tip: 실행 구간/전략명/청산 규칙 필터를 완화하거나 lifecycle 데이터 생성 여부를 확인하세요.")
+        print("  tip: ???????? ??????????????ш끽維뽳쭩?뱀땡???얩맪????????????????????????????????????????????????????????lifecycle ????????????????獄쏅챶留덌┼?????????????????釉먮폁????????????????븐뼐??????????????ㅼ굣????")
     else:
         print(
             "  "
@@ -2043,7 +3236,7 @@ def cmd_experiment_report(
             "top_n": summary.top_n,
         },
         "operational_stability_boundary": {
-            "note": "ops-report/health/recovery 지표와 분리된 실험용 expectancy 검증 리포트입니다."
+            "note": "ops-report/health/recovery ?????됰Ŧ?????????? ??????????????????????????깅♥???expectancy ????留⑶뜮????????????????ル탛????耀붿빓??????????釉먮폁???????????????щⅨ????????????쇨덫櫻?"
         },
         "experiment_expectancy_metrics": {
             "realized_net_pnl": summary.realized_net_pnl,
@@ -2190,10 +3383,13 @@ def cmd_experiment_report(
 
 def cmd_ops_report(*, limit: int = 20) -> None:
     market, raw_symbol = canonical_market_with_raw(settings.PAIR)
+    reserved_exit_qty = 0.0
     conn = ensure_db()
     try:
         strategy_stats = _fetch_strategy_stats(conn)
         recent_flow = _fetch_recent_flow(conn, limit=max(1, int(limit)))
+        recent_sell_suppressions = _fetch_recent_sell_suppressions(conn, limit=max(1, int(limit)))
+        recent_decision_flow = fetch_recent_decision_flow(conn, limit=max(1, int(limit)))
         recent_trades = _fetch_recent_trade_ops(conn, limit=max(1, int(limit)))
         fee_summary = fetch_fee_diagnostics(
             conn,
@@ -2202,8 +3398,32 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             estimated_fee_rate=float(settings.FEE_RATE),
         )
         recovery_attribution_signals = fetch_recovery_attribution_signal_summary(conn)
+        recent_external_cash_adjustment = get_external_cash_adjustment_summary(conn)
+        health_row = conn.execute(
+            """
+            SELECT
+                unresolved_open_order_count,
+                oldest_unresolved_order_age_sec,
+                recovery_required_count,
+                last_reconcile_epoch_sec,
+                last_reconcile_status,
+                last_reconcile_reason_code,
+                last_reconcile_metadata,
+                last_disable_reason,
+                halt_reason_code,
+                halt_state_unresolved
+            FROM bot_health
+            WHERE id=1
+            """
+        ).fetchone()
+        portfolio_row = conn.execute(
+            "SELECT asset_qty FROM portfolio WHERE id=1"
+        ).fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
     finally:
         conn.close()
+
+    run_lock_status = read_run_lock_status(Path(settings.RUN_LOCK_PATH))
 
     order_rule_snapshot: dict[str, object]
     try:
@@ -2266,6 +3486,61 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             for stat in strategy_stats
         ],
         "recent_flow": [dict(row) for row in recent_flow],
+        "recent_sell_suppressions": [
+            {
+                "event_ts": row.event_ts,
+                "strategy_name": row.strategy_name,
+                "signal": row.signal,
+                "side": row.side,
+                "reason_code": row.reason_code,
+                "suppression_category": row.suppression_category,
+                "requested_qty": row.requested_qty,
+                "normalized_qty": row.normalized_qty,
+                "market_price": row.market_price,
+                "observed_sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
+                "sell_submit_lot_count": row.sell_submit_lot_count,
+                "dust_state": row.dust_state,
+                "dust_action": row.dust_action,
+                "operator_action": row.operator_action,
+                "summary": row.summary,
+            }
+            for row in recent_sell_suppressions
+        ],
+        "recent_decision_flow": [
+            {
+                "decision_id": row.decision_id,
+                "decision_ts": row.decision_ts,
+                "strategy_name": row.strategy_name,
+                "decision_type": row.decision_type,
+                "base_signal": row.base_signal,
+                "raw_signal": row.raw_signal,
+                "final_signal": row.final_signal,
+                "buy_flow_state": row.buy_flow_state,
+                "entry_blocked": row.entry_blocked,
+                "entry_allowed": row.entry_allowed,
+                "effective_flat": row.effective_flat,
+                "raw_qty_open": row.raw_qty_open,
+                "raw_total_asset_qty": row.raw_total_asset_qty,
+                "observed_position_qty": row.position_qty,
+                "position_qty": row.position_qty,
+                "observed_submit_payload_qty": row.submit_payload_qty,
+                "submit_payload_qty": row.submit_payload_qty,
+                "normalized_exposure_active": row.normalized_exposure_active,
+                "normalized_exposure_qty": row.normalized_exposure_qty,
+                "open_exposure_qty": row.open_exposure_qty,
+                "dust_tracking_qty": row.dust_tracking_qty,
+                "sell_open_exposure_qty": row.sell_open_exposure_qty,
+                "sell_dust_tracking_qty": row.sell_dust_tracking_qty,
+                "observed_sell_qty_basis_qty": row.sell_qty_basis_qty,
+                "sell_qty_boundary_kind": row.sell_qty_boundary_kind,
+                "sell_submit_lot_count": row.sell_submit_lot_count,
+                "sell_normalized_exposure_qty": row.sell_normalized_exposure_qty,
+                "block_reason": row.block_reason,
+                "reason": row.reason,
+            }
+            for row in recent_decision_flow
+        ],
         "recent_trades": [dict(row) for row in recent_trades],
         "order_rule_snapshot": order_rule_snapshot,
         "fee_diagnostics_snapshot": {
@@ -2290,7 +3565,86 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             ),
             "last_reconcile_epoch_sec": recovery_attribution_signals.last_reconcile_epoch_sec,
         },
+        "recent_external_cash_adjustment": recent_external_cash_adjustment,
+        "runtime_state_snapshot": {
+            "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
+            "oldest_unresolved_order_age_sec": (
+                float(health_row["oldest_unresolved_order_age_sec"]) if health_row and health_row["oldest_unresolved_order_age_sec"] is not None else None
+            ),
+            "recovery_required_present": bool(int(health_row["recovery_required_count"] or 0)) if health_row else False,
+            "last_reconcile_epoch_sec": (
+                float(health_row["last_reconcile_epoch_sec"]) if health_row and health_row["last_reconcile_epoch_sec"] is not None else None
+            ),
+            "last_reconcile_status": (str(health_row["last_reconcile_status"]) if health_row and health_row["last_reconcile_status"] is not None else None),
+            "last_reconcile_reason_code": (str(health_row["last_reconcile_reason_code"]) if health_row and health_row["last_reconcile_reason_code"] is not None else None),
+            "last_disable_reason": (str(health_row["last_disable_reason"]) if health_row and health_row["last_disable_reason"] is not None else None),
+            "halt_reason_code": (str(health_row["halt_reason_code"]) if health_row and health_row["halt_reason_code"] is not None else None),
+            "halt_state_unresolved": bool(int(health_row["halt_state_unresolved"])) if health_row else False,
+        },
+        "run_lock": run_lock_status.as_dict(),
     }
+    reconcile_metadata_raw = health_row["last_reconcile_metadata"] if health_row else None
+    dust_context = build_dust_display_context(reconcile_metadata_raw)
+    position_metadata_raw: str | dict[str, object] | None = reconcile_metadata_raw
+    if isinstance(reconcile_metadata_raw, str):
+        try:
+            parsed_metadata = json.loads(reconcile_metadata_raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed_metadata = None
+        if isinstance(parsed_metadata, dict):
+            position_metadata_raw = parsed_metadata
+    if isinstance(position_metadata_raw, dict):
+        position_metadata_raw = {
+            **position_metadata_raw,
+            "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
+            "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
+        }
+    portfolio_asset_qty = float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0
+    position_state = build_position_state_model(
+        raw_qty_open=portfolio_asset_qty,
+        metadata_raw=position_metadata_raw,
+        raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
+        dust_tracking_qty=(
+            float(dust_context.raw_holdings.local_qty)
+            if bool(dust_context.classification.present)
+            else 0.0
+        ),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    dust_view = position_state.operator_diagnostics
+    payload["operator_recovery_summary"] = {
+        "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
+        "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
+        "position_authority_summary": position_state.normalized_exposure.position_authority_summary,
+        **dust_context.fields,
+        "raw_holdings": position_state.raw_holdings.as_dict(),
+        "normalized_exposure": position_state.normalized_exposure.as_dict(),
+        "state_interpretation": position_state.state_interpretation.as_dict(),
+        "operator_diagnostics": {
+            "state": position_state.operator_diagnostics.state,
+            "state_label": position_state.operator_diagnostics.state_label,
+            "operator_action": position_state.operator_diagnostics.operator_action,
+            "operator_message": position_state.operator_diagnostics.operator_message,
+            "broker_local_match": bool(position_state.operator_diagnostics.broker_local_match),
+            "new_orders_allowed": bool(position_state.operator_diagnostics.new_orders_allowed),
+            "resume_allowed": bool(position_state.operator_diagnostics.resume_allowed),
+            "treat_as_flat": bool(position_state.operator_diagnostics.treat_as_flat),
+        },
+    }
+    payload.update(
+        {
+            "raw_total_asset_qty": float(position_state.normalized_exposure.raw_total_asset_qty),
+            "open_exposure_qty": float(position_state.normalized_exposure.open_exposure_qty),
+            "dust_tracking_qty": float(position_state.normalized_exposure.dust_tracking_qty),
+            "open_lot_count": int(position_state.normalized_exposure.open_lot_count),
+            "dust_tracking_lot_count": int(position_state.normalized_exposure.dust_tracking_lot_count),
+            "reserved_exit_lot_count": int(position_state.normalized_exposure.reserved_exit_lot_count),
+            "sellable_executable_lot_count": int(position_state.normalized_exposure.sellable_executable_lot_count),
+            "sellable_executable_qty": float(position_state.normalized_exposure.sellable_executable_qty),
+            "terminal_state": str(position_state.normalized_exposure.terminal_state),
+            "exit_block_reason": str(position_state.normalized_exposure.exit_block_reason),
+        }
+    )
     balance_source_diag: dict[str, object] = {
         "source": "unavailable",
         "reason": "not_checked",
@@ -2311,6 +3665,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             balance_source_diag.update(raw_diag)
     except Exception as exc:
         balance_source_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
+    if dust_view.resume_allowed and dust_view.treat_as_flat:
+        balance_source_diag["flat_start_allowed"] = True
+    balance_source_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
+        balance_source_diag.get("flat_start_reason"),
+        dust_context,
+    )
     payload["balance_source_diagnostics"] = balance_source_diag
     write_json_atomic(PATH_MANAGER.ops_report_path(), payload)
 
@@ -2318,6 +3678,58 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     raw_symbol_info = f" raw_symbol={raw_symbol}" if raw_symbol else ""
     print(
         f"  mode={settings.MODE} market={market}{raw_symbol_info} interval={settings.INTERVAL} db_path={settings.DB_PATH}"
+    )
+    operator_recovery = payload["operator_recovery_summary"]
+    print(
+        "  "
+        f"unresolved_open_order_count={operator_recovery['unresolved_open_order_count']} "
+        f"recovery_required_count={operator_recovery['recovery_required_count']} "
+        f"dust_state={operator_recovery['dust_state']} "
+        f"dust_action={operator_recovery['dust_operator_action']} "
+        f"dust_new_orders_allowed={1 if operator_recovery['dust_new_orders_allowed'] else 0} "
+        f"dust_resume_allowed={1 if operator_recovery['dust_resume_allowed_by_policy'] else 0} "
+        f"dust_treat_as_flat={1 if operator_recovery['dust_treat_as_flat'] else 0}"
+    )
+    print(f"  position_authority_summary={operator_recovery['position_authority_summary']}")
+    print(
+        "  "
+        f"raw_holdings_state={position_state.raw_holdings.state} "
+        f"raw_holdings_match={1 if position_state.raw_holdings.broker_local_match else 0} "
+        f"entry_allowed={1 if position_state.normalized_exposure.entry_allowed else 0} "
+        f"entry_block_reason={position_state.normalized_exposure.entry_block_reason} "
+        f"exit_allowed={1 if position_state.normalized_exposure.exit_allowed else 0} "
+        f"exit_block_reason={position_state.normalized_exposure.exit_block_reason} "
+        f"normalized_exposure_active={1 if position_state.normalized_exposure.normalized_exposure_active else 0} "
+        f"has_executable_exposure={1 if position_state.normalized_exposure.has_executable_exposure else 0} "
+        f"has_dust_only_remainder={1 if position_state.normalized_exposure.has_dust_only_remainder else 0} "
+        f"normalized_exposure_qty={position_state.normalized_exposure.normalized_exposure_qty:.8f}"
+    )
+    print(
+        "  "
+        f"total_holdings_qty={float(position_state.normalized_exposure.raw_total_asset_qty):.8f} "
+        f"executable_exposure_qty={float(position_state.normalized_exposure.open_exposure_qty):.8f} "
+        f"tracked_dust_qty={float(position_state.normalized_exposure.dust_tracking_qty):.8f} "
+        f"reserved_exit_qty={float(position_state.normalized_exposure.reserved_exit_qty):.8f} "
+        f"sellable_executable_qty={float(position_state.normalized_exposure.sellable_executable_qty):.8f} "
+        f"terminal_state={position_state.normalized_exposure.terminal_state}"
+    )
+    print(
+        "  "
+        f"state_outcome={position_state.state_interpretation.operator_outcome} "
+        f"exit_submit_expected={1 if position_state.state_interpretation.exit_submit_expected else 0} "
+        f"state_message={position_state.state_interpretation.operator_message}"
+    )
+    print(
+        "  "
+        f"dust_broker_qty={float(position_state.raw_holdings.broker_qty):.8f} "
+        f"dust_local_qty={float(position_state.raw_holdings.local_qty):.8f} "
+        f"dust_delta_qty={float(position_state.raw_holdings.delta_qty):.8f} "
+        f"dust_min_qty={float(position_state.raw_holdings.min_qty):.8f} "
+        f"dust_min_notional_krw={float(position_state.raw_holdings.min_notional_krw):.1f} "
+        f"dust_broker_local_match={1 if position_state.raw_holdings.broker_local_match else 0} "
+        f"dust_threshold_basis={dust_context.fields['dust_threshold_basis']} "
+        f"dust_qty_below_min={dust_context.qty_below_min_summary} "
+        f"dust_notional_below_min={dust_context.notional_below_min_summary}"
     )
     print(
         "  "
@@ -2330,16 +3742,36 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"base_currency={balance_source_diag.get('base_currency') or '-'} "
         f"base_missing_policy={balance_source_diag.get('base_currency_missing_policy') or '-'} "
         f"preflight_outcome={balance_source_diag.get('preflight_outcome') or '-'} "
-        f"flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
-        f"flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
+        f"accounts_flat_start_allowed={balance_source_diag.get('flat_start_allowed')} "
+        f"accounts_flat_start_reason={balance_source_diag.get('flat_start_reason') or '-'}"
+    )
+    print(
+        "  recent_external_cash_adjustment="
+        f"{_format_external_cash_adjustment_summary(recent_external_cash_adjustment)}"
     )
     print(
         "  "
+        f"operator_action={position_state.operator_diagnostics.operator_action} "
+        f"resume_allowed={1 if position_state.operator_diagnostics.resume_allowed else 0} "
+        f"treat_as_flat={1 if position_state.operator_diagnostics.treat_as_flat else 0} "
         f"unresolved_attribution_count={recovery_attribution_signals.unresolved_attribution_count} "
         f"recent_recovery_derived_trade_count={recovery_attribution_signals.recent_recovery_derived_trade_count} "
         "ambiguous_linkage_after_recent_reconcile="
         f"{recovery_attribution_signals.ambiguous_linkage_after_recent_reconcile}"
     )
+    runtime_state_snapshot = payload.get("runtime_state_snapshot") or {}
+    print(
+        "  "
+        f"runtime_state_snapshot=recovery_required_present={1 if runtime_state_snapshot.get('recovery_required_present') else 0} "
+        f"unresolved_open_order_count={runtime_state_snapshot.get('unresolved_open_order_count', 0)} "
+        f"oldest_unresolved_order_age_sec={runtime_state_snapshot.get('oldest_unresolved_order_age_sec') or '-'} "
+        f"last_reconcile_epoch_sec={runtime_state_snapshot.get('last_reconcile_epoch_sec') or '-'} "
+        f"last_disable_reason={runtime_state_snapshot.get('last_disable_reason') or '-'} "
+        f"halt_reason_code={runtime_state_snapshot.get('halt_reason_code') or '-'} "
+        f"halt_state_unresolved={1 if runtime_state_snapshot.get('halt_state_unresolved') else 0}"
+    )
+    run_lock = payload.get("run_lock") or {}
+    print(f"  run_lock={run_lock.get('human_text') or '-'}")
     print("\n[ORDER-RULE-SNAPSHOT]")
     if "error" in order_rule_snapshot:
         print(f"  failed_to_load={order_rule_snapshot['error']}")
@@ -2362,7 +3794,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     print("\n[STRATEGY-SUMMARY]")
     if not strategy_stats:
         print("  no strategy_context rows in order_intent_dedup")
-        print("  tip: strategy_context 기반 집계는 주문 intent dedup 데이터가 있어야 계산됩니다.")
+        print("  tip: strategy_context ????????????????????됰Ŧ?????????棺堉?뤃?????????????袁⑸즴筌????遺얘턁?????????ㅼ굡獒??intent dedup ?????????? ??????????????????????????????븐뼐?????????")
     else:
         print("  strategy_context,order_count,fill_count,buy_notional,sell_notional,fee_total,pnl_proxy_deprecated")
         for stat in strategy_stats:
@@ -2380,14 +3812,121 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             ts = kst_str(int(row["event_ts"]))
             strategy_context = str(row["strategy_context"] or "<unknown>")
             message = str(row["message"] or "")
+            submit_evidence = str(row["submit_evidence"] or "")
+            evidence_payload = _load_json_dict(submit_evidence)
+            decision_summary_payload = (
+                evidence_payload.get("decision_summary")
+                if isinstance(evidence_payload.get("decision_summary"), dict)
+                else {}
+            )
+            sell_failure_category = _sell_failure_category_from_observability(
+                submission_reason_code=str(row["submission_reason_code"] or ""),
+                message=message,
+                submit_evidence=submit_evidence,
+            )
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(evidence_payload.get("sell_failure_category") or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(decision_summary_payload.get("sell_failure_category") or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = str(row["sell_failure_category"] or "").strip()
+            if not sell_failure_category or sell_failure_category in {"-", "none", "null", "unknown"}:
+                sell_failure_category = "unknown"
+            sell_failure_detail = str(evidence_payload.get("sell_failure_detail") or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = str(decision_summary_payload.get("sell_failure_detail") or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = str(row["sell_failure_detail"] or "").strip()
+            if not sell_failure_detail or sell_failure_detail in {"-", "none", "null", "unknown"}:
+                sell_failure_detail = sell_failure_category
+            operator_action = str(
+                evidence_payload.get("operator_action")
+                or evidence_payload.get("dust_action")
+                or evidence_payload.get("dust_operator_action")
+                or "-"
+            )
+            sell_normalized_exposure_qty = float(
+                evidence_payload.get("sell_normalized_exposure_qty")
+                or evidence_payload.get("normalized_qty")
+                or row["normalized_qty"]
+                or 0.0
+            )
             if len(message) > 80:
                 message = f"{message[:77]}..."
             print(
                 "  "
                 f"{ts} strategy={strategy_context} cid={row['client_order_id']} "
                 f"event={row['event_type']} status={row['order_status'] or '-'} side={row['side'] or '-'} "
-                f"qty={_fmt_float(float(row['qty'] or 0.0), 8)} price={_fmt_float(float(row['price'] or 0.0), 0)} "
+                f"observed_position_qty={_fmt_float(float(row['position_qty'] or 0.0), 8)} "
+                f"observed_submit_payload_qty={_fmt_float(float(row['submit_payload_qty'] or 0.0), 8)} "
+                f"order_events_qty={_fmt_float(float(row['order_events_qty'] or 0.0), 8)} "
+                f"normalized_qty={_fmt_float(float(row['normalized_qty'] or 0.0), 8)} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row['sell_qty_basis_qty'] or 0.0), 8)} "
+                f"sell_qty_boundary_kind={row['sell_qty_boundary_kind'] or '-'} "
+                f"sell_failure_category={sell_failure_category} "
+                f"sell_failure_detail={sell_failure_detail} "
+                f"operator_action={operator_action} "
+                f"sell_normalized_exposure_qty={_fmt_float(float(sell_normalized_exposure_qty), 8)} "
+                f"raw_total_asset_qty={_fmt_float(float(row['raw_total_asset_qty'] or 0.0), 8)} "
+                f"open_exposure_qty={_fmt_float(float(row['open_exposure_qty'] or 0.0), 8)} "
+                f"dust_tracking_qty={_fmt_float(float(row['dust_tracking_qty'] or 0.0), 8)} "
+                f"sell_open_exposure_qty={_fmt_float(float(row['sell_open_exposure_qty'] or 0.0), 8)} "
+                f"sell_dust_tracking_qty={_fmt_float(float(row['sell_dust_tracking_qty'] or 0.0), 8)} "
+                f"price={_fmt_float(float(row['price'] or 0.0), 0)} "
                 f"reason={row['submission_reason_code'] or '-'} note={message or '-'}"
+            )
+
+    print("\n[RECENT-SELL-SUPPRESSIONS]")
+    if not recent_sell_suppressions:
+        print("  no order_suppressions rows")
+    else:
+        for row in reversed(recent_sell_suppressions):
+            print(
+                "  "
+                f"{kst_str(int(row.event_ts))} strategy={row.strategy_name} signal={row.signal} side={row.side} "
+                f"reason={row.reason_code} sell_failure_category={row.suppression_category} "
+                f"sell_failure_detail={row.sell_failure_detail or '-'} "
+                f"sell_submit_lot_count={row.sell_submit_lot_count} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty or 0.0), 8)} "
+                f"sell_qty_boundary_kind={row.sell_qty_boundary_kind or '-'} "
+                f"requested_qty={_fmt_float(float(row.requested_qty or 0.0), 8)} "
+                f"normalized_qty={_fmt_float(float(row.normalized_qty or 0.0), 8)} "
+                f"open_exposure_qty={_fmt_float(float(row.open_exposure_qty or 0.0), 8)} "
+                f"dust_tracking_qty={_fmt_float(float(row.dust_tracking_qty or 0.0), 8)} "
+                f"market_price={_fmt_float(float(row.market_price or 0.0), 0)} "
+                f"dust_state={row.dust_state or '-'} dust_action={row.dust_action or '-'} "
+                f"operator_action={row.operator_action or '-'} "
+                f"summary={row.summary or '-'}"
+            )
+
+    print("\n[RECENT-STRATEGY-DECISION-FLOW]")
+    if not recent_decision_flow:
+        print("  no strategy_decisions rows")
+    else:
+        for row in recent_decision_flow:
+            print(
+                "  "
+                f"{kst_str(int(row.decision_ts))} decision_id={row.decision_id} strategy={row.strategy_name} "
+                f"base={row.base_signal} raw={row.raw_signal} final={row.final_signal} "
+                f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
+                f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
+                f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
+                f"has_executable_exposure={1 if bool(getattr(row, 'has_executable_exposure', False)) else 0} "
+                f"has_dust_only_remainder={1 if bool(getattr(row, 'has_dust_only_remainder', False)) else 0} "
+                f"observed_position_qty={_fmt_float(float(row.position_qty), 8)} "
+                f"observed_submit_payload_qty={_fmt_float(float(row.submit_payload_qty), 8)} "
+                f"sell_submit_lot_count={row.sell_submit_lot_count} "
+                f"observed_sell_qty_basis_qty={_fmt_float(float(row.sell_qty_basis_qty), 8)} "
+                f"sell_qty_boundary_kind={row.sell_qty_boundary_kind} "
+                f"sell_normalized_exposure_qty={_fmt_float(float(row.sell_normalized_exposure_qty), 8)} "
+                f"sell_failure_category={row.sell_failure_category} "
+                f"sell_failure_detail={row.sell_failure_detail} "
+                f"normalized_exposure_qty={_fmt_float(float(row.normalized_exposure_qty), 8)} "
+                f"raw_qty_open={_fmt_float(float(row.raw_qty_open), 8)} "
+                f"raw_total_asset_qty={_fmt_float(float(row.raw_total_asset_qty), 8)} "
+                f"open_exposure_qty={_fmt_float(float(row.open_exposure_qty), 8)} "
+                f"dust_tracking_qty={_fmt_float(float(row.dust_tracking_qty), 8)} "
+                f"reason={row.reason}"
             )
 
     print("\n[RECENT-TRADES-OPERATIONS]")
@@ -2408,8 +3947,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         print(f"  fee_total(last {len(recent_trades)} trades)={_fmt_float(fee_total, 2)}")
 
     print("\n[KNOWN-LIMITATIONS/TODO]")
-    print("  - strategy-report는 trade_lifecycles 기반 realized gross/fee/net pnl 집계를 우선 사용하세요.")
-    print("  - ops-report의 strategy_summary는 intent/fill 기반 참고용이며 pnl_proxy_deprecated를 포함합니다.")
+    print("  - strategy-report??trade_lifecycles ???????????????realized gross/fee/net pnl ?????됰Ŧ?????????棺堉?뤃????????筌띯뫔???????????????? ?????????븐뼐??????????????ㅼ굣????")
+    print("  - ops-report??strategy_summary??intent/fill ????????????????????됰Ŧ???????????怨뺤른?????????????????먃??곌램鍮???pnl_proxy_deprecated???????????븐뼐?????????")
     print("\n[FEE-DIAGNOSTICS-SNAPSHOT]")
     print(
         "  "
@@ -2442,10 +3981,26 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
     if not rows:
         print("  no strategy_decisions rows")
         return
-    print("  decision_type,strategy_name,pair,interval,block_reason,count")
+    print(
+        "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
+        "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
+        "raw_total_asset_qty,observed_position_qty,observed_submit_payload_qty,normalized_exposure_active,"
+        "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
+        "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
+        "sell_normalized_exposure_qty,sell_failure_category,sell_failure_detail,"
+        "strategy_name,pair,interval,count"
+    )
     for row in rows:
         print(
             "  "
-            f"{row.decision_type},{row.strategy_name},{row.pair},{row.interval},"
-            f"{row.block_reason},{row.count}"
+            f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
+            f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
+            f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
+            f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},"
+            f"{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},"
+            f"{row.normalized_exposure_qty:.8f},{row.open_exposure_qty:.8f},"
+            f"{row.dust_tracking_qty:.8f},{row.sell_open_exposure_qty:.8f},{row.sell_dust_tracking_qty:.8f},"
+            f"{row.sell_qty_basis_qty:.8f},{row.sell_qty_boundary_kind},{row.sell_submit_lot_count},"
+            f"{row.sell_normalized_exposure_qty:.8f},{row.sell_failure_category},{row.sell_failure_detail},"
+            f"{row.strategy_name},{row.pair},{row.interval},{row.count}"
         )

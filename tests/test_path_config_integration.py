@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import subprocess
@@ -146,3 +146,4 @@ def test_live_blocks_paper_lock_path(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         config.validate_live_mode_preflight(settings)
 
     assert "RUN_LOCK_PATH must not contain a paper-scoped path segment" in str(exc.value)
+

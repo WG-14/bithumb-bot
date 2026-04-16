@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import os
@@ -92,6 +92,8 @@ def _set_valid_live_defaults(
     monkeypatch.setenv("RUN_LOCK_PATH", str((run_root / "live" / "bithumb-bot.lock").resolve()))
     monkeypatch.setenv("NOTIFIER_ENABLED", "true")
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/ok")
+    monkeypatch.setenv("BITHUMB_API_KEY", "key")
+    monkeypatch.setenv("BITHUMB_API_SECRET", "secret")
     monkeypatch.delenv("START_CASH_KRW", raising=False)
     monkeypatch.delenv("BUY_FRACTION", raising=False)
     monkeypatch.delenv("FEE_RATE", raising=False)
@@ -104,8 +106,8 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
-    object.__setattr__(settings, "BITHUMB_API_KEY", "")
-    object.__setattr__(settings, "BITHUMB_API_SECRET", "")
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
@@ -226,10 +228,10 @@ def test_live_preflight_requires_chance_doc_side_rules(monkeypatch: pytest.Monke
     assert "ask_min_total_krw source must be chance_doc for MODE=live" in msg
 
 
-def test_live_preflight_requires_credentials_when_not_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_preflight_requires_credentials_in_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
-    object.__setattr__(settings, "LIVE_DRY_RUN", False)
-    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
 
@@ -237,8 +239,8 @@ def test_live_preflight_requires_credentials_when_not_dry_run(monkeypatch: pytes
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "BITHUMB_API_KEY is required when LIVE_DRY_RUN=false" in msg
-    assert "BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false" in msg
+    assert "BITHUMB_API_KEY is required when MODE=live" in msg
+    assert "BITHUMB_API_SECRET is required when MODE=live" in msg
 
 
 def test_live_preflight_requires_explicit_arming_for_real_live_orders(
@@ -247,8 +249,8 @@ def test_live_preflight_requires_explicit_arming_for_real_live_orders(
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
-    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
-    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+    object.__setattr__(settings, "BITHUMB_API_KEY", "")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "")
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
@@ -268,7 +270,41 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     config.validate_live_mode_preflight(settings)
 
 
+def test_live_preflight_requires_notifier_delivery_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    monkeypatch.delenv("NOTIFIER_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
 
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "notifier must be enabled and configured with at least one delivery target" in str(exc.value)
+
+
+def test_live_preflight_rejects_shared_runtime_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    shared_root = Path(os.environ["DATA_ROOT"]).resolve()
+    monkeypatch.setenv("BACKUP_ROOT", str(shared_root))
+    object.__setattr__(settings, "BACKUP_ROOT", str(shared_root))
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "runtime roots must not overlap or share parent/child paths when MODE=live" in str(exc.value)
+
+
+def test_live_preflight_accepts_valid_live_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    config.validate_live_mode_preflight(settings)
 
 
 def test_live_preflight_requires_meaningful_live_price_protection(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,18 +322,26 @@ def test_live_preflight_accepts_meaningful_live_price_protection(monkeypatch: py
 
     config.validate_live_mode_preflight(settings)
 
+
 def test_live_preflight_allows_kill_switch_liquidate_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "KILL_SWITCH_LIQUIDATE", True)
 
     config.validate_live_mode_preflight(settings)
 
-def test_live_preflight_allows_dry_run_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_preflight_requires_credentials_even_for_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
     object.__setattr__(settings, "BITHUMB_API_KEY", "")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "")
 
-    config.validate_live_mode_preflight(settings)
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    msg = str(exc.value)
+    assert "BITHUMB_API_KEY is required when MODE=live" in msg
+    assert "BITHUMB_API_SECRET is required when MODE=live" in msg
 
 
 def test_live_preflight_requires_explicit_db_path_for_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1163,7 +1207,7 @@ def test_accounts_preflight_auth_failure_is_classified(monkeypatch: pytest.Monke
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "인증 실패" in msg
+    assert "?몄쬆 ?ㅽ뙣" in msg
     assert "ACCOUNTS_AUTH_FAILED" in msg
 
 
@@ -1179,7 +1223,7 @@ def test_accounts_preflight_permission_failure_is_classified_as_auth_failure(mon
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "인증 실패" in msg
+    assert "?몄쬆 ?ㅽ뙣" in msg
     assert "ACCOUNTS_AUTH_FAILED" in msg
     assert "class=PERMISSION" in msg
 
@@ -1196,7 +1240,7 @@ def test_accounts_preflight_transport_failure_is_classified(monkeypatch: pytest.
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "transport 실패" in msg
+    assert "transport ?ㅽ뙣" in msg
     assert "ACCOUNTS_TRANSPORT_FAILED" in msg
 
 
@@ -1212,6 +1256,8 @@ def test_accounts_preflight_unclassified_private_error_is_transport_failure(monk
         config.validate_live_mode_preflight(settings)
 
     msg = str(exc.value)
-    assert "transport 실패" in msg
+    assert "transport ?ㅽ뙣" in msg
     assert "ACCOUNTS_TRANSPORT_FAILED" in msg
     assert "class=UNRECOVERABLE" in msg
+
+

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import time
@@ -16,8 +18,20 @@ from .broker.base import (
     BrokerTemporaryError,
 )
 from .broker.balance_source import fetch_balance_snapshot
-from .db_core import ensure_db, get_portfolio_breakdown, init_portfolio, set_portfolio_breakdown
-from .execution import apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .broker.order_rules import get_effective_order_rules
+from .config import settings
+from .db_core import (
+    ensure_db,
+    get_portfolio_breakdown,
+    init_portfolio,
+    portfolio_cash_total,
+    normalize_cash_amount,
+    record_external_cash_adjustment,
+    set_portfolio_breakdown,
+)
+from .dust import build_dust_display_context, build_position_state_model, classify_dust_residual, dust_qty_gap_tolerance
+from .execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
 from . import runtime_state
 from .notifier import format_event, notify
@@ -25,7 +39,7 @@ from .observability import safety_event
 from .reason_codes import AMBIGUOUS_RECENT_FILL, AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH, WEAK_ORDER_CORRELATION
 
 
-LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN")
+LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED")
 
 REASON_REMOTE_OPEN_ORDER_FOUND = "REMOTE_OPEN_ORDER_FOUND"
 REASON_RECENT_FILL_APPLIED = "RECENT_FILL_APPLIED"
@@ -36,14 +50,17 @@ REASON_RECONCILE_OK = "RECONCILE_OK"
 REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
 REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVERY"
+REASON_FEE_GAP_RECOVERY_REQUIRED = "FEE_GAP_RECOVERY_REQUIRED"
 
-OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN"}
-UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}
+OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED"}
+UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
 NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_RECONCILE_FAILED,
     REASON_SOURCE_CONFLICT_HALT,
     REASON_STARTUP_GATE_BLOCKED,
     REASON_SUBMIT_UNKNOWN_UNRESOLVED,
+    REASON_RECENT_FILL_INVALID_PRICE,
+    REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY,
 }
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
 
@@ -96,6 +113,13 @@ def classify_recovery_outcome(
             reason="startup gate remains blocked",
         )
 
+    if int(metadata.get("fee_gap_recovery_required", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
+            reason="fee-related cash drift requires manual accounting recovery",
+        )
+
     if int(metadata.get("recent_fill_applied", 0)) > 0:
         return RecoveryClassification(
             disposition=RecoveryDisposition.AUTO_RECOVERABLE_CANDIDATE,
@@ -110,10 +134,21 @@ def classify_recovery_outcome(
     )
 
 
-def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int]]:
+def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str | int | float]]:
     rows = conn.execute(
         """
-        SELECT client_order_id, submit_attempt_id, exchange_order_id, status, side, qty_req, created_ts
+        SELECT
+            client_order_id,
+            submit_attempt_id,
+            exchange_order_id,
+            status,
+            side,
+            qty_req,
+            intended_lot_count,
+            executable_lot_count,
+            final_intended_qty,
+            final_submitted_qty,
+            created_ts
         FROM orders
         ORDER BY created_ts DESC
         LIMIT ?
@@ -121,10 +156,11 @@ def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str |
         (max(1, int(limit)),),
     ).fetchall()
 
-    lifecycle: list[dict[str, str | int]] = []
+    lifecycle: list[dict[str, str | int | float]] = []
     for row in rows:
         context = _load_submit_attempt_context(conn, row=row)
         submit_attempt_id = str(context.get("submit_attempt_id") or "")
+        lot_basis_qty, lot_basis_source = _order_lot_basis_qty(row=row)
         submit_event = None
         intent_event = conn.execute(
             """
@@ -193,6 +229,13 @@ def load_recent_order_lifecycle(conn, *, limit: int = 5) -> list[dict[str, str |
                 "mapping_status": mapping_status,
                 "state": status,
                 "unresolved": 1 if status in UNRESOLVED_ORDER_STATUSES else 0,
+                "requested_qty": float(row["qty_req"] or 0.0),
+                "requested_lot_count": int(row["intended_lot_count"] or 0),
+                "executable_lot_count": int(row["executable_lot_count"] or 0),
+                "final_intended_qty": float(row["final_intended_qty"] or 0.0) if row["final_intended_qty"] is not None else 0.0,
+                "final_submitted_qty": float(row["final_submitted_qty"] or 0.0) if row["final_submitted_qty"] is not None else 0.0,
+                "lot_basis_qty": lot_basis_qty,
+                "lot_basis_source": lot_basis_source,
             }
         )
 
@@ -273,9 +316,6 @@ def _strong_submit_unknown_correlation(
     ):
         return True
 
-    if local_exchange_order_id:
-        return False
-
     if not bool(submit_attempt_context.get("timeout_submit_unknown")):
         return False
 
@@ -288,6 +328,35 @@ def _strong_submit_unknown_correlation(
 
     local_qty = float(submit_attempt_context.get("preflight_qty") or local_row["qty_req"])
     if remote_qty is not None and abs(float(remote_qty) - local_qty) > 1e-12:
+        return False
+
+    return True
+
+
+def _strong_submit_unknown_fill_correlation(
+    *,
+    local_row,
+    submit_attempt_context: dict[str, str | float | bool],
+    remote_client_order_id: str | None,
+    remote_exchange_order_id: str | None,
+) -> bool:
+    local_client_order_id = str(local_row["client_order_id"])
+    local_exchange_order_id = str(local_row["exchange_order_id"] or "")
+    if _strong_order_correlation(
+        local_client_order_id=local_client_order_id,
+        local_exchange_order_id=(local_exchange_order_id or None),
+        remote_client_order_id=remote_client_order_id,
+        remote_exchange_order_id=remote_exchange_order_id,
+    ):
+        return True
+
+    if not bool(submit_attempt_context.get("timeout_submit_unknown")):
+        return False
+
+    if str(remote_client_order_id or "") != local_client_order_id:
+        return False
+
+    if local_exchange_order_id and remote_exchange_order_id and remote_exchange_order_id != local_exchange_order_id:
         return False
 
     return True
@@ -360,9 +429,41 @@ def _classify_lookup_error(exc: Exception) -> str:
     return "unexpected_error"
 
 
+def _order_lot_basis_qty(*, row) -> tuple[float, str]:
+    def _read_value(key: str, index: int) -> object | None:
+        if row is None:
+            return None
+        if hasattr(row, "keys"):
+            try:
+                return row[key]  # type: ignore[index]
+            except (KeyError, IndexError, TypeError):
+                pass
+        try:
+            return row[index]  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            return None
+
+    for key, source in (
+        ("final_submitted_qty", "final_submitted_qty"),
+        ("final_intended_qty", "final_intended_qty"),
+        ("qty_req", "qty_req"),
+    ):
+        value = _read_value(key, 0)
+        if value is None:
+            continue
+        try:
+            qty = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+        return qty, source
+    return 0.0, "qty_req"
+
+
 CASH_SPLIT_ABS_TOL = 1e-6
 ASSET_SPLIT_ABS_TOL = 1e-10
 _LOG = logging.getLogger(__name__)
+RECENT_FLATTEN_WINDOW_SEC = 600.0
+CASH_ADJUSTMENT_KEY_VERSION = "reconcile_cash_drift_v2"
 
 
 def _balance_split_mismatch_summary(
@@ -410,6 +511,154 @@ def _balance_split_mismatch_summary(
     )
 
     return len(mismatches), "; ".join(mismatches)
+
+
+def _external_cash_adjustment_key(
+    *,
+    balance_source: str,
+    broker_cash_available: float,
+    broker_cash_locked: float,
+    broker_cash_total: float,
+    local_cash_available: float,
+    local_cash_locked: float,
+    local_cash_total: float,
+    cash_delta: float,
+    recent_fill_applied: int,
+    remote_open_order_found: int,
+    invalid_fill_price_blocked: int,
+    unresolved_open_order_count: int,
+    submit_unknown_count: int,
+    recovery_required_count: int,
+) -> str:
+    payload = {
+        "event_type": "external_cash_adjustment",
+        "key_version": CASH_ADJUSTMENT_KEY_VERSION,
+        "currency": "KRW",
+        "balance_source": str(balance_source or "-"),
+        "broker_cash_available": f"{normalize_cash_amount(broker_cash_available):.8f}",
+        "broker_cash_locked": f"{normalize_cash_amount(broker_cash_locked):.8f}",
+        "broker_cash_total": f"{normalize_cash_amount(broker_cash_total):.8f}",
+        "local_cash_available": f"{normalize_cash_amount(local_cash_available):.8f}",
+        "local_cash_locked": f"{normalize_cash_amount(local_cash_locked):.8f}",
+        "local_cash_total": f"{normalize_cash_amount(local_cash_total):.8f}",
+        "cash_delta": f"{normalize_cash_amount(cash_delta):.8f}",
+        "recent_fill_applied": int(recent_fill_applied),
+        "remote_open_order_found": int(remote_open_order_found),
+        "invalid_fill_price_blocked": int(invalid_fill_price_blocked),
+        "unresolved_open_order_count": int(unresolved_open_order_count),
+        "submit_unknown_count": int(submit_unknown_count),
+        "recovery_required_count": int(recovery_required_count),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _latest_price_for_notional_estimate(conn) -> float | None:
+    row = conn.execute(
+        """
+        SELECT close
+        FROM candles
+        WHERE close IS NOT NULL
+        ORDER BY ts DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        price = float(row["close"])
+    except (TypeError, ValueError):
+        return None
+    if price <= 0:
+        return None
+    return price
+
+
+def _is_partial_flatten_recent(*, now_sec: float) -> tuple[bool, str]:
+    try:
+        state = runtime_state.snapshot()
+    except Exception as exc:
+        return False, f"flatten_state_unavailable({type(exc).__name__})"
+    status = str(state.last_flatten_position_status or "").strip()
+    flatten_ts = state.last_flatten_position_epoch_sec
+    if status != "submitted" or flatten_ts is None:
+        return False, "flatten_not_recent"
+    age_sec = max(0.0, now_sec - float(flatten_ts))
+    if age_sec > RECENT_FLATTEN_WINDOW_SEC:
+        return False, f"flatten_too_old(age_sec={age_sec:.1f})"
+    summary_raw = str(state.last_flatten_position_summary or "").strip()
+    trigger = "-"
+    if summary_raw:
+        try:
+            summary = json.loads(summary_raw)
+            trigger = str(summary.get("trigger") or "-")
+        except json.JSONDecodeError:
+            trigger = "-"
+    return True, f"flatten_recent(age_sec={age_sec:.1f},trigger={trigger})"
+
+
+def _evaluate_dust_residual_policy(
+    *,
+    conn,
+    broker_asset_available: float,
+    broker_asset_locked: float,
+    local_asset_available: float,
+    local_asset_locked: float,
+) -> dict[str, int | float | str]:
+    broker_qty = max(0.0, float(broker_asset_available) + float(broker_asset_locked))
+    local_qty = max(0.0, float(local_asset_available) + float(local_asset_locked))
+    min_qty = 0.0
+    min_notional = 0.0
+    try:
+        rules = get_effective_order_rules(settings.PAIR).rules
+        min_qty = max(0.0, float(rules.min_qty))
+        min_notional = max(0.0, float(rules.min_notional_krw))
+    except Exception:
+        min_qty = 0.0
+        min_notional = 0.0
+
+    status_counts = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
+            SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
+            SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
+        FROM orders
+        """
+    ).fetchone()
+    unresolved_open_order_count = int(status_counts["unresolved_open_order_count"] or 0) if status_counts else 0
+    submit_unknown_count = int(status_counts["submit_unknown_count"] or 0) if status_counts else 0
+    recovery_required_count = int(status_counts["recovery_required_count"] or 0) if status_counts else 0
+
+    recent_flatten, recent_flatten_reason = _is_partial_flatten_recent(now_sec=time.time())
+    est_price = _latest_price_for_notional_estimate(conn)
+    dust_eval = classify_dust_residual(
+        broker_qty=broker_qty,
+        local_qty=local_qty,
+        min_qty=min_qty,
+        min_notional_krw=min_notional,
+        latest_price=est_price,
+        partial_flatten_recent=recent_flatten,
+        partial_flatten_reason=recent_flatten_reason,
+        qty_gap_tolerance=dust_qty_gap_tolerance(
+            min_qty=min_qty,
+            default_abs_tolerance=ASSET_SPLIT_ABS_TOL * 10.0,
+        ),
+        matched_harmless_resume_allowed=(
+            unresolved_open_order_count == 0
+            and submit_unknown_count == 0
+            and recovery_required_count == 0
+        ),
+    )
+    metadata = dust_eval.to_metadata()
+    metadata.update(
+        {
+            "unresolved_open_order_count": unresolved_open_order_count,
+            "submit_unknown_count": submit_unknown_count,
+            "recovery_required_count": recovery_required_count,
+        }
+    )
+    return metadata
 
 
 def assert_no_open_orders() -> None:
@@ -642,18 +891,29 @@ def _apply_recent_fills(
             blocked_invalid_price += 1
             continue
 
-        apply_fill_and_trade(
-            conn,
-            client_order_id=local_id,
-            side=str(local["side"]),
-            fill_id=fill.fill_id,
-            fill_ts=fill.fill_ts,
-            price=fill.price,
-            qty=fill.qty,
-            fee=fill.fee,
-            note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
-            allow_entry_decision_fallback=False,
-        )
+        try:
+            apply_fill_and_trade(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=fill.fee,
+                note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
+                allow_entry_decision_fallback=False,
+            )
+        except LiveFillFeeValidationError as exc:
+            _mark_recovery_required_with_reason(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                from_status=str(local["status"]),
+                reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                reason=f"recent fill fee validation blocked ledger apply; manual recovery required ({exc})",
+            )
+            continue
         applied = True
 
         order_row = conn.execute(
@@ -703,6 +963,7 @@ class _SubmitUnknownRecentActivityInterpretation:
     candidate_count: int
     matched_exchange_order_id: str | None
     matched_order: BrokerOrder | None
+    matched_orders: tuple[BrokerOrder, ...]
     matched_fills: tuple[BrokerFill, ...]
     has_partial_fill_evidence: bool
 
@@ -714,7 +975,10 @@ def _interpret_submit_unknown_recent_activity(
     recent_orders: list[BrokerOrder],
     recent_fills: list[BrokerFill],
 ) -> _SubmitUnknownRecentActivityInterpretation:
-    candidate_orders: dict[str, BrokerOrder] = {}
+    candidate_orders: list[BrokerOrder] = []
+    candidate_fills: list[BrokerFill] = []
+    candidate_exchange_ids: set[str] = set()
+
     for remote in recent_orders:
         remote_client_order_id = str(remote.client_order_id or "")
         remote_exchange_order_id = str(remote.exchange_order_id or "")
@@ -731,50 +995,69 @@ def _interpret_submit_unknown_recent_activity(
         status_allowed, _ = validate_status_transition(from_status="SUBMIT_UNKNOWN", to_status=remote.status)
         if not status_allowed:
             continue
-        if not remote_exchange_order_id:
-            continue
-        candidate_orders[remote_exchange_order_id] = remote
+        candidate_orders.append(remote)
+        if remote_exchange_order_id:
+            candidate_exchange_ids.add(remote_exchange_order_id)
 
-    candidate_count = len(candidate_orders)
-    if candidate_count != 1:
-        return _SubmitUnknownRecentActivityInterpretation(
-            outcome=("ambiguous" if candidate_count > 1 else "insufficient_evidence"),
-            candidate_count=candidate_count,
-            matched_exchange_order_id=None,
-            matched_order=None,
-            matched_fills=(),
-            has_partial_fill_evidence=False,
-        )
-
-    matched_exchange_order_id = next(iter(candidate_orders.keys()))
-    matched_order = candidate_orders[matched_exchange_order_id]
-    matched_fills: list[BrokerFill] = []
     for fill in recent_fills:
         remote_client_order_id = str(fill.client_order_id or "")
         remote_exchange_order_id = str(fill.exchange_order_id or "")
-        if remote_exchange_order_id and remote_exchange_order_id != matched_exchange_order_id:
-            continue
-        if not _strong_submit_unknown_correlation(
+        if not _strong_submit_unknown_fill_correlation(
             local_row=local_row,
             submit_attempt_context=submit_attempt_context,
             remote_client_order_id=remote_client_order_id or None,
             remote_exchange_order_id=remote_exchange_order_id or None,
-            remote_side=str(local_row["side"]),
-            remote_qty=None,
         ):
             continue
-        matched_fills.append(fill)
+        candidate_fills.append(fill)
+        if remote_exchange_order_id:
+            candidate_exchange_ids.add(remote_exchange_order_id)
 
-    total_fill_qty = sum(max(0.0, float(fill.qty)) for fill in matched_fills)
-    local_qty_req = max(0.0, float(local_row["qty_req"]))
-    has_partial_fill_evidence = bool(total_fill_qty > 1e-12 and local_qty_req > total_fill_qty + 1e-12)
+    if not candidate_orders and not candidate_fills:
+        return _SubmitUnknownRecentActivityInterpretation(
+            outcome="insufficient_evidence",
+            candidate_count=0,
+            matched_exchange_order_id=None,
+            matched_order=None,
+            matched_orders=(),
+            matched_fills=(),
+            has_partial_fill_evidence=False,
+        )
+
+    if len(candidate_exchange_ids) > 1:
+        return _SubmitUnknownRecentActivityInterpretation(
+            outcome="ambiguous",
+            candidate_count=len(candidate_exchange_ids),
+            matched_exchange_order_id=None,
+            matched_order=None,
+            matched_orders=tuple(candidate_orders),
+            matched_fills=tuple(candidate_fills),
+            has_partial_fill_evidence=False,
+        )
+
+    matched_exchange_order_id = next(iter(candidate_exchange_ids)) if candidate_exchange_ids else None
+    matched_order = None
+    if candidate_orders:
+        matched_order = max(
+            candidate_orders,
+            key=lambda order: (int(order.updated_ts), int(order.created_ts)),
+        )
+
+    total_fill_qty = sum(max(0.0, float(fill.qty)) for fill in candidate_fills)
+    local_qty_basis, _ = _order_lot_basis_qty(row=local_row)
+    has_partial_fill_evidence = bool(total_fill_qty > 1e-12 and local_qty_basis > total_fill_qty + 1e-12)
+
+    candidate_count = 1
+    if candidate_exchange_ids:
+        candidate_count = len(candidate_exchange_ids)
 
     return _SubmitUnknownRecentActivityInterpretation(
         outcome="success",
-        candidate_count=1,
+        candidate_count=candidate_count,
         matched_exchange_order_id=matched_exchange_order_id,
         matched_order=matched_order,
-        matched_fills=tuple(matched_fills),
+        matched_orders=tuple(candidate_orders),
+        matched_fills=tuple(candidate_fills),
         has_partial_fill_evidence=has_partial_fill_evidence,
     )
 
@@ -785,7 +1068,7 @@ def _try_resolve_submit_unknown_from_recent_activity(
     row,
     recent_orders: list[BrokerOrder],
     recent_fills: list[BrokerFill],
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None, str | None]:
     client_order_id = str(row["client_order_id"])
     side = str(row["side"])
     submit_attempt_context = _load_submit_attempt_context(conn, row=row)
@@ -806,19 +1089,28 @@ def _try_resolve_submit_unknown_from_recent_activity(
             outcome=interpretation.outcome,
             candidate_count=interpretation.candidate_count,
             exchange_order_id=None,
+            matched_order_count=len(interpretation.matched_orders),
+            matched_fill_count=len(interpretation.matched_fills),
         )
-        return False, False
+        return False, False, None, None
 
     matched_exchange_order_id = interpretation.matched_exchange_order_id
     matched_order = interpretation.matched_order
+    evidence_mode = (
+        "order_and_fill"
+        if interpretation.matched_orders and interpretation.matched_fills
+        else ("order_only" if interpretation.matched_orders else "fill_only")
+    )
     _record_submit_unknown_autolink_event(
         conn,
         client_order_id=client_order_id,
         side=side,
         submit_attempt_context=submit_attempt_context,
-        outcome="success",
-        candidate_count=1,
+        outcome=evidence_mode,
+        candidate_count=interpretation.candidate_count,
         exchange_order_id=matched_exchange_order_id,
+        matched_order_count=len(interpretation.matched_orders),
+        matched_fill_count=len(interpretation.matched_fills),
     )
 
     if matched_exchange_order_id:
@@ -852,14 +1144,12 @@ def _try_resolve_submit_unknown_from_recent_activity(
 
     prev_status = str(row["status"])
     next_status = prev_status
-    if matched_order is not None:
-        next_status = matched_order.status
-    elif applied_fill:
-        order_row = conn.execute(
-            "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
-            (client_order_id,),
-        ).fetchone()
-        if order_row is not None:
+    order_row = conn.execute(
+        "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
+        (client_order_id,),
+    ).fetchone()
+    if order_row is not None:
+        if applied_fill:
             reconciled_status = _status_after_recent_fill_replay(
                 current_status=str(order_row["status"]),
                 qty_req=float(order_row["qty_req"]),
@@ -867,6 +1157,8 @@ def _try_resolve_submit_unknown_from_recent_activity(
             )
             if reconciled_status is not None:
                 next_status = reconciled_status
+        elif matched_order is not None:
+            next_status = matched_order.status
 
     set_status(client_order_id, next_status, conn=conn)
     if prev_status != next_status:
@@ -881,7 +1173,8 @@ def _try_resolve_submit_unknown_from_recent_activity(
             )
         )
 
-    return True, applied_fill
+    return True, applied_fill, client_order_id, matched_exchange_order_id
+
 
 def _record_submit_unknown_autolink_event(
     conn,
@@ -892,6 +1185,8 @@ def _record_submit_unknown_autolink_event(
     outcome: str,
     candidate_count: int,
     exchange_order_id: str | None,
+    matched_order_count: int = 0,
+    matched_fill_count: int = 0,
 ) -> None:
     submit_attempt_id = str(submit_attempt_context.get("submit_attempt_id") or "")
     event_message = format_event(
@@ -901,6 +1196,8 @@ def _record_submit_unknown_autolink_event(
         side=side,
         outcome=outcome,
         candidate_count=max(0, int(candidate_count)),
+        matched_order_count=max(0, int(matched_order_count)),
+        matched_fill_count=max(0, int(matched_fill_count)),
         submit_attempt_id=submit_attempt_id or None,
         timeout_submit_unknown=1 if bool(submit_attempt_context.get("timeout_submit_unknown")) else 0,
     )
@@ -1047,27 +1344,70 @@ def _clear_reconcile_halt_if_safe(
     portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
     unresolved_count = int(unresolved_row["unresolved_count"] or 0) if unresolved_row else 0
     recovery_required_count = int(unresolved_row["recovery_required_count"] or 0) if unresolved_row else 0
-    position_flat = abs(float(portfolio_row["asset_qty"] or 0.0)) <= 1e-12 if portfolio_row else True
+    position_qty = float(portfolio_row["asset_qty"] or 0.0) if portfolio_row else 0.0
+    dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
+    dust_context = build_dust_display_context(metadata)
+    lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    position_state = build_position_state_model(
+        raw_qty_open=position_qty,
+        metadata_raw=metadata,
+        raw_total_asset_qty=max(
+            position_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+    )
+    normalized_exposure = position_state.normalized_exposure
+    position_flat = str(normalized_exposure.terminal_state) == "flat"
+    position_dust_only = bool(normalized_exposure.has_dust_only_remainder)
+    position_has_executable_exposure = bool(normalized_exposure.has_executable_exposure)
     _LOG.info(
-        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s halt_reason_code=%s",
+        "reconcile_exposure_decision unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_terminal_state=%s raw_total_asset_qty=%.8f executable_exposure_qty=%.8f dust_tracking_qty=%.8f open_lot_count=%s dust_tracking_lot_count=%s sellable_executable_lot_count=%s sellable_executable_qty=%.8f exit_block_reason=%s position_has_executable_exposure=%s position_dust_only=%s dust_resume_allowed=%s halt_reason_code=%s",
         unresolved_count,
         recovery_required_count,
         broker_open_order_count,
-        int(position_flat),
+        normalized_exposure.terminal_state,
+        float(normalized_exposure.raw_total_asset_qty),
+        float(normalized_exposure.open_exposure_qty),
+        float(normalized_exposure.dust_tracking_qty),
+        int(normalized_exposure.open_lot_count),
+        int(normalized_exposure.dust_tracking_lot_count),
+        int(normalized_exposure.sellable_executable_lot_count),
+        float(normalized_exposure.sellable_executable_qty),
+        normalized_exposure.exit_block_reason,
+        int(position_has_executable_exposure),
+        int(position_dust_only),
+        int(dust_resume_allowed),
         state.halt_reason_code or "-",
     )
     if not (
         unresolved_count == 0
         and recovery_required_count == 0
         and broker_open_order_count == 0
-        and position_flat
+        and not position_has_executable_exposure
+        and (position_flat or (position_dust_only and dust_resume_allowed))
     ):
         _LOG.info(
-            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s position_flat=%s",
+            "reconcile_halt_retained reason=safety_blockers_remaining unresolved_count=%s recovery_required_count=%s broker_open_order_count=%s raw_total_asset_qty=%.8f executable_exposure_qty=%.8f dust_tracking_qty=%.8f open_lot_count=%s dust_tracking_lot_count=%s sellable_executable_lot_count=%s sellable_executable_qty=%.8f exit_block_reason=%s position_terminal_state=%s position_has_executable_exposure=%s position_dust_only=%s dust_resume_allowed=%s",
             unresolved_count,
             recovery_required_count,
             broker_open_order_count,
-            int(position_flat),
+            float(normalized_exposure.raw_total_asset_qty),
+            float(normalized_exposure.open_exposure_qty),
+            float(normalized_exposure.dust_tracking_qty),
+            int(normalized_exposure.open_lot_count),
+            int(normalized_exposure.dust_tracking_lot_count),
+            int(normalized_exposure.sellable_executable_lot_count),
+            float(normalized_exposure.sellable_executable_qty),
+            normalized_exposure.exit_block_reason,
+            normalized_exposure.terminal_state,
+            int(position_has_executable_exposure),
+            int(position_dust_only),
+            int(dust_resume_allowed),
         )
         return
     _LOG.info(
@@ -1083,6 +1423,64 @@ def _clear_reconcile_halt_if_safe(
         unresolved=False,
     )
     runtime_state.set_resume_gate(blocked=False, reason=None)
+
+
+def _material_zero_fee_fill_summary(
+    conn,
+    *,
+    observed_ts_ms: int | None,
+) -> dict[str, int | float]:
+    min_notional = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    if min_notional <= 0:
+        return {
+            "material_zero_fee_fill_count": 0,
+            "material_zero_fee_fill_notional_krw": 0.0,
+            "material_zero_fee_fill_latest_ts": 0,
+        }
+
+    params: list[object] = [min_notional]
+    observed_filter = ""
+    if observed_ts_ms is not None and int(observed_ts_ms) > 0:
+        observed_filter = "AND fill_ts <= ?"
+        params.append(int(observed_ts_ms))
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS fill_count,
+            COALESCE(SUM(price * qty), 0.0) AS total_notional,
+            COALESCE(MAX(fill_ts), 0) AS latest_fill_ts
+        FROM fills
+        WHERE price > 0
+          AND qty > 0
+          AND ABS(COALESCE(fee, 0.0)) <= 1e-12
+          AND (price * qty) >= ?
+          {observed_filter}
+        """,
+        tuple(params),
+    ).fetchone()
+    return {
+        "material_zero_fee_fill_count": int(row["fill_count"] or 0),
+        "material_zero_fee_fill_notional_krw": float(row["total_notional"] or 0.0),
+        "material_zero_fee_fill_latest_ts": int(row["latest_fill_ts"] or 0),
+    }
+
+
+def _fee_gap_adjustment_history_summary(conn) -> dict[str, int | float]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS adjustment_count,
+            COALESCE(SUM(delta_amount), 0.0) AS total_delta,
+            COALESCE(MAX(event_ts), 0) AS latest_event_ts
+        FROM external_cash_adjustments
+        WHERE reason='reconcile_fee_gap_cash_drift'
+        """
+    ).fetchone()
+    return {
+        "fee_gap_adjustment_count": int(row["adjustment_count"] or 0),
+        "fee_gap_adjustment_total_krw": float(row["total_delta"] or 0.0),
+        "fee_gap_adjustment_latest_event_ts": int(row["latest_event_ts"] or 0),
+    }
 
 
 def reconcile_with_broker(broker: Broker) -> None:
@@ -1106,6 +1504,14 @@ def reconcile_with_broker(broker: Broker) -> None:
         "lookup_schema_mismatch": 0,
         "balance_source": "-",
         "balance_observed_ts_ms": 0,
+        "dust_residual_present": 0,
+        "dust_residual_allow_resume": 0,
+        "dust_policy_reason": "no_dust_residual",
+        "material_zero_fee_fill_count": 0,
+        "material_zero_fee_fill_latest_ts": 0,
+        "fee_gap_recovery_required": 0,
+        "fee_gap_adjustment_count": 0,
+        "fee_gap_adjustment_latest_event_ts": 0,
     }
     try:
         init_portfolio(conn)
@@ -1134,16 +1540,22 @@ def reconcile_with_broker(broker: Broker) -> None:
             exchange_order_ids=known_exchange_order_ids,
             client_order_ids_without_exchange_id=client_order_ids_without_exchange_id,
         )
+        resolved_submit_unknown_client_ids: set[str] = set()
+        resolved_submit_unknown_exchange_ids: set[str] = set()
         for row in local_open:
             oid = row["client_order_id"]
             if row["status"] == "SUBMIT_UNKNOWN" and not row["exchange_order_id"]:
-                recovered, applied_fill = _try_resolve_submit_unknown_from_recent_activity(
+                recovered, applied_fill, resolved_client_order_id, resolved_exchange_order_id = _try_resolve_submit_unknown_from_recent_activity(
                     conn,
                     row=row,
                     recent_orders=recent_orders,
                     recent_fills=recent_fills,
                 )
                 if recovered:
+                    if resolved_client_order_id:
+                        resolved_submit_unknown_client_ids.add(str(resolved_client_order_id))
+                    if resolved_exchange_order_id:
+                        resolved_submit_unknown_exchange_ids.add(str(resolved_exchange_order_id))
                     if applied_fill:
                         metadata["recent_fill_applied"] += 1
                         if reason_code == REASON_RECONCILE_OK:
@@ -1240,19 +1652,41 @@ def reconcile_with_broker(broker: Broker) -> None:
                     )
                 )
             prev_status = row["status"]
-            set_status(oid, remote.status, conn=conn)
-            if prev_status != remote.status:
-                notify(
-                    format_event(
-                        "reconcile_status_change",
-                        client_order_id=oid,
-                        exchange_order_id=remote.exchange_order_id,
-                        side=row["side"],
-                        status=remote.status,
-                        reason=f"from={prev_status}",
+            defer_terminal_fill_status = str(remote.status) == "FILLED"
+            if not defer_terminal_fill_status:
+                set_status(oid, remote.status, conn=conn)
+                if prev_status != remote.status:
+                    notify(
+                        format_event(
+                            "reconcile_status_change",
+                            client_order_id=oid,
+                            exchange_order_id=remote.exchange_order_id,
+                            side=row["side"],
+                            status=remote.status,
+                            reason=f"from={prev_status}",
+                        )
                     )
+            try:
+                fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
+            except BrokerRejectError as exc:
+                if "fee" not in str(exc).lower():
+                    raise
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
+                    from_status=remote.status,
+                    reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                    reason=(
+                        "reconcile blocked: fill fee validation failed; "
+                        f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                        f"manual recovery required ({type(exc).__name__}: {exc})"
+                    ),
                 )
-            fills = broker.get_fills(client_order_id=oid, exchange_order_id=remote.exchange_order_id)
+                metadata["fee_gap_recovery_required"] = 1
+                if reason_code == REASON_RECONCILE_OK:
+                    reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
+                continue
             invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
             if invalid_fill is not None:
                 reason = (
@@ -1272,19 +1706,52 @@ def reconcile_with_broker(broker: Broker) -> None:
                 if reason_code == REASON_RECONCILE_OK:
                     reason_code = REASON_RECENT_FILL_INVALID_PRICE
                 continue
+            fill_apply_blocked = False
             for fill in fills:
-                apply_fill_and_trade(
-                    conn,
-                    client_order_id=oid,
-                    side=row["side"],
-                    fill_id=fill.fill_id,
-                    fill_ts=fill.fill_ts,
-                    price=fill.price,
-                    qty=fill.qty,
-                    fee=fill.fee,
-                    note=f"reconcile exchange_order_id={remote.exchange_order_id}",
-                    allow_entry_decision_fallback=False,
-                )
+                try:
+                    apply_fill_and_trade(
+                        conn,
+                        client_order_id=oid,
+                        side=row["side"],
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=fill.fee,
+                        note=f"reconcile exchange_order_id={remote.exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+                except LiveFillFeeValidationError as exc:
+                    _mark_recovery_required_with_reason(
+                        conn,
+                        client_order_id=oid,
+                        side=str(row["side"]),
+                        from_status=remote.status,
+                        reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                        reason=(
+                            "reconcile blocked: fill fee validation failed during ledger apply; "
+                            f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                            f"fill_id={fill.fill_id}; manual recovery required ({exc})"
+                        ),
+                    )
+                    metadata["fee_gap_recovery_required"] = 1
+                    if reason_code == REASON_RECONCILE_OK:
+                        reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
+                    fill_apply_blocked = True
+                    break
+            if defer_terminal_fill_status and not fill_apply_blocked:
+                set_status(oid, remote.status, conn=conn)
+                if prev_status != remote.status:
+                    notify(
+                        format_event(
+                            "reconcile_status_change",
+                            client_order_id=oid,
+                            exchange_order_id=remote.exchange_order_id,
+                            side=row["side"],
+                            status=remote.status,
+                            reason=f"from={prev_status}",
+                        )
+                    )
 
         remote_open = _get_open_orders_for_known_ids(
             broker,
@@ -1332,14 +1799,26 @@ def reconcile_with_broker(broker: Broker) -> None:
                 )
             )
 
+        filtered_recent_orders = [
+            remote
+            for remote in recent_orders
+            if str(remote.client_order_id or "") not in resolved_submit_unknown_client_ids
+            and str(remote.exchange_order_id or "") not in resolved_submit_unknown_exchange_ids
+        ]
+        filtered_recent_fills = [
+            fill
+            for fill in recent_fills
+            if str(fill.client_order_id or "") not in resolved_submit_unknown_client_ids
+            and str(fill.exchange_order_id or "") not in resolved_submit_unknown_exchange_ids
+        ]
         conflicts = _sync_recent_order_activity(
             conn,
-            recent_orders,
+            filtered_recent_orders,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         applied_recent_fill, fill_conflicts, blocked_recent_fill_price = _apply_recent_fills(
             conn,
-            recent_fills,
+            filtered_recent_fills,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         conflicts.extend(fill_conflicts)
@@ -1365,17 +1844,151 @@ def reconcile_with_broker(broker: Broker) -> None:
         local_cash_available, local_cash_locked, local_asset_available, local_asset_locked = get_portfolio_breakdown(conn)
         has_open_orders = bool(local_open) or bool(remote_open)
 
-        cash_locked = float(bal.cash_locked)
+        broker_cash_available = float(bal.cash_available)
+        broker_cash_locked = float(bal.cash_locked)
         asset_locked = float(bal.asset_locked)
+        local_cash_total = portfolio_cash_total(
+            cash_available=local_cash_available,
+            cash_locked=local_cash_locked,
+        )
+        broker_cash_total = portfolio_cash_total(
+            cash_available=broker_cash_available,
+            cash_locked=broker_cash_locked,
+        )
+        portfolio_cash_available = broker_cash_available
+        cash_delta = broker_cash_total - local_cash_total
+        cash_locked = broker_cash_locked
         # Accounts snapshot source can briefly report locked=0 around in-flight open orders.
         # Keep local locked split as conservative floor when remote split is zero during open-order windows.
         if has_open_orders and cash_locked <= 1e-12 and local_cash_locked > 1e-12:
             cash_locked = local_cash_locked
+
+        pre_adjustment_mismatch_count, pre_adjustment_mismatch_summary = _balance_split_mismatch_summary(
+            broker_cash_available=broker_cash_available,
+            broker_cash_locked=broker_cash_locked,
+            broker_asset_available=float(bal.asset_available),
+            broker_asset_locked=asset_locked,
+            local_cash_available=local_cash_available,
+            local_cash_locked=local_cash_locked,
+            local_asset_available=local_asset_available,
+            local_asset_locked=local_asset_locked,
+        )
+        zero_fee_fill_summary = _material_zero_fee_fill_summary(
+            conn,
+            observed_ts_ms=int(balance_snapshot.observed_ts_ms or 0),
+        )
+        metadata["material_zero_fee_fill_count"] = int(zero_fee_fill_summary["material_zero_fee_fill_count"])
+        metadata["material_zero_fee_fill_notional_krw"] = float(zero_fee_fill_summary["material_zero_fee_fill_notional_krw"])
+        metadata["material_zero_fee_fill_latest_ts"] = int(zero_fee_fill_summary["material_zero_fee_fill_latest_ts"])
+        external_cash_adjustment = None
+        should_record_external_cash_adjustment = (
+            abs(cash_delta) > CASH_SPLIT_ABS_TOL
+            and reason_code not in NON_CLEARING_RECONCILE_REASON_CODES
+            and not conflicts
+            and pre_adjustment_mismatch_count == 1
+            and "cash_available" in pre_adjustment_mismatch_summary
+            and "cash_locked" not in pre_adjustment_mismatch_summary
+            and "asset_available" not in pre_adjustment_mismatch_summary
+            and "asset_locked" not in pre_adjustment_mismatch_summary
+        )
+        if should_record_external_cash_adjustment:
+            fee_gap_drift_detected = (
+                int(zero_fee_fill_summary["material_zero_fee_fill_count"]) > 0
+                and abs(cash_delta) > CASH_SPLIT_ABS_TOL
+            )
+            adjustment_key = _external_cash_adjustment_key(
+                balance_source=str(balance_snapshot.source_id or "-"),
+                broker_cash_available=broker_cash_available,
+                broker_cash_locked=broker_cash_locked,
+                broker_cash_total=broker_cash_total,
+                local_cash_available=float(local_cash_available),
+                local_cash_locked=float(local_cash_locked),
+                local_cash_total=local_cash_total,
+                cash_delta=cash_delta,
+                recent_fill_applied=int(metadata["recent_fill_applied"]),
+                remote_open_order_found=int(metadata["remote_open_order_found"]),
+                invalid_fill_price_blocked=int(metadata["invalid_fill_price_blocked"]),
+                unresolved_open_order_count=int(metadata.get("unresolved_open_order_count", 0) or 0),
+                submit_unknown_count=int(metadata.get("submit_unknown_count", 0) or 0),
+                recovery_required_count=int(metadata.get("recovery_required_count", 0) or 0),
+            )
+            external_cash_adjustment = record_external_cash_adjustment(
+                conn,
+                event_ts=int(balance_snapshot.observed_ts_ms or (time.time() * 1000)),
+                currency="KRW",
+                delta_amount=cash_delta,
+                source=str(balance_snapshot.source_id or "reconcile"),
+                reason=("reconcile_fee_gap_cash_drift" if fee_gap_drift_detected else "reconcile_cash_drift"),
+                broker_snapshot_basis={
+                    "key_version": CASH_ADJUSTMENT_KEY_VERSION,
+                    "balance_source": str(balance_snapshot.source_id or "-"),
+                    "observed_ts_ms": int(balance_snapshot.observed_ts_ms),
+                    "asset_ts_ms": int(balance_snapshot.asset_ts_ms),
+                    "broker_cash_available": broker_cash_available,
+                    "broker_cash_locked": broker_cash_locked,
+                    "broker_cash_total": broker_cash_total,
+                    "local_cash_available": float(local_cash_available),
+                    "local_cash_locked": float(local_cash_locked),
+                    "local_cash_total": local_cash_total,
+                    "cash_delta": cash_delta,
+                    "reconcile_reason_code": reason_code,
+                    "material_zero_fee_fill_count": int(zero_fee_fill_summary["material_zero_fee_fill_count"]),
+                    "material_zero_fee_fill_notional_krw": float(zero_fee_fill_summary["material_zero_fee_fill_notional_krw"]),
+                },
+                correlation_metadata={
+                    "remote_open_order_found": int(metadata["remote_open_order_found"]),
+                    "recent_fill_applied": int(metadata["recent_fill_applied"]),
+                    "invalid_fill_price_blocked": int(metadata["invalid_fill_price_blocked"]),
+                    "fee_gap_recovery_required": 1 if fee_gap_drift_detected else 0,
+                },
+                note=(
+                    "cash drift inferred from reconcile balance snapshot; material zero-fee fill history present"
+                    if fee_gap_drift_detected
+                    else "cash drift inferred from reconcile balance snapshot"
+                ),
+                adjustment_key=adjustment_key,
+            )
+            metadata["external_cash_adjustment_count"] = 1
+            metadata["external_cash_adjustment_delta_krw"] = cash_delta
+            metadata["external_cash_adjustment_total_krw"] = cash_delta
+            metadata["external_cash_adjustment_event_ts"] = int(balance_snapshot.observed_ts_ms or 0)
+            metadata["external_cash_adjustment_created"] = 1 if external_cash_adjustment and external_cash_adjustment.get("created") else 0
+            metadata["external_cash_adjustment_key"] = str(external_cash_adjustment["adjustment_key"]) if external_cash_adjustment else adjustment_key
+            metadata["external_cash_adjustment_reason"] = str(external_cash_adjustment["reason"]) if external_cash_adjustment else "reconcile_cash_drift"
+
+            adjusted_cash_available, adjusted_cash_locked, adjusted_asset_available, adjusted_asset_locked = get_portfolio_breakdown(conn)
+            adjusted_cash_total = portfolio_cash_total(
+                cash_available=adjusted_cash_available,
+                cash_locked=adjusted_cash_locked,
+            )
+            residual_after_adjustment = broker_cash_total - adjusted_cash_total
+            if abs(residual_after_adjustment) > CASH_SPLIT_ABS_TOL:
+                raise RuntimeError(
+                    "external cash adjustment failed to absorb broker/local cash delta: "
+                    f"broker_cash_total={broker_cash_total:.12g} "
+                    f"adjusted_cash_total={adjusted_cash_total:.12g} "
+                    f"residual={residual_after_adjustment:.12g}"
+                )
+            metadata["external_cash_adjustment_residual_krw"] = residual_after_adjustment
+            local_cash_available = float(adjusted_cash_available)
+            local_cash_locked = float(adjusted_cash_locked)
+            local_asset_available = float(adjusted_asset_available)
+            local_asset_locked = float(adjusted_asset_locked)
+            local_cash_total = adjusted_cash_total
+            portfolio_cash_available = local_cash_available
+        fee_gap_adjustment_history = _fee_gap_adjustment_history_summary(conn)
+        metadata["fee_gap_adjustment_count"] = int(fee_gap_adjustment_history["fee_gap_adjustment_count"])
+        metadata["fee_gap_adjustment_total_krw"] = float(fee_gap_adjustment_history["fee_gap_adjustment_total_krw"])
+        metadata["fee_gap_adjustment_latest_event_ts"] = int(fee_gap_adjustment_history["fee_gap_adjustment_latest_event_ts"])
+        if int(metadata["fee_gap_adjustment_count"]) > 0:
+            metadata["fee_gap_recovery_required"] = 1
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
             asset_locked = local_asset_locked
 
         mismatch_count, mismatch_summary = _balance_split_mismatch_summary(
-            broker_cash_available=float(bal.cash_available),
+            broker_cash_available=broker_cash_available,
             broker_cash_locked=cash_locked,
             broker_asset_available=float(bal.asset_available),
             broker_asset_locked=asset_locked,
@@ -1387,10 +2000,25 @@ def reconcile_with_broker(broker: Broker) -> None:
         metadata["balance_split_mismatch_count"] = mismatch_count
         if mismatch_summary:
             metadata["balance_split_mismatch_summary"] = mismatch_summary[:500]
+        dust_eval = _evaluate_dust_residual_policy(
+            conn=conn,
+            broker_asset_available=float(bal.asset_available),
+            broker_asset_locked=asset_locked,
+            local_asset_available=local_asset_available,
+            local_asset_locked=local_asset_locked,
+        )
+        for key, value in dust_eval.items():
+            metadata[key] = value
+        dust_tracking_count = mark_harmless_dust_positions(
+            conn,
+            pair=settings.PAIR,
+            dust_metadata=dust_eval,
+        )
+        metadata["dust_tracking_position_lot_count"] = dust_tracking_count
 
         set_portfolio_breakdown(
             conn,
-            cash_available=bal.cash_available,
+            cash_available=portfolio_cash_available,
             cash_locked=cash_locked,
             asset_available=bal.asset_available,
             asset_locked=asset_locked,
@@ -1612,15 +2240,49 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
             cancel_client_order_id = local_id or remote_client_order_id or f"remote_{remote_exchange_id or 'unknown'}"
 
             try:
-                cancel_result = broker.cancel_order(
+                request_cancel = getattr(broker, "request_cancel_order", broker.cancel_order)
+                cancel_result = request_cancel(
                     client_order_id=cancel_client_order_id,
                     exchange_order_id=remote.exchange_order_id,
                 )
                 cancel_accepted_count += 1
             except Exception as e:
+                error_text = f"{type(e).__name__}: {e}"
+                if "NOT_FOUND_NEEDS_RECONCILE" in error_text or "order not found" in error_text.lower():
+                    try:
+                        cancel_result = broker.get_order(
+                            client_order_id=cancel_client_order_id,
+                            exchange_order_id=(remote.exchange_order_id or None),
+                        )
+                        cancel_accepted_count += 1
+                    except Exception as lookup_exc:
+                        failed_count += 1
+                        target = remote_exchange_id or cancel_client_order_id
+                        error_messages.append(
+                            f"failed to cancel {target}: {error_text}; lookup={type(lookup_exc).__name__}: {lookup_exc}"
+                        )
+                        current = conn.execute(
+                            "SELECT status, side FROM orders WHERE client_order_id=?",
+                            (local_id,),
+                        ).fetchone()
+                        from_status = str(current["status"]) if current and current["status"] else "UNKNOWN"
+                        local_side = str(current["side"]) if current and current["side"] else str(remote.side)
+                        _mark_recovery_required_with_reason(
+                            conn,
+                            client_order_id=local_id,
+                            side=local_side,
+                            from_status=from_status,
+                            reason_code=RECONCILE_MISMATCH,
+                            reason=(
+                                "cancel not found needs interpretation and lookup failed; "
+                                f"exchange_order_id={remote_exchange_id or '<none>'}; "
+                                f"client_order_id={cancel_client_order_id}"
+                            ),
+                        )
+                        continue
                 failed_count += 1
                 target = remote_exchange_id or cancel_client_order_id
-                error_messages.append(f"failed to cancel {target}: {type(e).__name__}: {e}")
+                error_messages.append(f"failed to cancel {target}: {error_text}")
                 continue
 
             final_status = str(cancel_result.status or "").strip()
@@ -1661,6 +2323,8 @@ def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]
                     set_status(local_id, "CANCELED", conn=conn)
                 elif is_final_filled:
                     set_status(local_id, "FILLED", conn=conn)
+                elif final_status == CANCEL_REQUESTED_STATUS:
+                    set_status(local_id, CANCEL_REQUESTED_STATUS, conn=conn)
                 else:
                     reason = (
                         "cancel accepted but final status unresolved; "

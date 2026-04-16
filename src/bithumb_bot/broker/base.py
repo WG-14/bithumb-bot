@@ -40,6 +40,7 @@ class BrokerOrder:
     created_ts: int
     updated_ts: int
     raw: dict[str, object] | None = None
+    submit_contract_context: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,11 @@ import pytest
 
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
-from bithumb_bot.broker.order_list_v1 import build_order_list_params, parse_v1_order_list_row
+from bithumb_bot.broker.order_list_v1 import (
+    build_order_list_params,
+    build_recovery_order_list_params,
+    parse_v1_order_list_row,
+)
 from bithumb_bot.config import settings
 
 
@@ -41,19 +45,30 @@ def test_v1_orders_builder_accepts_documented_identifier_query_only() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "error_type"),
+    "kwargs",
     [
-        ({"market": "KRW-BTC", "state": "wait", "limit": 100}, TypeError),
-        ({"state": "wait", "limit": 100}, ValueError),
-        ({"market": "KRW-BTC", "state": "done"}, TypeError),
+        {"market": "KRW-BTC", "state": "wait", "limit": 100},
+        {"state": "wait", "limit": 100},
+        {"market": "KRW-BTC", "state": "done"},
     ],
 )
 def test_v1_orders_builder_rejects_legacy_market_state_limit_scan_shape(
     kwargs: dict[str, object],
-    error_type: type[Exception],
 ) -> None:
-    with pytest.raises(error_type):
+    with pytest.raises(ValueError, match="use build_recovery_order_list_params"):
         build_order_list_params(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"market": "KRW-BTC", "state": "wait", "limit": 100},
+        {"market": "KRW-BTC", "states": ["wait", "done"], "limit": 100},
+    ],
+)
+def test_v1_orders_builder_accepts_recovery_scans_via_explicit_helper(kwargs: dict[str, object]) -> None:
+    params = build_recovery_order_list_params(**kwargs)
+    assert params["market"] == "KRW-BTC"
 
 
 def test_v1_orders_parser_rejects_row_without_identifiers() -> None:
@@ -131,7 +146,7 @@ def test_v1_orders_builder_rejects_invalid_client_order_id_format() -> None:
 def test_get_recent_orders_rejects_broad_scan_without_identifiers() -> None:
     _configure_live()
     broker = BithumbBroker()
-    with pytest.raises(BrokerRejectError, match="broad /v1/orders market/state scans are disabled"):
+    with pytest.raises(BrokerRejectError, match="identifier-scoped by bot policy"):
         broker.get_recent_orders(limit=10)
 
 

@@ -1,7 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 import json
 import os
@@ -18,15 +19,37 @@ from .config import (
 from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.paper import paper_execute
-from .broker.live import live_execute_signal
-from .broker.bithumb import BithumbBroker
+from .broker.live import live_execute_signal, record_harmless_dust_exit_suppression
+from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
-from .db_core import ensure_db
+from .decision_context import resolve_canonical_position_exposure_snapshot
+from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
+from .fee_gap_repair import build_fee_gap_accounting_repair_preview
+from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+from .manual_flat_repair import build_manual_flat_accounting_repair_preview
+from .dust import (
+    DustClassification,
+    DustState,
+    build_dust_display_context,
+    build_position_state_model,
+)
 from .utils_time import kst_str, parse_interval_sec
 from .notifier import format_event, notify
 from .observability import configure_runtime_logging, format_log_kv, safety_event
-from .reason_codes import CANCEL_FAILURE, POSITION_LOSS_LIMIT, RISKY_ORDER_BLOCK, STARTUP_BLOCKED
+from .bootstrap import get_last_explicit_env_load_summary
+from .reason_codes import (
+    BLOCKER_DUST_RESIDUAL,
+    BLOCKER_BROKER_CASH_DELTA_UNEXPLAINED,
+    BLOCKER_EXTERNAL_CASH_ADJUSTMENT_REQUIRED,
+    BLOCKER_PORTFOLIO_BROKER_CASH_MISMATCH,
+    BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
+    BLOCKER_TRADE_FILL_UNRESOLVED,
+    CANCEL_FAILURE,
+    POSITION_LOSS_LIMIT,
+    RISKY_ORDER_BLOCK,
+    STARTUP_BLOCKED,
+)
 from . import runtime_state
 from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
 from .oms import collect_risky_order_state
@@ -38,6 +61,7 @@ STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+_CANONICAL_SELL_SUBMIT_LOT_SOURCE = "position_state.normalized_exposure.sellable_executable_lot_count"
 
 
 def compute_signal(
@@ -64,6 +88,34 @@ def compute_signal(
     return payload
 
 
+def _canonical_harmless_dust_sell_preview(decision_context: dict[str, object] | None) -> dict[str, float | str] | None:
+    if not isinstance(decision_context, dict):
+        return None
+
+    canonical_exposure = resolve_canonical_position_exposure_snapshot(decision_context)
+    if bool(canonical_exposure.exit_allowed):
+        return None
+    if int(canonical_exposure.sellable_executable_lot_count) > 0:
+        return None
+
+    exit_block_reason = str(canonical_exposure.exit_block_reason or "").strip()
+    if exit_block_reason not in {"dust_only_remainder", "no_executable_exit_lot"}:
+        return None
+
+    requested_qty = max(0.0, float(canonical_exposure.raw_total_asset_qty))
+    if requested_qty <= 1e-12:
+        return None
+
+    return {
+        "requested_qty": requested_qty,
+        "normalized_qty": max(0.0, float(canonical_exposure.sellable_executable_qty)),
+        "raw_total_asset_qty": requested_qty,
+        "open_exposure_qty": max(0.0, float(canonical_exposure.open_exposure_qty)),
+        "dust_tracking_qty": max(0.0, float(canonical_exposure.dust_tracking_qty)),
+        "submit_qty_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
+    }
+
+
 @dataclass(frozen=True)
 class HaltReason:
     code: str
@@ -74,15 +126,239 @@ class HaltReason:
 class ResumeBlocker:
     code: str
     detail: str
+    reason_code: str
+    summary: str
     overridable: bool
+    balance_delta_krw: float | None = None
+    recent_external_cash_adjustment_present: bool | None = None
+    recent_external_cash_adjustment_count: int | None = None
+
+
+@dataclass(frozen=True)
+class ResumeGuidance:
+    operator_next_action: str
+    recommended_command: str
+    recommended_next_action: str
+    resume_blocked_reason: str
+    blocker_summary: str
+    active_blocker_summary: str
+    risk_level: str
+    primary_blocker_code: str
+    primary_blocker_reason_code: str
+    blocker_summary_view: list[dict[str, object]]
+    blockers: list[dict[str, object]]
+    non_overridable_blockers: list[dict[str, object]]
 
 
 def _halt_reason(code: str, detail: str) -> HaltReason:
     return HaltReason(code=code, detail=detail)
 
 
-def _resume_blocker(*, code: str, detail: str, overridable: bool) -> ResumeBlocker:
-    return ResumeBlocker(code=code, detail=detail, overridable=overridable)
+def _resume_blocker(
+    *,
+    code: str,
+    detail: str,
+    overridable: bool,
+    reason_code: str | None = None,
+    summary: str | None = None,
+    balance_delta_krw: float | None = None,
+    recent_external_cash_adjustment_present: bool | None = None,
+    recent_external_cash_adjustment_count: int | None = None,
+) -> ResumeBlocker:
+    return ResumeBlocker(
+        code=code,
+        detail=detail,
+        reason_code=str(reason_code or code),
+        summary=str(summary or detail),
+        overridable=overridable,
+        balance_delta_krw=balance_delta_krw,
+        recent_external_cash_adjustment_present=recent_external_cash_adjustment_present,
+        recent_external_cash_adjustment_count=recent_external_cash_adjustment_count,
+    )
+
+
+def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> tuple[str, str]:
+    reason = str(startup_gate_reason or "").strip()
+    if not reason:
+        return "-", "no startup gate blocker"
+    if "position_authority_gap=" in reason:
+        return (
+            "POSITION_AUTHORITY_RECOVERY_REQUIRED",
+            "lot authority is missing; manual recovery required",
+        )
+    if "fee_gap_recovery_required=" in reason:
+        return (
+            "FEE_GAP_RECOVERY_REQUIRED",
+            "fee-related accounting inconsistency requires manual recovery",
+        )
+    if int(state.recovery_required_count) > 0 or "recovery_required_orders=" in reason:
+        return (
+            BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
+            "recovery-required orders remain",
+        )
+    if "submit_unknown_orders=" in reason:
+        return (
+            BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
+            "submit unknown orders remain",
+        )
+    if (
+        "pending_submit_orders=" in reason
+        or "unresolved_open_orders=" in reason
+        or "stale_new_partial_orders=" in reason
+    ):
+        return (
+            BLOCKER_TRADE_FILL_UNRESOLVED,
+            "trade/fill state remains unresolved",
+        )
+    return (
+        BLOCKER_TRADE_FILL_UNRESOLVED,
+        "startup safety gate blocked",
+    )
+
+
+def _classify_dust_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str]:
+    if str(dust_context.get("classification") or "") == DustState.HARMLESS_DUST.value:
+        return (
+            BLOCKER_DUST_RESIDUAL,
+            "harmless dust still needs policy review",
+        )
+    return (
+        BLOCKER_DUST_RESIDUAL,
+        "dust residual requires operator review",
+    )
+
+
+def _extract_balance_split_delta_krw(summary: str) -> float | None:
+    if not summary:
+        return None
+    match = re.search(
+        r"cash_[a-z_]+\([^)]*delta=([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\)",
+        summary,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    try:
+        value = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _ledger_external_cash_adjustment_summary() -> dict[str, object] | None:
+    try:
+        conn = ensure_db()
+    except Exception:
+        return None
+    try:
+        return get_external_cash_adjustment_summary(conn)
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _classify_balance_split_blocker(metadata: dict[str, object]) -> ResumeBlocker | None:
+    mismatch_count_raw = metadata.get("balance_split_mismatch_count", 0)
+    try:
+        mismatch_count = max(0, int(mismatch_count_raw))
+    except (TypeError, ValueError):
+        mismatch_count = 0
+    if mismatch_count <= 0:
+        return None
+
+    summary = str(metadata.get("balance_split_mismatch_summary") or "").strip()
+    external_cash_adjustment_count = 0
+    try:
+        external_cash_adjustment_count = max(0, int(metadata.get("external_cash_adjustment_count", 0) or 0))
+    except (TypeError, ValueError):
+        external_cash_adjustment_count = 0
+    delta_krw = _extract_balance_split_delta_krw(summary)
+    recent_external_cash_adjustment_present = external_cash_adjustment_count > 0
+
+    cash_only_mismatch = (
+        bool(summary)
+        and ("cash_available" in summary or "cash_locked" in summary)
+        and "asset_available" not in summary
+        and "asset_locked" not in summary
+    )
+    if external_cash_adjustment_count <= 0 and cash_only_mismatch:
+        return _resume_blocker(
+            code=BLOCKER_EXTERNAL_CASH_ADJUSTMENT_REQUIRED,
+            detail=(
+                "balance split mismatch detected after reconcile: "
+                f"count={mismatch_count} summary={summary or '-'} "
+                f"external_cash_adjustment_present=0 delta_krw={delta_krw if delta_krw is not None else '-'}"
+            ),
+            reason_code=BLOCKER_BROKER_CASH_DELTA_UNEXPLAINED,
+            summary="cash mismatch requires external cash adjustment evidence",
+            overridable=False,
+            balance_delta_krw=delta_krw,
+            recent_external_cash_adjustment_present=False,
+            recent_external_cash_adjustment_count=external_cash_adjustment_count,
+        )
+
+    if cash_only_mismatch and recent_external_cash_adjustment_present:
+        blocker_summary = "cash split mismatch persists after external cash adjustment was recorded"
+    else:
+        blocker_summary = "portfolio cash split does not match broker snapshot"
+
+    return _resume_blocker(
+        code="BALANCE_SPLIT_MISMATCH",
+        detail=(
+            "balance split mismatch detected after reconcile: "
+            f"count={mismatch_count} summary={summary or '-'} "
+            f"external_cash_adjustment_present={1 if recent_external_cash_adjustment_present else 0} "
+            f"delta_krw={delta_krw if delta_krw is not None else '-'}"
+        ),
+        reason_code=BLOCKER_PORTFOLIO_BROKER_CASH_MISMATCH,
+        summary=blocker_summary,
+        overridable=False,
+        balance_delta_krw=delta_krw,
+        recent_external_cash_adjustment_present=recent_external_cash_adjustment_present,
+        recent_external_cash_adjustment_count=external_cash_adjustment_count,
+    )
+
+
+def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlocker | None:
+    try:
+        fee_gap_recovery_required = int(metadata.get("fee_gap_recovery_required", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_recovery_required = 0
+    if fee_gap_recovery_required <= 0:
+        return None
+
+    try:
+        zero_fee_fill_count = max(0, int(metadata.get("material_zero_fee_fill_count", 0) or 0))
+    except (TypeError, ValueError):
+        zero_fee_fill_count = 0
+    try:
+        fee_gap_adjustment_count = max(0, int(metadata.get("fee_gap_adjustment_count", 0) or 0))
+    except (TypeError, ValueError):
+        fee_gap_adjustment_count = 0
+
+    conn = ensure_db()
+    try:
+        fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+    if not bool(fee_gap_preview.get("needs_repair")):
+        return None
+
+    return _resume_blocker(
+        code="FEE_GAP_RECOVERY_REQUIRED",
+        detail=(
+            "fee-related cash drift detected during reconcile: "
+            f"material_zero_fee_fill_count={zero_fee_fill_count} "
+            f"fee_gap_adjustment_count={fee_gap_adjustment_count} "
+            f"fee_gap_accounting_repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)}"
+        ),
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        summary="fee-related accounting inconsistency requires manual recovery",
+        overridable=False,
+    )
 
 
 def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
@@ -97,6 +373,41 @@ def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
         return max(0, int(mismatch_raw))
     except (TypeError, ValueError):
         return 0
+
+
+def _reconcile_dust_context(metadata_raw: str | None) -> dict[str, object]:
+    dust = DustClassification.from_metadata(metadata_raw)
+    raw_holdings = dust.to_raw_holdings()
+    return {
+        "classification": raw_holdings.classification,
+        "present": raw_holdings.present,
+        "allow_resume": dust.allow_resume,
+        "effective_flat": dust.effective_flat,
+        "policy_reason": dust.policy_reason,
+        "summary": raw_holdings.compact_summary,
+    }
+
+
+def _dust_residual_resume_blocker(dust_context: dict[str, object]) -> tuple[str, str] | None:
+    if not bool(dust_context["present"]) or bool(dust_context["allow_resume"]):
+        return None
+    if str(dust_context.get("classification") or "") == DustState.HARMLESS_DUST.value:
+        return (
+            "HARMLESS_DUST_POLICY_REVIEW_REQUIRED",
+            (
+                "harmless dust is visible and treated as flat, but current policy still blocks resume/new orders: "
+                f"policy={str(dust_context['policy_reason'])} "
+                f"summary={str(dust_context['summary'])}"
+            ),
+        )
+    return (
+        "BLOCKING_DUST_REVIEW_REQUIRED",
+        (
+            "blocking dust residual requires operator review before resume: "
+            f"policy={str(dust_context['policy_reason'])} "
+            f"summary={str(dust_context['summary'])}"
+        ),
+    )
 
 
 LIVE_UNRESOLVED_ORDER_STATUSES = (
@@ -226,11 +537,41 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     conn = ensure_db()
     try:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        state = runtime_state.snapshot()
+        try:
+            reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        except Exception as exc:
+            # Halt-clearing checks must fail closed when lot-native exposure
+            # cannot be reconstructed from local state.
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[STARTUP_GATE] exposure snapshot unavailable",
+                    reason=f"{type(exc).__name__}: {exc}",
+                    open_orders_present=1 if open_count > 0 else 0,
+                )
+            )
+            return open_count > 0, True
     finally:
         conn.close()
 
     asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
-    return open_count > 0, asset_qty > 1e-12
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    position_state = build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    return open_count > 0, position_state.normalized_exposure.has_any_position_residue
 
 
 def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
@@ -254,6 +595,7 @@ def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
 def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None) -> bool:
     open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
     mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
+    dust_context = _reconcile_dust_context(state.last_reconcile_metadata)
     reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
     return bool(
         state.last_reconcile_status == "ok"
@@ -264,7 +606,7 @@ def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None)
         and state.unresolved_open_order_count == 0
         and state.recovery_required_count == 0
         and not open_orders_present
-        and not position_present
+        and (not position_present or bool(dust_context["effective_flat"]))
     )
 
 
@@ -301,8 +643,43 @@ def maybe_clear_stale_initial_reconcile_halt() -> bool:
     )
     return True
 
+
+def maybe_clear_stale_live_execution_broker_halt(*, startup_gate_reason: str | None = None) -> bool:
+    runtime_state.refresh_open_order_health()
+    state = runtime_state.snapshot()
+
+    if not (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
+    ):
+        return False
+
+    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
+    if not _can_clear_reconcile_failure_halt(
+        state=runtime_state.snapshot(),
+        startup_gate_reason=gate_reason,
+    ):
+        return False
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=state.last_disable_reason,
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    _log_loop_event(
+        logging.INFO,
+        "[RUN] stale_live_execution_broker_halt_cleared",
+        halt_reason_code=state.halt_reason_code or "-",
+        reconcile_reason_code=state.last_reconcile_reason_code or "-",
+    )
+    return True
+
 def get_health_status() -> dict[str, float | int | bool | str | None]:
     maybe_clear_stale_initial_reconcile_halt()
+    maybe_clear_stale_live_execution_broker_halt()
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
@@ -350,6 +727,12 @@ def evaluate_startup_safety_gate() -> str | None:
     runtime_state.refresh_open_order_health()
     state = runtime_state.snapshot()
     now_ms = int(time.time() * 1000)
+    reconcile_metadata: dict[str, object] = {}
+    if state.last_reconcile_metadata:
+        try:
+            reconcile_metadata = json.loads(str(state.last_reconcile_metadata))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            reconcile_metadata = {}
 
     conn = ensure_db()
     try:
@@ -420,6 +803,58 @@ def evaluate_startup_safety_gate() -> str | None:
     if state.recovery_required_count > status_counts["recovery_required"]:
         reasons.append(f"recovery_required_orders={state.recovery_required_count}")
 
+    portfolio_conn = ensure_db()
+    try:
+        portfolio_row = portfolio_conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
+        lot_snapshot = summarize_position_lots(portfolio_conn, pair=settings.PAIR)
+    finally:
+        portfolio_conn.close()
+
+    portfolio_asset_qty = float(portfolio_row["asset_qty"] if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0)
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    normalized_position = build_position_state_model(
+        raw_qty_open=portfolio_asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            portfolio_asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    ).normalized_exposure
+    if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
+        reasons.append(
+            "position_authority_gap="
+            f"{normalized_position.authority_gap_reason}"
+            f"(terminal_state={normalized_position.terminal_state})"
+        )
+
+    try:
+        fee_gap_recovery_required = int(reconcile_metadata.get("fee_gap_recovery_required", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_recovery_required = 0
+    if fee_gap_recovery_required > 0:
+        try:
+            fee_gap_adjustment_count = max(0, int(reconcile_metadata.get("fee_gap_adjustment_count", 0) or 0))
+        except (TypeError, ValueError):
+            fee_gap_adjustment_count = 0
+        conn = ensure_db()
+        try:
+            fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
+        finally:
+            conn.close()
+        if bool(fee_gap_preview.get("needs_repair")):
+            reasons.append(
+                "fee_gap_recovery_required="
+                f"{fee_gap_recovery_required}"
+                f"(adjustments={fee_gap_adjustment_count})"
+            )
+
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])
     if submit_unknown_without_exchange_count > 0:
         reasons.append(
@@ -440,6 +875,8 @@ def evaluate_startup_safety_gate() -> str | None:
             stale_new_partial=status_counts["stale_new_partial"],
             unresolved_open_orders=state.unresolved_open_order_count,
             runtime_recovery_required=state.recovery_required_count,
+            fee_gap_recovery_required=fee_gap_recovery_required,
+            position_authority_gap_reason=normalized_position.authority_gap_reason or "-",
             submit_unknown_without_exchange_id=submit_unknown_without_exchange_count,
             stray_remote_open_orders=stray_remote_open_count,
             gate_blocked=bool(reasons),
@@ -460,6 +897,8 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     """Returns whether operator resume may proceed and structured blockers."""
     maybe_clear_stale_initial_reconcile_halt()
     startup_gate_reason = evaluate_startup_safety_gate()
+    maybe_clear_stale_live_execution_broker_halt(startup_gate_reason=startup_gate_reason)
+    startup_gate_reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
 
     reasons: list[ResumeBlocker] = []
@@ -472,15 +911,44 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                     f"reason_code={state.last_reconcile_reason_code or '-'} "
                     f"error={state.last_reconcile_error or '-'}"
                 ),
+                reason_code="LAST_RECONCILE_FAILED",
+                summary="last reconcile failed",
                 overridable=False,
             )
         )
 
+    if not startup_gate_reason and not state.halt_new_orders_blocked and not state.halt_state_unresolved:
+        conn = ensure_db()
+        try:
+            manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
+        finally:
+            conn.close()
+        if bool(manual_flat_preview.get("safe_to_apply")):
+            reasons.append(
+                _resume_blocker(
+                    code="MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED",
+                    detail=(
+                        f"manual-flat accounting repair pending: {manual_flat_preview.get('eligibility_reason')}; "
+                        f"cash_delta={float(manual_flat_preview.get('cash_delta') or 0.0):.3f} "
+                        f"asset_qty_delta={float(manual_flat_preview.get('asset_qty_delta') or 0.0):.10f}"
+                    ),
+                    reason_code="MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED",
+                    summary="manual-flat accounting repair required",
+                    overridable=False,
+                )
+            )
+
     if startup_gate_reason:
+        startup_blocker_reason_code, startup_blocker_summary = _classify_startup_gate_reason(
+            startup_gate_reason,
+            state=state,
+        )
         reasons.append(
             _resume_blocker(
                 code="STARTUP_SAFETY_GATE_BLOCKED",
                 detail=startup_gate_reason,
+                reason_code=startup_blocker_reason_code,
+                summary=startup_blocker_summary,
                 overridable=False,
             )
         )
@@ -493,32 +961,77 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                     state.emergency_flatten_block_reason
                     or f"last_flatten_status={state.last_flatten_position_status or '-'}"
                 ),
+                reason_code="EMERGENCY_FLATTEN_UNRESOLVED",
+                summary="emergency flatten remains unresolved",
                 overridable=False,
             )
         )
 
     if startup_gate_reason and state.last_reconcile_status == "ok":
+        startup_blocker_reason_code, startup_blocker_summary = _classify_startup_gate_reason(
+            startup_gate_reason,
+            state=state,
+        )
+        if startup_blocker_reason_code != "FEE_GAP_RECOVERY_REQUIRED":
+            reasons.append(
+                _resume_blocker(
+                    code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
+                    detail="latest reconcile reported ok but startup safety gate still blocks resume",
+                    reason_code=startup_blocker_reason_code,
+                    summary=startup_blocker_summary,
+                    overridable=False,
+                )
+            )
+
+    dust_context_for_halt = _reconcile_dust_context(state.last_reconcile_metadata)
+    dust_resume_blocker = _dust_residual_resume_blocker(dust_context_for_halt)
+    if dust_resume_blocker is not None:
+        blocker_code, blocker_detail = dust_resume_blocker
+        dust_reason_code, dust_summary = _classify_dust_resume_blocker(dust_context_for_halt)
         reasons.append(
             _resume_blocker(
-                code="LAST_RECONCILE_DID_NOT_CLEAR_BLOCKERS",
-                detail="latest reconcile reported ok but startup safety gate still blocks resume",
+                code=blocker_code,
+                detail=blocker_detail,
+                reason_code=dust_reason_code,
+                summary=dust_summary,
                 overridable=False,
             )
         )
 
-    if state.halt_state_unresolved:
-        reasons.append(
-            _resume_blocker(
-                code="HALT_STATE_UNRESOLVED",
-                detail=f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
-                overridable=False,
+    unresolved_dust_safe = bool(
+        state.halt_state_unresolved
+        and (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
+        and int(state.unresolved_open_order_count) == 0
+        and int(state.recovery_required_count) == 0
+        and bool(dust_context_for_halt["effective_flat"])
+    )
+    if state.halt_state_unresolved and not unresolved_dust_safe:
+            reasons.append(
+                _resume_blocker(
+                    code="HALT_STATE_UNRESOLVED",
+                    detail=f"halt unresolved: code={state.halt_reason_code or '-'} reason={state.last_disable_reason or '-'}",
+                    reason_code="HALT_STATE_UNRESOLVED",
+                    summary="halt state remains unresolved",
+                    overridable=False,
+                )
             )
-        )
 
     if state.halt_new_orders_blocked:
         open_orders_present, position_present = _get_exposure_snapshot(int(time.time() * 1000))
+        # Preserve the original halt exposure signal as a fail-closed fallback
+        # when current lot-native reconstruction can only classify the holdings
+        # as a non-executable authority gap.
+        open_orders_present = bool(open_orders_present or state.halt_open_orders_present)
+        position_present = bool(position_present or state.halt_position_present)
+        dust_context = _reconcile_dust_context(state.last_reconcile_metadata)
         is_risk_exposure_halt = (state.halt_reason_code or "") in RISK_EXPOSURE_HALT_REASON_CODES
-        if open_orders_present or position_present:
+        dust_exposure_only = bool(
+            not open_orders_present
+            and position_present
+            and bool(dust_context["present"])
+            and bool(dust_context["effective_flat"])
+        )
+        if open_orders_present or (position_present and not dust_exposure_only):
             detail = (
                 "halt blocked with open exposure: "
                 f"position_present={1 if position_present else 0} "
@@ -526,6 +1039,11 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 f"reason_code={state.halt_reason_code or '-'} "
                 f"reason={state.last_disable_reason or '-'}"
             )
+            if position_present and not open_orders_present and bool(dust_context["present"]):
+                detail += (
+                    f" dust_policy={str(dust_context['policy_reason'])} "
+                    f"dust_summary={str(dust_context['summary'])}"
+                )
             if is_risk_exposure_halt:
                 detail = (
                     "risk halt resume rejected until exposure is flattened/resolved first; "
@@ -535,25 +1053,58 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
                 _resume_blocker(
                     code="HALT_RISK_OPEN_POSITION",
                     detail=detail,
+                    reason_code="HALT_RISK_OPEN_POSITION",
+                    summary="halt risk still has open exposure",
                     overridable=False,
                 )
             )
 
+    ledger_adjustment_summary = _ledger_external_cash_adjustment_summary() if settings.MODE == "live" else None
     if settings.MODE == "live" and state.last_reconcile_metadata:
         mismatch_count = _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata)
         try:
             reconcile_meta = json.loads(str(state.last_reconcile_metadata))
         except json.JSONDecodeError:
             reconcile_meta = {}
+        ledger_adjustment_count = 0
+        ledger_adjustment_total = 0.0
+        if ledger_adjustment_summary is not None:
+            try:
+                ledger_adjustment_count = max(0, int(ledger_adjustment_summary.get("adjustment_count", 0) or 0))
+            except (TypeError, ValueError):
+                ledger_adjustment_count = 0
+            try:
+                ledger_adjustment_total = float(ledger_adjustment_summary.get("adjustment_total", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                ledger_adjustment_total = 0.0
+        if ledger_adjustment_count > 0:
+            reconcile_meta = dict(reconcile_meta)
+            reconcile_meta["external_cash_adjustment_count"] = max(
+                ledger_adjustment_count,
+                int(reconcile_meta.get("external_cash_adjustment_count", 0) or 0),
+            )
+            reconcile_meta["external_cash_adjustment_total_krw"] = (
+                float(reconcile_meta.get("external_cash_adjustment_total_krw", 0.0) or 0.0)
+                if float(reconcile_meta.get("external_cash_adjustment_total_krw", 0.0) or 0.0) != 0.0
+                else ledger_adjustment_total
+            )
         if mismatch_count > 0:
-            mismatch_summary = str(reconcile_meta.get("balance_split_mismatch_summary") or "-")
-            reasons.append(
-                _resume_blocker(
+            blocker_reason = _classify_balance_split_blocker(reconcile_meta)
+            if blocker_reason is None:
+                blocker_reason = _resume_blocker(
                     code="BALANCE_SPLIT_MISMATCH",
-                    detail=f"balance split mismatch detected after reconcile: count={mismatch_count} summary={mismatch_summary}",
+                    detail=(
+                        "balance split mismatch detected after reconcile: "
+                        f"count={mismatch_count} summary={str(reconcile_meta.get('balance_split_mismatch_summary') or '-')}"
+                    ),
+                    reason_code=BLOCKER_PORTFOLIO_BROKER_CASH_MISMATCH,
+                    summary="portfolio cash split does not match broker snapshot",
                     overridable=False,
                 )
-            )
+            reasons.append(blocker_reason)
+        fee_gap_blocker = _classify_fee_gap_recovery_blocker(reconcile_meta)
+        if fee_gap_blocker is not None:
+            reasons.append(fee_gap_blocker)
 
     gate_reason = None
     if reasons:
@@ -561,11 +1112,391 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     runtime_state.set_resume_gate(blocked=bool(reasons), reason=gate_reason)
     return (len(reasons) == 0), reasons
 
-def _halt_trading(reason: HaltReason, *, unresolved: bool = False) -> None:
+
+def build_resume_guidance(
+    *,
+    resume_allowed: bool,
+    blockers: list[ResumeBlocker],
+    unresolved_count: int,
+    recovery_required_count: int,
+    submit_unknown_count: int,
+) -> ResumeGuidance:
+    blocker_list: list[dict[str, object]] = [
+        {
+            "code": b.code,
+            "reason_code": str(getattr(b, "reason_code", b.code)),
+            "summary": str(getattr(b, "summary", b.detail)),
+            "detail": b.detail,
+            "overridable": bool(b.overridable),
+            "balance_delta_krw": getattr(b, "balance_delta_krw", None),
+            "recent_external_cash_adjustment_present": getattr(b, "recent_external_cash_adjustment_present", None),
+            "recent_external_cash_adjustment_count": getattr(b, "recent_external_cash_adjustment_count", None),
+        }
+        for b in blockers
+    ]
+    blocker_codes = [str(b["code"]) for b in blocker_list]
+    non_overridable_blockers = [b for b in blocker_list if not bool(b["overridable"])]
+    primary_blocker_code = str(blocker_list[0]["code"]) if blocker_list else "-"
+    primary_blocker_reason_code = str(blocker_list[0]["reason_code"]) if blocker_list else "-"
+    blocker_summary = (
+        f"total={len(blocker_list)} "
+        f"non_overridable={len(non_overridable_blockers)} "
+        f"overridable={len(blocker_list) - len(non_overridable_blockers)}"
+    )
+
+    if resume_allowed:
+        operator_next_action = "resume_now"
+        recommended_command = "uv run python bot.py resume"
+        recommended_next_action = "No active blocker. Resume trading now."
+        resume_blocked_reason = "none"
+    elif blocker_list and all(bool(b["overridable"]) for b in blocker_list):
+        operator_next_action = "review_and_force_resume"
+        recommended_command = "uv run python bot.py resume --force"
+        recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
+        resume_blocked_reason = "resume blocked by overridable blockers"
+    elif recovery_required_count > 0:
+        operator_next_action = "manual_recovery_required"
+        recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
+        recommended_next_action = "Recover RECOVERY_REQUIRED orders before attempting resume."
+        resume_blocked_reason = "resume blocked by RECOVERY_REQUIRED orders"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_RECOVERY_REQUIRED" for b in blocker_list):
+        operator_next_action = "manual_position_authority_recovery_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Do not resume trading. Holdings exist but canonical lot authority is missing; repair or explicitly recover the position state first."
+        )
+        resume_blocked_reason = "resume blocked by missing lot authority"
+    elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_flat_accounting_repair_required"
+        recommended_command = "uv run python bot.py manual-flat-accounting-repair"
+        recommended_next_action = (
+            "Do not resume trading. The runtime is flat, but accounting replay still needs an explicit manual-flat repair event."
+        )
+        resume_blocked_reason = "resume blocked pending manual-flat accounting repair"
+    elif "HARMLESS_DUST_POLICY_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "review_harmless_dust_policy"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm harmless broker/local dust is truly safe, decide whether policy should keep blocking resume, and avoid forced liquidation below exchange minimums."
+        )
+        resume_blocked_reason = "resume blocked by harmless dust policy review"
+    elif "BLOCKING_DUST_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_dust_review_required"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = (
+            "Confirm this is not a broker/local mismatch or recovery issue before resuming. Do not force extra liquidation while state is unclear."
+        )
+        resume_blocked_reason = "resume blocked by blocking dust manual review"
+    elif "EXTERNAL_CASH_ADJUSTMENT_REQUIRED" in blocker_codes:
+        operator_next_action = "record_external_cash_adjustment"
+        recommended_command = "uv run python bot.py record-external-cash-adjustment --help"
+        recommended_next_action = (
+            "Record the missing external cash adjustment evidence, then rerun reconcile before resuming."
+        )
+        resume_blocked_reason = "resume blocked pending external cash adjustment evidence"
+    elif "FEE_GAP_RECOVERY_REQUIRED" in blocker_codes:
+        operator_next_action = "manual_fee_gap_recovery_required"
+        recommended_command = "uv run python bot.py fee-gap-accounting-repair"
+        recommended_next_action = (
+            "Do not resume live trading. Review the fee-gap preview and record an explicit fee-gap accounting repair before resuming."
+        )
+        resume_blocked_reason = "resume blocked by fee-related accounting inconsistency"
+    elif "BALANCE_SPLIT_MISMATCH" in blocker_codes:
+        if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+            operator_next_action = "reconcile_after_external_adjustment"
+            recommended_command = "uv run python bot.py reconcile"
+            recommended_next_action = (
+                "An external cash adjustment is already recorded. Verify the broker snapshot, then rerun reconcile."
+            )
+            resume_blocked_reason = "resume blocked by remaining balance split mismatch after external adjustment"
+        else:
+            operator_next_action = "investigate_blockers"
+            recommended_command = "uv run python bot.py recovery-report --json"
+            recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+            resume_blocked_reason = "resume blocked by non-overridable safety blockers"
+    else:
+        operator_next_action = "investigate_blockers"
+        recommended_command = "uv run python bot.py recovery-report --json"
+        recommended_next_action = "Investigate non-overridable blockers and clear the root cause first."
+        resume_blocked_reason = "resume blocked by non-overridable safety blockers"
+
+    active_blocker_summary = "none"
+    if blocker_list:
+        active_blocker_summary = " | ".join(
+            f"{b['code']}(overridable={1 if bool(b['overridable']) else 0})"
+            for b in blocker_list[:3]
+        )
+
+    risk_level = "low"
+    if recovery_required_count > 0 or non_overridable_blockers:
+        risk_level = "high"
+    elif unresolved_count > 0 or blocker_list:
+        risk_level = "medium"
+
+    def _next_action_for_blocker(code: str) -> str:
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            if recovery_required_count > 0:
+                return "uv run python bot.py recover-order --client-order-id <id>"
+            if submit_unknown_count > 0:
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report"
+        if code == "LAST_RECONCILE_FAILED":
+            return "uv run python bot.py reconcile"
+        if code == "EXTERNAL_CASH_ADJUSTMENT_REQUIRED":
+            return "uv run python bot.py record-external-cash-adjustment --help"
+        if code == "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED":
+            return "uv run python bot.py manual-flat-accounting-repair"
+        if code == "FEE_GAP_RECOVERY_REQUIRED":
+            return "uv run python bot.py fee-gap-accounting-repair"
+        if code == "BALANCE_SPLIT_MISMATCH":
+            if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
+                return "uv run python bot.py reconcile"
+            return "uv run python bot.py recovery-report --json"
+        if code == "HALT_RISK_OPEN_POSITION":
+            return "uv run python bot.py flatten-position"
+        if code in {"HARMLESS_DUST_POLICY_REVIEW_REQUIRED", "BLOCKING_DUST_REVIEW_REQUIRED"}:
+            return "uv run python bot.py recovery-report --json"
+        if code in {"HALT_STATE_UNRESOLVED", "EMERGENCY_FLATTEN_UNRESOLVED"}:
+            return "uv run python bot.py restart-checklist"
+        return recommended_command
+
+    blocker_summary_view: list[dict[str, object]] = []
+    for blocker in blocker_list[:3]:
+        code = str(blocker["code"])
+        reason_code = str(blocker["reason_code"])
+        summary = str(blocker["summary"])
+        evidence = str(blocker["detail"])
+        if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            evidence = (
+                f"unresolved={unresolved_count} "
+                f"submit_unknown={submit_unknown_count} "
+                f"recovery_required={recovery_required_count}; "
+                f"{evidence}"
+            )
+        balance_delta_krw = blocker.get("balance_delta_krw")
+        recent_adjustment_present = blocker.get("recent_external_cash_adjustment_present")
+        recent_adjustment_count = blocker.get("recent_external_cash_adjustment_count")
+        if balance_delta_krw is not None or recent_adjustment_present is not None:
+            delta_text = (
+                f"{float(balance_delta_krw):.3f}"
+                if isinstance(balance_delta_krw, (int, float))
+                else str(balance_delta_krw)
+            )
+            evidence = (
+                f"{evidence} "
+                f"delta_krw={delta_text} "
+                f"recent_external_cash_adjustment_present={1 if bool(recent_adjustment_present) else 0} "
+                f"recent_external_cash_adjustment_count={int(recent_adjustment_count or 0)}"
+            )
+        blocker_summary_view.append(
+            {
+                "blocker": code,
+                "reason_code": reason_code,
+                "summary": summary,
+                "evidence": evidence,
+                "recommended_next_action": _next_action_for_blocker(code),
+                "delta_krw": balance_delta_krw,
+                "recent_external_cash_adjustment_present": recent_adjustment_present,
+                "recent_external_cash_adjustment_count": recent_adjustment_count,
+            }
+        )
+
+    if not blocker_summary_view:
+        blocker_summary_view.append(
+            {
+                "blocker": "none",
+                "evidence": "resume gates clear",
+                "recommended_next_action": "uv run python bot.py resume",
+            }
+        )
+
+    return ResumeGuidance(
+        operator_next_action=operator_next_action,
+        recommended_command=recommended_command,
+        recommended_next_action=recommended_next_action,
+        resume_blocked_reason=resume_blocked_reason,
+        blocker_summary=blocker_summary,
+        active_blocker_summary=active_blocker_summary,
+        risk_level=risk_level,
+        primary_blocker_code=primary_blocker_code,
+        primary_blocker_reason_code=primary_blocker_reason_code,
+        blocker_summary_view=blocker_summary_view,
+        blockers=blocker_list,
+        non_overridable_blockers=non_overridable_blockers,
+    )
+
+
+def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
+    resume_allowed, blockers = evaluate_resume_eligibility()
+    state = runtime_state.snapshot()
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+
+    conn = ensure_db()
+    try:
+        open_row = conn.execute(
+            """
+            SELECT COUNT(*) AS open_count
+            FROM orders
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN')
+            """
+        ).fetchone()
+        recovery_row = conn.execute(
+            "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
+        ).fetchone()
+        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    open_order_count = int(open_row["open_count"] if open_row else 0)
+    recovery_required_count = int(recovery_row["recovery_required_count"] if recovery_row else 0)
+    unresolved_count = max(0, open_order_count + recovery_required_count)
+    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
+    position_state = build_position_state_model(
+        raw_qty_open=asset_qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    normalized_exposure = position_state.normalized_exposure
+    dust_present = bool(dust_context.classification.present)
+    dust_resume_safe = bool(dust_present and dust_context.operator_view.resume_allowed)
+    raw_qty_without_dust_evidence = bool(asset_qty > 1e-12 and not dust_present)
+    raw_qty_residue_without_resume_safe_dust = bool(
+        raw_qty_without_dust_evidence
+        or (
+            asset_qty > 1e-12
+            and not normalized_exposure.has_any_position_residue
+            and not dust_resume_safe
+        )
+    )
+    position_state_clear = bool(
+        not raw_qty_residue_without_resume_safe_dust
+        and not normalized_exposure.has_executable_exposure
+        and (
+            str(normalized_exposure.terminal_state) == "flat"
+            or (str(normalized_exposure.terminal_state) == "dust_only" and dust_resume_safe)
+        )
+    )
+    display_terminal_state = (
+        "open_exposure"
+        if raw_qty_residue_without_resume_safe_dust
+        else str(normalized_exposure.terminal_state)
+    )
+    display_has_executable_exposure = bool(
+        raw_qty_residue_without_resume_safe_dust or normalized_exposure.has_executable_exposure
+    )
+    display_has_dust_only_remainder = bool(
+        (not raw_qty_residue_without_resume_safe_dust) and normalized_exposure.has_dust_only_remainder
+    )
+
+    last_reconcile_summary = "none"
+    if state.last_reconcile_status:
+        last_reconcile_summary = (
+            f"status={state.last_reconcile_status} "
+            f"reason_code={state.last_reconcile_reason_code or '-'}"
+        )
+        if state.last_reconcile_error:
+            last_reconcile_summary += f" error={state.last_reconcile_error}"
+    last_reconcile_ok = bool(str(state.last_reconcile_status or "").lower() in {"", "ok"})
+
+    blocker_codes = {blocker.code for blocker in blockers}
+    halt_clear = bool(
+        state.halt_new_orders_blocked is False
+        and state.halt_state_unresolved is False
+        and "HALT_STATE_UNRESOLVED" not in blocker_codes
+        and "HALT_RISK_OPEN_POSITION" not in blocker_codes
+    )
+
+    manual_flat_repair_needed = False
+    manual_flat_repair_detail = "not_checked"
+    fee_gap_repair_needed = False
+    fee_gap_repair_detail = "not_checked"
+    conn = ensure_db()
+    try:
+        manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
+        fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+    manual_flat_repair_needed = bool(manual_flat_preview.get("safe_to_apply"))
+    manual_flat_repair_detail = (
+        f"needed={1 if manual_flat_repair_needed else 0} "
+        f"safe_to_apply={1 if bool(manual_flat_preview.get('safe_to_apply')) else 0} "
+        f"reason={manual_flat_preview.get('eligibility_reason') or 'none'}"
+    )
+    fee_gap_repair_needed = bool(fee_gap_preview.get("needs_repair"))
+    fee_gap_repair_detail = (
+        f"needed={1 if fee_gap_repair_needed else 0} "
+        f"safe_to_apply={1 if bool(fee_gap_preview.get('safe_to_apply')) else 0} "
+        f"repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)} "
+        f"reason={fee_gap_preview.get('eligibility_reason') or 'none'}"
+    )
+
+    return [
+        (
+            "unresolved/recovery-required orders",
+            unresolved_count == 0,
+            (
+                f"unresolved={unresolved_count} "
+                f"recovery_required={recovery_required_count}"
+            ),
+        ),
+        (
+            "open orders",
+            open_order_count == 0,
+            f"open_orders={open_order_count}",
+        ),
+        (
+            "normalized position state",
+            position_state_clear,
+            (
+                f"terminal_state={display_terminal_state} "
+                f"has_executable_exposure={1 if display_has_executable_exposure else 0} "
+                f"has_dust_only_remainder={1 if display_has_dust_only_remainder else 0} "
+                f"dust_resume_allowed={1 if dust_resume_safe else 0}"
+            ),
+        ),
+        (
+            "halt state",
+            halt_clear and resume_allowed,
+            (
+                f"halt_blocked={1 if state.halt_new_orders_blocked else 0} "
+                f"halt_unresolved={1 if state.halt_state_unresolved else 0} "
+                f"detail={state.last_disable_reason or 'none'}"
+            ),
+        ),
+        (
+            "last reconcile",
+            last_reconcile_ok,
+            last_reconcile_summary,
+        ),
+        (
+            "manual-flat accounting repair",
+            not manual_flat_repair_needed,
+            manual_flat_repair_detail,
+        ),
+        (
+            "fee-gap accounting repair",
+            not fee_gap_repair_needed,
+            fee_gap_repair_detail,
+        ),
+    ]
+
+def _halt_trading(reason: HaltReason, *, unresolved: bool = False, attempt_flatten: bool = False) -> None:
     runtime_state.enter_halt(
         reason_code=reason.code,
         reason=reason.detail,
         unresolved=unresolved,
+        attempt_flatten=attempt_flatten,
     )
     halt_state = runtime_state.snapshot()
     _, resume_blockers = evaluate_resume_eligibility()
@@ -660,7 +1591,7 @@ def _latest_order_identifiers() -> tuple[str | None, str | None]:
             """
             SELECT client_order_id, exchange_order_id
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             ORDER BY updated_ts DESC, created_ts DESC
             LIMIT 1
             """
@@ -689,13 +1620,46 @@ def _position_summary() -> str:
     conn = ensure_db()
     try:
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+        state = runtime_state.snapshot()
+        try:
+            reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        except Exception as exc:
+            RUN_LOG.warning(
+                format_log_kv(
+                    "[RUN] position summary unavailable",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            qty = float(row["asset_qty"] or 0.0) if row is not None else 0.0
+            return f"position=unknown qty={qty:.8f} reason=lot_snapshot_unavailable"
     finally:
         conn.close()
 
     qty = float(row["asset_qty"] or 0.0) if row is not None else 0.0
-    if abs(qty) <= 1e-12:
+    dust_context = build_dust_display_context(state.last_reconcile_metadata)
+    position_state = build_position_state_model(
+        raw_qty_open=qty,
+        metadata_raw=state.last_reconcile_metadata,
+        raw_total_asset_qty=max(
+            qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
+        ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        reserved_exit_qty=reserved_exit_qty,
+    )
+    normalized_exposure = position_state.normalized_exposure
+    if normalized_exposure.terminal_state == "flat":
         return "flat"
-    return f"long_qty={qty:.8f}"
+    if normalized_exposure.has_executable_exposure:
+        return f"open_exposure_qty={normalized_exposure.open_exposure_qty:.8f}"
+    if normalized_exposure.has_dust_only_remainder:
+        return f"dust_only_qty={normalized_exposure.dust_tracking_qty:.8f}"
+    return f"non_executable_position_state={normalized_exposure.terminal_state}"
 
 
 def _recommended_operator_commands(
@@ -907,21 +1871,43 @@ def _attempt_open_order_cancellation(broker: BithumbBroker, trigger: str) -> boo
     return True
 
 
-def _attempt_risk_breach_flatten(
+def _attempt_cleanup_with_optional_flatten(
     broker: BithumbBroker,
     *,
     reason_code: str,
     reason_detail: str,
     cancel_trigger: str,
     flatten_trigger: str,
+    attempt_flatten: bool,
 ) -> tuple[HaltReason, bool, bool]:
+    initial_open_orders_present, initial_position_present = _get_exposure_snapshot(int(time.time() * 1000))
     canceled_ok = _attempt_open_order_cancellation(broker, trigger=cancel_trigger)
-    flatten_outcome = flatten_btc_position(
-        broker=broker,
-        dry_run=bool(settings.LIVE_DRY_RUN),
-        trigger=flatten_trigger,
-    )
-    flatten_status = str(flatten_outcome.get("status") or "-")
+    flatten_outcome: dict[str, object] | None = None
+    if attempt_flatten and canceled_ok:
+        flatten_outcome = flatten_btc_position(
+            broker=broker,
+            dry_run=bool(settings.LIVE_DRY_RUN),
+            trigger=flatten_trigger,
+        )
+        flatten_status = str(flatten_outcome.get("status") or "-")
+    elif attempt_flatten:
+        flatten_status = "skipped_cancel_failed"
+    else:
+        flatten_status = "skipped"
+
+    if flatten_status in {"skipped", "skipped_cancel_failed"}:
+        runtime_state.record_flatten_position_result(
+            status=flatten_status,
+            summary={
+                "status": flatten_status,
+                "attempted": int(bool(attempt_flatten)),
+                "cancel_ok": int(bool(canceled_ok)),
+                "reason_code": reason_code,
+                "reason_detail": reason_detail,
+                "trigger": flatten_trigger,
+            },
+        )
+
     detail_parts = [
         reason_detail,
         (
@@ -932,11 +1918,11 @@ def _attempt_risk_breach_flatten(
         f"flatten_status={flatten_status}",
     ]
     flatten_failed = flatten_status == "failed"
-    if flatten_failed:
+    if flatten_failed and flatten_outcome is not None:
         detail_parts.append(f"flatten_error={str(flatten_outcome.get('error') or '-')}")
 
     cleanup_uncertain = (not canceled_ok) or flatten_failed
-    unresolved = cleanup_uncertain
+    unresolved = True
     if cleanup_uncertain:
         revalidated_safe, revalidation_detail = _revalidate_cleanup_state_after_failure(
             broker,
@@ -944,8 +1930,61 @@ def _attempt_risk_breach_flatten(
         )
         detail_parts.append(revalidation_detail)
         unresolved = not revalidated_safe
+    else:
+        post_open_orders_present, post_position_present = _get_exposure_snapshot(int(time.time() * 1000))
+        if post_open_orders_present or post_position_present:
+            detail_parts.append(
+                "risk_open_exposure_remains("
+                f"open_orders={1 if post_open_orders_present else 0},"
+                f"position={1 if post_position_present else 0})"
+            )
+        unresolved = post_open_orders_present or post_position_present
+
+    if initial_open_orders_present or initial_position_present:
+        detail_parts.append(
+            "cleanup_started_with_exposure("
+            f"open_orders={1 if initial_open_orders_present else 0},"
+            f"position={1 if initial_position_present else 0})"
+        )
 
     return _halt_reason(reason_code, "; ".join(detail_parts)), canceled_ok, unresolved
+
+
+def _attempt_risk_breach_flatten(
+    broker: BithumbBroker,
+    *,
+    reason_code: str,
+    reason_detail: str,
+    cancel_trigger: str,
+    flatten_trigger: str,
+) -> tuple[HaltReason, bool, bool]:
+    return _attempt_cleanup_with_optional_flatten(
+        broker,
+        reason_code=reason_code,
+        reason_detail=reason_detail,
+        cancel_trigger=cancel_trigger,
+        flatten_trigger=flatten_trigger,
+        attempt_flatten=True,
+    )
+
+
+def perform_panic_stop_cleanup(
+    broker: BithumbBroker,
+    *,
+    reason_code: str,
+    reason_detail: str,
+    cancel_trigger: str,
+    flatten_trigger: str,
+    attempt_flatten: bool,
+) -> tuple[HaltReason, bool, bool]:
+    return _attempt_cleanup_with_optional_flatten(
+        broker,
+        reason_code=reason_code,
+        reason_detail=reason_detail,
+        cancel_trigger=cancel_trigger,
+        flatten_trigger=flatten_trigger,
+        attempt_flatten=attempt_flatten,
+    )
 
 
 def run_loop(short_n: int, long_n: int) -> None:
@@ -966,6 +2005,8 @@ def run_loop(short_n: int, long_n: int) -> None:
             raise
     validate_live_mode_preflight(settings)
 
+    maybe_clear_stale_initial_reconcile_halt()
+    maybe_clear_stale_live_execution_broker_halt()
     state = runtime_state.snapshot()
     if state.halt_new_orders_blocked:
         reason = state.last_disable_reason or "persisted halt state requires explicit operator resume"
@@ -1013,7 +2054,11 @@ def run_loop(short_n: int, long_n: int) -> None:
 
     broker = None
     if settings.MODE == "live":
-        broker = BithumbBroker()
+        broker, _auth_diag = build_broker_with_auth_diagnostics(
+            caller="run_loop",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+            broker_factory=BithumbBroker,
+        )
         try:
             reconcile_with_broker(broker)
         except Exception as e:
@@ -1211,74 +2256,44 @@ def run_loop(short_n: int, long_n: int) -> None:
 
             if settings.MODE == "live" and broker is not None:
                 if settings.KILL_SWITCH:
-                    canceled_ok = _attempt_open_order_cancellation(
-                        broker, trigger="kill-switch"
+                    halt_reason, _canceled_ok, unresolved = perform_panic_stop_cleanup(
+                        broker,
+                        reason_code="KILL_SWITCH",
+                        reason_detail="KILL_SWITCH=ON",
+                        cancel_trigger="kill-switch",
+                        flatten_trigger="kill-switch",
+                        attempt_flatten=bool(settings.KILL_SWITCH_LIQUIDATE),
                     )
-                    flatten_outcome: dict[str, object] | None = None
-                    flatten_failed = False
-                    if settings.KILL_SWITCH_LIQUIDATE:
-                        flatten_outcome = flatten_btc_position(
-                            broker=broker,
-                            dry_run=bool(settings.LIVE_DRY_RUN),
-                            trigger="kill-switch",
-                        )
-                        flatten_status = str(flatten_outcome.get("status") or "")
-                        flatten_failed = flatten_status == "failed"
-
-                    open_orders_present, position_present = _get_exposure_snapshot(int(now * 1000))
-                    risk_open = open_orders_present or position_present
-                    cancel_status = (
-                        "emergency cancellation attempted"
-                        if canceled_ok
-                        else "emergency cancellation failed"
+                    _halt_trading(
+                        halt_reason,
+                        unresolved=unresolved,
+                        attempt_flatten=bool(settings.KILL_SWITCH_LIQUIDATE),
                     )
-                    reason_detail = f"KILL_SWITCH=ON; {cancel_status}"
-                    if flatten_outcome is not None:
-                        reason_detail += f"; flatten_status={str(flatten_outcome.get('status') or '-') }"
-                        if flatten_failed:
-                            reason_detail += f"; flatten_error={str(flatten_outcome.get('error') or '-') }"
-                    if risk_open:
-                        reason_detail += (
-                            "; risk_open_exposure_remains"
-                            f"(open_orders={1 if open_orders_present else 0},"
-                            f"position={1 if position_present else 0})"
-                        )
-                    cleanup_uncertain = (not canceled_ok) or flatten_failed
-                    if cleanup_uncertain:
-                        revalidated_safe, revalidation_detail = _revalidate_cleanup_state_after_failure(
-                            broker,
-                            trigger="kill-switch",
-                        )
-                        reason_detail += f"; {revalidation_detail}"
-                        if revalidated_safe:
-                            _halt_trading(
-                                _halt_reason("KILL_SWITCH", reason_detail),
-                                unresolved=False,
-                            )
-                        else:
-                            _halt_trading(
-                                _halt_reason("KILL_SWITCH", reason_detail),
-                                unresolved=True,
-                            )
-                    else:
-                        _halt_trading(
-                            _halt_reason("KILL_SWITCH", reason_detail),
-                            unresolved=risk_open,
-                        )
                     continue
 
                 conn = ensure_db()
+                portfolio_cash = 0.0
+                portfolio_qty = 0.0
                 try:
                     portfolio = conn.execute(
                         "SELECT cash_krw, asset_qty FROM portfolio WHERE id=1"
                     ).fetchone()
                     if portfolio is not None:
+                        portfolio_cash = float(portfolio["cash_krw"])
+                        portfolio_qty = float(portfolio["asset_qty"])
+                        dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+                        position_state = build_position_state_model(
+                            raw_qty_open=portfolio_qty,
+                            metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+                            raw_total_asset_qty=max(portfolio_qty, float(dust_context.raw_holdings.broker_qty)),
+                            dust_tracking_qty=float(dust_context.raw_holdings.local_qty),
+                        )
                         # Use latest candle close as the mark price for daily-loss evaluation.
                         blocked, reason = evaluate_daily_loss_breach(
                             conn,
                             ts_ms=int(now * 1000),
-                            cash=float(portfolio["cash_krw"]),
-                            qty=float(portfolio["asset_qty"]),
+                            cash=portfolio_cash,
+                            qty=portfolio_qty,
                             price=float(last_close),
                         )
                         if blocked:
@@ -1297,7 +2312,7 @@ def run_loop(short_n: int, long_n: int) -> None:
 
                         blocked, reason = evaluate_position_loss_breach(
                             conn,
-                            qty=float(portfolio["asset_qty"]),
+                            qty=float(position_state.normalized_exposure.open_exposure_qty),
                             price=float(last_close),
                         )
                         if blocked:
@@ -1527,8 +2542,10 @@ def run_loop(short_n: int, long_n: int) -> None:
             decision_reason_for_trade: str | None = None
             decision_exit_rule_name: str | None = None
             decision_strategy_name_for_trade: str | None = None
+            decision_context_for_trade: dict[str, object] | None = None
             try:
                 context = dict(r)
+                decision_context_for_trade = context
                 strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
@@ -1542,6 +2559,22 @@ def run_loop(short_n: int, long_n: int) -> None:
                 candle_ts_raw = context.get("ts")
                 market_price_raw = context.get("last_close")
                 confidence_raw = context.get("confidence")
+                _log_loop_event(
+                    logging.INFO,
+                    "[RUN] strategy decision",
+                    strategy=strategy_name,
+                    decision_type=str(context.get("decision_type") or "-"),
+                    raw_signal=str(context.get("raw_signal") or context.get("base_signal") or signal),
+                    final_signal=signal,
+                    entry_blocked=1 if bool(context.get("entry_blocked")) else 0,
+                    entry_block_reason=str(context.get("entry_block_reason") or "-"),
+                    dust_classification=str(context.get("dust_classification") or context.get("position_gate", {}).get("dust_state") or "-"),
+                    effective_flat=1 if bool(context.get("effective_flat")) else 0,
+                    raw_qty_open=f"{float(context.get('raw_qty_open', 0.0) or 0.0):.8f}",
+                    normalized_exposure_active=1 if bool(context.get("normalized_exposure_active")) else 0,
+                    normalized_exposure_qty=f"{float(context.get('normalized_exposure_qty', 0.0) or 0.0):.8f}",
+                    reason=reason,
+                )
                 try:
                     decision_id = record_strategy_decision(
                         conn,
@@ -1587,6 +2620,34 @@ def run_loop(short_n: int, long_n: int) -> None:
                         raise
                     trade = paper_execute(r["signal"], r["ts"], r["last_close"])
             elif settings.MODE == "live" and broker is not None:
+                harmless_dust_preview = None
+                if r["signal"] == "SELL":
+                    harmless_dust_preview = _canonical_harmless_dust_sell_preview(decision_context_for_trade)
+                if harmless_dust_preview is not None:
+                    suppression_conn = ensure_db()
+                    try:
+                        if record_harmless_dust_exit_suppression(
+                            conn=suppression_conn,
+                            state=runtime_state.snapshot(),
+                            signal=r["signal"],
+                            side="SELL",
+                            requested_qty=float(harmless_dust_preview["requested_qty"]),
+                            market_price=float(r["last_close"]),
+                            normalized_qty=float(harmless_dust_preview["normalized_qty"]),
+                            strategy_name=decision_strategy_name_for_trade,
+                            decision_id=decision_id,
+                            decision_reason=decision_reason_for_trade,
+                            exit_rule_name=decision_exit_rule_name,
+                            submit_qty_source=str(harmless_dust_preview["submit_qty_source"]),
+                            position_state_source=str(harmless_dust_preview["submit_qty_source"]),
+                            raw_total_asset_qty=float(harmless_dust_preview["raw_total_asset_qty"]),
+                            open_exposure_qty=float(harmless_dust_preview["open_exposure_qty"]),
+                            dust_tracking_qty=float(harmless_dust_preview["dust_tracking_qty"]),
+                        ):
+                            suppression_conn.commit()
+                            continue
+                    finally:
+                        suppression_conn.close()
                 try:
                     try:
                         trade = live_execute_signal(
@@ -1640,13 +2701,20 @@ def run_loop(short_n: int, long_n: int) -> None:
                     "[RUN] trade_applied",
                     symbol=settings.PAIR,
                     interval=settings.INTERVAL,
-                    candle_ts=r["ts"],
+                    candle_ts=trade.get("candle_ts", r["ts"]),
+                    signal_ts=trade.get("signal_ts", r["ts"]),
+                    client_order_id=trade.get("client_order_id", "-"),
+                    exchange_order_id=trade.get("exchange_order_id", "-"),
                     side=trade["side"],
                     qty=f"{trade['qty']:.8f}",
+                    submit_qty=f"{float(trade.get('submit_qty', trade['qty'])):.8f}",
+                    filled_qty=f"{float(trade.get('filled_qty', trade['qty'])):.8f}",
                     price=f"{trade['price']:,.0f}",
                     fee=f"{trade['fee']:,.0f}",
                     cash=f"{trade['cash']:,.0f}",
                     asset=f"{trade['asset']:.8f}",
+                    post_trade_cash=f"{float(trade.get('post_trade_cash', trade['cash'])):,.0f}",
+                    post_trade_asset=f"{float(trade.get('post_trade_asset', trade['asset'])):.8f}",
                 )
 
     except KeyboardInterrupt:

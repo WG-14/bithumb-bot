@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import math
 import os
@@ -18,7 +18,7 @@ from .markets import (
 )
 from .market_catalog_snapshot import record_market_catalog_snapshot
 from .notifier import is_configured as notifier_is_configured
-from .paths import PathManager, PathPolicyError
+from .paths import PathManager, PathPolicyError, validate_runtime_root_separation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +55,19 @@ def parse_bool_env(key: str, default: str = "false") -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
+def parse_bool_env_strict(key: str, default: str) -> bool:
+    raw = os.getenv(key)
+    candidate = raw if raw is not None and raw.strip() != "" else default
+    normalized = str(candidate).strip().lower()
+    if normalized in ("1", "true", "yes", "y", "on"):
+        return True
+    if normalized in ("0", "false", "no", "n", "off"):
+        return False
+    raise ValueError(
+        f"{key} must be a boolean value (one of: true/false/1/0/yes/no/on/off), got {candidate!r}"
+    )
+
+
 def parse_float_env(key: str, default: str) -> float:
     raw = os.getenv(key)
     candidate = raw if raw is not None and raw.strip() != "" else default
@@ -62,6 +75,13 @@ def parse_float_env(key: str, default: str) -> float:
         return float(candidate)
     except ValueError as exc:
         raise ValueError(f"{key} must be a float-compatible value, got {candidate!r}") from exc
+
+
+def parse_non_negative_float_env(key: str, default: str) -> float:
+    value = parse_float_env(key, default)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{key} must be a finite value >= 0, got {value!r}")
+    return value
 
 
 def resolve_db_path(path: str) -> str:
@@ -166,13 +186,13 @@ def validate_accounts_preflight(cfg: Settings) -> None:
         detail = str(exc)
         if code in {"AUTH_SIGN", "PERMISSION"}:
             raise AccountsPreflightValidationError(
-                "/v1/accounts REST snapshot preflight 인증 실패: "
+                "/v1/accounts REST snapshot preflight ?몄쬆 ?ㅽ뙣: "
                 f"reason=auth failure reason_code=ACCOUNTS_AUTH_FAILED class={code} summary={summary} "
                 f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
                 f"base_currency_missing_policy={base_missing_policy} detail={detail}"
             ) from exc
         raise AccountsPreflightValidationError(
-            "/v1/accounts REST snapshot preflight transport 실패: "
+            "/v1/accounts REST snapshot preflight transport ?ㅽ뙣: "
             f"reason=transport failure reason_code=ACCOUNTS_TRANSPORT_FAILED class={code} summary={summary} "
             f"execution_mode={execution_mode} quote_currency={quote_currency} base_currency={base_currency} "
             f"base_currency_missing_policy={base_missing_policy} detail={detail}"
@@ -239,6 +259,8 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
         return False, "non_live_mode"
     if bool(settings.LIVE_DRY_RUN) or not bool(settings.LIVE_REAL_ORDER_ARMED):
         return False, "not_real_order_path"
+    from . import runtime_state
+    from .dust import DustClassification, DustState
     from .db_core import ensure_db
 
     conn = ensure_db()
@@ -247,7 +269,7 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
             """
             SELECT COUNT(*) AS cnt
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)
@@ -256,6 +278,9 @@ def _flat_start_safety_for_accounts_preflight() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
+            dust = DustClassification.from_metadata(runtime_state.snapshot().last_reconcile_metadata)
+            if dust.classification == DustState.HARMLESS_DUST.value and dust.allow_resume and dust.effective_flat:
+                return True, f"flat_start_effective_flat({dust.summary})"
             return False, f"local_position_present={asset_qty:.12f}"
     finally:
         conn.close()
@@ -361,7 +386,7 @@ def resolve_market_from_env() -> str:
 
 def default_run_lock_path(mode: str) -> str:
     normalized_mode = (mode or "paper").strip().lower() or "paper"
-    return str(PATH_MANAGER.config.run_root / normalized_mode / "bithumb-bot.lock")
+    return str(PATH_MANAGER.run_lock_path_for_mode(normalized_mode))
 
 
 def resolve_run_lock_path(path: str, *, mode: str | None = None) -> str:
@@ -392,14 +417,14 @@ class Settings:
     EVERY: int = int(os.getenv("EVERY", "60"))  # seconds
 
     # strategy
-    # 운영 기본 전략은 필터 포함 sma_with_filter를 권장.
-    # STRATEGY_NAME 환경변수로 전략 이름을 명시적으로 선택한다.
+    # ?댁쁺 湲곕낯 ?꾨왂? ?꾪꽣 ?ы븿 sma_with_filter瑜?沅뚯옣.
+    # STRATEGY_NAME ?섍꼍蹂?섎줈 ?꾨왂 ?대쫫??紐낆떆?곸쑝濡??좏깮?쒕떎.
     STRATEGY_NAME: str = resolve_strategy_name_from_env()
     SMA_SHORT: int = int(os.getenv("SMA_SHORT", "7"))
     SMA_LONG: int = int(os.getenv("SMA_LONG", "30"))
     COOLDOWN_MIN: int = int(os.getenv("COOLDOWN_MIN", "1"))
     MIN_GAP: float = float(os.getenv("MIN_GAP", "0.0003"))
-    # 실거래 수수료/슬리피지 환경에서 과도한 잔진입을 줄이기 위한 보수적 기본 임계값.
+    # ?ㅺ굅???섏닔猷??щ━?쇱? ?섍꼍?먯꽌 怨쇰룄???붿쭊?낆쓣 以꾩씠湲??꾪븳 蹂댁닔??湲곕낯 ?꾧퀎媛?
     SMA_FILTER_GAP_MIN_RATIO: float = float(os.getenv("SMA_FILTER_GAP_MIN_RATIO", "0.0012"))
     SMA_FILTER_VOL_WINDOW: int = int(os.getenv("SMA_FILTER_VOL_WINDOW", "10"))
     SMA_FILTER_VOL_MIN_RANGE_RATIO: float = float(
@@ -408,6 +433,11 @@ class Settings:
     SMA_FILTER_OVEREXT_LOOKBACK: int = int(os.getenv("SMA_FILTER_OVEREXT_LOOKBACK", "3"))
     SMA_FILTER_OVEREXT_MAX_RETURN_RATIO: float = float(
         os.getenv("SMA_FILTER_OVEREXT_MAX_RETURN_RATIO", "0.02")
+    )
+    SMA_COST_EDGE_ENABLED: bool = parse_bool_env_strict("SMA_COST_EDGE_ENABLED", "true")
+    SMA_COST_EDGE_MIN_RATIO: float = parse_non_negative_float_env(
+        "SMA_COST_EDGE_MIN_RATIO",
+        os.getenv("STRATEGY_MIN_EXPECTED_EDGE_RATIO", "0"),
     )
     ENTRY_EDGE_BUFFER_RATIO: float = parse_float_env("ENTRY_EDGE_BUFFER_RATIO", "0.0005")
     STRATEGY_MIN_EXPECTED_EDGE_RATIO: float = parse_float_env(
@@ -438,15 +468,15 @@ class Settings:
     # paper portfolio
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
-    # 공통 기본 수수료율. 운영에서는 LIVE/PAPER 수수료율을 각각 명시한다.
+    # 怨듯넻 湲곕낯 ?섏닔猷뚯쑉. ?댁쁺?먯꽌??LIVE/PAPER ?섏닔猷뚯쑉??媛곴컖 紐낆떆?쒕떎.
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
-    # live pretrade 잔고/현금 검증 전용 보수적 추정 수수료율.
-    # 우선순위: LIVE_FEE_RATE_ESTIMATE > FEE_RATE > 0.0025(default)
+    # live pretrade ?붽퀬/?꾧툑 寃利??꾩슜 蹂댁닔??異붿젙 ?섏닔猷뚯쑉.
+    # ?곗꽑?쒖쐞: LIVE_FEE_RATE_ESTIMATE > FEE_RATE > 0.0025(default)
     LIVE_FEE_RATE_ESTIMATE: float = parse_float_env(
         "LIVE_FEE_RATE_ESTIMATE", os.getenv("FEE_RATE", "0.0025")
     )
-    # paper 체결/손익 시뮬레이션 전용 수수료율.
-    # 우선순위:
+    # paper 泥닿껐/?먯씡 ?쒕??덉씠???꾩슜 ?섏닔猷뚯쑉.
+    # ?곗꽑?쒖쐞:
     #   PAPER_FEE_RATE > PAPER_FEE_RATE_ESTIMATE > FEE_RATE > LIVE_FEE_RATE_ESTIMATE > 0.0025
     PAPER_FEE_RATE: float = float(
         os.getenv(
@@ -457,11 +487,11 @@ class Settings:
             ),
         )
     )
-    # PAPER_FEE_RATE와 동일 값(기존 키 호환용).
+    # PAPER_FEE_RATE? ?숈씪 媛?湲곗〈 ???명솚??.
     PAPER_FEE_RATE_ESTIMATE: float = PAPER_FEE_RATE
     SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "0"))
-    # 전략 진입 비용 필터에서 기대 슬리피지를 추정할 때 사용하는 bps.
-    # 우선순위:
+    # ?꾨왂 吏꾩엯 鍮꾩슜 ?꾪꽣?먯꽌 湲곕? ?щ━?쇱?瑜?異붿젙?????ъ슜?섎뒗 bps.
+    # ?곗꽑?쒖쐞:
     #   STRATEGY_ENTRY_SLIPPAGE_BPS > MAX_MARKET_SLIPPAGE_BPS > SLIPPAGE_BPS > 0
     STRATEGY_ENTRY_SLIPPAGE_BPS: float = float(
         os.getenv(
@@ -489,6 +519,7 @@ class Settings:
     )
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
+    LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
 
     # risk
     MAX_ORDER_KRW: float = float(os.getenv("MAX_ORDER_KRW", "0"))
@@ -503,6 +534,10 @@ class Settings:
     BITHUMB_API_BASE: str = os.getenv("BITHUMB_API_BASE", "https://api.bithumb.com")
     BITHUMB_API_KEY: str = os.getenv("BITHUMB_API_KEY", "")
     BITHUMB_API_SECRET: str = os.getenv("BITHUMB_API_SECRET", "")
+    BITHUMB_PRIVATE_RPS_LIMIT: float = parse_float_env("BITHUMB_PRIVATE_RPS_LIMIT", "140")
+    BITHUMB_ORDER_RPS_LIMIT: float = parse_float_env("BITHUMB_ORDER_RPS_LIMIT", "10")
+    BITHUMB_CANCEL_RETRY_ATTEMPTS: int = int(os.getenv("BITHUMB_CANCEL_RETRY_ATTEMPTS", "3"))
+    BITHUMB_CANCEL_RETRY_BACKOFF_SEC: float = parse_float_env("BITHUMB_CANCEL_RETRY_BACKOFF_SEC", "0.15")
     LIVE_DRY_RUN: bool = parse_bool_env("LIVE_DRY_RUN", "false")
     LIVE_REAL_ORDER_ARMED: bool = parse_bool_env("LIVE_REAL_ORDER_ARMED", "false")
     OPEN_ORDER_RECONCILE_MIN_INTERVAL_SEC: int = int(
@@ -717,6 +752,11 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         return
 
     issues: list[str] = []
+    try:
+        live_path_manager = PathManager.from_env(PROJECT_ROOT)
+        validate_runtime_root_separation(live_path_manager.config)
+    except PathPolicyError as exc:
+        issues.append(str(exc))
     for root_key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT"):
         root_raw = os.getenv(root_key)
         if root_raw is None or not root_raw.strip():
@@ -767,9 +807,9 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
             "unset paper-only env keys: " + ", ".join(explicitly_set_paper_keys)
         )
 
-    if cfg.MAX_ORDER_KRW <= 0:
+    if cfg.MAX_ORDER_KRW <= 0 or not math.isfinite(float(cfg.MAX_ORDER_KRW)):
         issues.append("MAX_ORDER_KRW must be > 0")
-    if cfg.MAX_DAILY_LOSS_KRW <= 0:
+    if cfg.MAX_DAILY_LOSS_KRW <= 0 or not math.isfinite(float(cfg.MAX_DAILY_LOSS_KRW)):
         issues.append("MAX_DAILY_LOSS_KRW must be > 0")
     if cfg.MAX_DAILY_ORDER_COUNT <= 0:
         issues.append("MAX_DAILY_ORDER_COUNT must be > 0")
@@ -815,21 +855,39 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 f"(got {strict_min_notional_raw!r})"
             )
 
+    if not cfg.BITHUMB_API_KEY.strip():
+        issues.append("BITHUMB_API_KEY is required when MODE=live")
+    if not cfg.BITHUMB_API_SECRET.strip():
+        issues.append("BITHUMB_API_SECRET is required when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_PRIVATE_RPS_LIMIT)) or cfg.BITHUMB_PRIVATE_RPS_LIMIT <= 0:
+        issues.append("BITHUMB_PRIVATE_RPS_LIMIT must be a finite value > 0 when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_ORDER_RPS_LIMIT)) or cfg.BITHUMB_ORDER_RPS_LIMIT <= 0:
+        issues.append("BITHUMB_ORDER_RPS_LIMIT must be a finite value > 0 when MODE=live")
+    if bool(cfg.LIVE_ALLOW_ORDER_RULE_FALLBACK) and not cfg.LIVE_DRY_RUN:
+        LOG.warning(
+            "live preflight warning: LIVE_ALLOW_ORDER_RULE_FALLBACK=true permits emergency fallback "
+            "when /v1/orders/chance is unavailable"
+        )
+    if cfg.BITHUMB_CANCEL_RETRY_ATTEMPTS <= 0:
+        issues.append("BITHUMB_CANCEL_RETRY_ATTEMPTS must be > 0 when MODE=live")
+    if not math.isfinite(float(cfg.BITHUMB_CANCEL_RETRY_BACKOFF_SEC)) or cfg.BITHUMB_CANCEL_RETRY_BACKOFF_SEC <= 0:
+        issues.append("BITHUMB_CANCEL_RETRY_BACKOFF_SEC must be a finite value > 0 when MODE=live")
+
     if not cfg.LIVE_DRY_RUN:
         if not cfg.LIVE_REAL_ORDER_ARMED:
             issues.append(
                 "LIVE_REAL_ORDER_ARMED=true is required to place real live orders "
                 "(MODE=live and LIVE_DRY_RUN=false)"
             )
-        if not cfg.BITHUMB_API_KEY.strip():
-            issues.append("BITHUMB_API_KEY is required when LIVE_DRY_RUN=false")
-        if not cfg.BITHUMB_API_SECRET.strip():
-            issues.append("BITHUMB_API_SECRET is required when LIVE_DRY_RUN=false")
 
     if not notifier_is_configured():
         issues.append(
             "notifier must be enabled and configured with at least one delivery target "
             "(NOTIFIER_WEBHOOK_URL, SLACK_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID) when MODE=live"
+        )
+    if not cfg.SMA_COST_EDGE_ENABLED:
+        LOG.warning(
+            "live preflight warning: SMA_COST_EDGE_ENABLED=false (cost-edge entry block disabled for sma_with_filter)"
         )
 
     from .broker.order_rules import (

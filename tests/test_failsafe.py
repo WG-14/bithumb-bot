@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -8,6 +8,7 @@ import pytest
 
 from bithumb_bot import runtime_state
 from bithumb_bot.broker.base import BrokerBalance, BrokerRejectError
+from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
@@ -112,7 +113,7 @@ class _LoopConn:
         q = " ".join(str(query).split())
 
         if "FROM candles" in q:
-            return _Rows({"ts": int(10_000_000_000_000), "close": 100.0})
+            return _Rows({"ts": 10_000, "close": 100.0})
 
         if "COUNT(*) AS open_count" in q:
             if self.open_order_created_ts is None:
@@ -136,6 +137,40 @@ class _LoopConn:
 
         if "client_order_id LIKE 'remote_%'" in q:
             return _Rows({"cnt": 0})
+
+        if (
+            "COALESCE(SUM(MAX(qty_req - qty_filled, 0.0)), 0.0) AS reserved_exit_qty" in q
+            and "FROM orders" in q
+            and "side='SELL'" in q
+        ):
+            return _Rows({"reserved_exit_qty": 0.0})
+
+        if (
+            "SELECT DISTINCT" in q
+            and "FROM open_position_lots" in q
+            and "lot_semantic_version" in q
+        ):
+            if self.asset_qty <= 1e-12:
+                return _Rows([])
+            return _Rows(
+                [
+                    {
+                        "lot_semantic_version": 1,
+                        "internal_lot_size": 0.0001,
+                        "lot_min_qty": 0.0001,
+                        "lot_qty_step": 0.0001,
+                        "lot_min_notional_krw": 5000.0,
+                        "lot_max_qty_decimals": 8,
+                        "lot_rule_source_mode": "ledger",
+                    }
+                ]
+            )
+
+        if "FROM open_position_lots" in q and "SUM(" in q:
+            if "executable_lot_count" in q and "dust_tracking_lot_count, 0) = 0" in q:
+                return _Rows((self.asset_qty, 1 if self.asset_qty > 1e-12 else 0))
+            if "dust_tracking_lot_count" in q and "executable_lot_count, 0) = 0" in q:
+                return _Rows((0.0, 0))
 
         if (
             "AS pending_submit_count" in q
@@ -208,6 +243,13 @@ class _Rows:
     def fetchone(self):
         return self._row
 
+    def fetchall(self):
+        if self._row is None:
+            return []
+        if isinstance(self._row, list):
+            return self._row
+        return [self._row]
+
 
 class _DummyBroker:
     def get_open_orders(self):
@@ -234,6 +276,10 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     runtime_state.set_error_count(0)
     runtime_state.set_last_candle_age_sec(None)
     runtime_state.set_startup_gate_reason(None)
+    runtime_state._STATE.last_processed_candle_ts_ms = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_ts_ms = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_status = None  # type: ignore[attr-defined]
+    runtime_state._STATE.last_candle_status_detail = None  # type: ignore[attr-defined]
 
     resolved_db_path = str(Path(settings.DB_PATH).resolve())
     monkeypatch.setenv("DB_PATH", resolved_db_path)
@@ -262,9 +308,13 @@ def _prepare_run_loop(monkeypatch, open_order_created_ts=None, asset_qty: float 
     monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 1)
     monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
     monkeypatch.setattr(
+        "bithumb_bot.engine._select_latest_closed_candle",
+        lambda _conn, **_kwargs: ({"ts": 9000, "close": 100.0}, None),
+    )
+    monkeypatch.setattr(
         "bithumb_bot.engine.compute_signal",
         lambda conn, s, l: {
-            "ts": 1000,
+            "ts": 9000,
             "last_close": 100.0,
             "curr_s": 1.0,
             "curr_l": 0.5,
@@ -321,6 +371,54 @@ def test_run_loop_live_broker_error_halts_instead_of_crash(monkeypatch):
     assert "BrokerRejectError" in state.last_disable_reason
     assert state.halt_new_orders_blocked is True
     assert state.halt_reason_code == "LIVE_EXECUTION_BROKER_ERROR"
+
+
+def test_flat_start_safety_check_avoids_self_lock_when_writer_transaction_open():
+    writer_conn = ensure_db()
+    try:
+        writer_conn.execute("BEGIN IMMEDIATE")
+        allowed, reason = _default_flat_start_safety_check()
+    finally:
+        writer_conn.rollback()
+        writer_conn.close()
+
+    assert isinstance(allowed, bool)
+    assert isinstance(reason, str)
+
+
+def test_flat_start_safety_check_blocks_local_dust_position_without_broker_confirmation(monkeypatch):
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00009629, 1000000.0, 0.0, 0.00009629, 0.0)
+            """
+        )
+        conn.execute(
+            "INSERT INTO candles(pair, interval, ts, open, high, low, close, volume) VALUES ('KRW-BTC', '1m', 1, 100000000, 100000000, 100000000, 100000000, 1.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _Resolved:
+        class rules:
+            min_qty = 0.0001
+            min_notional_krw = 5000.0
+
+    monkeypatch.setattr("bithumb_bot.broker.order_rules.get_effective_order_rules", lambda _pair: _Resolved())
+
+    allowed, reason = _default_flat_start_safety_check()
+
+    assert allowed is False
+    assert "flat_start_requires_operator_review" in reason
+    assert "state=blocking_dust" in reason
+    assert "broker_qty=0.00000000" in reason
+    assert "local_qty=0.00009629" in reason
+    assert "min_qty=0.00010000" in reason
+    assert "qty_below_min(broker=0 local=1)" in reason
 
 
 def test_run_loop_surfaces_market_preflight_error_during_live_startup(monkeypatch):
@@ -522,6 +620,138 @@ def test_run_loop_startup_recovery_gate_allows_clean_startup(monkeypatch, tmp_pa
     assert called["n"] == 1
 
 
+def test_run_loop_live_harmless_dust_sell_suppresses_before_live_execution(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00009193)
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100_000_000.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "SELL",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_total_asset_qty": 0.00009193,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.00009193,
+                    "sellable_executable_qty": 0.0,
+                    "sellable_executable_lot_count": 0,
+                    "exit_allowed": False,
+                    "exit_block_reason": "dust_only_remainder",
+                }
+            },
+        },
+    )
+
+    suppression_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "bithumb_bot.engine.record_harmless_dust_exit_suppression",
+        lambda **kwargs: suppression_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not reach live execution")),
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_partial_flatten_recent": 0,
+            "dust_partial_flatten_reason": "flatten_not_recent",
+            "dust_qty_gap_tolerance": 0.00005,
+            "dust_qty_gap_small": 1,
+            "dust_broker_qty": 0.00009193,
+            "dust_local_qty": 0.00009193,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_latest_price": 100_000_000.0,
+            "dust_broker_notional_krw": 9193.0,
+            "dust_local_notional_krw": 9193.0,
+            "dust_broker_qty_is_dust": 1,
+            "dust_local_qty_is_dust": 1,
+            "dust_broker_notional_is_dust": 0,
+            "dust_local_notional_is_dust": 0,
+            "dust_residual_summary": (
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+        },
+    )
+
+    run_loop(5, 20)
+
+    state = runtime_state.snapshot()
+    assert state.trading_enabled is True
+    assert suppression_calls
+    assert suppression_calls[0]["signal"] == "SELL"
+    assert suppression_calls[0]["side"] == "SELL"
+    assert suppression_calls[0]["requested_qty"] == pytest.approx(0.00009193)
+    assert suppression_calls[0]["market_price"] == pytest.approx(100_000_000.0)
+    assert suppression_calls[0]["submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
+def test_run_loop_live_sell_does_not_presuppress_when_canonical_sell_authority_is_executable(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00049193)
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_signal",
+        lambda conn, s, l: {
+            "ts": 1000,
+            "last_close": 100_000_000.0,
+            "curr_s": 1.0,
+            "curr_l": 0.5,
+            "signal": "SELL",
+            "position_state": {
+                "normalized_exposure": {
+                    "raw_total_asset_qty": 0.00049193,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.00009193,
+                    "sellable_executable_qty": 0.0004,
+                    "sellable_executable_lot_count": 1,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                }
+            },
+        },
+    )
+
+    suppression_calls: list[dict[str, object]] = []
+    live_calls = {"n": 0}
+    monkeypatch.setattr(
+        "bithumb_bot.engine.record_harmless_dust_exit_suppression",
+        lambda **kwargs: suppression_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.live_execute_signal",
+        lambda *_args, **_kwargs: live_calls.__setitem__("n", live_calls["n"] + 1) or None,
+    )
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        metadata={
+            "dust_classification": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+        },
+    )
+
+    run_loop(5, 20)
+
+    assert suppression_calls == []
+    assert live_calls["n"] == 1
+
+
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):
     _prepare_run_loop(monkeypatch)
     object.__setattr__(settings, "KILL_SWITCH", True)
@@ -572,6 +802,7 @@ def test_run_loop_kill_switch_liquidate_with_open_position_triggers_flatten(monk
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is True
     assert state.last_flatten_position_status == "dry_run"
     assert state.last_flatten_position_summary is not None
     assert '"trigger": "kill-switch"' in state.last_flatten_position_summary
@@ -614,6 +845,7 @@ def test_run_loop_kill_switch_liquidate_flatten_failure_is_persisted(monkeypatch
 
     state = runtime_state.snapshot()
     assert state.halt_reason_code == "KILL_SWITCH"
+    assert state.halt_policy_auto_liquidate_positions is True
     assert state.halt_state_unresolved is True
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
@@ -988,6 +1220,46 @@ def test_run_loop_position_loss_breach_triggers_halt(monkeypatch):
     assert "position loss threshold breached" in state.last_disable_reason
     assert "flatten_status=dry_run" in state.last_disable_reason
     assert flatten_calls["n"] == 1
+
+
+def test_run_loop_position_loss_breach_uses_executable_exposure_qty(monkeypatch):
+    _prepare_run_loop(monkeypatch, asset_qty=0.00009629)
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECENT_FILL_APPLIED",
+        metadata={
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_classification": "harmless_dust",
+            "dust_policy_reason": "matched_harmless_dust_resume_allowed",
+            "dust_residual_summary": (
+                "broker_qty=0.00009629 local_qty=0.00009629 delta=0.00000000 "
+                "min_qty=0.00010000 min_notional_krw=5000.0 qty_gap_small=1 "
+                "classification=harmless_dust harmless_dust=1 broker_local_match=1 "
+                "allow_resume=1 effective_flat=1 policy_reason=matched_harmless_dust_resume_allowed"
+            ),
+            "dust_broker_qty": 0.00009629,
+            "dust_local_qty": 0.00009629,
+            "dust_effective_flat": 1,
+            "remote_open_order_found": 0,
+            "submit_unknown_unresolved": 0,
+        },
+    )
+
+    captured_qty: list[float] = []
+
+    def _capture_position_loss_breach(_conn, *, qty: float, price: float):
+        captured_qty.append(qty)
+        return False, "ok"
+
+    monkeypatch.setattr("bithumb_bot.recovery.reconcile_with_broker", lambda _broker: None, raising=False)
+    monkeypatch.setattr("bithumb_bot.engine.evaluate_position_loss_breach", _capture_position_loss_breach)
+    monkeypatch.setattr("bithumb_bot.engine.live_execute_signal", lambda *_args, **_kwargs: None)
+
+    run_loop(5, 20)
+
+    assert captured_qty
+    assert captured_qty[0] == 0.0
 
 
 def test_run_loop_daily_loss_breach_with_no_position_records_no_position_flatten(monkeypatch):

@@ -107,7 +107,7 @@ def test_aggregate_fills_warns_when_fee_missing_or_invalid(caplog: pytest.LogCap
     assert not any("[FILL_AGG_HARD_ALERT]" in msg for msg in warning_messages)
 
 
-def test_aggregate_fills_high_notional_invalid_fee_emits_hard_alert_and_continues(
+def test_aggregate_fills_high_notional_invalid_fee_blocks_after_hard_alert(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     original_alert_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
@@ -140,20 +140,19 @@ def test_aggregate_fills_high_notional_invalid_fee_emits_hard_alert_and_continue
 
     try:
         with caplog.at_level(logging.WARNING, logger="bithumb_bot.run"):
-            aggregated = _aggregate_fills_for_apply(
-                fills=fills,
-                client_order_id="cid-4",
-                exchange_order_id="ex-4",
-                side="BUY",
-                context="test",
-            )
+            with pytest.raises(FillFeeStrictModeError, match="material fee validation blocked fill aggregation"):
+                _aggregate_fills_for_apply(
+                    fills=fills,
+                    client_order_id="cid-4",
+                    exchange_order_id="ex-4",
+                    side="BUY",
+                    context="test",
+                )
     finally:
         object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_alert_min_notional)
         object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", original_strict_mode)
         object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW", original_strict_min_notional)
 
-    assert len(aggregated) == 1
-    assert aggregated[0].qty == pytest.approx(0.02)
     messages = [record.getMessage() for record in caplog.records]
     assert any("[FILL_AGG_HARD_ALERT]" in msg for msg in messages)
 
@@ -188,7 +187,7 @@ def test_aggregate_fills_strict_mode_blocks_high_notional_invalid_fee() -> None:
     ]
 
     try:
-        with pytest.raises(FillFeeStrictModeError, match="strict fee validation blocked fill aggregation"):
+        with pytest.raises(FillFeeStrictModeError, match="blocked fill aggregation"):
             _aggregate_fills_for_apply(
                 fills=fills,
                 client_order_id="cid-5",

@@ -1,23 +1,69 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass
 from threading import Lock
 
+from .config import settings
 from .db_core import ensure_db
 from .oms import OPEN_ORDER_STATUSES
 from .reason_codes import HALT_ENTERED, STARTUP_BLOCKED
 from .observability import safety_event
 from .sqlite_resilience import run_with_locked_db_retry
+from .dust import build_dust_display_context, build_position_state_model
+from .lifecycle import summarize_position_lots
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
+_HEALTH_SUMMARY_MAX_LEN = 1400
 
 
 def _clip(v: str | None, max_len: int = 500) -> str | None:
     if v is None:
         return None
     return str(v)[:max_len]
+
+
+def _json_with_size_limit(
+    payload: dict[str, object] | None,
+    *,
+    max_len: int = _HEALTH_SUMMARY_MAX_LEN,
+    preserve_keys: tuple[str, ...] = (),
+) -> str | None:
+    if payload is None:
+        return None
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if len(encoded) <= max_len:
+        return encoded
+
+    compact: dict[str, object] = {}
+    for key, value in payload.items():
+        if isinstance(value, str):
+            compact[key] = value[:160]
+        else:
+            compact[key] = value
+    encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+    if len(encoded) <= max_len:
+        return encoded
+
+    protected_keys = [str(k) for k in preserve_keys]
+    protected = set(protected_keys)
+    removable_keys = [k for k in sorted(compact.keys()) if k not in protected]
+    for key in removable_keys:
+        compact.pop(key, None)
+        encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        if len(encoded) <= max_len:
+            return encoded
+
+    for key in reversed(protected_keys):
+        if key not in compact:
+            continue
+        compact.pop(key, None)
+        encoded = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+        if len(encoded) <= max_len:
+            return encoded
+
+    return "{}"
 
 
 @dataclass
@@ -241,14 +287,14 @@ def _persist_state(state: RuntimeState) -> None:
                     _clip(state.last_reconcile_status),
                     _clip(state.last_reconcile_error),
                     _clip(state.last_reconcile_reason_code),
-                    _clip(state.last_reconcile_metadata, max_len=1000),
+                    _clip(state.last_reconcile_metadata, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     state.last_cancel_open_orders_epoch_sec,
                     _clip(state.last_cancel_open_orders_trigger),
                     _clip(state.last_cancel_open_orders_status),
-                    _clip(state.last_cancel_open_orders_summary, max_len=1000),
+                    _clip(state.last_cancel_open_orders_summary, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     state.last_flatten_position_epoch_sec,
                     _clip(state.last_flatten_position_status),
-                    _clip(state.last_flatten_position_summary, max_len=1000),
+                    _clip(state.last_flatten_position_summary, max_len=_HEALTH_SUMMARY_MAX_LEN),
                     1 if state.emergency_flatten_blocked else 0,
                     _clip(state.emergency_flatten_block_reason),
                     _clip(state.startup_gate_reason),
@@ -505,9 +551,62 @@ def record_reconcile_result(
 
         ts = time.time()
 
-    payload = None
-    if metadata is not None:
-        payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    payload = _json_with_size_limit(
+        metadata,
+        max_len=_HEALTH_SUMMARY_MAX_LEN,
+        preserve_keys=(
+            "balance_source",
+            "balance_observed_ts_ms",
+            "broker_read_journal",
+            "balance_split_mismatch_count",
+            "balance_split_mismatch_summary",
+            "external_cash_adjustment_count",
+            "external_cash_adjustment_delta_krw",
+            "external_cash_adjustment_total_krw",
+            "external_cash_adjustment_event_ts",
+            "external_cash_adjustment_created",
+            "external_cash_adjustment_key",
+            "external_cash_adjustment_reason",
+            "external_cash_adjustment_residual_krw",
+            "material_zero_fee_fill_count",
+            "material_zero_fee_fill_notional_krw",
+            "material_zero_fee_fill_latest_ts",
+            "fee_gap_recovery_required",
+            "fee_gap_adjustment_count",
+            "fee_gap_adjustment_total_krw",
+            "fee_gap_adjustment_latest_event_ts",
+            "dust_state",
+            "dust_classification",
+            "dust_residual_present",
+            "dust_residual_allow_resume",
+            "dust_policy_reason",
+            "dust_residual_summary",
+            "dust_state_label",
+            "dust_effective_flat",
+            "dust_partial_flatten_recent",
+            "dust_partial_flatten_reason",
+            "unresolved_open_order_count",
+            "submit_unknown_count",
+            "recovery_required_count",
+            "dust_qty_gap_tolerance",
+            "dust_qty_gap_small",
+            "dust_broker_qty",
+            "dust_local_qty",
+            "dust_delta_qty",
+            "dust_min_qty",
+            "dust_min_notional_krw",
+            "dust_latest_price",
+            "dust_broker_notional_krw",
+            "dust_local_notional_krw",
+            "dust_broker_qty_is_dust",
+            "dust_local_qty_is_dust",
+            "dust_broker_notional_is_dust",
+            "dust_local_notional_is_dust",
+            "recovery_disposition",
+            "recovery_progress_state",
+            "recovery_classification_reason",
+        ),
+    )
 
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -515,7 +614,7 @@ def record_reconcile_result(
         _STATE.last_reconcile_status = "ok" if success else "error"
         _STATE.last_reconcile_error = None if success else (error[:500] if error else "unknown")
         _STATE.last_reconcile_reason_code = _clip(reason_code)
-        _STATE.last_reconcile_metadata = _clip(payload, max_len=1000)
+        _STATE.last_reconcile_metadata = payload
         _persist_state(_STATE)
 
 
@@ -541,7 +640,7 @@ def record_cancel_open_orders_result(
         _STATE.last_cancel_open_orders_epoch_sec = float(ts)
         _STATE.last_cancel_open_orders_trigger = _clip(trigger)
         _STATE.last_cancel_open_orders_status = _clip(status)
-        _STATE.last_cancel_open_orders_summary = _clip(payload, max_len=1000)
+        _STATE.last_cancel_open_orders_summary = _clip(payload, max_len=_HEALTH_SUMMARY_MAX_LEN)
         _persist_state(_STATE)
 
 
@@ -565,7 +664,7 @@ def record_flatten_position_result(
         _sync_state_from_persisted_locked()
         _STATE.last_flatten_position_epoch_sec = float(ts)
         _STATE.last_flatten_position_status = _clip(status)
-        _STATE.last_flatten_position_summary = _clip(payload, max_len=1000)
+        _STATE.last_flatten_position_summary = _clip(payload, max_len=_HEALTH_SUMMARY_MAX_LEN)
         if str(status) in {"failed", "started"}:
             _STATE.emergency_flatten_blocked = True
             _STATE.emergency_flatten_block_reason = _clip(
@@ -590,11 +689,81 @@ def set_startup_gate_reason(reason: str | None) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
         _STATE.startup_gate_reason = _clip(reason)
+        existing_metadata: dict[str, object] = {}
+        if _STATE.last_reconcile_metadata:
+            try:
+                decoded = json.loads(_STATE.last_reconcile_metadata)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, dict):
+                existing_metadata = dict(decoded)
         if reason:
             _STATE.last_reconcile_reason_code = "STARTUP_GATE_BLOCKED"
-            _STATE.last_reconcile_metadata = _clip(
-                json.dumps({"startup_gate_reason": reason}, ensure_ascii=False, sort_keys=True),
-                max_len=1000,
+            existing_metadata["startup_gate_reason"] = _STATE.startup_gate_reason
+            existing_metadata["startup_gate_blocked"] = True
+            _STATE.last_reconcile_metadata = _json_with_size_limit(
+                existing_metadata,
+                max_len=_HEALTH_SUMMARY_MAX_LEN,
+                preserve_keys=(
+                    "startup_gate_reason",
+                    "startup_gate_blocked",
+                    "balance_source",
+                    "balance_observed_ts_ms",
+                    "broker_read_journal",
+                    "balance_split_mismatch_count",
+                    "balance_split_mismatch_summary",
+                    "external_cash_adjustment_count",
+                    "external_cash_adjustment_delta_krw",
+                    "external_cash_adjustment_total_krw",
+                    "external_cash_adjustment_event_ts",
+                    "external_cash_adjustment_created",
+                    "external_cash_adjustment_key",
+                    "external_cash_adjustment_reason",
+                    "external_cash_adjustment_residual_krw",
+                    "material_zero_fee_fill_count",
+                    "material_zero_fee_fill_notional_krw",
+                    "material_zero_fee_fill_latest_ts",
+                    "fee_gap_recovery_required",
+                    "fee_gap_adjustment_count",
+                    "fee_gap_adjustment_total_krw",
+                    "fee_gap_adjustment_latest_event_ts",
+                    "dust_state",
+                    "dust_classification",
+                    "dust_residual_present",
+                    "dust_residual_allow_resume",
+                    "dust_policy_reason",
+                    "dust_residual_summary",
+                    "dust_state_label",
+                    "dust_effective_flat",
+                    "dust_partial_flatten_recent",
+                    "dust_partial_flatten_reason",
+                    "dust_qty_gap_tolerance",
+                    "dust_qty_gap_small",
+                    "dust_broker_qty",
+                    "dust_local_qty",
+                    "dust_delta_qty",
+                    "dust_min_qty",
+                    "dust_min_notional_krw",
+                    "dust_latest_price",
+                    "dust_broker_notional_krw",
+                    "dust_local_notional_krw",
+                    "dust_broker_qty_is_dust",
+                    "dust_local_qty_is_dust",
+                    "dust_broker_notional_is_dust",
+                    "dust_local_notional_is_dust",
+                    "recovery_disposition",
+                    "recovery_progress_state",
+                    "recovery_classification_reason",
+                ),
+            )
+        elif _STATE.last_reconcile_reason_code == "STARTUP_GATE_BLOCKED":
+            _STATE.last_reconcile_reason_code = None
+            existing_metadata.pop("startup_gate_reason", None)
+            existing_metadata.pop("startup_gate_blocked", None)
+            _STATE.last_reconcile_metadata = (
+                _json_with_size_limit(existing_metadata, max_len=_HEALTH_SUMMARY_MAX_LEN)
+                if existing_metadata
+                else None
             )
         _persist_state(_STATE)
 
@@ -671,6 +840,7 @@ def disable_trading_until(
     reason_code: str | None = None,
     halt_new_orders_blocked: bool = False,
     unresolved: bool = False,
+    attempt_flatten: bool = False,
 ) -> None:
     with _LOCK:
         _sync_state_from_persisted_locked()
@@ -683,7 +853,7 @@ def disable_trading_until(
         _STATE.halt_policy_stage = HALT_POLICY_STAGE
         _STATE.halt_policy_block_new_orders = True
         _STATE.halt_policy_attempt_cancel_open_orders = True
-        _STATE.halt_policy_auto_liquidate_positions = False
+        _STATE.halt_policy_auto_liquidate_positions = bool(attempt_flatten)
         _STATE.halt_position_present = False
         _STATE.halt_open_orders_present = False
         _STATE.halt_operator_action_required = bool(unresolved)
@@ -695,14 +865,32 @@ def disable_trading_until(
                     OPEN_ORDER_STATUSES,
                 ).fetchone()
                 portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
+                lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
             finally:
                 conn.close()
             open_count = int(open_row["open_count"] if open_row else 0)
             asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
+            dust_context = build_dust_display_context(_STATE.last_reconcile_metadata)
+            position_state = build_position_state_model(
+                raw_qty_open=asset_qty,
+                metadata_raw=_STATE.last_reconcile_metadata,
+                raw_total_asset_qty=max(
+                    asset_qty,
+                    float(lot_snapshot.raw_total_asset_qty),
+                    float(dust_context.raw_holdings.broker_qty),
+                ),
+                open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+                dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
+                open_lot_count=int(lot_snapshot.open_lot_count),
+                dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+            )
             _STATE.halt_open_orders_present = open_count > 0
-            _STATE.halt_position_present = asset_qty > 1e-12
+            _STATE.halt_position_present = bool(position_state.normalized_exposure.has_any_position_residue)
             _STATE.halt_operator_action_required = bool(
-                unresolved or _STATE.halt_open_orders_present or _STATE.halt_position_present
+                unresolved
+                or _STATE.halt_open_orders_present
+                or _STATE.halt_position_present
+                or bool(position_state.normalized_exposure.has_dust_only_remainder)
             )
         _persist_state(_STATE)
 
@@ -712,6 +900,7 @@ def enter_halt(
     reason_code: str,
     reason: str,
     unresolved: bool,
+    attempt_flatten: bool = False,
 ) -> None:
     disable_trading_until(
         float("inf"),
@@ -719,6 +908,7 @@ def enter_halt(
         reason_code=reason_code,
         halt_new_orders_blocked=True,
         unresolved=unresolved,
+        attempt_flatten=attempt_flatten,
     )
     _LOG.error(
         safety_event(

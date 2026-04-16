@@ -96,6 +96,35 @@ def test_compute_signal_through_ts_excludes_newer_candles() -> None:
     assert bounded["last_close"] == 14.0
 
 
+def test_compute_signal_ignores_open_candle_tail_when_bounded(monkeypatch) -> None:
+    base_ts = 1_700_000_000_000
+    # The last candle is intentionally "open" and would flip the moving-average
+    # signal if the strategy were allowed to see it.
+    closes = [100.0, 100.0, 100.0, 100.0, 100.0, 200.0]
+    for idx, close in enumerate(closes):
+        _insert_candle(base_ts + idx * 60_000, close)
+
+    # Force the strategy's default closed-only cutoff to land before the open tail.
+    monkeypatch.setattr(
+        "bithumb_bot.strategy.sma.time.time",
+        lambda: (base_ts + 5 * 60_000 + 3_100) / 1000,
+    )
+
+    conn = ensure_db()
+    try:
+        unbounded = compute_signal(conn, 2, 3)
+        bounded = compute_signal(conn, 2, 3, through_ts_ms=base_ts + 4 * 60_000)
+    finally:
+        conn.close()
+
+    assert unbounded is not None
+    assert bounded is not None
+    assert unbounded["ts"] == base_ts + 4 * 60_000
+    assert bounded["ts"] == base_ts + 4 * 60_000
+    assert unbounded["signal"] == "HOLD"
+    assert bounded["signal"] == "HOLD"
+
+
 def test_select_latest_closed_candle_skips_open_tail() -> None:
     _insert_candle(0, 100.0)
     _insert_candle(60_000, 101.0)
@@ -236,3 +265,69 @@ def test_run_loop_processes_latest_closed_candle_and_persists_it(monkeypatch, ca
     assert "[RUN] processed closed candle" in output
     assert f"candle_ts={closed_ts}" in output
     assert runtime_state.snapshot().last_processed_candle_ts_ms == closed_ts
+
+
+def test_run_loop_uses_closed_candle_for_signal_and_trade_log_correlation(monkeypatch, capsys):
+    closed_ts = 0
+    open_ts = 60_000
+    _insert_candle(closed_ts, 100.0)
+    _insert_candle(open_ts, 200.0)
+
+    monkeypatch.setattr("bithumb_bot.engine.cmd_sync", lambda quiet=True: None)
+    monkeypatch.setattr("bithumb_bot.engine.parse_interval_sec", lambda _: 60)
+
+    def _compute_signal(_conn, _short, _long, *, through_ts_ms=None, strategy_name=None):
+        assert through_ts_ms == closed_ts
+        return {
+            "ts": through_ts_ms,
+            "last_close": 100.0,
+            "curr_s": 1.0,
+            "curr_l": 1.0,
+            "signal": "BUY",
+        }
+
+    monkeypatch.setattr("bithumb_bot.engine.compute_signal", _compute_signal)
+    monkeypatch.setattr(
+        "bithumb_bot.engine.paper_execute",
+        lambda _signal, _ts, _price, **_kwargs: {
+            "ts": closed_ts,
+            "signal_ts": closed_ts,
+            "candle_ts": closed_ts,
+            "client_order_id": "paper-closed-log",
+            "exchange_order_id": "ex-closed-log",
+            "side": "BUY",
+            "qty": 0.02,
+            "filled_qty": 0.02,
+            "submit_qty": 0.02,
+            "price": 100.0,
+            "fee": 1.0,
+            "cash": 999.0,
+            "asset": 0.02,
+            "post_trade_cash": 999.0,
+            "post_trade_asset": 0.02,
+        },
+    )
+
+    times = iter([64.0, 65.0, 65.0])
+    monkeypatch.setattr("bithumb_bot.engine.time.time", lambda: next(times, 65.0))
+    sleep_calls = {"n": 0}
+
+    def _sleep(_sec: float) -> None:
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("bithumb_bot.engine.time.sleep", _sleep)
+
+    run_loop(5, 20)
+
+    output = capsys.readouterr().out
+    assert "[RUN] processed closed candle" in output
+    assert "[RUN] trade_applied" in output
+    assert "client_order_id=paper-closed-log" in output
+    assert "exchange_order_id=ex-closed-log" in output
+    assert "signal_ts=0" in output
+    assert "submit_qty=0.020" in output
+    assert "filled_qty=0.020" in output
+    assert "post_trade_cash=999" in output
+    assert "post_trade_asset=0.02000000" in output

@@ -9,6 +9,7 @@ from pathlib import Path
 
 ALLOWED_MODES = {"paper", "live"}
 ALLOWED_LOG_KINDS = {"app", "strategy", "orders", "fills", "errors", "audit"}
+MODE_SCOPED_ROOT_SEGMENTS = {"paper", "live", "dryrun"}
 
 
 class PathPolicyError(ValueError):
@@ -52,6 +53,17 @@ class PathManager:
             archive_root = default_runtime_root / "archive"
         else:
             archive_root = cls._resolve_explicit_root("ARCHIVE_ROOT", archive_raw, normalized_mode, project_root)
+
+        cls._validate_mode_neutral_roots(
+            {
+                "ENV_ROOT": env_root,
+                "RUN_ROOT": run_root,
+                "DATA_ROOT": data_root,
+                "LOG_ROOT": log_root,
+                "BACKUP_ROOT": backup_root,
+                "ARCHIVE_ROOT": archive_root,
+            }
+        )
 
         return cls(
             project_root=project_root,
@@ -121,6 +133,20 @@ class PathManager:
             return False
         return normalized in {part.lower() for part in path.parts}
 
+    @classmethod
+    def _validate_mode_neutral_roots(cls, roots: dict[str, Path | None]) -> None:
+        mode_segments = sorted(MODE_SCOPED_ROOT_SEGMENTS)
+        for key, path in roots.items():
+            if path is None:
+                continue
+            offending = [segment for segment in mode_segments if cls._contains_segment(path, segment)]
+            if offending:
+                segments_text = ", ".join(offending)
+                raise PathPolicyError(
+                    f"{key} must not contain mode-scoped path segment(s) when roots are managed by PathManager; "
+                    f"offending_segments={segments_text} path={path}"
+                )
+
     @staticmethod
     def _day_or_today(day: str | None) -> str:
         return day or datetime.now(timezone.utc).date().isoformat()
@@ -128,14 +154,29 @@ class PathManager:
     def run_dir(self) -> Path:
         return self.config.run_root / self.config.mode
 
+    def run_dir_for_mode(self, mode: str | None = None) -> Path:
+        normalized_mode = str(mode or self.config.mode or "paper").strip().lower() or "paper"
+        return self.config.run_root / normalized_mode
+
     def data_dir(self) -> Path:
         return self.config.data_root / self.config.mode
+
+    def data_dir_for_mode(self, mode: str | None = None) -> Path:
+        normalized_mode = str(mode or self.config.mode or "paper").strip().lower() or "paper"
+        return self.config.data_root / normalized_mode
 
     def log_dir(self) -> Path:
         return self.config.log_root / self.config.mode
 
+    def log_dir_for_mode(self, mode: str | None = None) -> Path:
+        normalized_mode = str(mode or self.config.mode or "paper").strip().lower() or "paper"
+        return self.config.log_root / normalized_mode
+
     def run_lock_path(self) -> Path:
-        return self.run_dir() / "bithumb-bot.lock"
+        return self.run_lock_path_for_mode(self.config.mode)
+
+    def run_lock_path_for_mode(self, mode: str | None = None) -> Path:
+        return self.run_dir_for_mode(mode) / "bithumb-bot.lock"
 
     def pid_path(self) -> Path:
         return self.run_dir() / "bithumb-bot.pid"
@@ -145,6 +186,10 @@ class PathManager:
 
     def primary_db_path(self) -> Path:
         return self.data_dir() / "trades" / f"{self.config.mode}.sqlite"
+
+    def primary_db_path_for_mode(self, mode: str | None = None) -> Path:
+        normalized_mode = str(mode or self.config.mode or "paper").strip().lower() or "paper"
+        return self.data_dir_for_mode(normalized_mode) / "trades" / f"{normalized_mode}.sqlite"
 
     def raw_path(self, topic: str, day: str | None = None, ext: str = "jsonl") -> Path:
         d = self._day_or_today(day)
@@ -215,6 +260,9 @@ class PathManager:
     def recovery_report_path(self, day: str | None = None, ext: str = "json") -> Path:
         return self.report_path("recovery_report", day=day, ext=ext)
 
+    def cash_drift_report_path(self, day: str | None = None, ext: str = "json") -> Path:
+        return self.report_path("cash_drift_report", day=day, ext=ext)
+
     def feature_snapshot_path(self, day: str | None = None, ext: str = "jsonl") -> Path:
         return self.derived_path("feature_snapshot", day=day, ext=ext)
 
@@ -229,6 +277,27 @@ class PathManager:
         path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def validate_runtime_root_separation(config: PathConfig) -> None:
+    roots: list[tuple[str, Path]] = [
+        ("ENV_ROOT", config.env_root),
+        ("RUN_ROOT", config.run_root),
+        ("DATA_ROOT", config.data_root),
+        ("LOG_ROOT", config.log_root),
+        ("BACKUP_ROOT", config.backup_root),
+    ]
+    if config.archive_root is not None:
+        roots.append(("ARCHIVE_ROOT", config.archive_root))
+
+    resolved_roots = [(name, path.resolve()) for name, path in roots]
+    for index, (left_name, left_path) in enumerate(resolved_roots):
+        for right_name, right_path in resolved_roots[index + 1 :]:
+            if left_path == right_path or PathManager._is_within(left_path, right_path) or PathManager._is_within(right_path, left_path):
+                raise PathPolicyError(
+                    "runtime roots must not overlap or share parent/child paths when MODE=live; "
+                    f"{left_name}={left_path} {right_name}={right_path}"
+                )
+
+
 def resolve_managed_path(kind: str, manager: PathManager) -> Path:
     normalized = str(kind or "").strip().lower()
     mapping = {
@@ -238,7 +307,7 @@ def resolve_managed_path(kind: str, manager: PathManager) -> Path:
         "runtime-state": manager.runtime_state_path(),
         "data-dir": manager.data_dir(),
         "primary-db": manager.primary_db_path(),
-        "reports-ops-dir": manager.data_dir() / "reports" / "ops",
+        "reports-ops-dir": manager.data_dir() / "reports" / "ops_report",
         "reports-dir": manager.data_dir() / "reports",
         "trades-dir": manager.data_dir() / "trades",
         "derived-dir": manager.data_dir() / "derived",

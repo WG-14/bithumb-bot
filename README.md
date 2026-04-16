@@ -1,38 +1,83 @@
 # bithumb-bot
 
-간단한 SMA 기반 빗썸 페이퍼/실거래 봇입니다.
+Safety-first Bithumb trading bot.
 
-## 빠른 시작
+The repository is optimized for:
+
+- Wrong-order prevention
+- Duplicate-order prevention
+- State integrity and restart recovery
+- Loss limits and emergency-stop behavior
+- Operational observability and recoverability
+
+## Position State Model
+
+This bot uses lot-native executable position semantics.
+The notes in this section describe the current implementation and its compatibility/reporting surfaces; they should not be read as a claim that every conceptual authority layer is already fully unified in code and emitted context.
+
+- `open_exposure` is the canonical lot-native executable exposure.
+- `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
+- `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
+- `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
+- `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They are not proof of zero holdings and do not define SELL authority, recovery authority, executable-position authority, recovery completeness, literal flatness, or restart safety.
+- In the current implementation, SELL authority is grounded in `build_position_state_model()` outputs such as `normalized_exposure.sellable_executable_lot_count`, `normalized_exposure.exit_allowed`, `normalized_exposure.exit_block_reason`, `normalized_exposure.terminal_state`, and operator diagnostics. Legacy wording such as `holding_authority_state` should not be read as a current emitted/runtime authority field or canonical authority surface.
+- Resume/recovery authority is a separate safety layer. In the current implementation it is determined from reconcile outcomes, runtime health, unresolved or recovery-required order state, halt conditions, dust resume policy, and explicit resume-eligibility checks; SELL authority or harmless dust alone is not sufficient to resume trading.
+- Persisted lot-state row values remain `open_exposure` and `dust_tracking`.
+- Current terminal/operator-facing normalized holding states are computed on top of persisted lot rows plus reservation and dust logic, and include `open_exposure`, `reserved_exit_pending`, `dust_only`, `flat`, and `non_executable_position`.
+- `reserved_exit_pending` is a real normalized terminal state: executable exposure still exists, but normal SELL submission is blocked because the sellable lots are already reserved by open SELL orders.
+- `dust_only`, `flat`, and `non_executable_position` remain distinct normalized outcomes and should not be collapsed into qty-first state interpretation.
+- If no executable exit lot exists, SELL must be suppressed rather than submitted as a failed order. In the current implementation, that suppression is an observable/reportable outcome that can carry reason-coded telemetry and operator-facing reporting context; it is not just an invisible strategy no-op.
+- Lot counts are the canonical executable state meaning.
+- Qty remains non-authoritative, but it is still operationally required as a derived surface for broker payloads, sell-boundary handling, and reporting.
+- Alias qty fields such as `position_qty`, `submit_payload_qty`, and `normalized_exposure_qty` may still appear in emitted/reporting context, but they are derived or compatibility/reporting surfaces and are not canonical SELL authority inputs.
+- Current external/terminal SELL authority is lot-native, but current context materialization still passes through compatibility-aware fail-closed normalization for legacy or non-executable cases.
+
+## Quick Start
 
 ```bash
 uv sync
 uv run pytest -q
+uv run bithumb-bot health
 ```
 
-## CLI/엔트리포인트 (canonical)
+## Canonical CLI
 
-- canonical CLI: `uv run bithumb-bot <command>`
-  - `pyproject.toml`의 `project.scripts`에 등록된 공식 엔트리포인트입니다.
-- 호환 엔트리포인트(동일 동작):
-  - `uv run python -m bithumb_bot <command>`
-  - `uv run python bot.py <command>`
+Use this command form as the canonical entrypoint:
 
-## env 로딩 규칙 (코드 기준)
+```bash
+uv run bithumb-bot <command>
+```
 
-- 기본적으로 런타임은 `.env`를 **자동 로딩하지 않습니다**.
-- env 파일 로딩은 `BITHUMB_ENV_FILE*` 계열을 명시했을 때만 수행됩니다.
-  - `BITHUMB_ENV_FILE=/path/to/file.env` (최우선)
-  - `MODE=live`이면 `BITHUMB_ENV_FILE_LIVE`
-  - `MODE=paper`/`test`이면 `BITHUMB_ENV_FILE_PAPER`
-- healthcheck 스크립트는 fail-fast 정책으로 **명시적 env 파일이 없으면 실패**합니다.
+Equivalent forms:
 
-로컬에서 `.env`를 쓰려면 명시적으로 지정하세요.
+```bash
+uv run python -m bithumb_bot <command>
+uv run python bot.py <command>
+```
+
+The `project.scripts` entry in `pyproject.toml` defines the canonical CLI. Current operator-facing output and recovery guidance may still reference `uv run python bot.py <command>` as a compatibility surface.
+
+## Env Loading Rules
+
+- Do not rely on implicit `.env` autoloading.
+- Use explicit env files for operator, live, and healthcheck operations.
+- `BITHUMB_ENV_FILE` takes priority when it is set.
+- `MODE=live` uses `BITHUMB_ENV_FILE_LIVE` when `BITHUMB_ENV_FILE` is not set.
+- The supported runtime modes are `paper` and `live`.
+- `MODE=paper` uses `BITHUMB_ENV_FILE_PAPER` when `BITHUMB_ENV_FILE` is not set.
+- `MODE=test` only appears here as an env-selection compatibility edge case in the helper logic; it is not a normal operator/runtime mode.
+- Explicit env files remain the operating standard for healthcheck and live-operation commands.
+- Bootstrap loads the selected explicit env file opportunistically; if the file is missing, later config validation still fails when required settings are absent.
+
+Example:
 
 ```bash
 BITHUMB_ENV_FILE=.env uv run bithumb-bot health
 ```
 
-## 자주 쓰는 명령
+Runtime artifacts must not be written into the repository. In `MODE=live`, every managed runtime root must be explicitly configured as an absolute repository-external path. In `MODE=paper`, `PathManager` falls back to the default runtime root under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot` when a managed root is unset.
+
+## Common Commands
 
 ```bash
 uv run bithumb-bot sync
@@ -44,19 +89,24 @@ uv run bithumb-bot status
 uv run bithumb-bot trades --limit 20
 uv run bithumb-bot ops-report --limit 20
 uv run bithumb-bot decision-telemetry --limit 200
+uv run bithumb-bot strategy-report
+uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
 uv run bithumb-bot run --short 7 --long 30
 ```
 
-- 운영자 전략/손익 검증 절차: `docs/OPERATOR_REPORTING.md`
+Operator reporting reference:
 
-## smoke/manual DB 검증 경로 정책
+- [`docs/OPERATOR_REPORTING.md`](/docs/OPERATOR_REPORTING.md)
 
-- smoke/manual 실행에서 생성/변경되는 SQLite는 운영 거래 원장 성격(`data/<mode>/trades`)으로 취급합니다.
-- 따라서 레포 내부 상대경로(`./tmp`, `./data`, `./backups`) DB를 사용하지 말고, **절대경로 + 레포 외부** DB만 사용하세요.
-- `tools/oms_smoke.py`는 repo-local DB를 차단합니다. 기본 경로는 `DB_PATH` env이며, 필요 시 `--db-path`로 절대경로를 주입하세요.
+## Smoke / Manual DB Validation
 
-예시(임시 검증 DB를 레포 외부 temp dir에 생성):
+- Smoke and manual validation must use absolute paths outside the repository.
+- Do not point smoke/manual DB validation at repo-relative paths such as `./tmp`, `./data`, or `./backups`.
+- Use an env-injected absolute runtime root and a repository-external temp directory instead.
+- `tools/oms_smoke.py` defaults to `DB_PATH`, and you can override it with `--db-path` when needed.
+
+Example:
 
 ```bash
 tmp_dir="$(mktemp -d)"
@@ -67,215 +117,69 @@ uv run bithumb-bot sync
 MODE=paper DB_PATH="$tmp_dir/data/paper/trades/paper.sqlite" uv run python tools/oms_smoke.py
 ```
 
-- 검증 후 레포 오염 여부를 점검하려면:
+To check for forbidden repo-local runtime artifacts:
 
 ```bash
 ./scripts/check_repo_runtime_artifacts.sh
 ```
 
-## 경로 정책 (PathManager 기준)
+## Path Policy
 
-- 저장 규칙 기준 문서:
-  - `docs/storage-layout.md`
-  - `docs/runtime-data-policy.md`
-- 경로는 env(`ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, `BACKUP_ROOT`, `ARCHIVE_ROOT`)로 주입하고, 하위 구조(`run/<mode>`, `data/<mode>/*`, `logs/<mode>/*`, `backup/<mode>/*`)는 코드(PathManager)가 강제합니다.
-- `DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`는 **점진적 호환용 override**로 유지됩니다.
-  - `DB_PATH` 미설정 시: `DATA_ROOT/<mode>/trades/<mode>.sqlite`
-  - `RUN_LOCK_PATH` 미설정 시: `RUN_ROOT/<mode>/bithumb-bot.lock`
-  - `BACKUP_DIR` 미설정 시: `BACKUP_ROOT/<mode>/db`
-- 운영 보조 스크립트(`scripts/check_live_runtime.sh`, `scripts/collect_live_snapshot.sh`, `scripts/backup_sqlite.sh`)도 PathManager 조회(`python -m bithumb_bot.paths --kind ...`)를 사용해 동일 경로 계약을 따릅니다.
-- 운영 산출물 기본 위치:
-  - run lock / pid / runtime state: `RUN_ROOT/<mode>/`
-  - DB: `DATA_ROOT/<mode>/trades/`
-  - ops/strategy/fee/recovery report: `DATA_ROOT/<mode>/reports/<topic>/`
-    - `ops_report_YYYY-MM-DD.json`
-    - `strategy_validation_YYYY-MM-DD.json`
-    - `fee_diagnostics_YYYY-MM-DD.json`
-    - `recovery_report_YYYY-MM-DD.json`
-  - trade ledger artifact(JSONL): `DATA_ROOT/<mode>/trades/<topic>/`
-  - derived artifact(JSONL): `DATA_ROOT/<mode>/derived/<topic>/`
-  - raw artifact(JSONL): `DATA_ROOT/<mode>/raw/<topic>/`
-  - 파일 로그(필요 시): `LOG_ROOT/<mode>/<kind>/`
-    - `kind ∈ {app, strategy, orders, fills, errors, audit}`
-  - snapshot archive: `BACKUP_ROOT/<mode>/snapshots/`
-  - DB backup: `BACKUP_ROOT/<mode>/db/`
-- `MODE=live`에서는 위 루트 변수들이 필수이며, repo 내부 경로/상대경로는 fail-fast로 차단됩니다.
-- `MODE=paper`에서는 로컬 개발 편의를 위해 상대경로 루트를 허용하되, 운영 배포에서는 live와 동일하게 절대경로를 권장합니다.
+Authoritative references:
 
-## run lock 동작
+- [`docs/storage-layout.md`](/docs/storage-layout.md)
+- [`docs/runtime-data-policy.md`](/docs/runtime-data-policy.md)
 
-- `run` 명령은 시작 시 run lock을 획득하며, 이미 다른 run loop가 실행 중이면 즉시 실패합니다.
-- lock 경로는 `RUN_LOCK_PATH`(미설정 시 `RUN_ROOT/<mode>/bithumb-bot.lock`)입니다.
-- lock 충돌 시 현재 owner PID/host/생성시각/lock age 정보를 포함해 에러를 출력합니다.
-- native Windows에서는 `fcntl` 미지원으로 run lock이 동작하지 않으며, 에러 메시지대로 WSL/Linux에서 실행해야 합니다.
+Rules:
 
-## 주요 환경 변수
+- In `MODE=live`, `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, and `BACKUP_ROOT` must be injected through env as absolute repository-external roots.
+- In `MODE=paper`, those managed roots default under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot` when unset; explicit overrides may still be supplied.
+- `ARCHIVE_ROOT` defaults to the same runtime root's `archive/` subtree when unset in both modes, and in `MODE=live` an explicit `ARCHIVE_ROOT` must still be absolute and repository-external.
+- Managed subtrees such as `run/<mode>`, `data/<mode>/*`, `logs/<mode>/*`, and `backup/<mode>/*` must be resolved through `PathManager`.
+- `DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`, and `SNAPSHOT_ROOT` are legacy compatibility override surfaces documented for the current storage contract; do not infer broader or newer override support from this list.
+- In `MODE=live`, these overrides must still be absolute, repository-external, and mode-correct.
+- Live helper scripts and deployment helpers should consult `PathManager` rather than inventing their own path scheme.
+- Runtime artifacts belong under the managed runtime roots, not in the repository.
 
-현재 코드에서 실제로 사용하는 주요 옵션입니다.
+Expected artifact placement:
 
-- `MODE` (기본: `paper`)
-- `MARKET` (기본: `KRW-BTC`, canonical)
-- `PAIR` (legacy alias. `MARKET` 미설정 시에만 사용; `MODE=live`에서는 `KRW-BTC` canonical만 허용되고 `BTC_KRW`/`BTC`는 거부)
-- `INTERVAL` (기본: `1m`)
-- `EVERY` (기본: `60`)
-- `STRATEGY_NAME` (기본: `sma_with_filter`)
-- `SMA_SHORT` (기본: `7`)
-- `SMA_LONG` (기본: `30`)
-- `COOLDOWN_MIN` (기본: `1`)
-- `MIN_GAP` (기본: `0.0003`)
-- `DB_PATH` (점진적 호환 override. 미설정 시 `DATA_ROOT/<mode>/trades/<mode>.sqlite`)
-- `LIVE_MIN_ORDER_QTY` (기본: `0`, 0이면 비활성)
-- `LIVE_ORDER_QTY_STEP` (기본: `0`, 0이면 비활성)
-- `LIVE_ORDER_MAX_QTY_DECIMALS` (기본: `0`, 0이면 비활성)
+- Run lock, PID, and runtime state: `RUN_ROOT/<mode>/`
+- DB: `DATA_ROOT/<mode>/trades/`
+- Ops, strategy, fee, and recovery reports: `DATA_ROOT/<mode>/reports/<topic>/`
+- Trade ledger artifacts: `DATA_ROOT/<mode>/trades/<topic>/`
+- Derived artifacts: `DATA_ROOT/<mode>/derived/<topic>/`
+- Raw artifacts: `DATA_ROOT/<mode>/raw/<topic>/`
+- Logs: `LOG_ROOT/<mode>/<kind>/`
+- Snapshot archives: `BACKUP_ROOT/<mode>/snapshots/`
+- DB backups: `BACKUP_ROOT/<mode>/db/`
 
-> `ENTRY_MODE`, `advise` 커맨드 같은 과거 옵션/명령은 현재 CLI에서 사용하지 않습니다.
+## Live Safety
 
-전략 선택은 전부 환경변수 주입(`STRATEGY_NAME`) 기반이며, 런타임/배포 환경(AWS EC2/ECS/Lambda 등)에서 파일 경로 하드코딩 없이 동일하게 동작합니다. 운영 기본값은 체결 비용/노이즈를 고려한 `sma_with_filter`이며, 백테스트/비교가 필요하면 `STRATEGY_NAME=sma_cross`로 즉시 override할 수 있습니다(대소문자/공백 입력도 정규화되어 동작).
+- Real-order flow requires explicit arming.
+- `LIVE_DRY_RUN=true` is the safe starting point for live bring-up and post-change validation.
+- `LIVE_REAL_ORDER_ARMED=true` is required before real orders are allowed.
+- Live preflight must fail fast when required limits, notifier configuration, or safety inputs are missing.
+- Current implementation runtime order is safety-first: preflight and startup reconcile/gate checks run before the steady-state loop, and each live loop iteration passes through runtime health, unresolved-order, halt, and submission-gate checks before strategy decision and submit-or-suppress handling.
+- Current implementation strategy decisions are evaluated from guarded closed-candle input; incomplete, stale, or duplicate runtime candle input is skipped rather than treated as a fresh decision trigger.
+- Recovery remains an operator-mediated workflow: commands such as `reconcile`, `recover-order`, and `resume` are explicit safety-gated procedures, not automatic recovery purely from passive state inspection.
+- Current implementation risk handling is not limited to signal-time entry rejection; depending on runtime state it may also retain or trigger halt, cancel/reconcile, or flatten-position intervention paths.
+- Do not merge paper and live storage.
+- Do not weaken live preflight or emergency-stop behavior.
 
-예시(AWS 배포 환경변수만으로 전략 전환):
+## 24/7 Ops
 
-```bash
-# 운영 기본(코드 수정 없음)
-STRATEGY_NAME=sma_with_filter
+- Systemd units live under `deploy/systemd/`.
+- Operator runbook: [`docs/RUNBOOK.md`](/docs/RUNBOOK.md)
+- Limited unattended checklist: [`docs/LIMITED_UNATTENDED_CHECKLIST.md`](/docs/LIMITED_UNATTENDED_CHECKLIST.md)
+- Backup script: `scripts/backup_sqlite.sh`
 
-# 비교/백테스트 호환 모드
-STRATEGY_NAME=sma_cross
-```
+The rendered units use `BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@` so the env file is injected explicitly.
 
-## Live 모드(실거래)
+## Test Groups
 
-- `MODE=live`로 실행하면 paper와 동일한 `orders/fills/trades/portfolio` 원장 스키마를 사용합니다.
-- 현재 자산 조회(`get_balance`)는 private REST `/v1/accounts` **snapshot** 기반입니다. MyAsset(WebSocket) 기반 자산 스트림은 현재 구현되어 있지 않습니다.
-- `MODE=live`에서는 `DB_PATH`를 반드시 명시해야 하며, **반드시 절대경로**여야 합니다(상대경로 금지).
-- `MODE=live` preflight는 paper/test 성격의 혼합 설정을 거부합니다. 예: 기본/공유 DB 경로, paper 전용 키(`START_CASH_KRW`, `BUY_FRACTION`, `FEE_RATE`, `PAPER_FEE_RATE`, `PAPER_FEE_RATE_ESTIMATE`, `SLIPPAGE_BPS`)가 설정된 경우, 또는 live 보호값(`MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `MAX_ORDERBOOK_SPREAD_BPS`, `MAX_MARKET_SLIPPAGE_BPS`, `LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS`)이 유효한 값(> 0, 유한값)으로 설정되지 않은 경우 기동 전에 fail-fast로 차단됩니다.
-- `MODE=live`에서는 notifier가 반드시 활성/설정되어 있어야 합니다 (`NOTIFIER_WEBHOOK_URL` 또는 `SLACK_WEBHOOK_URL` 또는 `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID`). 미설정 시 기동이 실패합니다.
-- `LIVE_DRY_RUN=true`를 켜면 **private write 요청(주문/취소/상태변경)** 은 차단하고, **private read-only GET 진단 요청(`/v1/accounts`, `/v1/orders/chance` 등)** 은 실제 API 호출을 허용합니다.
-- 실주문(`LIVE_DRY_RUN=false`)은 `LIVE_REAL_ORDER_ARMED=true`를 명시적으로 설정한 경우에만 허용됩니다.
+- Fast regression set:
+  - `uv run pytest -q -m fast_regression`
+- Slow integration/live-like set:
+  - `uv run pytest -q -m slow_integration`
 
-### 실주문 arming 방법
-
-1. 먼저 `LIVE_DRY_RUN=true`로 충분히 검증합니다.
-2. 실주문 직전에만 아래 값을 함께 설정합니다.
-   - `LIVE_DRY_RUN=false`
-   - `LIVE_REAL_ORDER_ARMED=true`
-3. 둘 중 하나라도 누락되면 기동 시 fail-fast로 즉시 종료됩니다.
-
-예시(보수적 소액 계정 live dry-run + notifier):
-
-```bash
-MODE=live DATA_ROOT=/var/lib/bithumb-bot/data RUN_ROOT=/var/lib/bithumb-bot/run LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
-DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=true LIVE_REAL_ORDER_ARMED=false \
-MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
-uv run bithumb-bot run
-```
-
-실주문 전환(운영자 명시 승인 후에만):
-
-```bash
-MODE=live DATA_ROOT=/var/lib/bithumb-bot/data RUN_ROOT=/var/lib/bithumb-bot/run LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
-DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.small.safe.sqlite LIVE_DRY_RUN=false LIVE_REAL_ORDER_ARMED=true \
-MAX_ORDER_KRW=30000 MAX_DAILY_LOSS_KRW=20000 MAX_DAILY_ORDER_COUNT=6 \
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz \
-BITHUMB_API_KEY=... BITHUMB_API_SECRET=... \
-uv run bithumb-bot run
-```
-
-paper/live DB 분리 예시(PathManager 기본 경로 사용):
-
-```bash
-# paper 검증
-MODE=paper \
-RUN_ROOT=/var/lib/bithumb-bot/run DATA_ROOT=/var/lib/bithumb-bot/data LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
-uv run bithumb-bot run
-
-# live 검증/운영
-MODE=live \
-RUN_ROOT=/var/lib/bithumb-bot/run DATA_ROOT=/var/lib/bithumb-bot/data LOG_ROOT=/var/lib/bithumb-bot/logs BACKUP_ROOT=/var/lib/bithumb-bot/backup ENV_ROOT=/var/lib/bithumb-bot/env \
-DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.sqlite \
-uv run bithumb-bot run
-```
-- 안전장치: `MAX_ORDER_KRW`, `MAX_DAILY_LOSS_KRW`, `MAX_DAILY_ORDER_COUNT`, `KILL_SWITCH`.
-- 재시작 시 엔진이 `reconcile`을 수행하여 열린 주문/체결/포트폴리오를 동기화합니다.
-
-### 보수적 라이브 프로필 (권장: 1,000,000 KRW 계정)
-
-초기 실거래는 아래처럼 **작게 시작**하는 것을 권장합니다.
-
-- `MAX_ORDER_KRW=30000` (주문 1회당 약 3%)
-- `MAX_DAILY_LOSS_KRW=20000` (일 손실 약 2%에서 즉시 HALT(무기한 중지, 자동 재개 없음))
-- `MAX_DAILY_ORDER_COUNT=6` (과매매 방지)
-- `KILL_SWITCH=false` (비상시에만 true)
-- `KILL_SWITCH_LIQUIDATE=false` (평시 off. 필요 시 `true`로 설정하면 kill switch 동작 시 포지션 flatten을 추가로 시도합니다. live preflight 실패 사유는 아닙니다.)
-- 일 손실 한도 초과 시 엔진은 신규 주문 전에 거래를 **HALT**하고 오픈주문 취소 + 포지션 flatten을 시도한 뒤, 노출/미해결 상태가 남으면 운영자 복구/재개 승인을 요구합니다.
-- `LIVE_DRY_RUN=true`로 최소 반나절 이상 검증 후 `false` 전환
-
-## 라이브 시작 전 체크리스트 (Startup)
-
-1. `BITHUMB_ENV_FILE`(또는 `BITHUMB_ENV_FILE_LIVE`)가 가리키는 env 파일에 라이브 안전값이 반영되었는지 확인
-2. `uv run bithumb-bot health`에서 `trading_enabled=True`, `error_count` 낮음, `last_candle_age_sec` 정상 확인
-3. `uv run bithumb-bot recovery-report`에서 미해결 주문/복구 필요 건수와 오래된 미해결 주문 요약(top 5) 확인
-4. 처음 라이브 전환 시 `MODE=live`, `LIVE_DRY_RUN=true`로 기동 후 로그/알림 확인
-5. API 키를 활성화하기 전 `pause/resume/reconcile` 명령이 정상 동작하는지 점검
-6. 실주문 전환(`LIVE_DRY_RUN=false`) 직후 30~60분 수동 모니터링
-
-## 비상 정지 / 일시중지 / 복구
-
-```bash
-# 즉시 신규 거래 중지
-uv run bithumb-bot pause
-
-# 상태 점검
-uv run bithumb-bot recovery-report
-uv run bithumb-bot health
-
-# (live) 원격 오픈 주문 일괄 취소
-uv run bithumb-bot cancel-open-orders
-
-# 정합성 점검
-uv run bithumb-bot reconcile
-
-# 보수적 재개(문제 있으면 자동 거부)
-uv run bithumb-bot resume
-```
-
-- 긴급 시에는 `pause`를 먼저 실행하고, 원인 파악 전 `resume --force`는 피하세요.
-- `KILL_SWITCH=true`는 마지막 안전장치로 사용하고, 해제 전 반드시 주문/체결 정합성을 다시 확인하세요.
-
-## 크래시 후 재개 전 필수 확인
-
-1. `journalctl -u bithumb-bot.service -n 200 --no-pager`로 마지막 예외/네트워크 오류 원인 확인
-2. `uv run bithumb-bot recovery-report`에서 `unresolved_orders`, `recovery_required_orders`가 0인지 확인 (0이 아니면 오래된 주문 요약 목록으로 우선 대응 대상 확인)
-3. `uv run bithumb-bot reconcile` 실행 후 다시 `recovery-report` 확인
-4. live 모드면 거래소 오픈 주문/체결 내역과 로컬 `orders/fills`가 일치하는지 샘플 대조
-5. `uv run bithumb-bot health` 정상 확인 후 `uv run bithumb-bot resume`
-
-## 24/7 운영(systemd + healthcheck + backup)
-
-- systemd 유닛: `deploy/systemd/`
-  - `bithumb-bot.service` (`Restart=always`)
-  - `bithumb-bot-healthcheck.timer` (1분 주기)
-  - `bithumb-bot-backup.timer` (6시간 주기)
-- 운영 절차 문서: `docs/RUNBOOK.md`
-- 제한적 무인 운용 체크리스트(요약): `docs/LIMITED_UNATTENDED_CHECKLIST.md`
-- 백업 스크립트: `scripts/backup_sqlite.sh`
-- 세 유닛(`bithumb-bot.service`, `bithumb-bot-healthcheck.service`, `bithumb-bot-backup.service`) 모두 `BITHUMB_ENV_FILE=@BITHUMB_ENV_FILE_LIVE@`를 사용하도록 템플릿이 작성되어 있습니다. 설치 시 `render_units.sh`로 실제 경로를 치환한 뒤 배포하세요.
-- `bithumb-bot-healthcheck.service`는 비대화형 systemd PATH 의존성을 제거하기 위해 `BITHUMB_UV_BIN`(기본값: 렌더 시점 `command -v uv` 결과, 없으면 `uv`)을 사용합니다.
-- systemd 실행 계정은 `BITHUMB_RUN_USER`로 주입할 수 있으며, 기본값은 유닛 렌더링을 실행한 사용자(`id -un`)입니다.
-- `bithumb-bot.service` / `bithumb-bot-paper.service`는 `PYTHONUNBUFFERED=1`과 `python -u`를 함께 사용해 journald에서 `[RUN]`/`[SKIP]` 로그가 지연 버퍼링 없이 바로 보이도록 구성합니다.
-
-빠른 확인:
-
-```bash
-sudo systemctl restart bithumb-bot.service
-uv run bithumb-bot health
-./scripts/backup_sqlite.sh
-```
-
-## 실행 환경 지원 범위
-
-- 권장/지원: Linux (예: Ubuntu, AWS EC2 Linux)
-  - systemd 운영은 Linux에서만 전제합니다.
-- Windows:
-  - native Windows는 run lock(`fcntl`) 미지원으로 `run` 루프 운영 대상이 아닙니다.
-  - 개발/실행은 WSL2(Linux 사용자공간)에서 수행하세요.
+Prefer the fast regression set first. Keep the slow set separate unless you are validating restart, recovery, or live-like execution paths.

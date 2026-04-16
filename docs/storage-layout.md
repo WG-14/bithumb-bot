@@ -1,408 +1,392 @@
-# AWS 비공유 자료 구조 제안 (`docs/storage-layout.md`)
+# Storage Layout Contract
 
-## 목적
-이 문서는 GitHub 레포 밖에서 관리해야 하는 AWS 운영 자료의 표준 경로를 정의한다.
-핵심 목표는 다음 4가지다.
+## Purpose
 
-1. `paper` / `live` 환경을 절대 섞지 않는다.
-2. 코드 저장소와 런타임 산출물을 분리한다.
-3. 장애 복구와 원인 추적이 가능한 구조를 만든다.
-4. 이후 어떤 패치가 들어와도 동일한 저장 규칙을 유지한다.
+This document defines the storage contract for runtime data managed by the bot.
+It exists to prevent wrong orders, duplicate orders, state corruption, and recoverability regressions.
 
----
+The repository contains code, tests, docs, templates, and deployment definitions.
+It does not contain runtime artifacts.
 
-## 1. 최상위 원칙
+## Non-Negotiable Rules
 
-### 1.1 레포와 운영 자료 분리
-- GitHub 레포에는 코드, 테스트, 문서, 템플릿만 둔다.
-- 실제 운영 산출물은 레포 밖 AWS 전용 디렉토리에 둔다.
-- 금지 예시:
-  - `repo/data/*.sqlite`
-  - `repo/backups/*`
-  - `repo/*.log`
-  - `repo/tmp/*`
+- Do not write runtime artifacts into the Git repository.
+- Do not write runtime artifacts to repo-relative paths such as `./data`, `./backups`, `./tmp`, or repo-root `*.log`.
+- All path resolution must go through `PathManager`, `PathConfig`, and the helpers in `src/bithumb_bot/paths.py`.
+- Paper and live data must remain fully separated.
+- Live mode must fail fast on relative paths, repo-internal paths, and wrong-environment segments such as `paper`.
+- Every new file output must be classified into exactly one storage bucket.
 
-### 1.2 환경 완전 분리
-- 최소 분리 환경: `paper`, `live`
-- 필요 시 `dryrun` 추가 가능하되, 처음 구조부터 확장 가능하게 설계한다.
-- 각 환경은 다음을 공유하지 않는다.
-  - DB
-  - runtime lock/pid
-  - logs
-  - reports
-  - backups
+## Storage Buckets
 
-### 1.3 자료 성격별 분리
-운영 자료는 다음 기준으로 구분한다.
-- `env/`: 실제 운영 env 파일
-- `run/`: pid, lock, state pointer 등 런타임 파일
-- `data/raw/`: 외부 원본 응답, 원본 시장데이터, 원본 진단 스냅샷
-- `data/derived/`: 지표/특징량/검증용 가공 데이터
-- `data/trades/`: 주문/체결/잔고/포지션/리컨실 결과
-- `data/reports/`: 운영 리포트, 전략 리포트, 수익 검증 산출물
-- `logs/`: 사람이 읽는 운영 로그
-- `backup/`: DB 스냅샷, 설정 백업, 복구용 아카이브
+The only valid storage buckets are:
 
-### 1.4 경로는 설정, 규칙은 코드
-- 실제 루트 경로는 env로 주입한다.
-- 하위 구조 규칙은 코드가 책임진다.
-- 모듈이 직접 `./data`, `./backups`, `./logs` 같은 경로를 만들면 안 된다.
+- `env/`
+- `run/`
+- `data/<mode>/raw/`
+- `data/<mode>/derived/`
+- `data/<mode>/trades/`
+- `data/<mode>/reports/`
+- `logs/<mode>/...`
+- `backup/<mode>/...`
+- `archive/<mode>/...`
 
----
+Classification examples:
 
-## 2. 권장 AWS 운영 루트
+- External API raw payload archive -> `raw`
+- Feature snapshot, signal trace, or tuning intermediate -> `derived`
+- Orders, fills, balances, or reconcile evidence -> `trades`
+- Operator-readable summary JSON or report -> `reports`
+- Runtime lock, PID, heartbeat, or transient state pointer -> `run`
+- DB snapshot, redacted config snapshot, or recovery snapshot -> `backup`
 
-권장 루트:
+## Required Layout
+
+The storage contract is defined per managed root, not as one required shared tree.
+
+Managed roots:
+
+- `ENV_ROOT`
+- `RUN_ROOT`
+- `DATA_ROOT`
+- `LOG_ROOT`
+- `BACKUP_ROOT`
+- `ARCHIVE_ROOT` when archive storage is enabled
+
+Current paper/default behavior:
+
+- When `MODE=paper` and `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, or `BACKUP_ROOT` are unset, `PathManager` falls back to the default runtime root under `XDG_STATE_HOME/bithumb-bot` or `~/.local/state/bithumb-bot`.
+- When `ARCHIVE_ROOT` is unset, both `paper` and `live` use the default runtime root's `archive/` subtree.
+- Explicit paper overrides may still be supplied, but the preferred operator layout remains repository-external absolute paths.
+
+Current live contract:
+
+- Every managed live root must be explicitly set to an absolute path.
+- Live managed roots must be repository-external.
+- Live managed roots must not overlap.
+- Live managed roots must not have parent/child relationships with one another.
+- Managed roots themselves must stay mode-neutral; `paper`, `live`, and `dryrun` are not valid root path segments for the root directories.
+
+Bucket structure is resolved relative to each managed root:
 
 ```text
-/var/lib/bithumb-bot/
+ENV_ROOT/
+  paper.env
+  live.env
+
+RUN_ROOT/
+  paper/
+    bithumb-bot.pid
+    bithumb-bot.lock
+    runtime_state.json
+  live/
+    bithumb-bot.pid
+    bithumb-bot.lock
+    runtime_state.json
+
+DATA_ROOT/
+  paper/
+    raw/
+    derived/
+    trades/
+      paper.sqlite
+    reports/
+  live/
+    raw/
+    derived/
+    trades/
+      live.sqlite
+    reports/
+
+LOG_ROOT/
+  paper/
+    app/
+    strategy/
+    orders/
+    fills/
+    errors/
+    audit/
+  live/
+    app/
+    strategy/
+    orders/
+    fills/
+    errors/
+    audit/
+
+BACKUP_ROOT/
+  paper/
+    db/
+    snapshots/
+  live/
+    db/
+    snapshots/
+
+ARCHIVE_ROOT/
+  paper/
+  live/
 ```
 
-대안:
+## Allowed Overrides
+
+These env vars are the current documented compatibility override surfaces for this storage contract, not new path conventions or a guarantee of broader override support:
+
+- `DB_PATH`
+- `RUN_LOCK_PATH`
+- `BACKUP_DIR`
+- `SNAPSHOT_ROOT`
+
+Rules for overrides:
+
+- The override value must be an absolute path.
+- Live mode requires a repository-external absolute path.
+- Live mode must not use a path inside the repository.
+- Live mode must not use a path that contains the wrong environment segment.
+- The override must still map to the correct mode-specific storage bucket.
+
+## Forbidden Patterns
+
+Do not:
+
+- Hardcode absolute runtime paths in code
+- Concatenate runtime path strings manually
+- Introduce direct path conventions outside the central path layer
+- Bypass `PathManager` for DB, logs, run lock, reports, raw or derived artifacts, backups, or snapshots
+- Share any storage between paper and live
+- Overwrite live evidence in place
+
+## Path Policy
+
+Path locations are configuration. Path structure rules are code.
+
+Path creation and path resolution must use the shared path layer:
+
+- `PathManager`
+- `PathConfig`
+- `src/bithumb_bot/paths.py`
+
+## Runtime Roots
+
+Recommended live/runtime shape: choose separate absolute roots and pass them through the managed env vars. This is required in `MODE=live` and remains the preferred operator layout in `MODE=paper`, even though paper can fall back to the default runtime root when roots are unset.
+
+Example:
 
 ```text
-/home/<run-user>/trading-bot-runtime/
-```
-
-문서에서는 이하 `RUNTIME_ROOT`로 표기한다.
-
----
-
-## 3. 권장 디렉토리 구조
-
-```text
-RUNTIME_ROOT/
-  env/
-    paper.env
-    live.env
-
-  run/
-    paper/
-      bithumb-bot.pid
-      bithumb-bot.lock
-      heartbeat.json
-    live/
-      bithumb-bot.pid
-      bithumb-bot.lock
-      heartbeat.json
-
-  data/
-    paper/
-      raw/
-        market/
-        broker/
-        snapshots/
-      derived/
-        indicators/
-        features/
-        validation/
-      trades/
-        paper.sqlite
-        orders/
-        fills/
-        balances/
-        reconcile/
-      reports/
-        ops/
-        strategy/
-        pnl/
-    live/
-      raw/
-        market/
-        broker/
-        snapshots/
-      derived/
-        indicators/
-        features/
-        validation/
-      trades/
-        live.sqlite
-        orders/
-        fills/
-        balances/
-        reconcile/
-      reports/
-        ops/
-        strategy/
-        pnl/
-
-  logs/
-    paper/
-      app/
-      strategy/
-      orders/
-      fills/
-      errors/
-      audit/
-    live/
-      app/
-      strategy/
-      orders/
-      fills/
-      errors/
-      audit/
-
-  backup/
-    paper/
-      db/
-      configs/
-      snapshots/
-    live/
-      db/
-      configs/
-      snapshots/
-
-  archive/
-    paper/
-    live/
-```
-
----
-
-## 4. 실제 파일 배치 기준
-
-### 4.1 env
-```text
-RUNTIME_ROOT/env/paper.env
-RUNTIME_ROOT/env/live.env
-```
-
-- GitHub에는 `.env.example`만 둔다.
-- 실제 API key/secret, webhook, 실제 DB 경로는 AWS env 파일에만 둔다.
-
-### 4.2 runtime
-```text
-RUNTIME_ROOT/run/live/bithumb-bot.lock
-RUNTIME_ROOT/run/live/bithumb-bot.pid
-RUNTIME_ROOT/run/live/heartbeat.json
-```
-
-- `RUN_LOCK_PATH`는 반드시 `run/<mode>/` 아래에 둔다.
-- lock 파일은 반드시 `run/<mode>/` 아래에 둔다. `data/locks/` 같은 과거 경로는 운영에서 금지한다.
-
-### 4.3 DB
-```text
-RUNTIME_ROOT/data/paper/trades/paper.sqlite
-RUNTIME_ROOT/data/live/trades/live.sqlite
-```
-
-- 환경별 DB 절대 공유 금지
-- live는 반드시 별도 `DB_PATH`를 명시한다.
-- `data/bithumb_1m.sqlite` 같은 레포 상대 기본값은 운영 기본값으로 사용하지 않는다.
-
-### 4.4 raw
-```text
-RUNTIME_ROOT/data/live/raw/market/orderbook_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/raw/broker/private_balance_2026-03-30.jsonl
-```
-
-- 재현성과 디버깅을 위해 저장하는 원본 응답
-- 민감정보가 있으면 redaction 규칙 적용
-
-### 4.5 derived
-```text
-RUNTIME_ROOT/data/live/derived/validation/signal_trace_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/derived/features/features_2026-03-30.parquet
-RUNTIME_ROOT/data/live/derived/market_catalog_snapshot/market_catalog_snapshot_2026-03-30.json
-```
-
-- 전략 검증, 관측, 튜닝용 가공 결과
-- raw를 덮어쓰지 않는다.
-
-### 4.6 trades
-```text
-RUNTIME_ROOT/data/live/trades/orders/orders_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/fills/fills_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/balances/balance_snapshots_2026-03-30.jsonl
-RUNTIME_ROOT/data/live/trades/reconcile/reconcile_2026-03-30.jsonl
-```
-
-- SQLite는 상태 복구용 원장
-- JSONL은 append-only 운영 기록
-- 둘 중 하나만 남기는 구조보다, DB + append-only 증거 로그 병행을 권장한다.
-
-### 4.7 reports
-```text
-RUNTIME_ROOT/data/live/reports/ops/ops_report_2026-03-30T090000KST.txt
-RUNTIME_ROOT/data/live/reports/strategy/strategy_report_2026-03-30.json
-RUNTIME_ROOT/data/live/reports/market_catalog_diff/market_catalog_diff_2026-03-30.jsonl
-```
-
-- 임시 터미널 출력도 필요하면 파일 아카이브 가능
-- 리포트는 `data/reports/`에 두고, 일반 로그와 분리한다.
-
-### 4.8 logs
-```text
-RUNTIME_ROOT/logs/live/app/app_2026-03-30.log
-RUNTIME_ROOT/logs/live/strategy/strategy_2026-03-30.log
-RUNTIME_ROOT/logs/live/orders/orders_2026-03-30.log
-RUNTIME_ROOT/logs/live/errors/error_2026-03-30.log
-RUNTIME_ROOT/logs/live/audit/audit_2026-03-30.log
-```
-
-- stdout/journalctl만으로 운영하지 말고, 최소한 로그 분류 기준은 문서화한다.
-- 초기에 journald 중심으로 가더라도 개념상 `app/strategy/orders/fills/errors/audit` 구분을 유지한다.
-
-### 4.9 backup
-```text
-RUNTIME_ROOT/backup/live/db/live.sqlite.20260330_120000.sqlite
-RUNTIME_ROOT/backup/live/configs/live.env.20260330_120000.redacted
-RUNTIME_ROOT/backup/live/snapshots/runtime_snapshot_20260330_120000.tar.gz
-```
-
-- 백업은 환경별 디렉토리 분리
-- `BACKUP_DIR=backups` 같은 레포 상대 기본값은 운영 기본값으로 사용하지 않는다.
-
----
-
-## 5. 운영 변수 표준안
-
-실제 env에는 최소 다음 경로 변수를 둔다.
-
-```dotenv
-MODE=live
-RUNTIME_ROOT=/var/lib/bithumb-bot
 ENV_ROOT=/var/lib/bithumb-bot/env
 RUN_ROOT=/var/lib/bithumb-bot/run
 DATA_ROOT=/var/lib/bithumb-bot/data
-LOG_ROOT=/var/lib/bithumb-bot/logs
-BACKUP_ROOT=/var/lib/bithumb-bot/backup
-ARCHIVE_ROOT=/var/lib/bithumb-bot/archive
-DB_PATH=/var/lib/bithumb-bot/data/live/trades/live.sqlite
-RUN_LOCK_PATH=/var/lib/bithumb-bot/run/live/bithumb-bot.lock
-BACKUP_DIR=/var/lib/bithumb-bot/backup/live/db
+LOG_ROOT=/var/log/bithumb-bot
+BACKUP_ROOT=/var/backups/bithumb-bot
+ARCHIVE_ROOT=/srv/bithumb-bot-archive
 ```
 
-추가 권장:
+These examples are illustrative locations only. The contract is the managed-root separation and the mode-relative bucket structure, not a single required parent directory.
 
-```dotenv
-REPORT_ROOT=/var/lib/bithumb-bot/data/live/reports
-RAW_DATA_ROOT=/var/lib/bithumb-bot/data/live/raw
-DERIVED_DATA_ROOT=/var/lib/bithumb-bot/data/live/derived
-TRADES_DATA_ROOT=/var/lib/bithumb-bot/data/live/trades
+## File Placement Examples
+
+### env
+
+```text
+ENV_ROOT/paper.env
+ENV_ROOT/live.env
 ```
 
----
+GitHub stores only `.env.example`. Real API keys, webhook secrets, and DB paths belong in runtime env files.
 
-## 6. 모드별 저장 규칙
+### run
+
+```text
+RUN_ROOT/live/bithumb-bot.lock
+RUN_ROOT/live/bithumb-bot.pid
+RUN_ROOT/live/runtime_state.json
+```
+
+The run lock must live under `RUN_ROOT/<mode>/`.
+Do not invent a `data/locks/` or similar alternate lock path.
+
+### trades
+
+```text
+DATA_ROOT/live/trades/live.sqlite
+DATA_ROOT/live/trades/orders/orders_2026-03-30.jsonl
+DATA_ROOT/live/trades/fills/fills_2026-03-30.jsonl
+DATA_ROOT/live/trades/balance_snapshots/balance_snapshots_2026-03-30.jsonl
+DATA_ROOT/live/trades/reconcile_events/reconcile_events_2026-03-30.jsonl
+```
+
+Use SQLite for stateful ledgers and JSONL append-only files for live evidence.
+
+### reports
+
+```text
+DATA_ROOT/live/reports/ops_report/ops_report_2026-03-30.json
+DATA_ROOT/live/reports/strategy_validation/strategy_validation_2026-03-30.json
+DATA_ROOT/live/reports/recovery_report/recovery_report_2026-03-30.json
+```
+
+Reports are operator-readable outputs. Keep them separate from general logs.
+
+### logs
+
+```text
+LOG_ROOT/live/app/app_2026-03-30.log
+LOG_ROOT/live/strategy/strategy_2026-03-30.log
+LOG_ROOT/live/orders/orders_2026-03-30.log
+LOG_ROOT/live/errors/errors_2026-03-30.log
+LOG_ROOT/live/audit/audit_2026-03-30.log
+```
+
+Keep log kinds separated. Valid log kinds are `app`, `strategy`, `orders`, `fills`, `errors`, and `audit`.
+
+### backup
+
+```text
+BACKUP_ROOT/live/db/live.sqlite.20260330_120000.sqlite
+BACKUP_ROOT/live/snapshots/runtime_snapshot_20260330_120000.tar.gz
+```
+
+Backups are mode-specific. Do not let paper and live share backup storage.
+
+## Mode Separation
 
 ### paper
-- 모의 체결 전용
-- 실거래 자격 없음
-- live와 DB/lock/backups 공유 금지
+
+- Paper is for validation and simulation.
+- Paper must never share DB, lock, logs, reports, backups, or snapshots with live.
 
 ### live
-- 실제 주문/실제 체결
-- 가장 엄격한 백업/로그/감사 기준 적용
-- `DB_PATH`, notifier, risk limit, arming 조건 필수
 
-### dryrun (향후 도입 시)
-- 전략/주문 직전 판단은 실제처럼 실행
-- 주문 전송만 차단
-- live와 별도 분리
+- Live is for real orders and recovery-critical evidence.
+- Live requires explicit DB path configuration, notifier readiness, risk-limit configuration, and arming requirements.
+- Live paths must be absolute, repository-external, and mode-correct.
 
----
-
-## 7. 저장 형식 권장안
+## Storage Formats
 
 ### SQLite
-용도:
-- 내부 상태 복구
-- 현재 포지션/주문/체결/헬스 원장
+
+Use SQLite for:
+
+- Stateful ledgers
+- Restart recovery state
+- Portfolio, order, fill, and trade lifecycle state
+- Bot health tables
+- Other core recovery-critical tables
 
 ### JSONL append-only
-용도:
-- 주문 요청/응답 기록
-- 체결 이벤트 기록
-- 전략 판단 근거
-- reconcile 결과
-- snapshot 증거 로그
 
-권장 이유:
-- 부분 손상 복구가 쉬움
-- 날짜별 파일 회전이 쉬움
-- pandas/jq/Python 후처리가 쉬움
+Use JSONL append-only files for:
 
----
+- Order request and response events
+- Fill events
+- Balance snapshots
+- Reconcile summaries
+- Strategy decision evidence
+- Raw external response snapshots
 
-## 8. 파일명 규칙
+Never overwrite live evidence in place.
+Use append-only or timestamped snapshot patterns for live evidence, audit evidence, incident evidence, and strategy decision evidence tied to live actions.
 
-### 날짜 단위 파일
-```text
-orders_YYYY-MM-DD.jsonl
-fills_YYYY-MM-DD.jsonl
-balance_snapshots_YYYY-MM-DD.jsonl
-strategy_YYYY-MM-DD.log
-error_YYYY-MM-DD.log
-```
+## File Naming Rules
 
-### 시각 단위 스냅샷
-```text
-ops_report_YYYY-MM-DDTHHMMSSKST.txt
-runtime_snapshot_YYYYMMDD_HHMMSS.tar.gz
-```
+- Use KST-based dates when the operator workflow already depends on them.
+- Use a clear timestamp format for snapshot-style files.
+- Keep filenames unambiguous and mode-specific.
+- Do not embed environment names in a way that can cause paper/live confusion.
 
-규칙:
-- KST 기준 날짜 사용
-- 파일명에 공백 금지
-- 환경명은 상위 경로로 표현하고 파일명에 중복하지 않는다.
+## Backup and Retention
 
----
+Backup priority:
 
-## 9. 백업/보관 기준
+1. Live DB
+2. Redacted env snapshot
+3. Reconcile, audit, and error evidence
+4. Strategy and validation reports
+5. Raw market cache
 
-### 백업 우선순위
-1. DB
-2. env redacted copy
-3. reconcile / audit / errors 관련 파일
-4. 전략 검증 리포트
-5. raw market cache
+Retention guidance:
 
-### 보관 예시
-- DB snapshot: 7일 daily + 최근 30개 유지
-- logs: 최근 30일 hot, 이후 archive 이동
-- raw market: 재수집 가능하면 단기 보관
-- live trades/fills/balances: 장기 보관 우선
+- DB snapshots: daily rotation with limited history
+- Logs: recent hot retention with later archive movement
+- Raw market cache: prune when safe
+- Live trades, fills, and balances: keep as long as needed for recovery
 
----
+## Path Contract Summary
 
-## 10. 현재 레포 기준 적용 메모
+The current codebase expects:
 
-현재 기준은 다음과 같다.
-- 경로 해석은 PathManager를 단일 진입점으로 사용한다.
-- `MODE=live`에서는 `ENV_ROOT/RUN_ROOT/DATA_ROOT/LOG_ROOT/BACKUP_ROOT`를 모두 절대경로로 명시해야 한다.
-- `MODE=live`에서는 레포 내부 경로가 즉시 거부되어야 한다.
-- `MODE=live`에서는 `paper` 세그먼트가 섞인 경로를 허용하지 않는다.
+- Path resolution through `PathManager`
+- Explicit env-root configuration for `ENV_ROOT`, `RUN_ROOT`, `DATA_ROOT`, `LOG_ROOT`, `BACKUP_ROOT`, and `ARCHIVE_ROOT`
+- Live compatibility overrides to remain absolute, repository-external, and mode-correct
+- Shared CLI and script helpers to consult managed paths instead of inventing new conventions
 
-운영 정책:
-- 레포 상대 경로는 운영에서 허용하지 않는다.
-- live 운영 경로는 항상 외부 절대경로를 사용한다.
-- 보조 스크립트도 공용 경로 계층(path_query + PathManager)을 우회하지 않는다.
-- 보조 스크립트 override(`DB_PATH`, `RUN_LOCK_PATH`, `BACKUP_DIR`, `SNAPSHOT_ROOT`)도 live에서는 절대경로 + 레포 외부 + mode 혼합 금지 규칙을 동일하게 강제한다.
+## Lot State Quantity Contract
 
----
+`open_position_lots` is the persisted storage contract for the base lot-native
+position rows.
 
-## 11. 금지사항
+Execution and reporting do not read final SELL authority directly from an
+individual stored row. They materialize normalized authority from the persisted
+lot-state rows together with reservation and dust interpretation.
 
-다음은 운영 패치에서 금지한다.
-- `./data`, `./backups`, `./tmp`, `./logs`에 직접 쓰기
-- repo 하위에 live DB 생성
-- paper/live 공용 DB 사용
-- 임시 디버그 파일을 레포 루트에 남기기
-- raw/derived/trades 구분 없이 한 폴더에 혼합 저장
-- 새 모듈이 자체적으로 경로 문자열을 조립하는 것
+Storage and normalized execution authority are separate layers:
 
----
+- persisted lot rows are the recovery/storage base contract
+- final SELL authority is the normalized runtime field `position_state.normalized_exposure.sellable_executable_lot_count`
+- persisted rows must not be treated as the final SELL authority surface without the normalization step
 
-## 12. 패치 승인 체크리스트
+Persisted schema-backed base fields in `open_position_lots`:
 
-새 패치가 저장을 추가하면 반드시 아래를 명시한다.
-- 어떤 환경(`paper/live/dryrun`)에 저장되는가
-- 어떤 분류(`run/raw/derived/trades/reports/logs/backup`)에 속하는가
-- 파일인가 DB인가
-- append-only인가 overwrite인가
-- 백업 대상인가
-- 민감정보가 포함되는가
-- retention 규칙이 필요한가
+- `qty_open`: stored row quantity for the current lot-state row.
+- `executable_lot_count`: stored canonical executable lot authority for an `open_exposure` row.
+- `dust_tracking_lot_count`: stored canonical operator-only residual lot authority for a `dust_tracking` row.
+- `position_state`: stored lot-state classification. Current values are `open_exposure` and `dust_tracking`.
+- `position_semantic_basis`: stored semantic basis and must remain `lot-native`.
+- `lot_semantic_version`, `internal_lot_size`, `lot_min_qty`, `lot_qty_step`, `lot_min_notional_krw`, `lot_max_qty_decimals`, and `lot_rule_source_mode`: stored lot-rule metadata for interpretation and recovery.
 
-이 체크리스트를 통과하지 못한 저장 패치는 병합하지 않는다.
+Normalized runtime holding states are a separate interpretation layer. They are
+computed from persisted lot rows plus reservation and dust logic, and current
+normalized states include `open_exposure`, `reserved_exit_pending`,
+`dust_only`, `flat`, and `non_executable_position`. Those normalized states are
+not additional stored `open_position_lots.position_state` row values.
+
+Trigger-enforced storage invariants:
+
+- `open_position_lots` is protected by insert/update validation triggers; it is not just an interpretation-layer convention.
+- These trigger guarantees are necessary storage-integrity checks, but they are not sufficient by themselves to prove final runtime SELL authority. Final SELL authority still depends on the separate normalized holding/exit materialization step.
+- Negative `executable_lot_count` and `dust_tracking_lot_count` values are rejected.
+- For lot-native rows with positive `qty_open`, `position_state='open_exposure'` requires positive `executable_lot_count` and zero `dust_tracking_lot_count`, while `position_state='dust_tracking'` requires the inverse.
+- For lot-native rows with positive `qty_open` and positive `internal_lot_size`, `qty_open` must equal the authoritative lot count multiplied by `internal_lot_size` for the active state bucket.
+- Zero-qty rows must not retain lot authority; both lot-count columns must be zero when `qty_open <= 1e-12`.
+
+Current schema-time legacy-row normalization:
+
+- During schema setup, rows with missing or blank `position_semantic_basis` are backfilled to `lot-native`.
+- Rows with missing or blank `position_state` are backfilled to `open_exposure`.
+- Existing positive-qty rows are normalized so `open_exposure` rows have at least one `executable_lot_count` and `dust_tracking` rows have at least one `dust_tracking_lot_count` when those legacy lot-count fields were blank or non-positive.
+- This schema-time backfill is compatibility and fail-closed normalization for pre-existing rows. It keeps older rows readable under the current storage contract, but it does not canonically reconstruct lot-native SELL semantics from qty-only legacy data or promote qty-only legacy data to final SELL authority.
+
+Derived / interpreted outputs from the lot-state and dust interpretation layer:
+
+- `open_lot_count`: interpreted executable exposure count derived from the stored lot-state row and surfaced for reporting / downstream logic.
+- `raw_total_asset_qty`: interpreted broker-visible total remainder for the asset. It is useful for reconciliation and reporting, but it is not a stored `open_position_lots` column.
+- `open_exposure_qty`: interpreted executable quantity derived from lot-native exposure for broker payloads, reporting, and compatibility.
+- `dust_tracking_qty`: interpreted operator-only residual quantity derived from the dust-tracking lot state for evidence and reporting.
+- `sellable_executable_qty`: interpreted sell-submit quantity derived from sellable executable lot count, not a persisted column.
+- `sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, and `exit_block_reason`: normalized execution/reporting authority fields materialized from persisted lot rows plus reservation and dust interpretation; they are not direct `open_position_lots` storage columns.
+- `sellable_executable_lot_count` is the final normalized SELL authority surface. Persisted lot rows supply inputs to that normalization, but are not themselves the final SELL decision surface.
+
+Practical routing rules:
+
+- BUY fills create or refresh `open_exposure` lots.
+- SELL matching consumes `open_exposure` lots only.
+- `dust_tracking` lots are not sellable inventory and must not be counted as the basis for a normal SELL order.
+- Harmless dust suppression is defined around the `dust_tracking` path, not the `open_exposure` path.
+- Suppression behavior must avoid creating a normal SELL order, SELL event, or fresh client order ID for dust-only exits unless an operator explicitly clears the dust state.
+- Reporting should surface the interpreted fields `open_lot_count`, `open_exposure_qty`, `dust_tracking_qty`, `sellable_executable_qty`, and `raw_total_asset_qty` together with the persisted lot-state fields so operators can explain the gap between broker-visible holdings and the sellable position base.
+- Boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty` stays `open_exposure`.
+- If a malformed `dust_tracking` lot appears above `min_qty`, it is still treated as operator evidence and remains excluded from normal SELL submission until an operator clears the inconsistency.
+- Routing summary:
+  - BUY creates or refreshes `open_exposure` lots.
+- SELL lifecycle and real-order submission use normalized lot-native authority materialized from the persisted lot-state base contract, with `open_exposure_qty` materialized from that authority for the final broker payload.
+  - `dust_tracking_qty` is operator-tracking evidence only and is excluded from normal SELL submission.
+  - Harmless dust suppression is anchored to the `dust_tracking` path, not the `open_exposure` path.

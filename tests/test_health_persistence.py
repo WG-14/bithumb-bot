@@ -725,7 +725,52 @@ def test_healthcheck_healthy_default_path(tmp_path):
 
     assert proc.returncode == 0
     assert env["RUN_LOCK_PATH"] in proc.stdout
+    assert "[HEALTHCHECK] ENV_SOURCE" in proc.stdout
+    assert "[HEALTHCHECK] AUTH_INIT" in proc.stdout
+    assert "endpoint=/v1/orders/chance" in proc.stdout
     assert "[HEALTHCHECK] OK" in proc.stdout
+
+
+def test_healthcheck_auth_diagnostics_do_not_print_secret_values(tmp_path):
+    db_path = _set_tmp_db(tmp_path)
+    env_file = _write_env_file(tmp_path, db_path=db_path)
+    secret_value = "very-secret-healthcheck-token"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MODE=paper",
+                f"DB_PATH={db_path}",
+                "BITHUMB_API_KEY=test-health-key",
+                f"BITHUMB_API_SECRET={secret_value}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runtime_state.enable_trading()
+    runtime_state.set_error_count(0)
+    runtime_state.set_last_candle_age_sec(None)
+    runtime_state.record_reconcile_result(success=True)
+
+    env = _healthcheck_subprocess_env(
+        env_file=env_file,
+        db_path=db_path,
+        run_lock_path=tmp_path / "locks" / "healthcheck-auth-diag.lock",
+    )
+
+    proc = subprocess.run(
+        [sys.executable, "scripts/healthcheck.py"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert "api_secret_present=1" in proc.stdout
+    assert f"api_secret_length={len(secret_value)}" in proc.stdout
+    assert secret_value not in proc.stdout
 
 
 def test_healthcheck_fails_when_explicit_env_file_is_missing(tmp_path):

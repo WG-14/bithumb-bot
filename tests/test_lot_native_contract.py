@@ -1,0 +1,763 @@
+"""Contract-gate tests for the current PASS baseline and full declaration closure."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from bithumb_bot.decision_context import (
+    normalize_strategy_decision_context,
+    resolve_canonical_position_exposure_snapshot,
+)
+from bithumb_bot.broker.order_rules import DerivedOrderConstraints, normalize_limit_price_for_side
+from bithumb_bot.dust import (
+    DUST_TRACKING_LOT_STATE,
+    OPEN_EXPOSURE_LOT_STATE,
+    build_position_state_model,
+    classify_dust_residual,
+    dust_qty_gap_tolerance,
+    lot_native_position_contract,
+    lot_state_quantity_contract,
+)
+from bithumb_bot.lifecycle import summarize_position_lots
+from bithumb_bot.order_sizing import SellExecutionAuthority, build_sell_execution_sizing
+
+
+pytestmark = pytest.mark.fast_regression
+
+
+# Authority boundary regression suite.
+
+
+# Canonical SELL authority and submit sizing.
+
+def test_authority_boundary_sell_execution_sizing_derives_final_qty_from_canonical_sellable_lot_count() -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=2,
+            exit_allowed=True,
+            exit_block_reason="none",
+        ),
+    )
+
+    expected_qty = pytest.approx(plan.internal_lot_size * 2)
+
+    assert plan.side == "SELL"
+    assert plan.allowed is True
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert plan.requested_qty == expected_qty
+    assert plan.executable_qty == expected_qty
+    assert plan.intended_lot_count == 2
+    assert plan.executable_lot_count == 2
+    assert plan.block_reason == "none"
+    assert plan.decision_reason_code == "none"
+
+
+@pytest.mark.parametrize(
+    "exit_block_reason",
+    [
+        "dust_only_remainder",
+        "boundary_below_min",
+        "no_executable_exit_lot",
+    ],
+)
+def test_sell_suppression_categories_remain_normal_suppression_outcomes(
+    exit_block_reason: str,
+) -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=False,
+            exit_block_reason=exit_block_reason,
+        ),
+    )
+
+    assert plan.side == "SELL"
+    assert plan.allowed is False
+    assert plan.requested_qty == pytest.approx(0.0)
+    assert plan.executable_qty == pytest.approx(0.0)
+    assert plan.intended_lot_count == 0
+    assert plan.executable_lot_count == 0
+    assert plan.block_reason == exit_block_reason
+    assert plan.non_executable_reason == exit_block_reason
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
+def test_tick_normalization_does_not_override_dust_only_sell_suppression() -> None:
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=20_000_003.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=0,
+            exit_allowed=False,
+            exit_block_reason="dust_only_remainder",
+        ),
+    )
+    normalized_price = normalize_limit_price_for_side(
+        price=20_000_003.0,
+        side="SELL",
+        rules=DerivedOrderConstraints(
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=10.0,
+            min_notional_krw=5000.0,
+        ),
+    )
+
+    assert normalized_price == pytest.approx(20_000_010.0)
+    assert plan.allowed is False
+    assert plan.executable_lot_count == 0
+    assert plan.executable_qty == pytest.approx(0.0)
+    assert plan.block_reason == "dust_only_remainder"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+
+
+# Lot-native state and authority contract declarations.
+
+def test_authority_boundary_lot_state_quantity_contract_keeps_open_exposure_and_dust_tracking_separate() -> None:
+    contract = lot_state_quantity_contract()
+
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_qty_source"] == "open_exposure_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["strategy_lot_source"] == "open_lot_count"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_qty_source"] == "position_state.normalized_exposure.sellable_executable_qty"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_lot_source"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
+    assert contract[OPEN_EXPOSURE_LOT_STATE]["operator_tracking_only"] is False
+    assert contract[DUST_TRACKING_LOT_STATE]["strategy_qty_source"] == "dust_tracking_qty"
+    assert contract[DUST_TRACKING_LOT_STATE]["strategy_lot_source"] == "dust_tracking_lot_count"
+    assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_qty_source"] == "excluded_from_sell_qty"
+    assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_lot_source"] == "excluded_from_sell_lot_count"
+    assert contract[DUST_TRACKING_LOT_STATE]["sell_submit_includes_dust_tracking"] is False
+    assert contract[DUST_TRACKING_LOT_STATE]["operator_tracking_only"] is True
+
+
+def test_authority_boundary_lot_native_position_contract_declares_singular_authority_surface() -> None:
+    contract = lot_native_position_contract()
+
+    assert contract["semantic_basis"] == "lot-native"
+    assert contract["executable_authority"] == "position_state.normalized_exposure.open_lot_count"
+    assert contract["sell_authority"] == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert contract["buy_authority"] == "position_state.normalized_exposure.entry_allowed"
+    assert contract["flatness_authority"] == "position_state.normalized_exposure.terminal_state"
+    assert contract["dust_authority"] == "position_state.normalized_exposure.dust_tracking_lot_count"
+    assert contract["reserved_exit_authority"] == "position_state.normalized_exposure.reserved_exit_lot_count"
+    assert contract["executable_qty_derivation"] == "open_lot_count -> open_exposure_qty"
+    assert contract["sell_qty_derivation"] == "sellable_executable_lot_count -> sellable_executable_qty"
+    assert contract["buy_qty_derivation"] == "feasible_entry_lot_count -> requested_qty"
+    assert contract["qty_semantic_authority"] == "derived_only"
+    assert contract["legacy_qty_only_recovery"] == "fail_closed"
+    assert contract["dust_tracking_sellable"] is False
+
+
+@pytest.mark.lot_native_regression_gate
+def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qty_aggregation() -> None:
+    dust = classify_dust_residual(
+        broker_qty=0.00049193,
+        local_qty=0.00049193,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+
+    model = build_position_state_model(
+        raw_qty_open=0.00049193,
+        metadata_raw=dust,
+        raw_total_asset_qty=0.00049193,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00049193,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        market_price=40_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        max_qty_decimals=8,
+    )
+
+    assert model.normalized_exposure.open_exposure_qty == pytest.approx(0.0)
+    assert model.normalized_exposure.dust_tracking_qty == pytest.approx(0.00049193)
+    assert model.normalized_exposure.sellable_executable_qty == pytest.approx(0.0)
+    assert model.normalized_exposure.open_lot_count == 0
+    assert model.normalized_exposure.dust_tracking_lot_count == 1
+    assert model.normalized_exposure.sellable_executable_lot_count == 0
+    assert model.normalized_exposure.has_executable_exposure is False
+    assert model.normalized_exposure.has_any_position_residue is True
+    assert model.normalized_exposure.has_non_executable_residue is True
+    assert model.normalized_exposure.has_dust_only_remainder is True
+    assert model.normalized_exposure.exit_allowed is False
+    assert model.normalized_exposure.exit_block_reason == "dust_only_remainder"
+    assert model.normalized_exposure.terminal_state == "dust_only"
+    assert model.state_interpretation.operator_outcome == "tracked_unsellable_residual"
+    assert model.state_interpretation.exit_submit_expected is False
+
+
+# Reserved-exit SELL authority boundary behavior.
+
+@pytest.mark.lot_native_regression_gate
+def test_authority_boundary_reserved_exit_contract_floors_clamped_qty_to_lots_but_sell_authority_stays_lot_native() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0012,
+        metadata_raw={},
+        raw_total_asset_qty=0.0012,
+        open_exposure_qty=0.0012,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.00105,
+        open_lot_count=3,
+        dust_tracking_lot_count=0,
+        market_price=100_000_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        max_qty_decimals=8,
+    )
+
+    plan = build_sell_execution_sizing(
+        pair="BTC_KRW",
+        market_price=100_000_000.0,
+        authority=SellExecutionAuthority(
+            sellable_executable_lot_count=model.normalized_exposure.sellable_executable_lot_count,
+            exit_allowed=model.normalized_exposure.exit_allowed,
+            exit_block_reason=model.normalized_exposure.exit_block_reason,
+        ),
+    )
+
+    assert model.normalized_exposure.open_lot_count == 3
+    assert model.normalized_exposure.reserved_exit_qty == pytest.approx(0.00105)
+    assert model.normalized_exposure.reserved_exit_lot_count == 2
+    assert model.normalized_exposure.sellable_executable_lot_count == 1
+    assert model.normalized_exposure.sellable_executable_qty == pytest.approx(0.00015)
+    assert model.normalized_exposure.terminal_state == "open_exposure"
+    assert plan.qty_source == "position_state.normalized_exposure.sellable_executable_lot_count"
+    assert plan.intended_lot_count == 1
+    assert plan.requested_qty == pytest.approx(plan.internal_lot_size)
+    assert plan.requested_qty > model.normalized_exposure.sellable_executable_qty
+
+
+@pytest.mark.lot_native_regression_gate
+def test_authority_boundary_reserved_exit_equal_to_open_exposure_still_materializes_reserved_exit_lots() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0002,
+        metadata_raw={},
+        raw_total_asset_qty=0.0002,
+        open_exposure_qty=0.0002,
+        dust_tracking_qty=0.0,
+        reserved_exit_qty=0.0002,
+        open_lot_count=2,
+        dust_tracking_lot_count=0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    assert model.normalized_exposure.open_lot_count == 2
+    assert model.normalized_exposure.reserved_exit_qty == pytest.approx(0.0002)
+    assert model.normalized_exposure.reserved_exit_lot_count == 2
+    assert model.normalized_exposure.sellable_executable_lot_count == 0
+    assert model.normalized_exposure.exit_allowed is False
+    assert model.normalized_exposure.exit_block_reason == "reserved_for_open_sell_orders"
+
+
+def test_authority_boundary_recovery_lifecycle_keeps_qty_only_legacy_rows_non_authoritative_without_legacy_semantic_marker() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY,
+            pair TEXT NOT NULL,
+            qty_open REAL NOT NULL,
+            position_state TEXT NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots (pair, qty_open, position_state, executable_lot_count, dust_tracking_lot_count)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 0.0004, OPEN_EXPOSURE_LOT_STATE, 0, 0),
+    )
+
+    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
+
+    assert snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.executable_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.open_lot_count == 0
+    assert snapshot.dust_tracking_lot_count == 0
+    assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
+    assert snapshot.position_semantic_basis == "lot-native"
+    assert "legacy_lot_metadata_missing" not in snapshot.as_dict().values()
+
+
+def test_authority_boundary_canonical_lot_summary_fails_closed_for_lot_native_rows_missing_explicit_counts() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY,
+            pair TEXT NOT NULL,
+            qty_open REAL NOT NULL,
+            position_state TEXT NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots (
+            pair,
+            qty_open,
+            position_state,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 0.0004, OPEN_EXPOSURE_LOT_STATE, 0, 0, "lot-native"),
+    )
+
+    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
+
+    assert snapshot.raw_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.open_lot_count == 0
+    assert snapshot.executable_open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
+
+
+# Full lot-native declaration closure.
+
+
+def test_authority_boundary_decision_context_ignores_fallback_only_qty_fields_without_canonical_lot_authority() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0004,
+            "sellable_executable_qty": 0.0004,
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        }
+    )
+
+    assert snapshot.open_lot_count == 0
+    assert snapshot.open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.sellable_executable_lot_count == 0
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0)
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0)
+    assert snapshot.sell_submit_lot_count == 0
+
+
+def test_authority_boundary_decision_context_prefers_canonical_normalized_sell_state_over_stale_qty_candidates() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0004,
+            "reserved_exit_qty": 0.0,
+            "sellable_executable_qty": 0.0004,
+            "sellable_executable_lot_count": 4,
+            "position_state": {
+                "open_exposure_qty": 0.0003,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0003,
+                "sellable_executable_lot_count": 3,
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0002,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 2,
+                    "reserved_exit_qty": 0.0001,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0001,
+                    "sellable_executable_lot_count": 1,
+                },
+            },
+        }
+    )
+
+    assert snapshot.open_exposure_qty == pytest.approx(0.0002)
+    assert snapshot.open_lot_count == 2
+    assert snapshot.reserved_exit_qty == pytest.approx(0.0001)
+    assert snapshot.reserved_exit_lot_count == 1
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0001)
+    assert snapshot.sellable_executable_lot_count == 1
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0001)
+    assert snapshot.sell_submit_lot_count == 1
+
+
+def test_authority_boundary_decision_context_prefers_normalized_sell_authority_over_position_state_compatibility_fields() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "position_state": {
+                "open_exposure_qty": 0.0009,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0009,
+                "sellable_executable_lot_count": 9,
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0002,
+                    "raw_total_asset_qty": 0.0002,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": 0.0001,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0001,
+                    "sellable_executable_lot_count": 1,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                },
+            }
+        }
+    )
+
+    assert snapshot.open_exposure_qty == pytest.approx(0.0002)
+    assert snapshot.open_lot_count == 2
+    assert snapshot.reserved_exit_qty == pytest.approx(0.0001)
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0001)
+    assert snapshot.sellable_executable_lot_count == 1
+    assert snapshot.sell_qty_basis_qty == pytest.approx(0.0001)
+
+
+def test_normalize_strategy_decision_context_keeps_position_state_compatibility_fields_non_authoritative() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "final_signal": "SELL",
+            "open_exposure_qty": 0.0009,
+            "sellable_executable_qty": 0.0009,
+            "sellable_executable_lot_count": 9,
+            "position_state": {
+                "open_exposure_qty": 0.0009,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0009,
+                "sellable_executable_lot_count": 9,
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0002,
+                    "raw_total_asset_qty": 0.0002,
+                    "open_exposure_qty": 0.0002,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 2,
+                    "dust_tracking_lot_count": 0,
+                    "reserved_exit_qty": 0.0001,
+                    "reserved_exit_lot_count": 1,
+                    "sellable_executable_qty": 0.0001,
+                    "sellable_executable_lot_count": 1,
+                    "has_executable_exposure": True,
+                    "exit_allowed": True,
+                    "exit_block_reason": "none",
+                    "terminal_state": "open_exposure",
+                },
+            },
+        },
+        signal="SELL",
+        reason="compatibility boundary",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=10,
+        candle_ts=10,
+        market_price=100_000_000.0,
+    )
+
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0002)
+    assert ctx["sellable_executable_qty"] == pytest.approx(0.0001)
+    assert ctx["sellable_executable_lot_count"] == 1
+    assert ctx["submit_lot_count"] == 1
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0001)
+    assert ctx["position_state"]["normalized_exposure"]["sellable_executable_lot_count"] == 1
+
+
+def test_authority_boundary_decision_context_fail_closes_position_state_exit_flags_without_normalized_lot_authority() -> None:
+    snapshot = resolve_canonical_position_exposure_snapshot(
+        {
+            "raw_total_asset_qty": 0.0002,
+            "open_exposure_qty": 0.0002,
+            "sellable_executable_qty": 0.0002,
+            "sellable_executable_lot_count": 2,
+            "exit_allowed": True,
+            "exit_block_reason": "none",
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "open_exposure_qty": 0.0002,
+                "reserved_exit_qty": 0.0,
+                "sellable_executable_qty": 0.0002,
+                "sellable_executable_lot_count": 2,
+                "exit_allowed": True,
+                "exit_block_reason": "none",
+            },
+        }
+    )
+
+    assert snapshot.open_exposure_qty == pytest.approx(0.0)
+    assert snapshot.sellable_executable_lot_count == 0
+    assert snapshot.sellable_executable_qty == pytest.approx(0.0)
+    assert snapshot.sell_submit_lot_count == 0
+    assert snapshot.exit_allowed is False
+    assert snapshot.exit_block_reason == "no_executable_exit_lot"
+
+
+def test_decision_context_no_longer_emits_compatibility_fallback_or_provenance_layer() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "base_reason": "legacy residue",
+            "entry_reason": "legacy residue",
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0004,
+            "dust_tracking_qty": 0.0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_lot_count": 0,
+            "position_state": {
+                "semantic_basis": "legacy",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        },
+        signal="SELL",
+        reason="legacy residue",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=1,
+        candle_ts=1,
+        market_price=100_000_000.0,
+    )
+
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["sellable_executable_lot_count"] == 0
+    assert ctx["submit_lot_count"] == 0
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
+    residue_keys = sorted(
+        key
+        for key in ctx
+        if key == "decision_compatibility_residue"
+        or key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
+    )
+
+    assert residue_keys == []
+
+
+def test_reporting_no_longer_preserves_truth_source_or_provenance_primary_fields() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "base_reason": "legacy residue",
+            "entry_reason": "legacy residue",
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0004,
+            "dust_tracking_qty": 0.0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_lot_count": 0,
+            "position_state_source": "context.raw_qty_open",
+            "position_state": {
+                "semantic_basis": "legacy",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0004,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        },
+        signal="SELL",
+        reason="legacy residue",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=2,
+        candle_ts=2,
+        market_price=100_000_000.0,
+    )
+
+    assert ctx["submit_lot_count"] == 0
+    assert ctx["sell_submit_lot_count"] == 0
+    primary_provenance_keys = sorted(
+        key
+        for key in ctx
+        if key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
+    )
+
+    assert primary_provenance_keys == []
+
+
+def test_full_declaration_closure_keeps_current_pass_baseline_and_removes_residue_layers() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY,
+            pair TEXT NOT NULL,
+            qty_open REAL NOT NULL,
+            position_state TEXT NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots (pair, qty_open, position_state, executable_lot_count, dust_tracking_lot_count)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("BTC_KRW", 0.0004, OPEN_EXPOSURE_LOT_STATE, 0, 0),
+    )
+    snapshot = summarize_position_lots(conn, pair="BTC_KRW")
+    conn.close()
+
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "base_reason": "lot-native closed",
+            "entry_reason": "lot-native closed",
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0,
+            "dust_tracking_qty": 0.0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_lot_count": 0,
+            "position_state_source": "context.raw_qty_open",
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        },
+        signal="SELL",
+        reason="lot-native closed",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=3,
+        candle_ts=3,
+        market_price=100_000_000.0,
+    )
+
+    residue_keys = sorted(
+        key
+        for key in ctx
+        if key.endswith("_source")
+        or key.endswith("_truth_source")
+        or key.endswith("_compatibility_residue")
+    )
+
+    assert snapshot.exit_non_executable_reason == "no_executable_open_lots"
+    assert snapshot.position_semantic_basis == "lot-native"
+    assert ctx["open_exposure_qty"] == pytest.approx(0.0)
+    assert ctx["sellable_executable_lot_count"] == 0
+    assert ctx["submit_lot_count"] == 0
+    assert ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
+    assert residue_keys == []
+
+
+def test_current_contract_pass_still_holds_once_the_declaration_residue_is_gone() -> None:
+    ctx = normalize_strategy_decision_context(
+        context={
+            "base_signal": "SELL",
+            "base_reason": "explicit residue bucket closed",
+            "entry_reason": "explicit residue bucket closed",
+            "raw_qty_open": 0.0004,
+            "raw_total_asset_qty": 0.0004,
+            "open_exposure_qty": 0.0,
+            "dust_tracking_qty": 0.0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+            "reserved_exit_lot_count": 0,
+            "sellable_executable_lot_count": 0,
+            "position_state_source": "context.raw_qty_open",
+            "position_state": {
+                "semantic_basis": "lot-native",
+                "normalized_exposure": {
+                    "raw_qty_open": 0.0004,
+                    "raw_total_asset_qty": 0.0004,
+                    "open_exposure_qty": 0.0,
+                    "dust_tracking_qty": 0.0,
+                    "open_lot_count": 0,
+                    "dust_tracking_lot_count": 0,
+                    "sellable_executable_lot_count": 0,
+                },
+            },
+        },
+        signal="SELL",
+        reason="explicit residue bucket closed",
+        strategy_name="contract_gate",
+        pair="BTC_KRW",
+        interval="1m",
+        decision_ts=4,
+        candle_ts=4,
+        market_price=100_000_000.0,
+    )
+
+    current_contract_pass = (
+        ctx["open_exposure_qty"] == pytest.approx(0.0)
+        and ctx["sellable_executable_lot_count"] == 0
+        and ctx["submit_lot_count"] == 0
+        and ctx["sell_qty_basis_qty"] == pytest.approx(0.0)
+    )
+    strict_final_closure_complete = bool(
+        not any(
+            key.endswith("_source")
+            or key.endswith("_truth_source")
+            or key.endswith("_compatibility_residue")
+            for key in ctx
+        )
+    )
+
+    assert current_contract_pass is True
+    assert strict_final_closure_complete is True

@@ -1,15 +1,224 @@
 from __future__ import annotations
 
+import hashlib
+import math
 import json
 import sqlite3
-from typing import Any
+from decimal import Decimal, ROUND_HALF_EVEN
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from .config import prepare_db_path_for_connection, settings
+from .dust import OPEN_EXPOSURE_LOT_STATE, lot_state_quantity_contract
 from .sqlite_resilience import configure_connection
-from .decision_context import normalize_strategy_decision_context
+from .decision_context import (
+    materialize_strategy_decision_context,
+    normalize_strategy_decision_context,
+)
 
 
-def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
+# The lot-state contract is intentionally tiny and safety-critical:
+# open_exposure is the sellable inventory base, while dust_tracking is
+# operator evidence only. Keep the schema aligned with that routing contract.
+_OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
+EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
+MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE = "manual_flat_accounting_repair"
+FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_gap_accounting_repair"
+_CASH_QUANTUM = Decimal("0.00000001")
+_ASSET_QUANTUM = Decimal("0.000000000001")
+
+
+def _as_finite_decimal(value: float | int | str, *, field: str) -> Decimal:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid accounting value for {field}: {value}") from exc
+    if not math.isfinite(numeric):
+        raise RuntimeError(f"invalid non-finite accounting value for {field}: {value}")
+    return Decimal(str(numeric))
+
+
+def normalize_cash_amount(value: float | int | str) -> float:
+    return float(_as_finite_decimal(value, field="cash").quantize(_CASH_QUANTUM, rounding=ROUND_HALF_EVEN))
+
+
+def normalize_asset_qty(value: float | int | str) -> float:
+    return float(_as_finite_decimal(value, field="asset").quantize(_ASSET_QUANTUM, rounding=ROUND_HALF_EVEN))
+
+
+def normalize_portfolio_breakdown(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+) -> tuple[float, float, float, float]:
+    return (
+        normalize_cash_amount(cash_available),
+        normalize_cash_amount(cash_locked),
+        normalize_asset_qty(asset_available),
+        normalize_asset_qty(asset_locked),
+    )
+
+
+def portfolio_cash_total(*, cash_available: float, cash_locked: float) -> float:
+    return normalize_cash_amount(normalize_cash_amount(cash_available) + normalize_cash_amount(cash_locked))
+
+
+def portfolio_asset_total(*, asset_available: float, asset_locked: float) -> float:
+    return normalize_asset_qty(normalize_asset_qty(asset_available) + normalize_asset_qty(asset_locked))
+
+
+def _consume_locked_then_available(
+    locked: float,
+    available: float,
+    amount: float,
+    *,
+    field: str,
+    normalize_amount: Callable[[float | int | str], float],
+) -> tuple[float, float]:
+    eps = 1e-12
+
+    def _normalize_tiny_negative(value: float, *, tolerance: float) -> float:
+        if -tolerance < value < 0.0:
+            return 0.0
+        return value
+
+    def _float_tolerance(*values: float) -> float:
+        finite_values = [abs(float(v)) for v in values if math.isfinite(float(v))]
+        scale = max(finite_values) if finite_values else 0.0
+        scale = max(scale, 1.0)
+        return max(eps, math.ulp(scale) * 4)
+
+    remaining = normalize_amount(amount)
+    locked_after = normalize_amount(locked)
+    available_after = normalize_amount(available)
+    tolerance = _float_tolerance(locked_after, available_after, remaining, locked, available)
+
+    locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+    available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
+
+    from_locked = min(locked_after, remaining)
+    locked_after = normalize_amount(locked_after - from_locked)
+    remaining = normalize_amount(remaining - from_locked)
+
+    if remaining > eps:
+        available_after = normalize_amount(available_after - remaining)
+
+    locked_after = _normalize_tiny_negative(locked_after, tolerance=tolerance)
+    available_after = _normalize_tiny_negative(available_after, tolerance=tolerance)
+    if locked_after < -tolerance or available_after < -tolerance:
+        raise RuntimeError(
+            f"negative {field} after fill: available={available_after}, locked={locked_after}, needed={amount}, tolerance={tolerance}"
+        )
+    return max(locked_after, 0.0), max(available_after, 0.0)
+
+
+def calculate_fill_portfolio_snapshot(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+    side: str,
+    price: float,
+    qty: float,
+    fee: float | None,
+) -> tuple[float, float, float, float, float, float]:
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    price_n = normalize_cash_amount(price)
+    qty_n = normalize_asset_qty(qty)
+    fee_n = normalize_cash_amount(0.0 if fee is None else fee)
+
+    if side == "BUY":
+        spend = normalize_cash_amount(price_n * qty_n + fee_n)
+        cash_locked_after, cash_available_after = _consume_locked_then_available(
+            cash_locked_n,
+            cash_available_n,
+            spend,
+            field="cash",
+            normalize_amount=normalize_cash_amount,
+        )
+        asset_available_after = normalize_asset_qty(asset_available_n + qty_n)
+        asset_locked_after = asset_locked_n
+    elif side == "SELL":
+        cash_available_after = normalize_cash_amount(cash_available_n + (price_n * qty_n) - fee_n)
+        cash_locked_after = cash_locked_n
+        asset_locked_after, asset_available_after = _consume_locked_then_available(
+            asset_locked_n,
+            asset_available_n,
+            qty_n,
+            field="asset",
+            normalize_amount=normalize_asset_qty,
+        )
+    else:
+        raise RuntimeError(f"invalid fill side: {side}")
+
+    cash_after = normalize_cash_amount(cash_available_after + cash_locked_after)
+    asset_after = normalize_asset_qty(asset_available_after + asset_locked_after)
+    return (
+        cash_available_after,
+        cash_locked_after,
+        asset_available_after,
+        asset_locked_after,
+        cash_after,
+        asset_after,
+    )
+
+
+def replay_fill_portfolio_snapshot(
+    *,
+    cash_available: float,
+    cash_locked: float,
+    asset_available: float,
+    asset_locked: float,
+    rows: Iterable[tuple[str, float, float, float | None]],
+) -> tuple[float, float, float, float, float, float]:
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    cash_after = portfolio_cash_total(cash_available=cash_available_n, cash_locked=cash_locked_n)
+    asset_after = portfolio_asset_total(asset_available=asset_available_n, asset_locked=asset_locked_n)
+
+    for side, price, qty, fee in rows:
+        (
+            cash_available_n,
+            cash_locked_n,
+            asset_available_n,
+            asset_locked_n,
+            cash_after,
+            asset_after,
+        ) = calculate_fill_portfolio_snapshot(
+            cash_available=cash_available_n,
+            cash_locked=cash_locked_n,
+            asset_available=asset_available_n,
+            asset_locked=asset_locked_n,
+            side=side,
+            price=price,
+            qty=qty,
+            fee=fee,
+        )
+
+    return (
+        cash_available_n,
+        cash_locked_n,
+        asset_available_n,
+        asset_locked_n,
+        cash_after,
+        asset_after,
+    )
+
+
+def ensure_db(db_path: str | None = None, *, ensure_schema_ready: bool = True) -> sqlite3.Connection:
     path = prepare_db_path_for_connection(db_path or settings.DB_PATH, mode=settings.MODE)
 
     conn = sqlite3.connect(path)
@@ -20,7 +229,8 @@ def ensure_db(db_path: str | None = None) -> sqlite3.Connection:
     except Exception:
         pass
 
-    ensure_schema(conn)
+    if ensure_schema_ready:
+        ensure_schema(conn)
     return conn
 
 
@@ -29,6 +239,78 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) 
     names = {str(row[1]) for row in cols}
     if column not in names:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _ensure_open_position_lot_invariant_triggers(conn: sqlite3.Connection) -> None:
+    invariant_check = """
+        SELECT CASE
+            WHEN COALESCE(NEW.executable_lot_count, 0) < 0
+                OR COALESCE(NEW.dust_tracking_lot_count, 0) < 0
+                THEN RAISE(ABORT, 'open_position_lots negative lot counts are not allowed')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND (
+                    (NEW.position_state = 'open_exposure'
+                        AND (
+                            COALESCE(NEW.executable_lot_count, 0) <= 0
+                            OR COALESCE(NEW.dust_tracking_lot_count, 0) != 0
+                        ))
+                    OR
+                    (NEW.position_state = 'dust_tracking'
+                        AND (
+                            COALESCE(NEW.executable_lot_count, 0) != 0
+                            OR COALESCE(NEW.dust_tracking_lot_count, 0) <= 0
+                        ))
+                 )
+                THEN RAISE(ABORT, 'open_position_lots lot-native state/count mismatch')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND COALESCE(NEW.internal_lot_size, 0.0) > 1e-12
+                 AND NEW.position_state = 'open_exposure'
+                 AND ABS(
+                    COALESCE(NEW.qty_open, 0.0)
+                    - (COALESCE(NEW.executable_lot_count, 0) * COALESCE(NEW.internal_lot_size, 0.0))
+                 ) > 1e-12
+                THEN RAISE(ABORT, 'open_position_lots executable qty must match lot authority')
+            WHEN COALESCE(NEW.position_semantic_basis, '') = 'lot-native'
+                 AND COALESCE(NEW.qty_open, 0.0) > 1e-12
+                 AND COALESCE(NEW.internal_lot_size, 0.0) > 1e-12
+                 AND NEW.position_state = 'dust_tracking'
+                 AND ABS(
+                    COALESCE(NEW.qty_open, 0.0)
+                    - (COALESCE(NEW.dust_tracking_lot_count, 0) * COALESCE(NEW.internal_lot_size, 0.0))
+                 ) > 1e-12
+                THEN RAISE(ABORT, 'open_position_lots dust qty must match lot authority')
+            WHEN COALESCE(NEW.qty_open, 0.0) <= 1e-12
+                 AND (
+                    COALESCE(NEW.executable_lot_count, 0) != 0
+                    OR COALESCE(NEW.dust_tracking_lot_count, 0) != 0
+                 )
+                THEN RAISE(ABORT, 'open_position_lots zero qty rows must not keep lot authority')
+        END
+    """
+    conn.execute("DROP TRIGGER IF EXISTS trg_open_position_lots_validate_insert")
+    conn.execute("DROP TRIGGER IF EXISTS trg_open_position_lots_validate_update")
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_open_position_lots_validate_insert
+        BEFORE INSERT ON open_position_lots
+        FOR EACH ROW
+        BEGIN
+            {invariant_check};
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER trg_open_position_lots_validate_update
+        BEFORE UPDATE ON open_position_lots
+        FOR EACH ROW
+        BEGIN
+            {invariant_check};
+        END
+        """
+    )
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -108,12 +390,175 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS external_cash_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'external_cash_adjustment'
+                CHECK (event_type = 'external_cash_adjustment'),
+            event_ts INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            delta_amount REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            broker_snapshot_basis TEXT NOT NULL,
+            correlation_metadata TEXT,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manual_flat_accounting_repairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'manual_flat_accounting_repair'
+                CHECK (event_type = 'manual_flat_accounting_repair'),
+            event_ts INTEGER NOT NULL,
+            asset_qty_delta REAL NOT NULL,
+            cash_delta REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            repair_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fee_gap_accounting_repairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'fee_gap_accounting_repair'
+                CHECK (event_type = 'fee_gap_accounting_repair'),
+            event_ts INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            repair_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
     _ensure_column(conn, "trades", "client_order_id", "client_order_id TEXT")
     _ensure_column(conn, "trades", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trades", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "trades", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "trades", "exit_reason", "exit_reason TEXT")
     _ensure_column(conn, "trades", "exit_rule_name", "exit_rule_name TEXT")
+
+    _ensure_column(conn, "external_cash_adjustments", "adjustment_key", "adjustment_key TEXT")
+    _ensure_column(
+        conn,
+        "external_cash_adjustments",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'external_cash_adjustment'",
+    )
+    _ensure_column(conn, "external_cash_adjustments", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "external_cash_adjustments", "currency", "currency TEXT NOT NULL DEFAULT 'KRW'")
+    _ensure_column(conn, "external_cash_adjustments", "delta_amount", "delta_amount REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "external_cash_adjustments", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "external_cash_adjustments", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "external_cash_adjustments",
+        "broker_snapshot_basis",
+        "broker_snapshot_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "external_cash_adjustments", "correlation_metadata", "correlation_metadata TEXT")
+    _ensure_column(conn, "external_cash_adjustments", "note", "note TEXT")
+    _ensure_column(conn, "manual_flat_accounting_repairs", "repair_key", "repair_key TEXT")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'manual_flat_accounting_repair'",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "asset_qty_delta",
+        "asset_qty_delta REAL NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "cash_delta",
+        "cash_delta REAL NOT NULL DEFAULT 0",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "manual_flat_accounting_repairs", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "manual_flat_accounting_repairs",
+        "repair_basis",
+        "repair_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "manual_flat_accounting_repairs", "note", "note TEXT")
+    _ensure_column(conn, "fee_gap_accounting_repairs", "repair_key", "repair_key TEXT")
+    _ensure_column(
+        conn,
+        "fee_gap_accounting_repairs",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'fee_gap_accounting_repair'",
+    )
+    _ensure_column(conn, "fee_gap_accounting_repairs", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_gap_accounting_repairs", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "fee_gap_accounting_repairs", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "fee_gap_accounting_repairs",
+        "repair_basis",
+        "repair_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "fee_gap_accounting_repairs", "note", "note TEXT")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_cash_adjustments_event_ts
+        ON external_cash_adjustments(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_external_cash_adjustments_key
+        ON external_cash_adjustments(adjustment_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_cash_adjustments_currency_ts
+        ON external_cash_adjustments(currency, event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_manual_flat_accounting_repairs_event_ts
+        ON manual_flat_accounting_repairs(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_manual_flat_accounting_repairs_key
+        ON manual_flat_accounting_repairs(repair_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fee_gap_accounting_repairs_event_ts
+        ON fee_gap_accounting_repairs(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_gap_accounting_repairs_key
+        ON fee_gap_accounting_repairs(repair_key)
+        """
+    )
 
     conn.execute(
         """
@@ -170,6 +615,90 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             resume_gate_reason TEXT,
             updated_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_rule_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market TEXT NOT NULL,
+            fetched_ts INTEGER NOT NULL,
+            source_mode TEXT NOT NULL,
+            fallback_used INTEGER NOT NULL DEFAULT 0,
+            fallback_reason_code TEXT,
+            fallback_reason_summary TEXT,
+            rule_signature TEXT NOT NULL,
+            rules_json TEXT NOT NULL,
+            source_json TEXT NOT NULL,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    _ensure_column(conn, "order_rule_snapshots", "market", "market TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "order_rule_snapshots", "fetched_ts", "fetched_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_rule_snapshots", "source_mode", "source_mode TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_used", "fallback_used INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_reason_code", "fallback_reason_code TEXT")
+    _ensure_column(conn, "order_rule_snapshots", "fallback_reason_summary", "fallback_reason_summary TEXT")
+    _ensure_column(conn, "order_rule_snapshots", "rule_signature", "rule_signature TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "order_rule_snapshots", "rules_json", "rules_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "order_rule_snapshots", "source_json", "source_json TEXT NOT NULL DEFAULT '{}'")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_order_rule_snapshots_market_signature
+        ON order_rule_snapshots(market, rule_signature)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_rule_snapshots_market_fetched
+        ON order_rule_snapshots(market, fetched_ts DESC, id DESC)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS private_stream_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stream_name TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            event_ts INTEGER NOT NULL,
+            client_order_id TEXT,
+            exchange_order_id TEXT,
+            order_status TEXT,
+            fill_id TEXT,
+            qty REAL,
+            price REAL,
+            payload_json TEXT NOT NULL,
+            applied INTEGER NOT NULL DEFAULT 0,
+            applied_status TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    _ensure_column(conn, "private_stream_events", "stream_name", "stream_name TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "private_stream_events", "dedupe_key", "dedupe_key TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "private_stream_events", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "private_stream_events", "client_order_id", "client_order_id TEXT")
+    _ensure_column(conn, "private_stream_events", "exchange_order_id", "exchange_order_id TEXT")
+    _ensure_column(conn, "private_stream_events", "order_status", "order_status TEXT")
+    _ensure_column(conn, "private_stream_events", "fill_id", "fill_id TEXT")
+    _ensure_column(conn, "private_stream_events", "qty", "qty REAL")
+    _ensure_column(conn, "private_stream_events", "price", "price REAL")
+    _ensure_column(conn, "private_stream_events", "payload_json", "payload_json TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(conn, "private_stream_events", "applied", "applied INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "private_stream_events", "applied_status", "applied_status TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_private_stream_events_dedupe
+        ON private_stream_events(dedupe_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_private_stream_events_lookup
+        ON private_stream_events(stream_name, event_ts DESC, id DESC)
         """
     )
 
@@ -398,6 +927,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             exchange_order_id TEXT,
             status TEXT NOT NULL,
             side TEXT NOT NULL,
+            order_type TEXT,
             price REAL,
             qty_req REAL NOT NULL,
             qty_filled REAL NOT NULL DEFAULT 0,
@@ -406,6 +936,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             exit_decision_id INTEGER,
             decision_reason TEXT,
             exit_rule_name TEXT,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
+            local_intent_state TEXT,
             created_ts INTEGER NOT NULL,
             updated_ts INTEGER NOT NULL,
             last_error TEXT
@@ -414,11 +954,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "orders", "submit_attempt_id", "submit_attempt_id TEXT")
+    _ensure_column(conn, "orders", "order_type", "order_type TEXT")
     _ensure_column(conn, "orders", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "orders", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "orders", "exit_decision_id", "exit_decision_id INTEGER")
     _ensure_column(conn, "orders", "decision_reason", "decision_reason TEXT")
     _ensure_column(conn, "orders", "exit_rule_name", "exit_rule_name TEXT")
+    _ensure_column(conn, "orders", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "orders", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "orders", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "orders", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "orders", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "orders", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "orders", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "orders", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "orders", "decision_reason_code", "decision_reason_code TEXT")
+    _ensure_column(conn, "orders", "local_intent_state", "local_intent_state TEXT")
 
     conn.execute(
         """
@@ -432,6 +983,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             fee REAL NOT NULL DEFAULT 0,
             reference_price REAL,
             slippage_bps REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            internal_lot_size REAL,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
@@ -440,6 +994,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "fills", "fill_id", "fill_id TEXT")
     _ensure_column(conn, "fills", "reference_price", "reference_price REAL")
     _ensure_column(conn, "fills", "slippage_bps", "slippage_bps REAL")
+    _ensure_column(conn, "fills", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "fills", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "fills", "internal_lot_size", "internal_lot_size REAL")
 
     conn.execute(
         """
@@ -464,6 +1021,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             message TEXT,
             symbol TEXT,
             side TEXT,
+            order_type TEXT,
             submit_attempt_id TEXT,
             mode TEXT,
             intent_ts INTEGER,
@@ -475,6 +1033,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             timeout_flag INTEGER,
             submit_evidence TEXT,
             exchange_order_id_obtained INTEGER,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
             FOREIGN KEY (client_order_id) REFERENCES orders(client_order_id)
         )
         """
@@ -482,6 +1049,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
     _ensure_column(conn, "order_events", "symbol", "symbol TEXT")
     _ensure_column(conn, "order_events", "side", "side TEXT")
+    _ensure_column(conn, "order_events", "order_type", "order_type TEXT")
     _ensure_column(conn, "order_events", "submit_attempt_id", "submit_attempt_id TEXT")
     _ensure_column(conn, "order_events", "mode", "mode TEXT")
     _ensure_column(conn, "order_events", "intent_ts", "intent_ts INTEGER")
@@ -493,6 +1061,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "order_events", "timeout_flag", "timeout_flag INTEGER")
     _ensure_column(conn, "order_events", "submit_evidence", "submit_evidence TEXT")
     _ensure_column(conn, "order_events", "exchange_order_id_obtained", "exchange_order_id_obtained INTEGER")
+    _ensure_column(conn, "order_events", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "order_events", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "order_events", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "order_events", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "order_events", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_events", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "order_events", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "order_events", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "order_events", "decision_reason_code", "decision_reason_code TEXT")
 
     conn.execute(
         """
@@ -511,6 +1088,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             intent_type TEXT NOT NULL,
             intent_ts INTEGER NOT NULL,
             qty REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
             client_order_id TEXT NOT NULL,
             order_status TEXT NOT NULL,
             created_ts INTEGER NOT NULL,
@@ -521,12 +1100,96 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "order_intent_dedup", "qty", "qty REAL")
+    _ensure_column(conn, "order_intent_dedup", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_intent_dedup", "executable_lot_count", "executable_lot_count INTEGER")
     _ensure_column(conn, "order_intent_dedup", "last_error", "last_error TEXT")
 
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_order_intent_dedup_lookup
         ON order_intent_dedup(symbol, side, intent_ts, updated_ts)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_suppressions (
+            suppression_key TEXT PRIMARY KEY,
+            event_kind TEXT NOT NULL,
+            event_ts INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            strategy_context TEXT NOT NULL,
+            strategy_name TEXT NOT NULL,
+            signal TEXT NOT NULL,
+            side TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            requested_qty REAL,
+            normalized_qty REAL,
+            market_price REAL,
+            decision_id INTEGER,
+            decision_reason TEXT,
+            exit_rule_name TEXT,
+            dust_present INTEGER NOT NULL DEFAULT 0,
+            dust_allow_resume INTEGER NOT NULL DEFAULT 0,
+            dust_effective_flat INTEGER NOT NULL DEFAULT 0,
+            dust_state TEXT,
+            dust_action TEXT,
+            dust_signature TEXT,
+            qty_below_min INTEGER NOT NULL DEFAULT 0,
+            normalized_non_positive INTEGER NOT NULL DEFAULT 0,
+            normalized_below_min INTEGER NOT NULL DEFAULT 0,
+            notional_below_min INTEGER NOT NULL DEFAULT 0,
+            internal_lot_size REAL,
+            effective_min_trade_qty REAL,
+            qty_step REAL,
+            min_notional_krw REAL,
+            intended_lot_count INTEGER,
+            executable_lot_count INTEGER,
+            final_intended_qty REAL,
+            final_submitted_qty REAL,
+            decision_reason_code TEXT,
+            summary TEXT,
+            context_json TEXT,
+            created_ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL,
+            seen_count INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+
+    _ensure_column(conn, "order_suppressions", "requested_qty", "requested_qty REAL")
+    _ensure_column(conn, "order_suppressions", "normalized_qty", "normalized_qty REAL")
+    _ensure_column(conn, "order_suppressions", "market_price", "market_price REAL")
+    _ensure_column(conn, "order_suppressions", "decision_id", "decision_id INTEGER")
+    _ensure_column(conn, "order_suppressions", "decision_reason", "decision_reason TEXT")
+    _ensure_column(conn, "order_suppressions", "exit_rule_name", "exit_rule_name TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_present", "dust_present INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_allow_resume", "dust_allow_resume INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_effective_flat", "dust_effective_flat INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "dust_state", "dust_state TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_action", "dust_action TEXT")
+    _ensure_column(conn, "order_suppressions", "dust_signature", "dust_signature TEXT")
+    _ensure_column(conn, "order_suppressions", "qty_below_min", "qty_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "normalized_non_positive", "normalized_non_positive INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "normalized_below_min", "normalized_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "notional_below_min", "notional_below_min INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "order_suppressions", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "order_suppressions", "effective_min_trade_qty", "effective_min_trade_qty REAL")
+    _ensure_column(conn, "order_suppressions", "qty_step", "qty_step REAL")
+    _ensure_column(conn, "order_suppressions", "min_notional_krw", "min_notional_krw REAL")
+    _ensure_column(conn, "order_suppressions", "intended_lot_count", "intended_lot_count INTEGER")
+    _ensure_column(conn, "order_suppressions", "executable_lot_count", "executable_lot_count INTEGER")
+    _ensure_column(conn, "order_suppressions", "final_intended_qty", "final_intended_qty REAL")
+    _ensure_column(conn, "order_suppressions", "final_submitted_qty", "final_submitted_qty REAL")
+    _ensure_column(conn, "order_suppressions", "decision_reason_code", "decision_reason_code TEXT")
+    _ensure_column(conn, "order_suppressions", "summary", "summary TEXT")
+    _ensure_column(conn, "order_suppressions", "context_json", "context_json TEXT")
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_suppressions_lookup
+        ON order_suppressions(mode, strategy_name, signal, side, updated_ts)
         """
     )
 
@@ -569,20 +1232,101 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             entry_ts INTEGER NOT NULL,
             entry_price REAL NOT NULL,
             qty_open REAL NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            lot_semantic_version INTEGER,
+            internal_lot_size REAL,
+            lot_min_qty REAL,
+            lot_qty_step REAL,
+            lot_min_notional_krw REAL,
+            lot_max_qty_decimals INTEGER,
+            lot_rule_source_mode TEXT,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native',
+            position_state TEXT NOT NULL DEFAULT '{open_state}' CHECK (position_state IN ({allowed_states})),
             entry_fee_total REAL NOT NULL DEFAULT 0,
             strategy_name TEXT,
             entry_decision_id INTEGER,
             entry_decision_linkage TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         )
-        """
+        """.format(
+            open_state=OPEN_EXPOSURE_LOT_STATE,
+            allowed_states=', '.join(repr(state) for state in _OPEN_POSITION_LOT_STATES),
+        )
     )
 
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "position_state",
+        f"position_state TEXT NOT NULL DEFAULT '{OPEN_EXPOSURE_LOT_STATE}'",
+    )
     _ensure_column(conn, "open_position_lots", "entry_fill_id", "entry_fill_id TEXT")
     _ensure_column(conn, "open_position_lots", "entry_fee_total", "entry_fee_total REAL NOT NULL DEFAULT 0")
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "executable_lot_count",
+        "executable_lot_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "dust_tracking_lot_count",
+        "dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0",
+    )
+    _ensure_column(conn, "open_position_lots", "lot_semantic_version", "lot_semantic_version INTEGER")
+    _ensure_column(conn, "open_position_lots", "internal_lot_size", "internal_lot_size REAL")
+    _ensure_column(conn, "open_position_lots", "lot_min_qty", "lot_min_qty REAL")
+    _ensure_column(conn, "open_position_lots", "lot_qty_step", "lot_qty_step REAL")
+    _ensure_column(conn, "open_position_lots", "lot_min_notional_krw", "lot_min_notional_krw REAL")
+    _ensure_column(conn, "open_position_lots", "lot_max_qty_decimals", "lot_max_qty_decimals INTEGER")
+    _ensure_column(conn, "open_position_lots", "lot_rule_source_mode", "lot_rule_source_mode TEXT")
+    _ensure_column(
+        conn,
+        "open_position_lots",
+        "position_semantic_basis",
+        "position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native'",
+    )
     _ensure_column(conn, "open_position_lots", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "open_position_lots", "entry_decision_id", "entry_decision_id INTEGER")
     _ensure_column(conn, "open_position_lots", "entry_decision_linkage", "entry_decision_linkage TEXT")
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_semantic_basis='lot-native'
+        WHERE position_semantic_basis IS NULL OR TRIM(position_semantic_basis)=''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET position_state=?
+        WHERE position_state IS NULL OR TRIM(position_state)=''
+        """
+        ,
+        (OPEN_EXPOSURE_LOT_STATE,),
+    )
+    conn.execute(
+        """
+        UPDATE open_position_lots
+        SET
+            executable_lot_count = CASE
+                WHEN position_state = ? AND qty_open > 1e-12 AND COALESCE(executable_lot_count, 0) <= 0
+                    THEN 1
+                ELSE COALESCE(executable_lot_count, 0)
+            END,
+            dust_tracking_lot_count = CASE
+                WHEN position_state = ? AND qty_open > 1e-12 AND COALESCE(dust_tracking_lot_count, 0) <= 0
+                    THEN 1
+                ELSE COALESCE(dust_tracking_lot_count, 0)
+            END
+        """,
+        (
+            OPEN_EXPOSURE_LOT_STATE,
+            "dust_tracking",
+        ),
+    )
 
     conn.execute(
         """
@@ -590,6 +1334,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         ON open_position_lots(pair, entry_ts, id)
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_open_position_lots_pair_state_ts
+        ON open_position_lots(pair, position_state, entry_ts, id)
+        """
+    )
+    _ensure_open_position_lot_invariant_triggers(conn)
 
     conn.execute(
         """
@@ -685,7 +1436,11 @@ def record_strategy_decision(
             None if candle_ts is None else int(candle_ts),
             None if market_price is None else float(market_price),
             None if confidence is None else float(confidence),
-            json.dumps(normalized_context, ensure_ascii=False, sort_keys=True),
+            json.dumps(
+                materialize_strategy_decision_context(normalized_context),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
         ),
     )
     return int(row.lastrowid)
@@ -712,17 +1467,20 @@ def get_portfolio_breakdown(conn: sqlite3.Connection) -> tuple[float, float, flo
     row = conn.execute(
         "SELECT cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1"
     ).fetchone()
-    return (
-        float(row["cash_available"]),
-        float(row["cash_locked"]),
-        float(row["asset_available"]),
-        float(row["asset_locked"]),
+    return normalize_portfolio_breakdown(
+        cash_available=float(row["cash_available"]),
+        cash_locked=float(row["cash_locked"]),
+        asset_available=float(row["asset_available"]),
+        asset_locked=float(row["asset_locked"]),
     )
 
 
 def get_portfolio(conn: sqlite3.Connection) -> tuple[float, float]:
     cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
-    return cash_available + cash_locked, asset_available + asset_locked
+    return portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked), portfolio_asset_total(
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
 
 
 def set_portfolio(
@@ -751,8 +1509,14 @@ def set_portfolio_breakdown(
     asset_locked: float,
 ) -> None:
     init_portfolio(conn)
-    cash_total = float(cash_available) + float(cash_locked)
-    asset_total = float(asset_available) + float(asset_locked)
+    cash_available_n, cash_locked_n, asset_available_n, asset_locked_n = normalize_portfolio_breakdown(
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_available,
+        asset_locked=asset_locked,
+    )
+    cash_total = portfolio_cash_total(cash_available=cash_available_n, cash_locked=cash_locked_n)
+    asset_total = portfolio_asset_total(asset_available=asset_available_n, asset_locked=asset_locked_n)
     had_tx = conn.in_transaction
     conn.execute(
         """
@@ -769,11 +1533,796 @@ def set_portfolio_breakdown(
         (
             cash_total,
             asset_total,
-            float(cash_available),
-            float(cash_locked),
-            float(asset_available),
-            float(asset_locked),
+            cash_available_n,
+            cash_locked_n,
+            asset_available_n,
+            asset_locked_n,
         ),
     )
     if not had_tx:
         conn.commit()
+
+
+def _external_cash_adjustment_key(
+    *,
+    currency: str,
+    delta_amount: float,
+    source: str,
+    reason: str,
+    broker_snapshot_basis: str,
+    correlation_metadata: str | None,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE,
+        "currency": str(currency).strip().upper(),
+        "delta_amount": f"{float(delta_amount):.12g}",
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "broker_snapshot_basis": str(broker_snapshot_basis).strip(),
+        "correlation_metadata": str(correlation_metadata or "").strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _manual_flat_accounting_repair_key(
+    *,
+    event_ts: int,
+    asset_qty_delta: float,
+    cash_delta: float,
+    source: str,
+    reason: str,
+    repair_basis: str,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE,
+        "event_ts": int(event_ts),
+        "asset_qty_delta": f"{normalize_asset_qty(asset_qty_delta):.12f}",
+        "cash_delta": f"{normalize_cash_amount(cash_delta):.8f}",
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "repair_basis": str(repair_basis).strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _fee_gap_accounting_repair_key(
+    *,
+    source: str,
+    reason: str,
+    repair_basis: str,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE,
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "repair_basis": str(repair_basis).strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int]:
+    init_portfolio(conn)
+    total_fee = 0.0
+    external_cash_adjustment_total = 0.0
+    external_cash_adjustment_count = 0
+    manual_flat_repair_cash_total = 0.0
+    manual_flat_repair_asset_total = 0.0
+    manual_flat_repair_count = 0
+    fee_gap_repair_count = 0
+    dup_fill_count = 0
+
+    seen_fill_keys: set[tuple[str, int, float, float]] = set()
+    fills = conn.execute(
+        """
+        SELECT f.client_order_id, f.fill_ts, f.price, f.qty, f.fee, o.side
+        FROM fills f
+        JOIN orders o ON o.client_order_id = f.client_order_id
+        ORDER BY f.fill_ts ASC, f.id ASC
+        """
+    ).fetchall()
+
+    fill_rows: list[tuple[str, float, float, float | None]] = []
+    for row in fills:
+        key = (
+            str(row["client_order_id"]),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(row["qty"]),
+        )
+        if key in seen_fill_keys:
+            dup_fill_count += 1
+        seen_fill_keys.add(key)
+
+        fee = float(row["fee"]) if row["fee"] is not None else None
+        total_fee += float(fee or 0.0)
+        fill_rows.append((str(row["side"]), float(row["price"]), float(row["qty"]), fee))
+
+    cash_available, cash_locked, asset_available, asset_locked, cash, qty = replay_fill_portfolio_snapshot(
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=0.0,
+        asset_locked=0.0,
+        rows=fill_rows,
+    )
+
+    adjustments = conn.execute(
+        """
+        SELECT adjustment_key, delta_amount
+        FROM external_cash_adjustments
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_adjustment_keys: set[str] = set()
+    for row in adjustments:
+        key = str(row["adjustment_key"])
+        if key in seen_adjustment_keys:
+            continue
+        seen_adjustment_keys.add(key)
+        delta_amount = normalize_cash_amount(row["delta_amount"])
+        external_cash_adjustment_total = normalize_cash_amount(external_cash_adjustment_total + delta_amount)
+        external_cash_adjustment_count += 1
+        cash = normalize_cash_amount(cash + delta_amount)
+        cash_available = normalize_cash_amount(cash_available + delta_amount)
+
+    repairs = conn.execute(
+        """
+        SELECT repair_key, cash_delta, asset_qty_delta
+        FROM manual_flat_accounting_repairs
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_repair_keys: set[str] = set()
+    for row in repairs:
+        key = str(row["repair_key"])
+        if key in seen_repair_keys:
+            continue
+        seen_repair_keys.add(key)
+        cash_delta = normalize_cash_amount(row["cash_delta"])
+        asset_qty_delta = normalize_asset_qty(row["asset_qty_delta"])
+        manual_flat_repair_cash_total = normalize_cash_amount(manual_flat_repair_cash_total + cash_delta)
+        manual_flat_repair_asset_total = normalize_asset_qty(manual_flat_repair_asset_total + asset_qty_delta)
+        manual_flat_repair_count += 1
+        cash = normalize_cash_amount(cash + cash_delta)
+        cash_available = normalize_cash_amount(cash_available + cash_delta)
+        qty = normalize_asset_qty(qty + asset_qty_delta)
+        asset_available = normalize_asset_qty(asset_available + asset_qty_delta)
+
+    fee_gap_repairs = conn.execute(
+        """
+        SELECT repair_key
+        FROM fee_gap_accounting_repairs
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    seen_fee_gap_repair_keys: set[str] = set()
+    for row in fee_gap_repairs:
+        key = str(row["repair_key"])
+        if key in seen_fee_gap_repair_keys:
+            continue
+        seen_fee_gap_repair_keys.add(key)
+        fee_gap_repair_count += 1
+
+    return {
+        "replay_cash": cash,
+        "replay_qty": qty,
+        "replay_cash_available": cash_available,
+        "replay_cash_locked": cash_locked,
+        "replay_asset_available": asset_available,
+        "replay_asset_locked": asset_locked,
+        "fee_total": total_fee,
+        "external_cash_adjustment_count": external_cash_adjustment_count,
+        "external_cash_adjustment_total": external_cash_adjustment_total,
+        "manual_flat_accounting_repair_count": manual_flat_repair_count,
+        "manual_flat_accounting_repair_cash_total": manual_flat_repair_cash_total,
+        "manual_flat_accounting_repair_asset_total": manual_flat_repair_asset_total,
+        "fee_gap_accounting_repair_count": fee_gap_repair_count,
+        "dup_fill_count": dup_fill_count,
+    }
+
+
+def record_external_cash_adjustment(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    currency: str,
+    delta_amount: float,
+    source: str,
+    reason: str,
+    broker_snapshot_basis: dict[str, Any] | str,
+    correlation_metadata: dict[str, Any] | str | None = None,
+    note: str | None = None,
+    adjustment_key: str | None = None,
+) -> dict[str, Any] | None:
+    currency_value = str(currency).strip().upper()
+    if currency_value != "KRW":
+        raise RuntimeError(f"unsupported external cash adjustment currency: {currency_value}")
+
+    basis_text = (
+        json.dumps(broker_snapshot_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(broker_snapshot_basis, dict)
+        else str(broker_snapshot_basis)
+    )
+    correlation_text = (
+        json.dumps(correlation_metadata, ensure_ascii=False, sort_keys=True)
+        if isinstance(correlation_metadata, dict)
+        else (str(correlation_metadata) if correlation_metadata is not None else None)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    if not source_text:
+        raise RuntimeError("external cash adjustment source is required")
+    if not reason_text:
+        raise RuntimeError("external cash adjustment reason is required")
+    if not basis_text.strip():
+        raise RuntimeError("external cash adjustment basis is required")
+
+    init_portfolio(conn)
+    had_tx = conn.in_transaction
+    key = adjustment_key or _external_cash_adjustment_key(
+        currency=currency_value,
+        delta_amount=float(delta_amount),
+        source=source_text,
+        reason=reason_text,
+        broker_snapshot_basis=basis_text,
+        correlation_metadata=correlation_text,
+        note=note,
+    )
+
+    existing = conn.execute(
+        """
+        SELECT id, adjustment_key, event_ts, currency, delta_amount, source, reason,
+               broker_snapshot_basis, correlation_metadata, note
+        FROM external_cash_adjustments
+        WHERE adjustment_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "adjustment_key": str(existing["adjustment_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "currency": str(existing["currency"]),
+            "delta_amount": float(existing["delta_amount"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "broker_snapshot_basis": str(existing["broker_snapshot_basis"]),
+            "correlation_metadata": (
+                str(existing["correlation_metadata"])
+                if existing["correlation_metadata"] is not None
+                else None
+            ),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    portfolio_row = conn.execute(
+        """
+        SELECT cash_krw, cash_available, cash_locked
+        FROM portfolio
+        WHERE id=1
+        """
+    ).fetchone()
+    if portfolio_row is None:
+        raise RuntimeError("portfolio row missing while recording external cash adjustment")
+
+    cash_available = normalize_cash_amount(portfolio_row["cash_available"])
+    cash_locked = normalize_cash_amount(portfolio_row["cash_locked"])
+    delta_amount_value = normalize_cash_amount(delta_amount)
+    new_cash_available = normalize_cash_amount(cash_available + delta_amount_value)
+    new_cash_total = portfolio_cash_total(cash_available=new_cash_available, cash_locked=cash_locked)
+    if new_cash_total < -1e-8:
+        raise RuntimeError(
+            "external cash adjustment would make cash negative: "
+            f"cash_before={float(portfolio_row['cash_krw']):.12g} delta={float(delta_amount):.12g} "
+            f"cash_after={new_cash_total:.12g}"
+        )
+
+    cursor = conn.execute(
+        """
+        INSERT INTO external_cash_adjustments(
+            adjustment_key, event_type, event_ts, currency, delta_amount, source, reason,
+            broker_snapshot_basis, correlation_metadata, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE,
+            int(event_ts),
+            currency_value,
+            delta_amount_value,
+            source_text,
+            reason_text,
+            basis_text,
+            correlation_text,
+            note,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE portfolio
+        SET cash_krw=?, cash_available=?
+        WHERE id=1
+        """,
+        (
+            new_cash_total,
+            new_cash_available,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "adjustment_key": key,
+        "event_ts": int(event_ts),
+        "currency": currency_value,
+        "delta_amount": delta_amount_value,
+        "source": source_text,
+        "reason": reason_text,
+        "broker_snapshot_basis": basis_text,
+        "correlation_metadata": correlation_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_external_cash_adjustment_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS adjustment_count, COALESCE(SUM(delta_amount), 0.0) AS adjustment_total
+        FROM external_cash_adjustments
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT adjustment_key, event_ts, currency, delta_amount, source, reason, broker_snapshot_basis, correlation_metadata, note
+        FROM external_cash_adjustments
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "adjustment_count": int(row["adjustment_count"] if row else 0),
+        "adjustment_total": float(row["adjustment_total"] if row else 0.0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_adjustment_key": str(last["adjustment_key"]) if last is not None else None,
+        "last_currency": str(last["currency"]) if last is not None else None,
+        "last_delta_amount": float(last["delta_amount"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_broker_snapshot_basis": str(last["broker_snapshot_basis"]) if last is not None else None,
+        "last_correlation_metadata": (
+            str(last["correlation_metadata"]) if last is not None and last["correlation_metadata"] is not None else None
+        ),
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_manual_flat_accounting_repair(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    asset_qty_delta: float,
+    cash_delta: float,
+    source: str,
+    reason: str,
+    repair_basis: dict[str, Any] | str,
+    note: str | None = None,
+    repair_key: str | None = None,
+) -> dict[str, Any]:
+    basis_text = (
+        json.dumps(repair_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(repair_basis, dict)
+        else str(repair_basis)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    asset_qty_delta_value = normalize_asset_qty(asset_qty_delta)
+    cash_delta_value = normalize_cash_amount(cash_delta)
+    if abs(asset_qty_delta_value) <= 1e-12 and abs(cash_delta_value) <= 1e-8:
+        raise RuntimeError("manual-flat accounting repair delta is zero")
+
+    key = repair_key or _manual_flat_accounting_repair_key(
+        event_ts=int(event_ts),
+        asset_qty_delta=asset_qty_delta_value,
+        cash_delta=cash_delta_value,
+        source=source_text,
+        reason=reason_text,
+        repair_basis=basis_text,
+        note=note,
+    )
+
+    existing = conn.execute(
+        """
+        SELECT id, repair_key, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        FROM manual_flat_accounting_repairs
+        WHERE repair_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "repair_key": str(existing["repair_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "asset_qty_delta": float(existing["asset_qty_delta"]),
+            "cash_delta": float(existing["cash_delta"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "repair_basis": str(existing["repair_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO manual_flat_accounting_repairs(
+            repair_key, event_type, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE,
+            int(event_ts),
+            asset_qty_delta_value,
+            cash_delta_value,
+            source_text,
+            reason_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "repair_key": key,
+        "event_ts": int(event_ts),
+        "asset_qty_delta": asset_qty_delta_value,
+        "cash_delta": cash_delta_value,
+        "source": source_text,
+        "reason": reason_text,
+        "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_manual_flat_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS repair_count,
+            COALESCE(SUM(asset_qty_delta), 0.0) AS asset_qty_total,
+            COALESCE(SUM(cash_delta), 0.0) AS cash_total
+        FROM manual_flat_accounting_repairs
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT repair_key, event_ts, asset_qty_delta, cash_delta, source, reason, repair_basis, note
+        FROM manual_flat_accounting_repairs
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "repair_count": int(row["repair_count"] if row else 0),
+        "asset_qty_total": float(row["asset_qty_total"] if row else 0.0),
+        "cash_total": float(row["cash_total"] if row else 0.0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_asset_qty_delta": float(last["asset_qty_delta"]) if last is not None else None,
+        "last_cash_delta": float(last["cash_delta"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_fee_gap_accounting_repair(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    source: str,
+    reason: str,
+    repair_basis: dict[str, Any] | str,
+    note: str | None = None,
+    repair_key: str | None = None,
+) -> dict[str, Any]:
+    basis_text = (
+        json.dumps(repair_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(repair_basis, dict)
+        else str(repair_basis)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    if not source_text:
+        raise RuntimeError("fee-gap accounting repair source is required")
+    if not reason_text:
+        raise RuntimeError("fee-gap accounting repair reason is required")
+    if not basis_text.strip():
+        raise RuntimeError("fee-gap accounting repair basis is required")
+
+    key = repair_key or _fee_gap_accounting_repair_key(
+        source=source_text,
+        reason=reason_text,
+        repair_basis=basis_text,
+        note=note,
+    )
+    existing = conn.execute(
+        """
+        SELECT id, repair_key, event_ts, source, reason, repair_basis, note
+        FROM fee_gap_accounting_repairs
+        WHERE repair_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "repair_key": str(existing["repair_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "repair_basis": str(existing["repair_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO fee_gap_accounting_repairs(
+            repair_key, event_type, event_ts, source, reason, repair_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE,
+            int(event_ts),
+            source_text,
+            reason_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "repair_key": key,
+        "event_ts": int(event_ts),
+        "source": source_text,
+        "reason": reason_text,
+        "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_fee_gap_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS repair_count
+        FROM fee_gap_accounting_repairs
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT repair_key, event_ts, source, reason, repair_basis, note
+        FROM fee_gap_accounting_repairs
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "repair_count": int(row["repair_count"] if row else 0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+@dataclass(frozen=True)
+class OrderRuleSnapshotRecord:
+    market: str
+    fetched_ts: int
+    source_mode: str
+    fallback_used: bool
+    fallback_reason_code: str
+    fallback_reason_summary: str
+    rule_signature: str
+    rules_json: str
+    source_json: str
+
+
+def record_order_rule_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    market: str,
+    fetched_ts: int,
+    source_mode: str,
+    fallback_used: bool,
+    fallback_reason_code: str | None,
+    fallback_reason_summary: str | None,
+    rules_payload: dict[str, Any],
+    source_payload: dict[str, str],
+) -> OrderRuleSnapshotRecord:
+    rules_json = json.dumps(rules_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    source_json = json.dumps(source_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    signature_payload = {
+        "market": str(market),
+        "source_mode": str(source_mode),
+        "fallback_used": bool(fallback_used),
+        "fallback_reason_code": str(fallback_reason_code or ""),
+        "fallback_reason_summary": str(fallback_reason_summary or ""),
+        "rules_json": rules_json,
+        "source_json": source_json,
+    }
+    rule_signature = hashlib.sha256(
+        json.dumps(signature_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO order_rule_snapshots(
+            market,
+            fetched_ts,
+            source_mode,
+            fallback_used,
+            fallback_reason_code,
+            fallback_reason_summary,
+            rule_signature,
+            rules_json,
+            source_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(market),
+            int(fetched_ts),
+            str(source_mode),
+            1 if fallback_used else 0,
+            (str(fallback_reason_code) if fallback_reason_code else None),
+            (str(fallback_reason_summary) if fallback_reason_summary else None),
+            rule_signature,
+            rules_json,
+            source_json,
+        ),
+    )
+    return OrderRuleSnapshotRecord(
+        market=str(market),
+        fetched_ts=int(fetched_ts),
+        source_mode=str(source_mode),
+        fallback_used=bool(fallback_used),
+        fallback_reason_code=str(fallback_reason_code or ""),
+        fallback_reason_summary=str(fallback_reason_summary or ""),
+        rule_signature=rule_signature,
+        rules_json=rules_json,
+        source_json=source_json,
+    )
+
+
+def fetch_latest_order_rule_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    market: str | None = None,
+) -> OrderRuleSnapshotRecord | None:
+    if market:
+        row = conn.execute(
+            """
+            SELECT market, fetched_ts, source_mode, fallback_used, fallback_reason_code,
+                   fallback_reason_summary, rule_signature, rules_json, source_json
+            FROM order_rule_snapshots
+            WHERE market=?
+            ORDER BY fetched_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (str(market),),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT market, fetched_ts, source_mode, fallback_used, fallback_reason_code,
+                   fallback_reason_summary, rule_signature, rules_json, source_json
+            FROM order_rule_snapshots
+            ORDER BY fetched_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
+        return None
+    return OrderRuleSnapshotRecord(
+        market=str(row["market"]),
+        fetched_ts=int(row["fetched_ts"]),
+        source_mode=str(row["source_mode"]),
+        fallback_used=bool(int(row["fallback_used"])),
+        fallback_reason_code=str(row["fallback_reason_code"] or ""),
+        fallback_reason_summary=str(row["fallback_reason_summary"] or ""),
+        rule_signature=str(row["rule_signature"]),
+        rules_json=str(row["rules_json"]),
+        source_json=str(row["source_json"]),
+    )
+
+
+def record_private_stream_event(
+    conn: sqlite3.Connection,
+    *,
+    stream_name: str,
+    dedupe_key: str,
+    event_ts: int,
+    client_order_id: str | None,
+    exchange_order_id: str | None,
+    order_status: str | None,
+    fill_id: str | None,
+    qty: float | None,
+    price: float | None,
+    payload: dict[str, Any],
+) -> bool:
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO private_stream_events(
+            stream_name,
+            dedupe_key,
+            event_ts,
+            client_order_id,
+            exchange_order_id,
+            order_status,
+            fill_id,
+            qty,
+            price,
+            payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(stream_name),
+            str(dedupe_key),
+            int(event_ts),
+            (str(client_order_id) if client_order_id else None),
+            (str(exchange_order_id) if exchange_order_id else None),
+            (str(order_status) if order_status else None),
+            (str(fill_id) if fill_id else None),
+            (float(qty) if qty is not None else None),
+            (float(price) if price is not None else None),
+            payload_json,
+        ),
+    )
+    return bool(cursor.rowcount)
+
+
+def mark_private_stream_event_applied(
+    conn: sqlite3.Connection,
+    *,
+    dedupe_key: str,
+    applied: bool,
+    applied_status: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE private_stream_events
+        SET applied=?, applied_status=?
+        WHERE dedupe_key=?
+        """,
+        (
+            1 if applied else 0,
+            str(applied_status),
+            str(dedupe_key),
+        ),
+    )

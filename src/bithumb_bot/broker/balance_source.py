@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
-
-from ..config import settings
-from ..db_core import ensure_db
+from ..config import prepare_db_path_for_connection, settings
+from ..dust import build_dust_display_context, build_normalized_exposure, dust_qty_gap_tolerance
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -89,7 +89,6 @@ class AccountsV1BalanceSource:
         self._allow_missing_base_on_flat_start = bool(
             str(settings.MODE).strip().lower() == "live"
             and not bool(settings.LIVE_DRY_RUN)
-            and bool(settings.LIVE_REAL_ORDER_ARMED)
         )
         self._flat_start_allowed = False
         self._flat_start_reason = "not_checked"
@@ -156,14 +155,12 @@ class AccountsV1BalanceSource:
     def fetch_snapshot(self) -> BalanceSnapshot:
         observed_ts_ms = self._now_ms()
         allow_missing_base = self._allow_missing_base
-        if self._allow_missing_base_on_flat_start:
-            self._flat_start_allowed, self._flat_start_reason = self._evaluate_flat_start_safety()
-            allow_missing_base = self._flat_start_allowed
+        if self._allow_missing_base:
+            self._flat_start_allowed = False
+            self._flat_start_reason = "dry_run_unarmed_allowance"
         else:
             self._flat_start_allowed = False
-            self._flat_start_reason = (
-                "dry_run_unarmed_allowance" if self._allow_missing_base else "not_applicable"
-            )
+            self._flat_start_reason = "not_applicable"
         try:
             response = self._fetch_accounts_raw()
         except Exception as exc:
@@ -194,6 +191,12 @@ class AccountsV1BalanceSource:
         parsed_accounts = None
         try:
             parsed_accounts = self._parse_accounts_response(response)
+            if (
+                self._allow_missing_base_on_flat_start
+                and self._order_currency not in parsed_accounts.balances
+            ):
+                self._flat_start_allowed, self._flat_start_reason = self._evaluate_flat_start_safety()
+                allow_missing_base = self._flat_start_allowed
             pair_balances = self._select_pair_balances(
                 parsed_accounts,
                 order_currency=self._order_currency,
@@ -279,13 +282,22 @@ class AccountsV1BalanceSource:
 
 
 def _default_flat_start_safety_check() -> tuple[bool, str]:
-    conn = ensure_db()
+    from .. import runtime_state
+
+    try:
+        db_path = prepare_db_path_for_connection(settings.DB_PATH, mode=settings.MODE)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        return False, f"flat_start_local_state_unavailable({type(exc).__name__}: {detail})"
+
     try:
         unresolved_row = conn.execute(
             """
             SELECT COUNT(*) AS cnt
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)
@@ -295,7 +307,42 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
-            return False, f"local_position_present={asset_qty:.12f}"
+            dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+            exposure = build_normalized_exposure(raw_qty_open=asset_qty, dust_context=dust_context)
+            if exposure.harmless_dust_effective_flat:
+                return True, f"flat_start_effective_flat({dust_context.compact_summary})"
+            if dust_context.classification.present:
+                return False, f"flat_start_requires_operator_review({dust_context.compact_summary})"
+            try:
+                from . import order_rules
+
+                rules = order_rules.get_effective_order_rules(settings.PAIR).rules
+                min_qty = float(rules.min_qty)
+                min_notional_krw = float(rules.min_notional_krw)
+                qty_gap_tolerance = dust_qty_gap_tolerance(
+                    min_qty=min_qty,
+                    default_abs_tolerance=1e-12,
+                )
+                local_only_summary = (
+                    "state=blocking_dust "
+                    f"broker_qty={0.0:.8f} "
+                    f"local_qty={asset_qty:.8f} "
+                    f"delta_qty={-asset_qty:.8f} "
+                    f"min_qty={min_qty:.8f} "
+                    f"min_notional_krw={min_notional_krw:.1f} "
+                    f"qty_gap_tolerance={qty_gap_tolerance:.8f} "
+                    "qty_gap_small=1 "
+                    "qty_below_min(broker=0 local=1) "
+                    "notional_below_min(broker=0 local=0) "
+                    "broker_local_match=0 "
+                    "operator_action=manual_review_before_resume "
+                    "new_orders_allowed=0 "
+                    "resume_allowed=0 "
+                    "treat_as_flat=0"
+                )
+                return False, f"flat_start_requires_operator_review({local_only_summary})"
+            except Exception:
+                return False, f"flat_start_requires_operator_review(local_position_present={asset_qty:.12f})"
     finally:
         conn.close()
     return True, "flat_start_safe"

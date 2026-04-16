@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 import importlib
 import sqlite3
 
+import pytest
+
+from bithumb_bot.config import settings
+from bithumb_bot.dust import classify_dust_residual, dust_qty_gap_tolerance
 from bithumb_bot.strategy.sma import create_sma_strategy, create_sma_with_filter_strategy
 
 
@@ -26,6 +31,73 @@ def _build_candle_db(closes: list[float]) -> sqlite3.Connection:
         )
     conn.commit()
     return conn
+
+
+def _seed_position_and_dust_state(
+    conn: sqlite3.Connection,
+    *,
+    qty_open: float,
+    dust_metadata: dict[str, object],
+    position_state: str = "open_exposure",
+    executable_lot_count: int = 0,
+    dust_tracking_lot_count: int = 0,
+) -> None:
+    conn.execute(
+        """
+        CREATE TABLE bot_health (
+            id INTEGER PRIMARY KEY,
+            last_reconcile_metadata TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE open_position_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair TEXT NOT NULL,
+            entry_trade_id INTEGER NOT NULL,
+            entry_client_order_id TEXT NOT NULL,
+            entry_ts INTEGER NOT NULL,
+            entry_price REAL NOT NULL,
+            qty_open REAL NOT NULL,
+            executable_lot_count INTEGER NOT NULL DEFAULT 0,
+            dust_tracking_lot_count INTEGER NOT NULL DEFAULT 0,
+            position_semantic_basis TEXT NOT NULL DEFAULT 'lot-native',
+            position_state TEXT NOT NULL DEFAULT 'open_exposure'
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO bot_health(id, last_reconcile_metadata) VALUES (1, ?)",
+        (json.dumps(dust_metadata, ensure_ascii=False, sort_keys=True),),
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "BTC_KRW",
+            1,
+            "entry-1",
+            1_700_000_000_000,
+            40_000_000.0,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_state,
+        ),
+    )
+    conn.commit()
 
 
 def test_filtered_sma_can_change_trade_signal_to_hold() -> None:
@@ -139,7 +211,7 @@ def test_cost_edge_filter_blocks_small_gap_entry_and_records_reason() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.02,
             entry_edge_buffer_ratio=0.005,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -172,7 +244,7 @@ def test_cost_edge_filter_allows_entry_when_signal_clears_cost_floor() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -199,6 +271,190 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
+            cost_edge_min_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.reason == "no_position"
+    assert decision.context["filters"]["cost_edge"]["passed"] is True
+    assert decision.context["entry"]["cost_edge_blocked"] is False
+
+
+def test_harmless_dust_effective_flat_keeps_buy_entry_intentable() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009629,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=True,
+    )
+    try:
+        _seed_position_and_dust_state(conn, qty_open=0.00009629, dust_metadata=dust.to_metadata())
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+        state_row = conn.execute(
+            "SELECT position_state FROM open_position_lots WHERE entry_client_order_id='entry-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert decision.context["raw_signal"] == "BUY"
+    assert decision.context["entry_allowed"] is True
+    assert decision.context["normalized_exposure_active"] is False
+    assert decision.context["entry"]["base_signal"] == "BUY"
+    assert decision.context["entry"]["entry_signal"] == "BUY"
+    assert decision.context["position_gate"]["effective_flat_due_to_harmless_dust"] is True
+    assert decision.context["position_gate"]["entry_allowed"] is True
+    assert decision.context["position_gate"]["normalized_exposure_active"] is False
+    assert decision.context["position_gate"]["has_executable_exposure"] is False
+    assert decision.context["position_gate"]["has_any_position_residue"] is True
+    assert decision.context["position_gate"]["has_dust_only_remainder"] is True
+    assert decision.context["position_gate"]["open_exposure_qty"] == pytest.approx(0.0)
+    assert decision.context["position_gate"]["dust_tracking_qty"] == pytest.approx(0.00009629)
+    assert decision.context["position_state"]["raw_holdings"]["classification"] == "harmless_dust"
+    assert decision.context["position_state"]["raw_holdings"]["present"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["entry_allowed"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_active"] is False
+    assert decision.context["position_state"]["normalized_exposure"]["has_executable_exposure"] is False
+    assert decision.context["position_state"]["normalized_exposure"]["has_any_position_residue"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["has_dust_only_remainder"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["open_exposure_qty"] == pytest.approx(0.0)
+    assert decision.context["position_state"]["normalized_exposure"]["dust_tracking_qty"] == pytest.approx(0.00009629)
+    assert decision.context["position_gate"]["dust_new_orders_allowed"] is True
+    assert decision.context["position_gate"]["dust_resume_allowed"] is True
+    assert decision.context["position_gate"]["dust_treat_as_flat"] is True
+    assert decision.context["position_gate"]["raw_qty_open"] == pytest.approx(0.0)
+    assert "sell_submit_qty" not in decision.context["position_gate"]
+    assert "sell_submit_qty_source" not in decision.context["position_gate"]
+    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
+    assert state_row[0] == "dust_tracking"
+
+
+def test_entry_decision_returns_intent_budget_without_final_order_size() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_strategy(short_n=2, long_n=3, pair="BTC_KRW", interval="1m").decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert "entry_execution_sizing" not in decision.context
+    assert "entry_execution_sizing" not in decision.context["filters"]
+    assert "submit_payload_qty" not in decision.context
+    assert "position_qty" not in decision.context
+    assert "open_exposure_qty" not in decision.context
+    assert "dust_tracking_qty" not in decision.context
+    assert "reserved_exit_qty" not in decision.context
+    assert "sellable_executable_qty" not in decision.context
+    assert "normalized_exposure_qty" not in decision.context
+    assert "budget_krw" not in decision.context["entry"]["intent"]
+    assert "requested_qty" not in decision.context["entry"]["intent"]
+    assert "executable_qty" not in decision.context["entry"]["intent"]
+    assert decision.context["entry"]["intent"] == {
+        "pair": "BTC_KRW",
+        "intent": "enter_open_exposure",
+        "budget_model": "cash_fraction_capped_by_max_order_krw",
+        "budget_fraction_of_cash": pytest.approx(float(settings.BUY_FRACTION)),
+        "max_budget_krw": pytest.approx(float(settings.MAX_ORDER_KRW)),
+        "requires_execution_sizing": True,
+    }
+
+
+def test_non_executable_exit_stops_at_state_layer_and_does_not_emit_sell() -> None:
+    original_rules = {
+        "LIVE_MIN_ORDER_QTY": float(settings.LIVE_MIN_ORDER_QTY),
+        "LIVE_ORDER_QTY_STEP": float(settings.LIVE_ORDER_QTY_STEP),
+        "LIVE_ORDER_MAX_QTY_DECIMALS": int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+        "MIN_ORDER_NOTIONAL_KRW": float(settings.MIN_ORDER_NOTIONAL_KRW),
+    }
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
+    try:
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.00009629,
+            dust_metadata={},
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+        state_row = conn.execute(
+            "SELECT position_state FROM open_position_lots WHERE entry_client_order_id='entry-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+        for key, value in original_rules.items():
+            object.__setattr__(settings, key, value)
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.reason == "dust_only_remainder"
+    assert decision.context["raw_signal"] == "SELL"
+    assert decision.context["terminal_state"] == "dust_only"
+    assert decision.context["exit_allowed"] is False
+    assert decision.context["exit_block_reason"] == "dust_only_remainder"
+    assert decision.context["position_state"]["normalized_exposure"]["sellable_executable_qty"] == pytest.approx(0.0)
+    assert decision.context["position_state"]["normalized_exposure"]["terminal_state"] == "dust_only"
+    assert decision.context["position_state"]["state_interpretation"]["operator_outcome"] == "tracked_unsellable_residual"
+    assert decision.context["position_state"]["state_interpretation"]["exit_submit_expected"] is False
+    assert decision.context["exit"]["triggered"] is False
+    assert decision.context["exit"]["policy"] == "none"
+    assert decision.context["exit"]["reason"] == "dust_only_remainder"
+    assert decision.context["state_outcome"] == "tracked_unsellable_residual"
+    assert decision.context["exit_submit_expected"] is False
+    assert state_row[0] == "dust_tracking"
+
+
+def test_exit_decision_uses_normalized_shared_state_without_last_buy_request_size(
+    relaxed_test_order_rules,
+) -> None:
+    conn = _build_candle_db([11.0, 11.0, 11.0, 11.0, 10.0])
+    try:
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.0002,
+            dust_metadata={},
+            executable_lot_count=2,
+        )
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
             strategy_min_expected_edge_ratio=0.0,
         ).decide(conn)
     finally:
@@ -206,8 +462,194 @@ def test_cost_edge_filter_keeps_sell_signal_when_edge_is_sufficient() -> None:
 
     assert decision is not None
     assert decision.signal == "SELL"
-    assert decision.context["filters"]["cost_edge"]["passed"] is True
+    assert decision.context["exit"]["policy"] == "full"
+    assert decision.context["position_state"]["normalized_exposure"]["open_exposure_qty"] == pytest.approx(0.0002)
+    assert decision.context["position_state"]["normalized_exposure"]["sellable_executable_qty"] == pytest.approx(0.0002)
+    assert "last_buy_request_qty" not in decision.context
+    assert "last_buy_request_qty" not in decision.context["exit"]
+
+
+def test_harmless_dust_without_resume_keeps_buy_entry_blocked() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    dust = classify_dust_residual(
+        broker_qty=0.00009629,
+        local_qty=0.00009629,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=False,
+    )
+    dust_metadata = dict(dust.to_metadata())
+    dust_metadata["unresolved_open_order_count"] = 1
+    try:
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.00009629,
+            dust_metadata=dust_metadata,
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["entry"]["base_signal"] == "BUY"
+    assert decision.context["entry"]["entry_signal"] == "BUY"
+    assert decision.context["position_gate"]["dust_state"] == "harmless_dust"
+    assert decision.context["position_gate"]["effective_flat_due_to_harmless_dust"] is False
+    assert decision.context["position_gate"]["dust_new_orders_allowed"] is False
+    assert decision.context["position_gate"]["dust_resume_allowed"] is False
+    assert decision.context["position_gate"]["dust_treat_as_flat"] is True
+    assert decision.context["position_gate"]["has_executable_exposure"] is False
+    assert decision.context["position_gate"]["has_any_position_residue"] is True
+    assert decision.context["position_gate"]["has_non_executable_residue"] is True
+    assert decision.context["raw_signal"] == "BUY"
+    assert decision.context["final_signal"] == "HOLD"
+    assert decision.context["entry_blocked"] is True
+    assert decision.context["entry_block_reason"] == "dust_only_remainder"
+    assert decision.context["dust_classification"] == "harmless_dust"
+    assert decision.context["effective_flat"] is False
+    assert decision.context["raw_qty_open"] == pytest.approx(0.00009629)
+    assert decision.context["normalized_exposure_active"] is False
+    assert decision.context["has_executable_exposure"] is False
+    assert decision.context["has_any_position_residue"] is True
+    assert decision.context["has_non_executable_residue"] is True
+    assert decision.context["position_state"]["normalized_exposure"]["normalized_exposure_qty"] == pytest.approx(0.0)
+
+
+def test_blocking_dust_still_blocks_buy_entry() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    dust = classify_dust_residual(
+        broker_qty=0.000099,
+        local_qty=0.000010,
+        min_qty=0.0001,
+        min_notional_krw=5000.0,
+        latest_price=40_000_000.0,
+        partial_flatten_recent=False,
+        partial_flatten_reason="not_recent",
+        qty_gap_tolerance=dust_qty_gap_tolerance(min_qty=0.0001, default_abs_tolerance=1e-8),
+        matched_harmless_resume_allowed=False,
+    )
+    try:
+        _seed_position_and_dust_state(
+            conn,
+            qty_open=0.000099,
+            dust_metadata=dust.to_metadata(),
+            position_state="dust_tracking",
+            dust_tracking_lot_count=1,
+        )
+        decision = create_sma_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.001,
+            strategy_min_expected_edge_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "HOLD"
+    assert decision.context["entry"]["base_signal"] == "BUY"
+    assert decision.context["entry"]["entry_signal"] == "BUY"
+    assert decision.context["position_gate"]["dust_state"] == "blocking_dust"
+    assert decision.context["position_gate"]["effective_flat_due_to_harmless_dust"] is False
+    assert decision.context["position_gate"]["dust_new_orders_allowed"] is False
+    assert decision.context["position_gate"]["dust_resume_allowed"] is False
+    assert decision.context["position_gate"]["dust_treat_as_flat"] is False
+
+
+def test_cost_edge_filter_can_be_disabled_explicitly() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        decision = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.02,
+            entry_edge_buffer_ratio=0.005,
+            cost_edge_enabled=False,
+            cost_edge_min_ratio=0.05,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert decision is not None
+    assert decision.signal == "BUY"
+    assert "cost_edge" not in decision.context["blocked_filters"]
+    assert decision.context["filters"]["cost_edge"]["enabled"] is False
+    assert decision.context["filters"]["cost_edge"]["configured_enabled"] is False
     assert decision.context["entry"]["cost_edge_blocked"] is False
+
+
+def test_cost_edge_min_ratio_relaxation_unblocks_same_market_case() -> None:
+    conn = _build_candle_db([10.0, 10.0, 10.0, 10.0, 11.0])
+    try:
+        strict = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.06,
+        ).decide(conn)
+        relaxed = create_sma_with_filter_strategy(
+            short_n=2,
+            long_n=3,
+            pair="BTC_KRW",
+            interval="1m",
+            min_gap_ratio=0.0,
+            volatility_window=3,
+            min_volatility_ratio=0.0,
+            overextended_lookback=1,
+            overextended_max_return_ratio=0.0,
+            slippage_bps=0.0,
+            live_fee_rate_estimate=0.001,
+            entry_edge_buffer_ratio=0.0,
+            cost_edge_enabled=True,
+            cost_edge_min_ratio=0.0,
+        ).decide(conn)
+    finally:
+        conn.close()
+
+    assert strict is not None
+    assert relaxed is not None
+    assert strict.signal == "HOLD"
+    assert "cost_edge" in strict.context["blocked_filters"]
+    assert relaxed.signal == "BUY"
+    assert "cost_edge" not in relaxed.context["blocked_filters"]
 
 
 def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase() -> None:
@@ -226,7 +668,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             slippage_bps=0.0,
             live_fee_rate_estimate=0.001,
             entry_edge_buffer_ratio=0.001,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
         conservative = create_sma_with_filter_strategy(
             short_n=2,
@@ -241,7 +683,7 @@ def test_cost_edge_filter_becomes_more_conservative_when_fee_or_buffer_increase(
             slippage_bps=0.0,
             live_fee_rate_estimate=0.01,
             entry_edge_buffer_ratio=0.01,
-            strategy_min_expected_edge_ratio=0.0,
+            cost_edge_min_ratio=0.0,
         ).decide(conn)
     finally:
         conn.close()
@@ -282,6 +724,10 @@ def test_sma_cross_cost_edge_filter_blocks_weak_entry_and_records_context() -> N
     assert decision is not None
     assert decision.signal == "HOLD"
     assert decision.reason == "filtered entry: cost_edge"
+    assert decision.context["raw_signal"] == "BUY"
+    assert decision.context["final_signal"] == "HOLD"
+    assert decision.context["entry_blocked"] is True
+    assert decision.context["entry_block_reason"] == "filtered entry: cost_edge"
     assert decision.context["blocked_by_cost_filter"] is True
     assert decision.context["gap_ratio"] < decision.context["cost_floor_ratio"]
     assert decision.context["filters"]["cost_edge"]["passed"] is False

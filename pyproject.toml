@@ -28,3 +28,11 @@ package-dir = {"" = "src"}
 where = ["src"]
 [project.scripts]
 bithumb-bot = "bithumb_bot.bootstrap:run_cli"
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+markers = [
+    "fast_regression: quick deterministic regression checks for dust, auth, and order-validation behavior",
+    "slow_integration: slower live-like or restart/reconcile integration checks",
+    "lot_native_regression_gate: required lot-native authority gate covering SELL authority, dust suppression, partial-fill recovery, and restart/reconcile preservation",
+]

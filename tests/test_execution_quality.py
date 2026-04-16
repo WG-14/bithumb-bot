@@ -3,6 +3,7 @@ from __future__ import annotations
 from bithumb_bot.app import cmd_report
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.config import settings
+from bithumb_bot.execution import apply_fill_and_trade
 from bithumb_bot.oms import add_fill, create_order, record_submit_attempt
 
 
@@ -100,6 +101,25 @@ def test_report_prints_execution_quality_aggregate(tmp_path, monkeypatch, capsys
     conn = ensure_db(str(db_path))
     try:
         create_order(
+            client_order_id="o_exec_seed_buy",
+            side="BUY",
+            qty_req=0.03,
+            price=None,
+            status="NEW",
+            ts_ms=1_700_000_199_900,
+            conn=conn,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="o_exec_seed_buy",
+            side="BUY",
+            fill_id="f_exec_seed_buy",
+            fill_ts=1_700_000_199_950,
+            price=1_000.0,
+            qty=0.03,
+            fee=0.0,
+        )
+        create_order(
             client_order_id="o_exec_report",
             submit_attempt_id="attempt_exec_report",
             side="SELL",
@@ -127,14 +147,15 @@ def test_report_prints_execution_quality_aggregate(tmp_path, monkeypatch, capsys
             exchange_order_id_obtained=True,
             order_status="NEW",
         )
-        add_fill(
+        apply_fill_and_trade(
+            conn,
             client_order_id="o_exec_report",
+            side="SELL",
             fill_id="f_exec_report",
             fill_ts=1_700_000_200_100,
             price=100_899_000.0,
             qty=0.03,
             fee=0.0,
-            conn=conn,
         )
         conn.commit()
     finally:
@@ -144,5 +165,5 @@ def test_report_prints_execution_quality_aggregate(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
 
     assert "[EXECUTION-QUALITY]" in out
-    assert "fills=1 measured=1" in out
+    assert "fills=2 measured=1" in out
     assert "avg_slippage_bps=10.000" in out

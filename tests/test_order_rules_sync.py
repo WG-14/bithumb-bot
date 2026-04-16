@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from bithumb_bot.broker import order_rules
+from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.config import settings
+from bithumb_bot.db_core import ensure_db, fetch_latest_order_rule_snapshot
 
 
 import pytest
@@ -10,6 +12,9 @@ import pytest
 @pytest.fixture(autouse=True)
 def _reset_settings():
     old = {
+        "DB_PATH": settings.DB_PATH,
+        "MODE": settings.MODE,
+        "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
         "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
         "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
         "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
@@ -234,6 +239,26 @@ def test_get_effective_order_rules_reports_schema_violation_even_with_manual_fal
     assert "response.market.bid.min_total" in warnings[0]
 
 
+def test_get_effective_order_rules_rejects_invalid_live_fallback_config(monkeypatch):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 0)
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(BrokerRejectError, match="live order rule fallback invalid"):
+        order_rules.get_effective_order_rules("KRW-BTC")
+
+
 def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monkeypatch):
     order_rules._cached_rules.clear()
 
@@ -347,8 +372,15 @@ def test_get_effective_order_rules_falls_back_to_manual_when_metadata_fetch_fail
     assert resolved.source["max_qty_decimals"] == "local_fallback"
     assert resolved.source["bid_min_total_krw"] == "unsupported_by_doc"
     assert resolved.source["ruleset"] == "merged"
+    assert resolved.fallback_used is True
+    assert resolved.fallback_reason_code == "UNRECOVERABLE"
+    assert resolved.fallback_reason_summary == "unclassified private API failure; operator investigation required"
+    assert "RuntimeError: boom" in resolved.fallback_reason_detail
+    assert "order-rule auto-sync unavailable" in resolved.fallback_risk
     assert warnings
-    assert "auto-sync failed" in warnings[0]
+    assert "using local fallback only" in warnings[0]
+    assert "reason_code=UNRECOVERABLE" in warnings[0]
+    assert "risk=order-rule auto-sync unavailable" in warnings[0]
 
 
 def test_get_effective_order_rules_cached_result_preserves_source_metadata(monkeypatch):
@@ -383,6 +415,87 @@ def test_get_effective_order_rules_cached_result_preserves_source_metadata(monke
     assert second.source["bid_min_total_krw"] == "chance_doc"
     assert first.source["min_qty"] == "local_fallback"
     assert second.source["min_qty"] == "local_fallback"
+
+
+def test_get_effective_order_rules_persists_durable_snapshot(monkeypatch, tmp_path):
+    order_rules._cached_rules.clear()
+    object.__setattr__(settings, "DB_PATH", str((tmp_path / "rules.sqlite").resolve()))
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0003)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0007)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 9000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 6)
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
+            market_id="KRW-BTC",
+            bid_min_total_krw=7000.0,
+            ask_min_total_krw=7100.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            order_types=("limit",),
+            order_sides=("ask", "bid"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
+        ),
+    )
+
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
+    conn = ensure_db(str((tmp_path / "rules.sqlite").resolve()))
+    try:
+        snapshot = fetch_latest_order_rule_snapshot(conn, market="KRW-BTC")
+    finally:
+        conn.close()
+
+    assert resolved.snapshot_persisted is True
+    assert snapshot is not None
+    assert snapshot.market == "KRW-BTC"
+    assert snapshot.source_mode == "merged"
+    assert snapshot.fallback_used is False
+    assert '"bid_min_total_krw":7000.0' in snapshot.rules_json
+    assert '"min_qty":"local_fallback"' in snapshot.source_json
+    assert '"source_mode":"merged"' in snapshot.source_json
+
+
+def test_get_effective_order_rules_separates_exchange_and_local_fallback_provenance(monkeypatch, tmp_path):
+    order_rules._cached_rules.clear()
+
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _pair: order_rules.ExchangeDerivedConstraints(
+            market_id="KRW-BTC",
+            bid_min_total_krw=7000.0,
+            ask_min_total_krw=7100.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            order_types=("limit", "price", "market"),
+            order_sides=("ask", "bid"),
+            bid_fee=0.0025,
+            ask_fee=0.0025,
+            maker_bid_fee=0.0020,
+            maker_ask_fee=0.0020,
+        ),
+    )
+
+    resolved = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved.source_mode == "merged"
+    assert resolved.exchange_source["bid_min_total_krw"] == "chance_doc"
+    assert resolved.exchange_source["ask_price_unit"] == "chance_doc"
+    assert resolved.local_fallback_source["min_qty"] == "local_fallback"
+    assert resolved.local_fallback_source["qty_step"] == "local_fallback"
+    assert resolved.source["ruleset"] == "merged"
+    assert "exchange_source_json" in resolved.source
+    assert "local_fallback_source_json" in resolved.source
 
 
 def test_side_min_total_krw_prefers_bid_ask_from_doc() -> None:
@@ -451,3 +564,38 @@ def test_side_price_unit_and_limit_price_normalization_are_side_aware() -> None:
 
     assert order_rules.normalize_limit_price_for_side(price=1003.0, side="BUY", rules=rules) == 1000.0
     assert order_rules.normalize_limit_price_for_side(price=1003.0, side="SELL", rules=rules) == 1003.0
+
+
+def test_validate_order_chance_support_rejects_unsupported_side_and_type() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit",),
+        order_sides=("bid",),
+    )
+
+    with pytest.raises(BrokerRejectError, match="rejected order side before submit"):
+        order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="limit")
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="market")
+
+
+def test_validate_order_chance_support_allows_supported_side_and_type() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+    order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="market")
+
+
+def test_validate_order_chance_support_allows_buy_market_notional_when_chance_advertises_market() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="price")
