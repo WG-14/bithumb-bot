@@ -2782,6 +2782,96 @@ def _encode_submit_evidence(*, payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def _submit_contract_fields(
+    *,
+    side: str,
+    order_type: str | None,
+    normalized_qty: float,
+    contract_context: dict[str, object] | None = None,
+) -> dict[str, object]:
+    context = contract_context or {}
+    normalized_side = str(side or "").strip().upper()
+    normalized_order_type = str(order_type or "").strip().lower()
+    is_buy_market_notional = normalized_side == "BUY" and normalized_order_type == "price"
+    exchange_submit_field = str(
+        context.get("exchange_submit_field")
+        or ("price" if is_buy_market_notional else "volume")
+    )
+    exchange_submit_qty = context.get("exchange_submit_qty")
+    if exchange_submit_qty is None and exchange_submit_field == "volume":
+        exchange_submit_qty = float(normalized_qty)
+    chance_supported_order_types = context.get("chance_supported_order_types")
+    if isinstance(chance_supported_order_types, (tuple, list)):
+        chance_supported_order_types = [str(item) for item in chance_supported_order_types]
+    elif chance_supported_order_types is not None:
+        chance_supported_order_types = [str(chance_supported_order_types)]
+    return {
+        "submit_contract_kind": (
+            "market_buy_notional"
+            if is_buy_market_notional
+            else ("market_qty" if normalized_order_type == "market" else "limit_qty_price")
+        ),
+        "exchange_order_type": str(context.get("exchange_order_type") or normalized_order_type or "-"),
+        "chance_validation_order_type": str(
+            context.get("chance_validation_order_type") or normalized_order_type or "-"
+        ),
+        "chance_supported_order_types": chance_supported_order_types,
+        "exchange_submit_field": exchange_submit_field,
+        "exchange_submit_qty": None if exchange_submit_qty is None else float(exchange_submit_qty),
+        "exchange_submit_notional_krw": (
+            None
+            if context.get("exchange_submit_notional_krw") is None
+            else float(context["exchange_submit_notional_krw"])
+        ),
+        "internal_executable_qty": float(
+            context.get("internal_executable_qty")
+            if context.get("internal_executable_qty") is not None
+            else normalized_qty
+        ),
+    }
+
+
+def _submit_failure_fields(
+    *,
+    side: str,
+    order_type: str | None,
+    error_class: str | None,
+    error_summary: str | None,
+) -> dict[str, str]:
+    if not str(error_class or "").strip() and not str(error_summary or "").strip():
+        return {
+            "submit_failure_category": "none",
+            "submit_failure_detail": "none",
+        }
+    normalized_side = str(side or "").strip().upper()
+    normalized_order_type = str(order_type or "").strip().lower()
+    detail = str(error_summary or "")
+    detail_lower = detail.lower()
+    if normalized_side == "BUY" and normalized_order_type == "price":
+        if "/v1/orders/chance rejected order type" in detail_lower:
+            category = "chance_order_type_mismatch"
+        elif "under_min_total" in detail_lower or "order notional below side minimum" in detail_lower:
+            category = "notional_rule_reject"
+        else:
+            category = "broker_reject"
+        return {
+            "submit_failure_category": category,
+            "submit_failure_detail": (
+                "buy_market_notional_contract" if category == "broker_reject" else category
+            ),
+        }
+    sell_failure_category = _classify_sell_failure_category(
+        error_class=error_class,
+        error_summary=error_summary,
+    )
+    return {
+        "submit_failure_category": sell_failure_category,
+        "submit_failure_detail": _sell_failure_detail_from_observability(
+            sell_failure_category=sell_failure_category
+        ),
+    }
+
+
 def _decision_truth_sources_payload(decision_observability: dict[str, object]) -> dict[str, str]:
     return {
         "entry_allowed": str(decision_observability.get("entry_allowed_truth_source") or "-"),
@@ -2886,6 +2976,46 @@ def _submit_via_standard_path(
         sell_failure_category="none",
         sell_failure_detail="none",
     )
+    base_submit_contract_fields = _submit_contract_fields(
+        side=side,
+        order_type=order_type,
+        normalized_qty=float(qty),
+    )
+    base_submit_failure_fields = _submit_failure_fields(
+        side=side,
+        order_type=order_type,
+        error_class=None,
+        error_summary=None,
+    )
+    submit_truth_source_fields: dict[str, object] = dict(sell_truth_source_fields)
+    submit_observability_fields: dict[str, object] = dict(sell_observability)
+    if side != "SELL":
+        submit_truth_source_fields = {
+            key: sell_truth_source_fields[key]
+            for key in (
+                "entry_allowed_truth_source",
+                "effective_flat_truth_source",
+                "raw_qty_open_truth_source",
+                "raw_total_asset_qty_truth_source",
+                "position_qty_truth_source",
+                "submit_payload_qty_truth_source",
+                "normalized_exposure_active_truth_source",
+                "normalized_exposure_qty_truth_source",
+                "open_exposure_qty_truth_source",
+                "dust_tracking_qty_truth_source",
+                "submit_qty_source_truth_source",
+                "position_state_source_truth_source",
+            )
+        }
+        submit_observability_fields = {
+            "observed_position_qty": float(position_qty),
+            "submit_payload_qty": float(qty),
+            "submit_qty_source": submit_qty_source,
+            "position_state_source": position_state_source,
+            "raw_total_asset_qty": float(raw_total_asset_qty),
+            "open_exposure_qty": float(open_exposure_qty),
+            "dust_tracking_qty": float(dust_tracking_qty),
+        }
     lot_evidence_fields = {
         "order_type": order_type,
         "internal_lot_size": None if internal_lot_size is None else float(internal_lot_size),
@@ -2916,14 +3046,16 @@ def _submit_via_standard_path(
             "order_qty": float(order_qty),
             "intended_qty": float(qty),
             "normalized_qty": float(qty),
-            **sell_observability,
-            **sell_truth_source_fields,
+            **submit_observability_fields,
+            **submit_truth_source_fields,
             "reference_price": reference_price,
             "top_of_book": top_of_book_summary,
             "request_ts": None,
             "response_ts": None,
             "submit_path": submit_path,
             "submit_mode": settings.MODE,
+            **base_submit_contract_fields,
+            **base_submit_failure_fields,
             "error_class": None,
             "error_summary": None,
             **lot_evidence_fields,
@@ -3032,6 +3164,9 @@ def _submit_via_standard_path(
                 final_intended_qty=final_intended_qty,
                 final_submitted_qty=final_submitted_qty,
                 decision_reason_code=decision_reason_code,
+                exchange_order_type=base_submit_contract_fields["exchange_order_type"],
+                exchange_submit_field=base_submit_contract_fields["exchange_submit_field"],
+                exchange_submit_notional_krw=base_submit_contract_fields["exchange_submit_notional_krw"] or "",
             )
         )
         order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
@@ -3040,15 +3175,25 @@ def _submit_via_standard_path(
         response_ts = int(time.time() * 1000)
         err = BrokerSubmissionUnknownError(f"submit unknown: {type(e).__name__}: {e}")
         submission_reason_code, timeout_flag = _classify_temporary_submit_error(e)
-        submit_evidence = _encode_submit_evidence(
-            payload={
-                "symbol": symbol,
-                "side": side,
-                "order_qty": float(order_qty),
-                "intended_qty": float(qty),
-                "normalized_qty": float(qty),
-                **{
-                    **sell_observability,
+        failure_submit_contract_fields = _submit_contract_fields(
+            side=side,
+            order_type=order_type,
+            normalized_qty=float(qty),
+            contract_context=getattr(e, "submit_contract_context", None),
+        )
+        failure_submit_fields = _submit_failure_fields(
+            side=side,
+            order_type=order_type,
+            error_class=type(e).__name__,
+            error_summary=str(e),
+        )
+        error_observability_fields: dict[str, object] = {
+            **submit_observability_fields,
+            **submit_truth_source_fields,
+        }
+        if side == "SELL":
+            error_observability_fields.update(
+                {
                     "operator_action": (
                         str(sell_observability.get("operator_action") or "")
                         if str(sell_observability.get("operator_action") or "").strip() not in {"", "-"}
@@ -3059,7 +3204,6 @@ def _submit_via_standard_path(
                         if str(sell_observability.get("dust_action") or "").strip() not in {"", "-"}
                         else MANUAL_DUST_REVIEW_REQUIRED
                     ),
-                    **sell_truth_source_fields,
                     "sell_failure_category": _classify_sell_failure_category(
                         error_class=type(e).__name__,
                         error_summary=str(e),
@@ -3070,13 +3214,24 @@ def _submit_via_standard_path(
                             error_summary=str(e),
                         )
                     ),
-                },
+                }
+            )
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "order_qty": float(order_qty),
+                "intended_qty": float(qty),
+                "normalized_qty": float(qty),
+                **error_observability_fields,
                 "reference_price": reference_price,
                 "top_of_book": top_of_book_summary,
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **failure_submit_contract_fields,
+                **failure_submit_fields,
                 **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
@@ -3131,15 +3286,25 @@ def _submit_via_standard_path(
         response_ts = int(time.time() * 1000)
         reason = f"submit rejected: {type(e).__name__}: {e}"
         is_sell_qty_step_reject = side == "SELL" and "qty does not match qty_step" in str(e)
-        submit_evidence = _encode_submit_evidence(
-            payload={
-                "symbol": symbol,
-                "side": side,
-                "order_qty": float(order_qty),
-                "intended_qty": float(qty),
-                "normalized_qty": float(qty),
-                **{
-                    **sell_observability,
+        failure_submit_contract_fields = _submit_contract_fields(
+            side=side,
+            order_type=order_type,
+            normalized_qty=float(qty),
+            contract_context=getattr(e, "submit_contract_context", None),
+        )
+        failure_submit_fields = _submit_failure_fields(
+            side=side,
+            order_type=order_type,
+            error_class=type(e).__name__,
+            error_summary=str(e),
+        )
+        error_observability_fields = {
+            **submit_observability_fields,
+            **submit_truth_source_fields,
+        }
+        if side == "SELL":
+            error_observability_fields.update(
+                {
                     "operator_action": (
                         str(sell_observability.get("operator_action") or "")
                         if str(sell_observability.get("operator_action") or "").strip() not in {"", "-"}
@@ -3150,7 +3315,6 @@ def _submit_via_standard_path(
                         if str(sell_observability.get("dust_action") or "").strip() not in {"", "-"}
                         else MANUAL_DUST_REVIEW_REQUIRED
                     ),
-                    **sell_truth_source_fields,
                     "sell_failure_category": _classify_sell_failure_category(
                         error_class=type(e).__name__,
                         error_summary=str(e),
@@ -3161,13 +3325,24 @@ def _submit_via_standard_path(
                             error_summary=str(e),
                         )
                     ),
-                },
+                }
+            )
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "order_qty": float(order_qty),
+                "intended_qty": float(qty),
+                "normalized_qty": float(qty),
+                **error_observability_fields,
                 "reference_price": reference_price,
                 "top_of_book": top_of_book_summary,
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **failure_submit_contract_fields,
+                **failure_submit_fields,
                 **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
@@ -3222,15 +3397,25 @@ def _submit_via_standard_path(
     except Exception as e:
         response_ts = int(time.time() * 1000)
         reason = f"submit failed: {type(e).__name__}: {e}"
-        submit_evidence = _encode_submit_evidence(
-            payload={
-                "symbol": symbol,
-                "side": side,
-                "order_qty": float(order_qty),
-                "intended_qty": float(qty),
-                "normalized_qty": float(qty),
-                **{
-                    **sell_observability,
+        failure_submit_contract_fields = _submit_contract_fields(
+            side=side,
+            order_type=order_type,
+            normalized_qty=float(qty),
+            contract_context=getattr(e, "submit_contract_context", None),
+        )
+        failure_submit_fields = _submit_failure_fields(
+            side=side,
+            order_type=order_type,
+            error_class=type(e).__name__,
+            error_summary=str(e),
+        )
+        error_observability_fields = {
+            **submit_observability_fields,
+            **submit_truth_source_fields,
+        }
+        if side == "SELL":
+            error_observability_fields.update(
+                {
                     "sell_failure_category": _classify_sell_failure_category(
                         error_class=type(e).__name__,
                         error_summary=str(e),
@@ -3241,13 +3426,24 @@ def _submit_via_standard_path(
                             error_summary=str(e),
                         )
                     ),
-                },
+                }
+            )
+        submit_evidence = _encode_submit_evidence(
+            payload={
+                "symbol": symbol,
+                "side": side,
+                "order_qty": float(order_qty),
+                "intended_qty": float(qty),
+                "normalized_qty": float(qty),
+                **error_observability_fields,
                 "reference_price": reference_price,
                 "top_of_book": top_of_book_summary,
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **failure_submit_contract_fields,
+                **failure_submit_fields,
                 **lot_evidence_fields,
                 "error_class": type(e).__name__,
                 "error_summary": str(e),
@@ -3317,6 +3513,22 @@ def _submit_via_standard_path(
         )
     if not order.exchange_order_id:
         reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
+        missing_id_submit_contract_fields = _submit_contract_fields(
+            side=side,
+            order_type=order_type,
+            normalized_qty=float(qty),
+            contract_context=(
+                order.raw.get("submit_contract_context")
+                if isinstance(getattr(order, "raw", None), dict)
+                else None
+            ),
+        )
+        missing_id_submit_failure_fields = _submit_failure_fields(
+            side=side,
+            order_type=order_type,
+            error_class=None,
+            error_summary="missing exchange_order_id",
+        )
         submit_evidence = _encode_submit_evidence(
             payload={
                 "symbol": symbol,
@@ -3326,7 +3538,7 @@ def _submit_via_standard_path(
                 "normalized_qty": float(qty),
                 "submit_qty_source": submit_qty_source,
                 "position_state_source": position_state_source,
-                **sell_truth_source_fields,
+                **submit_truth_source_fields,
                 "raw_total_asset_qty": float(raw_total_asset_qty),
                 "open_exposure_qty": float(open_exposure_qty),
                 "dust_tracking_qty": float(dust_tracking_qty),
@@ -3336,6 +3548,8 @@ def _submit_via_standard_path(
                 "response_ts": response_ts,
                 "submit_path": submit_path,
                 "submit_mode": settings.MODE,
+                **missing_id_submit_contract_fields,
+                **missing_id_submit_failure_fields,
                 **lot_evidence_fields,
                 "error_class": None,
                 "error_summary": "missing exchange_order_id",
@@ -3388,6 +3602,22 @@ def _submit_via_standard_path(
         return None
 
     set_status(client_order_id, order.status, conn=conn)
+    success_submit_contract_fields = _submit_contract_fields(
+        side=side,
+        order_type=order_type,
+        normalized_qty=float(qty),
+        contract_context=(
+            order.raw.get("submit_contract_context")
+            if isinstance(getattr(order, "raw", None), dict)
+            else None
+        ),
+    )
+    success_submit_failure_fields = _submit_failure_fields(
+        side=side,
+        order_type=order_type,
+        error_class=None,
+        error_summary=None,
+    )
 
     submit_evidence = _encode_submit_evidence(
         payload={
@@ -3396,13 +3626,16 @@ def _submit_via_standard_path(
             "order_qty": float(order_qty),
             "intended_qty": float(qty),
             "normalized_qty": float(qty),
-            **sell_observability,
+            **submit_observability_fields,
+            **submit_truth_source_fields,
             "reference_price": reference_price,
             "top_of_book": top_of_book_summary,
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": submit_path,
             "submit_mode": settings.MODE,
+            **success_submit_contract_fields,
+            **success_submit_failure_fields,
             **lot_evidence_fields,
             "error_class": None,
             "error_summary": None,

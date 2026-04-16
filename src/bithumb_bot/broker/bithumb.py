@@ -2153,190 +2153,248 @@ class BithumbBroker:
             validate_order_chance_support,
             side_min_total_krw,
         )
-
-        order_rules_resolution = get_effective_order_rules(market)
-        rules = order_rules_resolution.rules
-        order_side = "BUY" if normalized_side == "bid" else "SELL"
-        submit_price_tick_policy = _resolve_submit_price_tick_policy(
-            order_side=order_side,
-            price=price,
-            rules=rules,
-        )
-        validate_order_chance_support(rules=rules, side=side, order_type=("price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")))
-        if price is None and normalized_side == "ask":
-            broker_precision_qty = self._truncate_volume(float(qty))
-            if abs(float(qty) - broker_precision_qty) > DUST_POSITION_EPS:
-                raise BrokerRejectError(
-                    "qty requires explicit lot normalization before submit: "
-                    f"raw_qty={format(float(qty), 'f')} broker_precision_qty={format(broker_precision_qty, 'f')}"
+        submit_contract_context: dict[str, object] = {}
+        try:
+            order_rules_resolution = get_effective_order_rules(market)
+            rules = order_rules_resolution.rules
+            order_side = "BUY" if normalized_side == "bid" else "SELL"
+            chance_validation_order_type = (
+                "price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")
+            )
+            chance_supported_order_types = tuple(
+                sorted(
+                    {
+                        str(item).strip().lower()
+                        for item in (getattr(rules, "order_types", ()) or ())
+                        if str(item).strip()
+                    }
                 )
-        effective_market_price: float | None = price
-        if price is None and normalized_side == "bid":
-            try:
-                quote = fetch_orderbook_top(market)
-                effective_market_price = validated_best_quote_ask_price(quote, requested_market=market)
-            except Exception as exc:
-                raise BrokerTemporaryError(
-                    "market buy blocked: failed to load validated best ask "
-                    f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
-                ) from exc
-
-        lot_rules = build_market_lot_rules(
-            market_id=market,
-            market_price=effective_market_price,
-            rules=rules,
-            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
-            exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-            exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
-            source_mode="exchange",
-        )
-        has_explicit_qty_controls = any(
-            hasattr(rules, field_name)
-            for field_name in ("min_qty", "qty_step", "max_qty_decimals")
-        )
-        qty_split = lot_rules.split_qty(float(qty))
-        # Defensive invariant only: upstream live SELL gating should suppress
-        # no-executable and dust-only cases before we reach broker submission.
-        if has_explicit_qty_controls and qty_split.executable is False:
-            raise BrokerRejectError(
-                f"{normalized_side.lower()} qty suppressed by quantity rule: "
-                f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
-                f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
-                f"lot_count={qty_split.lot_count} client_order_id={validated_client_order_id}"
             )
-        if has_explicit_qty_controls and qty_split.dust_qty > DUST_POSITION_EPS:
-            raise BrokerRejectError(
-                f"qty requires explicit lot normalization before submit: "
-                f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
-                f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
+            exchange_submit_field_hint = "price" if price is None and normalized_side == "bid" else "volume"
+            submit_contract_context.update(
+                {
+                    "market": market,
+                    "order_side": order_side,
+                    "chance_validation_order_type": chance_validation_order_type,
+                    "chance_supported_order_types": list(chance_supported_order_types),
+                    "exchange_submit_field": exchange_submit_field_hint,
+                    "exchange_order_type": chance_validation_order_type,
+                    "exchange_submit_notional_krw": None,
+                    "exchange_submit_qty": None,
+                    "internal_executable_qty": None,
+                }
+            )
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SUBMIT] chance contract",
+                    market=market,
+                    side=normalized_side,
+                    client_order_id=validated_client_order_id,
+                    chance_validation_order_type=chance_validation_order_type,
+                    supported_order_types=",".join(chance_supported_order_types) or "-",
+                    submit_field=exchange_submit_field_hint,
+                )
             )
 
-        internal_lot_qty = (
-            lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
-            if has_explicit_qty_controls
-            else float(qty)
-        )
-        exchange_submit_qty = internal_lot_qty
-        exchange_submit_notional_krw: float | None = None
-        exchange_submit_field = "volume"
-        payload: dict[str, object]
-        if price is None:
-            if normalized_side == "bid":
-                # Bithumb market BUY still submits KRW notional (ord_type=price).
-                # Internal execution stays lot-first, while the exchange-side
-                # submit field is the KRW notional derived from that lot quantity.
-                exchange_submit_field = "price"
-                exchange_submit_notional = self._decimal_from_value(effective_market_price) * self._decimal_from_value(internal_lot_qty)
-                bid_price_unit = self._decimal_from_value(submit_price_tick_policy.price_unit)
-                if bid_price_unit > 0:
-                    exchange_submit_notional = (exchange_submit_notional / bid_price_unit).to_integral_value(rounding=ROUND_DOWN) * bid_price_unit
+            submit_price_tick_policy = _resolve_submit_price_tick_policy(
+                order_side=order_side,
+                price=price,
+                rules=rules,
+            )
+            validate_order_chance_support(
+                rules=rules,
+                side=side,
+                order_type=chance_validation_order_type,
+            )
+            if price is None and normalized_side == "ask":
+                broker_precision_qty = self._truncate_volume(float(qty))
+                if abs(float(qty) - broker_precision_qty) > DUST_POSITION_EPS:
+                    raise BrokerRejectError(
+                        "qty requires explicit lot normalization before submit: "
+                        f"raw_qty={format(float(qty), 'f')} broker_precision_qty={format(broker_precision_qty, 'f')}"
+                    )
+            effective_market_price: float | None = price
+            if price is None and normalized_side == "bid":
+                try:
+                    quote = fetch_orderbook_top(market)
+                    effective_market_price = validated_best_quote_ask_price(quote, requested_market=market)
+                except Exception as exc:
+                    raise BrokerTemporaryError(
+                        "market buy blocked: failed to load validated best ask "
+                        f"market={market} client_order_id={validated_client_order_id} cause={type(exc).__name__}: {exc}"
+                    ) from exc
+
+            lot_rules = build_market_lot_rules(
+                market_id=market,
+                market_price=effective_market_price,
+                rules=rules,
+                exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+                exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+                exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
+                source_mode="exchange",
+            )
+            has_explicit_qty_controls = any(
+                hasattr(rules, field_name)
+                for field_name in ("min_qty", "qty_step", "max_qty_decimals")
+            )
+            qty_split = lot_rules.split_qty(float(qty))
+            # Defensive invariant only: upstream live SELL gating should suppress
+            # no-executable and dust-only cases before we reach broker submission.
+            if has_explicit_qty_controls and qty_split.executable is False:
+                raise BrokerRejectError(
+                    f"{normalized_side.lower()} qty suppressed by quantity rule: "
+                    f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
+                    f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
+                    f"lot_count={qty_split.lot_count} client_order_id={validated_client_order_id}"
+                )
+            if has_explicit_qty_controls and qty_split.dust_qty > DUST_POSITION_EPS:
+                raise BrokerRejectError(
+                    f"qty requires explicit lot normalization before submit: "
+                    f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
+                    f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
+                )
+
+            internal_lot_qty = (
+                lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+                if has_explicit_qty_controls
+                else float(qty)
+            )
+            exchange_submit_qty = internal_lot_qty
+            exchange_submit_notional_krw: float | None = None
+            exchange_submit_field = "volume"
+            payload: dict[str, object]
+            if price is None:
+                if normalized_side == "bid":
+                    # Bithumb market BUY still submits KRW notional (ord_type=price).
+                    # Internal execution stays lot-first, while the exchange-side
+                    # submit field is the KRW notional derived from that lot quantity.
+                    exchange_submit_field = "price"
+                    exchange_submit_notional = self._decimal_from_value(effective_market_price) * self._decimal_from_value(internal_lot_qty)
+                    bid_price_unit = self._decimal_from_value(submit_price_tick_policy.price_unit)
+                    if bid_price_unit > 0:
+                        exchange_submit_notional = (exchange_submit_notional / bid_price_unit).to_integral_value(rounding=ROUND_DOWN) * bid_price_unit
+                    min_total = side_min_total_krw(rules=rules, side=order_side)
+                    if min_total > 0 and exchange_submit_notional < self._decimal_from_value(min_total):
+                        raise BrokerRejectError(
+                            "order notional below side minimum for market BUY: "
+                            f"side={order_side} notional={format(exchange_submit_notional, 'f')} min_total={min_total:.8f}"
+                        )
+                    exchange_submit_notional_krw = float(exchange_submit_notional)
+                    payload = build_order_payload(
+                        market=market,
+                        side=normalized_side,
+                        ord_type="price",
+                        price=self._format_krw_amount(exchange_submit_notional),
+                        client_order_id=validated_client_order_id,
+                    )
+                else:
+                    payload = build_order_payload(
+                        market=market,
+                        side=normalized_side,
+                        ord_type="market",
+                        volume=self._format_volume(exchange_submit_qty),
+                        client_order_id=validated_client_order_id,
+                    )
+            else:
+                requested_limit_price = self._decimal_from_value(price)
+                if requested_limit_price <= 0:
+                    raise BrokerRejectError(f"limit price must be > 0 (got {price})")
+
+                price_unit = submit_price_tick_policy.price_unit
+                normalized_limit_price = self._decimal_from_value(
+                    normalize_limit_price_for_side(price=float(requested_limit_price), side=order_side, rules=rules)
+                )
+                # Tick-size shaping is execution-owned payload normalization only.
+                # It must not alter side/qty authority that was decided upstream.
+                if normalized_limit_price <= 0:
+                    raise BrokerRejectError(
+                        "limit price normalization produced non-positive executable price: "
+                        f"side={order_side} requested={format(requested_limit_price, 'f')} "
+                        f"price_unit={price_unit:.8f} normalized={format(normalized_limit_price, 'f')}"
+                    )
+
+                exchange_submit_notional = normalized_limit_price * self._decimal_from_value(internal_lot_qty)
                 min_total = side_min_total_krw(rules=rules, side=order_side)
                 if min_total > 0 and exchange_submit_notional < self._decimal_from_value(min_total):
                     raise BrokerRejectError(
-                        "order notional below side minimum for market BUY: "
+                        "order notional below side minimum for limit order: "
                         f"side={order_side} notional={format(exchange_submit_notional, 'f')} min_total={min_total:.8f}"
                     )
-                exchange_submit_notional_krw = float(exchange_submit_notional)
                 payload = build_order_payload(
                     market=market,
                     side=normalized_side,
-                    ord_type="price",
-                    price=self._format_krw_amount(exchange_submit_notional),
-                    client_order_id=validated_client_order_id,
-                )
-            else:
-                payload = build_order_payload(
-                    market=market,
-                    side=normalized_side,
-                    ord_type="market",
+                    ord_type="limit",
                     volume=self._format_volume(exchange_submit_qty),
+                    price=self._format_krw_amount(normalized_limit_price),
                     client_order_id=validated_client_order_id,
                 )
-        else:
-            requested_limit_price = self._decimal_from_value(price)
-            if requested_limit_price <= 0:
-                raise BrokerRejectError(f"limit price must be > 0 (got {price})")
 
-            price_unit = submit_price_tick_policy.price_unit
-            normalized_limit_price = self._decimal_from_value(
-                normalize_limit_price_for_side(price=float(requested_limit_price), side=order_side, rules=rules)
+            submit_contract_context.update(
+                {
+                    "exchange_submit_field": exchange_submit_field,
+                    "exchange_order_type": str(payload.get("order_type") or chance_validation_order_type),
+                    "exchange_submit_notional_krw": exchange_submit_notional_krw,
+                    "exchange_submit_qty": float(exchange_submit_qty) if exchange_submit_field == "volume" else None,
+                    "internal_executable_qty": float(internal_lot_qty),
+                }
             )
-            # Tick-size shaping is execution-owned payload normalization only.
-            # It must not alter side/qty authority that was decided upstream.
-            if normalized_limit_price <= 0:
-                raise BrokerRejectError(
-                    "limit price normalization produced non-positive executable price: "
-                    f"side={order_side} requested={format(requested_limit_price, 'f')} "
-                    f"price_unit={price_unit:.8f} normalized={format(normalized_limit_price, 'f')}"
+            canonical_payload = BithumbPrivateAPI._query_string(payload)
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SUBMIT] validated payload",
+                    market=payload.get("market"),
+                    side=normalized_side,
+                    order_type=payload.get("order_type"),
+                    chance_validation_order_type=chance_validation_order_type,
+                    supported_order_types=",".join(chance_supported_order_types) or "-",
+                    submit_field=exchange_submit_field,
+                    volume=payload.get("volume"),
+                    price=payload.get("price"),
+                    client_order_id=validated_client_order_id,
+                    requested_qty=float(qty),
+                    internal_lot_qty=float(internal_lot_qty),
+                    exchange_submit_qty=float(exchange_submit_qty),
+                    exchange_submit_notional_krw=exchange_submit_notional_krw if exchange_submit_notional_krw is not None else "",
+                    dust_qty=float(qty_split.dust_qty),
+                    lot_count=int(qty_split.lot_count),
+                    lot_size=float(lot_rules.lot_size),
+                    submit_price_tick_applies=1 if submit_price_tick_policy.applies else 0,
+                    submit_price_tick_unit=float(submit_price_tick_policy.price_unit),
+                    submit_price_tick_reason=submit_price_tick_policy.reason,
+                    canonical_query_string=canonical_payload,
+                    payload_fields=",".join(payload.keys()),
                 )
+            )
 
-            exchange_submit_notional = normalized_limit_price * self._decimal_from_value(internal_lot_qty)
-            min_total = side_min_total_krw(rules=rules, side=order_side)
-            if min_total > 0 and exchange_submit_notional < self._decimal_from_value(min_total):
+            data = self._post_private("/v2/orders", payload, retry_safe=False)
+            if not isinstance(data, dict):
+                raise BrokerRejectError(f"unexpected /v2/orders payload type: {type(data).__name__}")
+            response_row = data.get("data") if isinstance(data.get("data"), dict) else data
+            resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
+                response_row if isinstance(response_row, dict) else {},
+                fallback_client_order_id=validated_client_order_id,
+                allow_coid_alias=True,
+                context="/v2/orders submit response",
+            )
+            if not resolved_exchange_order_id:
+                raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
+            if resolved_client_order_id and resolved_client_order_id != validated_client_order_id:
                 raise BrokerRejectError(
-                    "order notional below side minimum for limit order: "
-                    f"side={order_side} notional={format(exchange_submit_notional, 'f')} min_total={min_total:.8f}"
+                    "order submit response client_order_id mismatch: "
+                    f"requested={validated_client_order_id} response={resolved_client_order_id}"
                 )
-            payload = build_order_payload(
-                market=market,
-                side=normalized_side,
-                ord_type="limit",
-                volume=self._format_volume(exchange_submit_qty),
-                price=self._format_krw_amount(normalized_limit_price),
-                client_order_id=validated_client_order_id,
+            raw = self._raw_v2_order_fields(
+                response_row if isinstance(response_row, dict) else {},
+                fallback_client_order_id=validated_client_order_id,
             )
-
-        canonical_payload = BithumbPrivateAPI._query_string(payload)
-        RUN_LOG.info(
-            format_log_kv(
-                "[ORDER_SUBMIT] validated payload",
-                market=payload.get("market"),
-                side=normalized_side,
-                order_type=payload.get("order_type"),
-                submit_field=exchange_submit_field,
-                volume=payload.get("volume"),
-                price=payload.get("price"),
-                client_order_id=validated_client_order_id,
-                requested_qty=float(qty),
-                internal_lot_qty=float(internal_lot_qty),
-                exchange_submit_qty=float(exchange_submit_qty),
-                exchange_submit_notional_krw=exchange_submit_notional_krw if exchange_submit_notional_krw is not None else "",
-                dust_qty=float(qty_split.dust_qty),
-                lot_count=int(qty_split.lot_count),
-                lot_size=float(lot_rules.lot_size),
-                submit_price_tick_applies=1 if submit_price_tick_policy.applies else 0,
-                submit_price_tick_unit=float(submit_price_tick_policy.price_unit),
-                submit_price_tick_reason=submit_price_tick_policy.reason,
-                canonical_query_string=canonical_payload,
-                payload_fields=",".join(payload.keys()),
-            )
-        )
-
-        data = self._post_private("/v2/orders", payload, retry_safe=False)
-        if not isinstance(data, dict):
-            raise BrokerRejectError(f"unexpected /v2/orders payload type: {type(data).__name__}")
-        response_row = data.get("data") if isinstance(data.get("data"), dict) else data
-        resolved_client_order_id, resolved_exchange_order_id = self._resolve_order_identifiers(
-            response_row if isinstance(response_row, dict) else {},
-            fallback_client_order_id=validated_client_order_id,
-            allow_coid_alias=True,
-            context="/v2/orders submit response",
-        )
-        if not resolved_exchange_order_id:
-            raise BrokerRejectError(f"missing order id from /v2/orders response: {data}")
-        if resolved_client_order_id and resolved_client_order_id != validated_client_order_id:
-            raise BrokerRejectError(
-                "order submit response client_order_id mismatch: "
-                f"requested={validated_client_order_id} response={resolved_client_order_id}"
-            )
-        raw = self._raw_v2_order_fields(
-            response_row if isinstance(response_row, dict) else {},
-            fallback_client_order_id=validated_client_order_id,
-        )
-        raw.setdefault("market", payload.get("market"))
-        raw.setdefault("order_type", payload.get("order_type"))
-        raw.setdefault("ord_type", payload.get("order_type"))
-        return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, float(internal_lot_qty), 0.0, now, now, raw)
+            raw.setdefault("market", payload.get("market"))
+            raw.setdefault("order_type", payload.get("order_type"))
+            raw.setdefault("ord_type", payload.get("order_type"))
+            raw.setdefault("submit_contract_context", dict(submit_contract_context))
+            return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, float(internal_lot_qty), 0.0, now, now, raw)
+        except BrokerRejectError as exc:
+            setattr(exc, "submit_contract_context", dict(submit_contract_context))
+            raise
 
     def request_cancel_order(
         self,

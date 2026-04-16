@@ -291,6 +291,65 @@ def test_private_order_submit_uses_utf8_json_content_type(monkeypatch):
     assert str(_SequencedClient.requests[0]["headers"]["Content-Type"]).startswith("application/json")
 
 
+def test_market_buy_chance_contract_log_includes_supported_types_and_submit_field(monkeypatch, caplog):
+    _configure_live()
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _market: object(),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.validated_best_quote_ask_price",
+        lambda _quote, requested_market: 100_000_000.0,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire",
+        lambda **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                market_id="KRW-BTC",
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=1.0,
+                ask_price_unit=1.0,
+                order_types=("limit", "price", "market"),
+                order_sides=("ask", "bid"),
+                bid_fee=0.0025,
+                ask_fee=0.0025,
+                maker_bid_fee=0.0025,
+                maker_ask_fee=0.0025,
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+            )
+        ),
+    )
+
+    broker = BithumbBroker()
+    monkeypatch.setattr(broker, "_market", lambda: "KRW-BTC")
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("forced stop after logging")),
+    )
+
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        with pytest.raises(BrokerRejectError, match="forced stop after logging"):
+            broker.place_order(
+                client_order_id="cid-buy-contract-log",
+                side="BUY",
+                qty=0.0004,
+                price=None,
+            )
+
+    assert "chance_validation_order_type=price" in caplog.text
+    assert "supported_order_types=limit,market,price" in caplog.text
+    assert "submit_field=price" in caplog.text
+
+
 def test_classify_private_api_error_categories_cover_v1_orders_contract_failures() -> None:
     code, summary = classify_private_api_error(BrokerRejectError("/v1/orders schema mismatch: unknown state 'halted'"))
     assert code == "DOC_SCHEMA"
