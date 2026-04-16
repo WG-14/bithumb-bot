@@ -34,6 +34,8 @@ def _doc_order_chance_payload(*, market: str = "KRW-BTC") -> dict[str, object]:
         "market": {
             "id": market,
             "order_types": ["limit", "price", "market"],
+            "bid_types": ["limit", "price", "market"],
+            "ask_types": ["limit", "price", "market"],
             "order_sides": ["ask", "bid"],
             "bid": {"price_unit": "1", "min_total": "5000"},
             "ask": {"price_unit": "1", "min_total": "5000"},
@@ -103,6 +105,8 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
     parsed = order_rules.parse_order_chance_response(valid_doc_shaped_response, requested_market="KRW-BTC")
 
     assert parsed.market_id == "KRW-BTC"
+    assert parsed.bid_types == ("limit", "price", "market")
+    assert parsed.ask_types == ("limit", "price", "market")
     assert parsed.bid.price_unit == 1.0
     assert parsed.bid.min_total == 5000.0
     assert parsed.ask.price_unit == 1.0
@@ -155,6 +159,22 @@ def test_derive_order_rules_from_chance_preserves_bid_ask_split():
     assert rules.bid_price_unit == 10.0
     assert rules.ask_price_unit == 1.0
     assert not hasattr(rules, "min_notional_krw")
+
+
+def test_derive_order_rules_from_chance_preserves_side_specific_order_types() -> None:
+    payload = _doc_order_chance_payload()
+    payload["market"] = payload["market"] | {
+        "order_types": ["limit"],
+        "bid_types": ["limit", "price"],
+        "ask_types": ["limit", "market"],
+    }
+
+    response = order_rules.parse_order_chance_response(payload, requested_market="KRW-BTC")
+    rules = order_rules.derive_order_rules_from_chance(response)
+
+    assert rules.order_types == ("limit",)
+    assert rules.bid_types == ("limit", "price")
+    assert rules.ask_types == ("limit", "market")
 
 
 def test_fetch_exchange_order_rules_fails_on_market_id_mismatch(monkeypatch, market_mismatch_response):
@@ -582,6 +602,8 @@ def test_validate_order_chance_support_rejects_unsupported_side_and_type() -> No
 def test_validate_order_chance_support_allows_supported_side_and_type() -> None:
     rules = order_rules.DerivedOrderConstraints(
         order_types=("limit", "price", "market"),
+        bid_types=("limit", "price", "market"),
+        ask_types=("limit", "price", "market"),
         order_sides=("bid", "ask"),
     )
 
@@ -599,3 +621,36 @@ def test_validate_order_chance_support_allows_buy_market_notional_when_chance_ad
 
     with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
         order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="price")
+
+
+def test_validate_order_chance_support_prefers_side_specific_order_types() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit",),
+        bid_types=("limit", "price"),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+    order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="market")
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="price")
+
+
+def test_validate_order_chance_support_uses_shared_market_fallback_only_when_bid_types_missing() -> None:
+    side_specific_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        bid_types=("limit",),
+        order_sides=("bid", "ask"),
+    )
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        order_rules.validate_order_chance_support(rules=side_specific_rules, side="BUY", order_type="price")
+
+    fallback_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    order_rules.validate_order_chance_support(rules=fallback_rules, side="BUY", order_type="price")

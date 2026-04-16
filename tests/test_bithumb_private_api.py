@@ -1610,7 +1610,7 @@ def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypa
         broker.place_order(client_order_id="cid-type", side="BUY", qty=0.4320, price=None)
 
 
-def test_place_order_accepts_supported_side_and_type_from_chance_rules(monkeypatch):
+def test_place_order_accepts_buy_market_notional_from_side_specific_chance_types(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     call: dict[str, object] = {}
@@ -1631,7 +1631,9 @@ def test_place_order_accepts_supported_side_and_type_from_chance_rules(monkeypat
                         "ask_price_unit": 1.0,
                         "min_notional_krw": 5000.0,
                         "order_sides": ("bid", "ask"),
-                        "order_types": ("limit", "price", "market"),
+                        "order_types": ("limit",),
+                        "bid_types": ("limit", "price"),
+                        "ask_types": ("limit", "market"),
                     },
                 )(),
             },
@@ -1653,6 +1655,7 @@ def test_place_order_accepts_supported_side_and_type_from_chance_rules(monkeypat
 
     assert order.exchange_order_id == "mkt-chance-ok"
     assert call["endpoint"] == "/v2/orders"
+    assert call["payload"]["order_type"] == "price"
 
 
 def test_place_order_accepts_buy_market_notional_when_chance_only_advertises_market(monkeypatch):

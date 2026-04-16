@@ -36,6 +36,8 @@ class OrderChanceSide:
 class OrderChanceResponse:
     market_id: str
     order_types: tuple[str, ...]
+    bid_types: tuple[str, ...]
+    ask_types: tuple[str, ...]
     order_sides: tuple[str, ...]
     bid: OrderChanceSide
     ask: OrderChanceSide
@@ -53,6 +55,8 @@ class DerivedOrderConstraints:
     bid_price_unit: float = 0.0
     ask_price_unit: float = 0.0
     order_types: tuple[str, ...] = ()
+    bid_types: tuple[str, ...] = ()
+    ask_types: tuple[str, ...] = ()
     order_sides: tuple[str, ...] = ()
     bid_fee: float = 0.0
     ask_fee: float = 0.0
@@ -72,6 +76,8 @@ class ExchangeDerivedConstraints:
     bid_price_unit: float = 0.0
     ask_price_unit: float = 0.0
     order_types: tuple[str, ...] = ()
+    bid_types: tuple[str, ...] = ()
+    ask_types: tuple[str, ...] = ()
     order_sides: tuple[str, ...] = ()
     bid_fee: float = 0.0
     ask_fee: float = 0.0
@@ -232,11 +238,11 @@ def _normalize_chance_order_type(order_type: str) -> str:
 
 def supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
     normalized_side = _normalize_chance_side(side)
-    supported_types = {
-        str(item).strip().lower()
-        for item in getattr(rules, "order_types", ()) or ()
-        if str(item).strip()
-    }
+    side_specific_attr = "bid_types" if normalized_side == "bid" else "ask_types"
+    # Side-specific chance metadata is authoritative when present; shared
+    # order_types is only a compatibility fallback for older payload shapes.
+    raw_supported_types = getattr(rules, side_specific_attr, ()) or getattr(rules, "order_types", ()) or ()
+    supported_types = {str(item).strip().lower() for item in raw_supported_types if str(item).strip()}
     if normalized_side == "bid" and "market" in supported_types:
         # /v1/orders/chance may advertise BUY market support as "market"
         # even though runtime submission must use the notional token "price".
@@ -345,6 +351,8 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
         )
 
     _require_non_empty_list(market, "order_types", where="response.market")
+    _require_non_empty_list(market, "bid_types", where="response.market")
+    _require_non_empty_list(market, "ask_types", where="response.market")
     _require_non_empty_list(market, "order_sides", where="response.market")
 
     bid = _require_dict(market, "bid", where="response.market")
@@ -353,6 +361,8 @@ def parse_order_chance_response(payload: dict[str, Any], *, requested_market: st
     return OrderChanceResponse(
         market_id=market_id,
         order_types=tuple(str(item) for item in _require_non_empty_list(market, "order_types", where="response.market")),
+        bid_types=tuple(str(item) for item in _require_non_empty_list(market, "bid_types", where="response.market")),
+        ask_types=tuple(str(item) for item in _require_non_empty_list(market, "ask_types", where="response.market")),
         order_sides=tuple(str(item) for item in _require_non_empty_list(market, "order_sides", where="response.market")),
         bid=OrderChanceSide(
             price_unit=_optional_positive_number(bid, "price_unit", where="response.market.bid"),
@@ -377,6 +387,8 @@ def _exchange_rule_source_map(exchange: ExchangeDerivedConstraints) -> dict[str,
         "bid_price_unit": "chance_doc" if exchange.bid_price_unit > 0 else "missing",
         "ask_price_unit": "chance_doc" if exchange.ask_price_unit > 0 else "missing",
         "order_types": "chance_doc",
+        "bid_types": "chance_doc",
+        "ask_types": "chance_doc",
         "order_sides": "chance_doc",
         "bid_fee": "chance_doc",
         "ask_fee": "chance_doc",
@@ -402,6 +414,8 @@ def derive_order_rules_from_chance(response: OrderChanceResponse) -> ExchangeDer
         bid_price_unit=float(response.bid.price_unit or 0.0),
         ask_price_unit=float(response.ask.price_unit or 0.0),
         order_types=response.order_types,
+        bid_types=response.bid_types,
+        ask_types=response.ask_types,
         order_sides=response.order_sides,
         bid_fee=response.bid_fee,
         ask_fee=response.ask_fee,
@@ -475,6 +489,8 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             "bid_price_unit": "unsupported_by_doc",
             "ask_price_unit": "unsupported_by_doc",
             "order_types": "unsupported_by_doc",
+            "bid_types": "unsupported_by_doc",
+            "ask_types": "unsupported_by_doc",
             "order_sides": "unsupported_by_doc",
             "bid_fee": "unsupported_by_doc",
             "ask_fee": "unsupported_by_doc",
@@ -530,6 +546,8 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         bid_price_unit=exchange.bid_price_unit,
         ask_price_unit=exchange.ask_price_unit,
         order_types=exchange.order_types,
+        bid_types=exchange.bid_types,
+        ask_types=exchange.ask_types,
         order_sides=exchange.order_sides,
         bid_fee=exchange.bid_fee,
         ask_fee=exchange.ask_fee,
