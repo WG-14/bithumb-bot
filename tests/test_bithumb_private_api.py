@@ -33,6 +33,8 @@ from bithumb_bot.lot_model import build_market_lot_rules, lot_count_to_qty
 from bithumb_bot.public_api_orderbook import BestQuote
 from decimal import Decimal, ROUND_DOWN
 
+from bithumb_bot.broker import order_rules
+
 _HTTPX_TIMEOUT = getattr(httpx, "ReadTimeout", getattr(httpx, "RequestError"))
 _HTTPX_CONNECT = getattr(httpx, "ConnectError", getattr(httpx, "RequestError"))
 
@@ -139,6 +141,10 @@ def _stub_order_rules(monkeypatch):
                         "bid_price_unit": 1.0,
                         "ask_price_unit": 1.0,
                         "min_notional_krw": 5000.0,
+                        "order_types": ("limit",),
+                        "bid_types": ("limit", "price"),
+                        "ask_types": ("limit", "market"),
+                        "order_sides": ("bid", "ask"),
                     },
                 )(),
             },
@@ -350,7 +356,7 @@ def test_market_buy_chance_contract_log_includes_supported_types_and_submit_fiel
     assert "submit_field=price" in caplog.text
 
 
-def test_market_buy_chance_contract_log_normalizes_market_support_to_runtime_price_contract(monkeypatch, caplog):
+def test_market_buy_chance_contract_log_surfaces_blocked_market_only_support(monkeypatch, caplog):
     _configure_live()
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
@@ -396,7 +402,7 @@ def test_market_buy_chance_contract_log_normalizes_market_support_to_runtime_pri
     )
 
     with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
-        with pytest.raises(BrokerRejectError, match="forced stop after logging"):
+        with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
             broker.place_order(
                 client_order_id="cid-buy-contract-market-alias-log",
                 side="BUY",
@@ -405,7 +411,10 @@ def test_market_buy_chance_contract_log_normalizes_market_support_to_runtime_pri
             )
 
     assert "chance_validation_order_type=price" in caplog.text
-    assert "supported_order_types=limit,market,price" in caplog.text
+    assert "supported_order_types=limit,market" in caplog.text
+    assert "buy_price_none_allowed=0" in caplog.text
+    assert "buy_price_none_alias_used=0" in caplog.text
+    assert "buy_price_none_block_reason=buy_price_none_requires_explicit_price_support" in caplog.text
     assert "submit_field=price" in caplog.text
 
 
@@ -1606,7 +1615,7 @@ def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypa
     with pytest.raises(BrokerRejectError, match="rejected order side before submit"):
         broker.place_order(client_order_id="cid-side", side="SELL", qty=0.4320, price=None)
 
-    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+    with pytest.raises(BrokerRejectError, match="buy_price_none_unsupported"):
         broker.place_order(client_order_id="cid-type", side="BUY", qty=0.4320, price=None)
 
 
@@ -1658,7 +1667,7 @@ def test_place_order_accepts_buy_market_notional_from_side_specific_chance_types
     assert call["payload"]["order_type"] == "price"
 
 
-def test_place_order_accepts_buy_market_notional_when_chance_only_advertises_market(monkeypatch):
+def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_market(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
     call: dict[str, object] = {}
@@ -1697,16 +1706,59 @@ def test_place_order_accepts_buy_market_notional_when_chance_only_advertises_mar
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
-    order = broker.place_order(
-        client_order_id="cid-chance-market-ok",
-        side="BUY",
-        qty=_exact_lot_qty(market_price=150_000_000.0),
-        price=None,
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        broker.place_order(
+            client_order_id="cid-chance-market-ok",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+        )
+
+    assert call == {}
+
+
+def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("limit", "market"),
+    )
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+
+    assert resolution.allowed is False
+    assert resolution.resolved_order_type == "price"
+    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(rules=rules),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
+    )
+    monkeypatch.setattr(
+        broker,
+        "_post_private",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("submit should stay blocked")),
     )
 
-    assert order.exchange_order_id == "mkt-chance-market-ok"
-    assert call["endpoint"] == "/v2/orders"
-    assert call["payload"]["order_type"] == "price"
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        broker.place_order(
+            client_order_id="cid-chance-shared-resolution",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+        )
 
 
 def test_place_order_blocks_volume_that_would_be_silently_truncated():
@@ -1872,6 +1924,10 @@ def test_place_order_limit_buy_normalizes_off_tick_price_at_execution_boundary(m
                         "bid_price_unit": 10.0,
                         "ask_price_unit": 1.0,
                         "min_notional_krw": 5000.0,
+                        "order_types": ("limit",),
+                        "bid_types": ("limit", "price"),
+                        "ask_types": ("limit", "market"),
+                        "order_sides": ("bid", "ask"),
                     },
                 )(),
             },
@@ -2094,6 +2150,10 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
                         "bid_price_unit": 10.0,
                         "ask_price_unit": 1.0,
                         "min_notional_krw": 5000.0,
+                        "order_types": ("limit",),
+                        "bid_types": ("limit", "price"),
+                        "ask_types": ("limit", "market"),
+                        "order_sides": ("bid", "ask"),
                     },
                 )(),
             },

@@ -52,7 +52,13 @@ from .run_lock import read_run_lock_status
 from .runtime_state import disable_trading_until, enable_trading, refresh_open_order_health
 from .notifier import notify
 from .observability import safety_event
-from .broker.order_rules import get_cached_order_rule_snapshot, get_effective_order_rules, rule_source_for
+from .broker.order_rules import (
+    get_cached_order_rule_snapshot,
+    get_effective_order_rules,
+    raw_supported_order_types_for_chance_validation,
+    resolve_buy_price_none_resolution,
+    rule_source_for,
+)
 from .broker.bithumb import build_broker_with_auth_diagnostics
 from .broker import bithumb as bithumb_broker_module
 from .broker.base import BrokerBalance, BrokerOrder
@@ -1519,6 +1525,8 @@ def cmd_broker_diagnose() -> None:
         rr = get_effective_order_rules(PAIR)
         rules = rr.rules
         source = rr.source or {}
+        buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
+        raw_buy_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
         add_check(
             "symbol/order rule query",
             "PASS",
@@ -1534,11 +1542,32 @@ def cmd_broker_diagnose() -> None:
             ),
             critical=False,
         )
+        add_check(
+            "BUY price=None chance resolution",
+            "PASS" if buy_price_none_resolution.allowed else "WARN",
+            (
+                f"raw_bid_types={list(getattr(rules, 'bid_types', ()) or [])} "
+                f"raw_order_types={list(getattr(rules, 'order_types', ()) or [])} "
+                f"raw_buy_supported_types={list(raw_buy_supported_types)} "
+                f"support_source={buy_price_none_resolution.support_source} "
+                f"resolved_order_type={buy_price_none_resolution.resolved_order_type} "
+                f"allowed={buy_price_none_resolution.allowed} "
+                f"alias_used={buy_price_none_resolution.alias_used} "
+                f"block_reason={buy_price_none_resolution.block_reason or '-'}"
+            ),
+            critical=False,
+        )
     except Exception as e:
         add_check(
             "symbol/order rule query",
             "WARN",
             f"lookup failed ({type(e).__name__}: {e})",
+            critical=False,
+        )
+        add_check(
+            "BUY price=None chance resolution",
+            "WARN",
+            f"resolution unavailable ({type(e).__name__}: {e})",
             critical=False,
         )
 

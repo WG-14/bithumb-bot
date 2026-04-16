@@ -611,13 +611,14 @@ def test_validate_order_chance_support_allows_supported_side_and_type() -> None:
     order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="market")
 
 
-def test_validate_order_chance_support_allows_buy_market_notional_when_chance_advertises_market() -> None:
+def test_validate_order_chance_support_blocks_buy_price_none_when_chance_only_advertises_market() -> None:
     rules = order_rules.DerivedOrderConstraints(
         order_types=("limit", "market"),
         order_sides=("bid", "ask"),
     )
 
-    order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
 
     with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
         order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="price")
@@ -645,7 +646,7 @@ def test_validate_order_chance_support_uses_shared_market_fallback_only_when_bid
         order_sides=("bid", "ask"),
     )
 
-    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+    with pytest.raises(BrokerRejectError, match="buy_price_none_unsupported"):
         order_rules.validate_order_chance_support(rules=side_specific_rules, side="BUY", order_type="price")
 
     fallback_rules = order_rules.DerivedOrderConstraints(
@@ -653,4 +654,37 @@ def test_validate_order_chance_support_uses_shared_market_fallback_only_when_bid
         order_sides=("bid", "ask"),
     )
 
-    order_rules.validate_order_chance_support(rules=fallback_rules, side="BUY", order_type="price")
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(rules=fallback_rules, side="BUY", order_type="price")
+
+
+def test_resolve_buy_price_none_resolution_default_mode_is_fail_closed() -> None:
+    limit_only = order_rules.resolve_buy_price_none_resolution(
+        rules=order_rules.DerivedOrderConstraints(
+            bid_types=("limit",),
+            order_sides=("bid", "ask"),
+        )
+    )
+    assert limit_only.allowed is False
+    assert limit_only.alias_used is False
+    assert limit_only.block_reason == "buy_price_none_unsupported"
+
+    market_only = order_rules.resolve_buy_price_none_resolution(
+        rules=order_rules.DerivedOrderConstraints(
+            bid_types=("market",),
+            order_sides=("bid", "ask"),
+        )
+    )
+    assert market_only.allowed is False
+    assert market_only.alias_used is False
+    assert market_only.block_reason == "buy_price_none_requires_explicit_price_support"
+
+    explicit_price = order_rules.resolve_buy_price_none_resolution(
+        rules=order_rules.DerivedOrderConstraints(
+            bid_types=("limit", "price"),
+            order_sides=("bid", "ask"),
+        )
+    )
+    assert explicit_price.allowed is True
+    assert explicit_price.alias_used is False
+    assert explicit_price.resolved_order_type == "price"

@@ -2150,6 +2150,7 @@ class BithumbBroker:
         from .order_rules import (
             get_effective_order_rules,
             normalize_limit_price_for_side,
+            resolve_buy_price_none_resolution,
             supported_order_types_for_chance_validation,
             validate_order_chance_support,
             side_min_total_krw,
@@ -2159,20 +2160,46 @@ class BithumbBroker:
             order_rules_resolution = get_effective_order_rules(market)
             rules = order_rules_resolution.rules
             order_side = "BUY" if normalized_side == "bid" else "SELL"
+            buy_price_none_resolution = (
+                resolve_buy_price_none_resolution(rules=rules)
+                if price is None and normalized_side == "bid"
+                else None
+            )
             chance_validation_order_type = (
-                "price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")
+                buy_price_none_resolution.resolved_order_type
+                if buy_price_none_resolution is not None
+                else ("market" if price is None else "limit")
             )
             chance_supported_order_types = supported_order_types_for_chance_validation(
                 side=order_side,
                 rules=rules,
             )
-            exchange_submit_field_hint = "price" if price is None and normalized_side == "bid" else "volume"
+            exchange_submit_field_hint = (
+                "price" if buy_price_none_resolution is not None else "volume"
+            )
             submit_contract_context.update(
                 {
                     "market": market,
                     "order_side": order_side,
                     "chance_validation_order_type": chance_validation_order_type,
                     "chance_supported_order_types": list(chance_supported_order_types),
+                    "buy_price_none_allowed": (
+                        None if buy_price_none_resolution is None else bool(buy_price_none_resolution.allowed)
+                    ),
+                    "buy_price_none_alias_used": (
+                        None if buy_price_none_resolution is None else bool(buy_price_none_resolution.alias_used)
+                    ),
+                    "buy_price_none_block_reason": (
+                        None if buy_price_none_resolution is None else buy_price_none_resolution.block_reason
+                    ),
+                    "buy_price_none_support_source": (
+                        None if buy_price_none_resolution is None else buy_price_none_resolution.support_source
+                    ),
+                    "buy_price_none_raw_supported_types": (
+                        None
+                        if buy_price_none_resolution is None
+                        else list(buy_price_none_resolution.raw_supported_types)
+                    ),
                     "exchange_submit_field": exchange_submit_field_hint,
                     "exchange_order_type": chance_validation_order_type,
                     "exchange_submit_notional_krw": None,
@@ -2188,6 +2215,21 @@ class BithumbBroker:
                     client_order_id=validated_client_order_id,
                     chance_validation_order_type=chance_validation_order_type,
                     supported_order_types=",".join(chance_supported_order_types) or "-",
+                    buy_price_none_allowed=(
+                        "-"
+                        if buy_price_none_resolution is None
+                        else int(buy_price_none_resolution.allowed)
+                    ),
+                    buy_price_none_alias_used=(
+                        "-"
+                        if buy_price_none_resolution is None
+                        else int(buy_price_none_resolution.alias_used)
+                    ),
+                    buy_price_none_block_reason=(
+                        "-"
+                        if buy_price_none_resolution is None
+                        else (buy_price_none_resolution.block_reason or "-")
+                    ),
                     submit_field=exchange_submit_field_hint,
                 )
             )

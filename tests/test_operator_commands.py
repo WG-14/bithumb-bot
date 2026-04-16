@@ -2461,6 +2461,9 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
                         "qty_step": 0.0001,
                         "min_notional_krw": 5000.0,
                         "max_qty_decimals": 8,
+                        "order_types": ("limit",),
+                        "bid_types": ("limit", "price"),
+                        "ask_types": ("limit", "market"),
                         "bid_min_total_krw": 0.0,
                         "ask_min_total_krw": 0.0,
                         "bid_price_unit": 0.0,
@@ -2511,6 +2514,10 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] order lookup path: get_order reads /v1/order directly; open/recent snapshots use /v1/orders" in out
     assert "[PASS] open order query: known_unresolved_count=2" in out
     assert "[PASS] symbol/order rule query" in out
+    assert "[PASS] BUY price=None chance resolution:" in out
+    assert "raw_bid_types=['limit', 'price']" in out
+    assert "raw_order_types=['limit']" in out
+    assert "resolved_order_type=price allowed=True alias_used=False block_reason=-" in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
     assert "execution_mode=- quote_currency=- base_currency=-" in out
     assert "base_currency_missing_policy=- preflight_outcome=-" in out
@@ -2518,6 +2525,91 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "ask_price_unit=0.0 (source=chance_doc)" in out
     assert "min_qty=0.0001 (source=local_fallback)" in out
     assert "[PASS] DB writable" in out
+
+
+def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    import bithumb_bot.app as app_module
+
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1200000.0, 10000.0, 0.12, 0.01)
+
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
+            return []
+
+        def get_accounts_validation_diagnostics(self):
+            return {}
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: type(
+            "_ResolvedRules",
+            (),
+            {
+                "rules": type(
+                    "_Rules",
+                    (),
+                    {
+                        "min_qty": 0.0001,
+                        "qty_step": 0.0001,
+                        "min_notional_krw": 5000.0,
+                        "max_qty_decimals": 8,
+                        "order_types": ("limit", "market"),
+                        "bid_types": ("market",),
+                        "ask_types": ("limit", "market"),
+                        "bid_min_total_krw": 5000.0,
+                        "ask_min_total_krw": 5000.0,
+                        "bid_price_unit": 1.0,
+                        "ask_price_unit": 1.0,
+                    },
+                )(),
+                "source": {
+                    "min_qty": "local_fallback",
+                    "qty_step": "local_fallback",
+                    "min_notional_krw": "local_fallback",
+                    "max_qty_decimals": "local_fallback",
+                    "bid_min_total_krw": "chance_doc",
+                    "ask_min_total_krw": "chance_doc",
+                    "bid_price_unit": "chance_doc",
+                    "ask_price_unit": "chance_doc",
+                },
+            },
+        )(),
+    )
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+
+    out = capsys.readouterr().out
+    assert "overall=WARN" in out
+    assert "[WARN] BUY price=None chance resolution:" in out
+    assert "raw_bid_types=['market']" in out
+    assert "raw_order_types=['limit', 'market']" in out
+    assert "raw_buy_supported_types=['market']" in out
+    assert "support_source=bid_types" in out
+    assert "resolved_order_type=price allowed=False alias_used=False" in out
+    assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
 def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):

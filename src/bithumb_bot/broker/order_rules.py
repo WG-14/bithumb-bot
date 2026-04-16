@@ -86,6 +86,16 @@ class ExchangeDerivedConstraints:
 
 
 @dataclass(frozen=True)
+class BuyPriceNoneResolution:
+    allowed: bool
+    resolved_order_type: str
+    alias_used: bool
+    block_reason: str
+    raw_supported_types: tuple[str, ...]
+    support_source: str
+
+
+@dataclass(frozen=True)
 class LocalFallbackConstraints:
     min_qty: float = 0.0
     qty_step: float = 0.0
@@ -236,18 +246,47 @@ def _normalize_chance_order_type(order_type: str) -> str:
     raise BrokerRejectError(f"unsupported order_type: {order_type}")
 
 
-def supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
+def raw_supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
     normalized_side = _normalize_chance_side(side)
     side_specific_attr = "bid_types" if normalized_side == "bid" else "ask_types"
-    # Side-specific chance metadata is authoritative when present; shared
-    # order_types is only a compatibility fallback for older payload shapes.
     raw_supported_types = getattr(rules, side_specific_attr, ()) or getattr(rules, "order_types", ()) or ()
     supported_types = {str(item).strip().lower() for item in raw_supported_types if str(item).strip()}
-    if normalized_side == "bid" and "market" in supported_types:
-        # /v1/orders/chance may advertise BUY market support as "market"
-        # even though runtime submission must use the notional token "price".
-        supported_types.add("price")
     return tuple(sorted(supported_types))
+
+
+def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyPriceNoneResolution:
+    raw_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
+    support_source = "bid_types" if getattr(rules, "bid_types", ()) else "order_types"
+    if "price" in raw_supported_types:
+        return BuyPriceNoneResolution(
+            allowed=True,
+            resolved_order_type="price",
+            alias_used=False,
+            block_reason="",
+            raw_supported_types=raw_supported_types,
+            support_source=support_source,
+        )
+    if "market" in raw_supported_types:
+        return BuyPriceNoneResolution(
+            allowed=False,
+            resolved_order_type="price",
+            alias_used=False,
+            block_reason="buy_price_none_requires_explicit_price_support",
+            raw_supported_types=raw_supported_types,
+            support_source=support_source,
+        )
+    return BuyPriceNoneResolution(
+        allowed=False,
+        resolved_order_type="price",
+        alias_used=False,
+        block_reason="buy_price_none_unsupported",
+        raw_supported_types=raw_supported_types,
+        support_source=support_source,
+    )
+
+
+def supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
+    return raw_supported_order_types_for_chance_validation(side=side, rules=rules)
 
 
 def validate_order_chance_support(
@@ -268,6 +307,17 @@ def validate_order_chance_support(
         raise BrokerRejectError(
             "/v1/orders/chance rejected order side before submit: "
             f"side={str(side).strip().upper()} supported={sorted(set(supported_sides))}"
+        )
+
+    if normalized_side == "bid" and normalized_order_type == "price":
+        buy_resolution = resolve_buy_price_none_resolution(rules=rules)
+        if buy_resolution.allowed:
+            return
+        raise BrokerRejectError(
+            "/v1/orders/chance rejected BUY price=None before submit: "
+            f"reason={buy_resolution.block_reason} "
+            f"support_source={buy_resolution.support_source} "
+            f"raw_supported_types={sorted(set(buy_resolution.raw_supported_types))}"
         )
 
     supported_types = supported_order_types_for_chance_validation(side=side, rules=rules)
