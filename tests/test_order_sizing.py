@@ -171,6 +171,30 @@ def test_buy_execution_sizing_returns_direct_reason_when_exchange_rounding_zeroe
     assert plan.decision_reason_code == BUY_BLOCK_REASON_ENTRY_QTY_ROUNDED_TO_ZERO
 
 
+def test_buy_execution_sizing_blocks_exchange_valid_qty_when_exit_would_be_non_executable(
+    sizing_rule_overrides,
+) -> None:
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 19_193.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 10.0)
+
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=19_193.0,
+        market_price=100_000_000.0,
+    )
+
+    assert plan.requested_qty == pytest.approx(0.00019193)
+    assert plan.allowed is False
+    assert plan.block_reason == "no_executable_exit_lot"
+    assert plan.decision_reason_code == "no_executable_exit_lot"
+    assert plan.non_executable_reason == "no_executable_exit_lot"
+    assert plan.executable_qty == pytest.approx(0.0)
+    assert plan.effective_min_trade_qty == pytest.approx(0.0002)
+    assert plan.effective_min_trade_qty > 0.0001
+
+
 def test_buy_execution_sizing_preserves_typed_buy_authority_handoff(
     sizing_rule_overrides,
 ) -> None:

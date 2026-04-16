@@ -3784,6 +3784,98 @@ def test_live_execute_signal_buy_blocks_when_dust_safe_adjustment_collapses_to_z
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_buy_dust_unsafe_entry_is_blocked_in_sizing_before_live_guard(
+    tmp_path, monkeypatch, caplog
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_sizing_dust_block.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 19_193.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "STRATEGY_ENTRY_SLIPPAGE_BPS", 10.0)
+    object.__setattr__(settings, "ENTRY_EDGE_BUFFER_RATIO", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    def _unexpected_live_guard(**kwargs):
+        raise AssertionError("live BUY dust guard should not run for normal dust-unsafe sizing block")
+
+    monkeypatch.setattr(live_module, "adjust_buy_order_qty_for_dust_safety", _unexpected_live_guard)
+
+    broker = _FakeBroker()
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert "[ORDER_SKIP] entry sizing blocked" in caplog.text
+    assert "reason=no_executable_exit_lot" in caplog.text
+
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_fallback_dust_guard_logs_unexpected_invariant_mismatch(
+    tmp_path, monkeypatch, caplog
+):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_dust_fallback.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5_000.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    def _allowed_buy_execution_sizing(**kwargs):
+        return SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=20_000.0,
+            requested_qty=0.0002,
+            executable_qty=0.0002,
+            internal_lot_size=0.0001,
+            intended_lot_count=2,
+            executable_lot_count=2,
+            qty_source="entry.intent_budget_exchange_constraints",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5_000.0,
+            non_executable_reason="executable",
+            buy_authority=kwargs.get("authority"),
+            internal_lot_is_exchange_inflated=False,
+            internal_lot_would_block_buy=False,
+        )
+
+    def _fallback_guard(*, qty: float, market_price: float) -> float:
+        raise ValueError(
+            "dust-safe entry qty would not leave an executable exit lot: "
+            "normalized_qty=0.000200000000 effective_min_trade_qty=0.000300000000 "
+            "reason=no_executable_exit_lot"
+        )
+
+    monkeypatch.setattr(live_module, "build_buy_execution_sizing", _allowed_buy_execution_sizing)
+    monkeypatch.setattr(live_module, "adjust_buy_order_qty_for_dust_safety", _fallback_guard)
+
+    broker = _FakeBroker()
+    with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
+        trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+    assert "[ORDER_SKIP] buy dust guard fallback blocked" in caplog.text
+    assert "fallback_invariant_mismatch=1" in caplog.text
+
+
+@pytest.mark.fast_regression
 def test_live_execute_signal_buy_records_intent_when_harmless_dust_is_effective_flat(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_harmless_dust.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)

@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import settings
 from .dust import DUST_POSITION_EPS
+from .dust import build_executable_lot
 from .broker.order_rules import get_effective_order_rules
 from .lifecycle import LotDefinitionSnapshot
 from .lot_model import build_market_lot_rules, lot_count_to_qty
@@ -306,18 +307,18 @@ def build_buy_execution_sizing(
         qty_step=float(effective_qty_step),
         max_qty_decimals=int(rules.max_qty_decimals),
     )
-    effective_min_trade_qty = max(
-        max(0.0, float(rules.min_qty)),
-        _ceil_qty_to_exchange_constraints(
-            qty=(
-                float(rules.min_notional_krw) / float(market_price)
-                if float(rules.min_notional_krw) > 0.0
-                else 0.0
-            ),
-            qty_step=float(effective_qty_step),
-            max_qty_decimals=int(rules.max_qty_decimals),
-        ),
+    executable_lot = build_executable_lot(
+        qty=float(executable_qty),
+        market_price=float(market_price),
+        min_qty=float(rules.min_qty),
+        qty_step=float(rules.qty_step),
+        min_notional_krw=float(rules.min_notional_krw),
+        max_qty_decimals=int(rules.max_qty_decimals),
+        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
+        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
+    effective_min_trade_qty = float(executable_lot.effective_min_trade_qty)
     intended_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(requested_qty), rounding=ROUND_FLOOR)))
     executable_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(executable_qty), rounding=ROUND_FLOOR)))
     internal_lot_is_exchange_inflated = bool(float(lot_rules.lot_size) > float(effective_min_trade_qty) + DUST_POSITION_EPS)
@@ -335,6 +336,9 @@ def build_buy_execution_sizing(
     elif float(rules.min_notional_krw) > 0.0 and (executable_qty * float(market_price)) + DUST_POSITION_EPS < float(rules.min_notional_krw):
         allowed = False
         entry_reason = BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS
+    elif executable_lot.executable_qty <= DUST_POSITION_EPS:
+        allowed = False
+        entry_reason = str(executable_lot.exit_non_executable_reason or "no_executable_exit_lot")
     else:
         allowed = True
         entry_reason = "none"

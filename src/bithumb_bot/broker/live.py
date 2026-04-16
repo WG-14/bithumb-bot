@@ -3721,11 +3721,12 @@ def _determine_live_execution_intent(
         except ValueError as e:
             RUN_LOG.info(
                 format_log_kv(
-                    "[ORDER_SKIP] buy dust guard blocked",
+                    "[ORDER_SKIP] buy dust guard fallback blocked",
                     base_signal=decision_observability["base_signal"],
                     final_signal=decision_observability["final_signal"],
                     signal=signal,
                     side="BUY",
+                    fallback_invariant_mismatch=1,
                     reason=str(e),
                     entry_allowed=1 if bool(decision_observability["entry_allowed"]) else 0,
                     effective_flat=1 if bool(decision_observability["effective_flat"]) else 0,
