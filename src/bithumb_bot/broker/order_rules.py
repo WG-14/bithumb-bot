@@ -230,6 +230,20 @@ def _normalize_chance_order_type(order_type: str) -> str:
     raise BrokerRejectError(f"unsupported order_type: {order_type}")
 
 
+def supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
+    normalized_side = _normalize_chance_side(side)
+    supported_types = {
+        str(item).strip().lower()
+        for item in getattr(rules, "order_types", ()) or ()
+        if str(item).strip()
+    }
+    if normalized_side == "bid" and "market" in supported_types:
+        # /v1/orders/chance may advertise BUY market support as "market"
+        # even though runtime submission must use the notional token "price".
+        supported_types.add("price")
+    return tuple(sorted(supported_types))
+
+
 def validate_order_chance_support(
     *,
     rules: DerivedOrderConstraints,
@@ -250,11 +264,7 @@ def validate_order_chance_support(
             f"side={str(side).strip().upper()} supported={sorted(set(supported_sides))}"
         )
 
-    supported_types = tuple(
-        str(item).strip().lower()
-        for item in getattr(rules, "order_types", ()) or ()
-        if str(item).strip()
-    )
+    supported_types = supported_order_types_for_chance_validation(side=side, rules=rules)
     if supported_types and normalized_order_type not in supported_types:
         raise BrokerRejectError(
             "/v1/orders/chance rejected order type before submit: "

@@ -1648,6 +1648,62 @@ def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit
     assert "qty_step_mismatch" not in json.dumps(preflight_evidence, sort_keys=True)
 
 
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismatch(tmp_path):
+    class _RejectingBuyBroker(_FakeBroker):
+        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+            raise BrokerRejectError(
+                "/v1/orders/chance rejected order type before submit: "
+                "order_type=price supported=['limit', 'market']"
+            )
+
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_chance_order_type_reject.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    trade = live_execute_signal(_RejectingBuyBroker(), "BUY", 1000, 100_000_000.0)
+    assert trade is None
+
+    conn = ensure_db(str(tmp_path / "buy_chance_order_type_reject.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id, status FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence, order_status
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    preflight = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    assert row["status"] == "FAILED"
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    preflight_evidence = json.loads(str(preflight["submit_evidence"]))
+    assert submit_evidence["exchange_order_type"] == "price"
+    assert submit_evidence["exchange_submit_field"] == "price"
+    assert submit_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert submit_evidence["submit_failure_category"] == "chance_order_type_mismatch"
+    assert submit_evidence["submit_failure_detail"] == "chance_order_type_mismatch"
+    assert "qty_step_mismatch" not in json.dumps(submit_evidence, sort_keys=True)
+    assert preflight_evidence["exchange_order_type"] == "price"
+    assert preflight_evidence["exchange_submit_field"] == "price"
+    assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert "qty_step_mismatch" not in json.dumps(preflight_evidence, sort_keys=True)
+
+
 def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_failed.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)

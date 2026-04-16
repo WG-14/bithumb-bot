@@ -587,3 +587,15 @@ def test_validate_order_chance_support_allows_supported_side_and_type() -> None:
 
     order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
     order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="market")
+
+
+def test_validate_order_chance_support_allows_buy_market_notional_when_chance_advertises_market() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+
+    with pytest.raises(BrokerRejectError, match="rejected order type before submit"):
+        order_rules.validate_order_chance_support(rules=rules, side="SELL", order_type="price")

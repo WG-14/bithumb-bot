@@ -2150,6 +2150,7 @@ class BithumbBroker:
         from .order_rules import (
             get_effective_order_rules,
             normalize_limit_price_for_side,
+            supported_order_types_for_chance_validation,
             validate_order_chance_support,
             side_min_total_krw,
         )
@@ -2161,14 +2162,9 @@ class BithumbBroker:
             chance_validation_order_type = (
                 "price" if price is None and normalized_side == "bid" else ("market" if price is None else "limit")
             )
-            chance_supported_order_types = tuple(
-                sorted(
-                    {
-                        str(item).strip().lower()
-                        for item in (getattr(rules, "order_types", ()) or ())
-                        if str(item).strip()
-                    }
-                )
+            chance_supported_order_types = supported_order_types_for_chance_validation(
+                side=order_side,
+                rules=rules,
             )
             exchange_submit_field_hint = "price" if price is None and normalized_side == "bid" else "volume"
             submit_contract_context.update(
