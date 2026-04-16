@@ -3517,11 +3517,7 @@ def _submit_via_standard_path(
             side=side,
             order_type=order_type,
             normalized_qty=float(qty),
-            contract_context=(
-                order.raw.get("submit_contract_context")
-                if isinstance(getattr(order, "raw", None), dict)
-                else None
-            ),
+            contract_context=getattr(order, "submit_contract_context", None),
         )
         missing_id_submit_failure_fields = _submit_failure_fields(
             side=side,
@@ -3606,11 +3602,7 @@ def _submit_via_standard_path(
         side=side,
         order_type=order_type,
         normalized_qty=float(qty),
-        contract_context=(
-            order.raw.get("submit_contract_context")
-            if isinstance(getattr(order, "raw", None), dict)
-            else None
-        ),
+        contract_context=getattr(order, "submit_contract_context", None),
     )
     success_submit_failure_fields = _submit_failure_fields(
         side=side,

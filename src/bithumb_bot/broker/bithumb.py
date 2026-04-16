@@ -2390,8 +2390,19 @@ class BithumbBroker:
             raw.setdefault("market", payload.get("market"))
             raw.setdefault("order_type", payload.get("order_type"))
             raw.setdefault("ord_type", payload.get("order_type"))
-            raw.setdefault("submit_contract_context", dict(submit_contract_context))
-            return BrokerOrder(validated_client_order_id, resolved_exchange_order_id, side, "NEW", price, float(internal_lot_qty), 0.0, now, now, raw)
+            return BrokerOrder(
+                validated_client_order_id,
+                resolved_exchange_order_id,
+                side,
+                "NEW",
+                price,
+                float(internal_lot_qty),
+                0.0,
+                now,
+                now,
+                raw,
+                dict(submit_contract_context),
+            )
         except BrokerRejectError as exc:
             setattr(exc, "submit_contract_context", dict(submit_contract_context))
             raise

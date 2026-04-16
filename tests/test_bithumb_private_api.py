@@ -1642,6 +1642,9 @@ def test_place_order_limit_buy_uses_v2_limit_order(monkeypatch):
         "ord_type": "limit",
         "client_order_id": "cid-3",
     }
+    assert order.submit_contract_context is not None
+    assert order.submit_contract_context["exchange_order_type"] == "limit"
+    assert order.submit_contract_context["exchange_submit_field"] == "volume"
 
 
 def test_place_order_preserves_local_client_order_id_when_response_omits_it(monkeypatch):
@@ -1673,6 +1676,9 @@ def test_place_order_preserves_local_client_order_id_when_response_omits_it(monk
         "ord_type": "limit",
         "client_order_id": "cid-omit",
     }
+    assert order.submit_contract_context is not None
+    assert order.submit_contract_context["exchange_order_type"] == "limit"
+    assert order.submit_contract_context["exchange_submit_field"] == "volume"
 
 
 def test_place_order_rejects_when_response_client_order_id_mismatches(monkeypatch):
