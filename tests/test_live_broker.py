@@ -192,6 +192,33 @@ class _CommitCheckingBroker(_FakeBroker):
         return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
 
 
+class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured_live_submit_contract_context: dict[str, object] | None = None
+        self.captured_broker_submit_contract_context: dict[str, object] | None = None
+
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        captured_live_contract = getattr(self, "_live_submit_contract_context", None)
+        assert isinstance(captured_live_contract, dict)
+        self.captured_live_submit_contract_context = dict(captured_live_contract)
+
+        resolved_rules = order_rules.get_effective_order_rules(settings.PAIR).rules
+        buy_price_none_resolution = order_rules.resolve_buy_price_none_resolution(rules=resolved_rules)
+        self.captured_broker_submit_contract_context = order_rules.build_buy_price_none_submit_contract_context(
+            rules=resolved_rules,
+            resolution=buy_price_none_resolution,
+        )
+        self.captured_broker_submit_contract_context.update(
+            {
+                "market": settings.PAIR,
+                "order_side": side,
+            }
+        )
+
+        return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
+
+
 class _TimeoutBroker(_FakeBroker):
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
         raise BrokerTemporaryError("timeout")
@@ -1618,7 +1645,8 @@ def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contra
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_price_none_shared_contract.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
 
-    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100_000_000.0)
+    broker = _BuyPriceNoneContractCapturingBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)
     assert trade is not None
 
     conn = ensure_db(str(tmp_path / "buy_price_none_shared_contract.sqlite"))
@@ -1666,9 +1694,12 @@ def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contra
         "market",
         "order_side",
     )
-    assert {key: preflight_evidence[key] for key in contract_keys} == {
-        key: submit_evidence[key] for key in contract_keys
-    }
+    expected_contract = {key: preflight_evidence[key] for key in contract_keys}
+    assert expected_contract == {key: submit_evidence[key] for key in contract_keys}
+    assert broker.captured_live_submit_contract_context is not None
+    assert broker.captured_broker_submit_contract_context is not None
+    assert expected_contract == {key: broker.captured_live_submit_contract_context[key] for key in contract_keys}
+    assert expected_contract == {key: broker.captured_broker_submit_contract_context[key] for key in contract_keys}
 
 
 def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(monkeypatch) -> None:
