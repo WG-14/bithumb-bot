@@ -289,6 +289,59 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
     )
 
 
+def build_buy_price_none_submit_contract_context(
+    *,
+    rules: DerivedOrderConstraints,
+    resolution: BuyPriceNoneResolution | None = None,
+) -> dict[str, object]:
+    """Return the canonical BUY price=None submit-context evidence.
+
+    BUY price=None permission is fail-closed and must come from one raw
+    exchange-declared resolution. This helper keeps validation, payload
+    routing, and operator-facing submit evidence on the same contract.
+    """
+
+    buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
+    return {
+        "chance_validation_order_type": buy_resolution.resolved_order_type,
+        "chance_supported_order_types": list(
+            supported_order_types_for_chance_validation(side="BUY", rules=rules)
+        ),
+        "buy_price_none_allowed": bool(buy_resolution.allowed),
+        "buy_price_none_decision_outcome": ("pass" if buy_resolution.allowed else "block"),
+        "buy_price_none_decision_basis": buy_resolution.decision_basis,
+        "buy_price_none_alias_used": bool(buy_resolution.alias_used),
+        "buy_price_none_block_reason": buy_resolution.block_reason,
+        "buy_price_none_support_source": buy_resolution.support_source,
+        "buy_price_none_raw_supported_types": list(buy_resolution.raw_supported_types),
+        "buy_price_none_resolved_order_type": buy_resolution.resolved_order_type,
+        "exchange_submit_field": "price",
+        "exchange_order_type": buy_resolution.resolved_order_type,
+        "exchange_submit_notional_krw": None,
+        "exchange_submit_qty": None,
+        "internal_executable_qty": None,
+    }
+
+
+def build_buy_price_none_diagnostic_fields(
+    *,
+    rules: DerivedOrderConstraints,
+    resolution: BuyPriceNoneResolution | None = None,
+) -> dict[str, object]:
+    buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
+    return {
+        "raw_bid_types": [str(item) for item in getattr(rules, "bid_types", ()) or ()],
+        "raw_order_types": [str(item) for item in getattr(rules, "order_types", ()) or ()],
+        "raw_buy_supported_types": list(buy_resolution.raw_supported_types),
+        "support_source": buy_resolution.support_source,
+        "resolved_order_type": buy_resolution.resolved_order_type,
+        "allowed": bool(buy_resolution.allowed),
+        "decision_basis": buy_resolution.decision_basis,
+        "alias_used": bool(buy_resolution.alias_used),
+        "block_reason": (buy_resolution.block_reason or "-"),
+    }
+
+
 def supported_order_types_for_chance_validation(*, side: str, rules: DerivedOrderConstraints) -> tuple[str, ...]:
     return raw_supported_order_types_for_chance_validation(side=side, rules=rules)
 

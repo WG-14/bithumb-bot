@@ -50,7 +50,11 @@ from ..reason_codes import (
     SUBMIT_TIMEOUT,
     sell_failure_detail_from_category,
 )
-from .order_rules import get_effective_order_rules, side_min_total_krw
+from .order_rules import (
+    build_buy_price_none_submit_contract_context,
+    get_effective_order_rules,
+    side_min_total_krw,
+)
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -204,6 +208,7 @@ class _LiveExecutionFeasibility:
     reference_quote: dict[str, float | str] | None
     entry_sizing: object | None
     exit_sizing: object | None
+    submit_contract_context: dict[str, object] | None = None
 
 
 def _resolve_non_authoritative_sell_basis_qty(
@@ -2943,6 +2948,7 @@ def _submit_via_standard_path(
     final_intended_qty: float,
     final_submitted_qty: float,
     decision_reason_code: str | None,
+    submit_contract_context: dict[str, object] | None = None,
 ):
     symbol = settings.PAIR
     decision_observability = decision_observability or {}
@@ -2993,6 +2999,7 @@ def _submit_via_standard_path(
         side=side,
         order_type=order_type,
         normalized_qty=float(qty),
+        contract_context=submit_contract_context,
     )
     base_submit_failure_fields = _submit_failure_fields(
         side=side,
@@ -3192,7 +3199,7 @@ def _submit_via_standard_path(
             side=side,
             order_type=order_type,
             normalized_qty=float(qty),
-            contract_context=getattr(e, "submit_contract_context", None),
+            contract_context=(getattr(e, "submit_contract_context", None) or submit_contract_context),
         )
         failure_submit_fields = _submit_failure_fields(
             side=side,
@@ -3303,7 +3310,7 @@ def _submit_via_standard_path(
             side=side,
             order_type=order_type,
             normalized_qty=float(qty),
-            contract_context=getattr(e, "submit_contract_context", None),
+            contract_context=(getattr(e, "submit_contract_context", None) or submit_contract_context),
         )
         failure_submit_fields = _submit_failure_fields(
             side=side,
@@ -3414,7 +3421,7 @@ def _submit_via_standard_path(
             side=side,
             order_type=order_type,
             normalized_qty=float(qty),
-            contract_context=getattr(e, "submit_contract_context", None),
+            contract_context=(getattr(e, "submit_contract_context", None) or submit_contract_context),
         )
         failure_submit_fields = _submit_failure_fields(
             side=side,
@@ -3530,7 +3537,7 @@ def _submit_via_standard_path(
             side=side,
             order_type=order_type,
             normalized_qty=float(qty),
-            contract_context=getattr(order, "submit_contract_context", None),
+            contract_context=(getattr(order, "submit_contract_context", None) or submit_contract_context),
         )
         missing_id_submit_failure_fields = _submit_failure_fields(
             side=side,
@@ -3615,7 +3622,7 @@ def _submit_via_standard_path(
         side=side,
         order_type=order_type,
         normalized_qty=float(qty),
-        contract_context=getattr(order, "submit_contract_context", None),
+        contract_context=(getattr(order, "submit_contract_context", None) or submit_contract_context),
     )
     success_submit_failure_fields = _submit_failure_fields(
         side=side,
@@ -4471,6 +4478,14 @@ def _evaluate_live_execution_feasibility(
         notify(f"live pretrade validation blocked ({intent.side}): {e}")
         return None
 
+    submit_contract_context = (
+        build_buy_price_none_submit_contract_context(
+            rules=position_state.effective_rules,
+        )
+        if intent.side == "BUY"
+        else None
+    )
+
     return _LiveExecutionFeasibility(
         side=intent.side,
         order_qty=float(order_qty),
@@ -4479,6 +4494,7 @@ def _evaluate_live_execution_feasibility(
         reference_quote=reference_quote,
         entry_sizing=intent.entry_sizing,
         exit_sizing=intent.exit_sizing,
+        submit_contract_context=submit_contract_context,
     )
 
 
@@ -4824,6 +4840,7 @@ def _execute_live_submission_and_application(
         final_intended_qty=float(feasibility.order_qty),
         final_submitted_qty=float(feasibility.normalized_qty),
         decision_reason_code=str(lot_sizing.decision_reason_code),
+        submit_contract_context=feasibility.submit_contract_context,
     )
     if order is None:
         return None

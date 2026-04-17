@@ -2448,10 +2448,6 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
     monkeypatch.setattr(
-        "bithumb_bot.app.raw_supported_order_types_for_chance_validation",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("readiness must reuse resolution raw_supported_types")),
-    )
-    monkeypatch.setattr(
         "bithumb_bot.app.get_effective_order_rules",
         lambda _pair: type(
             "_ResolvedRules",
@@ -2561,10 +2557,6 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
             return {}
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
-    monkeypatch.setattr(
-        "bithumb_bot.app.raw_supported_order_types_for_chance_validation",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("readiness must reuse resolution raw_supported_types")),
-    )
     monkeypatch.setattr(
         "bithumb_bot.app.get_effective_order_rules",
         lambda _pair: type(

@@ -1779,6 +1779,58 @@ def test_buy_price_none_resolution_blocks_limit_only_support():
         )
 
 
+def test_buy_price_none_blocked_exception_context_matches_shared_diagnostic_fields(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        ask_types=("limit", "market"),
+    )
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(rules=rules),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.resolve_buy_price_none_resolution",
+        lambda *, rules: resolution,
+    )
+
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support") as excinfo:
+        broker.place_order(
+            client_order_id="cid-buy-price-none-market-only",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+        )
+
+    context = getattr(excinfo.value, "submit_contract_context", None)
+    assert context is not None
+    assert context["buy_price_none_allowed"] == diagnostic_fields["allowed"]
+    assert context["buy_price_none_decision_outcome"] == "block"
+    assert context["buy_price_none_decision_basis"] == diagnostic_fields["decision_basis"]
+    assert context["buy_price_none_alias_used"] == diagnostic_fields["alias_used"]
+    assert context["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
+    assert context["buy_price_none_support_source"] == diagnostic_fields["support_source"]
+    assert context["buy_price_none_raw_supported_types"] == diagnostic_fields["raw_buy_supported_types"]
+    assert context["buy_price_none_resolved_order_type"] == diagnostic_fields["resolved_order_type"]
+    assert context["chance_validation_order_type"] == "price"
+    assert context["exchange_order_type"] == "price"
+    assert context["exchange_submit_field"] == "price"
+
+
 @pytest.mark.parametrize(
     ("order_types", "bid_types", "allowed", "block_reason"),
     (
@@ -1858,14 +1910,32 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert order.submit_contract_context is not None
         assert order.submit_contract_context["buy_price_none_allowed"] is True
         assert order.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
+        assert order.submit_contract_context["buy_price_none_decision_basis"] == "raw"
+        assert order.submit_contract_context["buy_price_none_alias_used"] is False
+        assert order.submit_contract_context["buy_price_none_block_reason"] == ""
+        assert order.submit_contract_context["buy_price_none_raw_supported_types"] == list(
+            resolution.raw_supported_types
+        )
+        assert order.submit_contract_context["buy_price_none_support_source"] == resolution.support_source
+        assert order.submit_contract_context["buy_price_none_resolved_order_type"] == "price"
     else:
-        with pytest.raises(BrokerRejectError, match=block_reason):
+        with pytest.raises(BrokerRejectError, match=block_reason) as excinfo:
             broker.place_order(
                 client_order_id="cid-chance-shared-resolution",
                 side="BUY",
                 qty=_exact_lot_qty(market_price=150_000_000.0),
                 price=None,
             )
+        context = getattr(excinfo.value, "submit_contract_context", None)
+        assert context is not None
+        assert context["buy_price_none_allowed"] is False
+        assert context["buy_price_none_decision_outcome"] == "block"
+        assert context["buy_price_none_decision_basis"] == "raw"
+        assert context["buy_price_none_alias_used"] is False
+        assert context["buy_price_none_block_reason"] == block_reason
+        assert context["buy_price_none_raw_supported_types"] == list(resolution.raw_supported_types)
+        assert context["buy_price_none_support_source"] == resolution.support_source
+        assert context["buy_price_none_resolved_order_type"] == "price"
 
     assert observed["buy_price_none_resolution"] is resolution
 

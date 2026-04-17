@@ -53,9 +53,9 @@ from .runtime_state import disable_trading_until, enable_trading, refresh_open_o
 from .notifier import notify
 from .observability import safety_event
 from .broker.order_rules import (
+    build_buy_price_none_diagnostic_fields,
     get_cached_order_rule_snapshot,
     get_effective_order_rules,
-    raw_supported_order_types_for_chance_validation,
     resolve_buy_price_none_resolution,
     rule_source_for,
 )
@@ -937,7 +937,10 @@ def cmd_health() -> None:
         rules = resolved_rules.rules
         source = resolved_rules.source or {}
         buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
-        raw_buy_supported_types = buy_price_none_resolution.raw_supported_types
+        buy_price_none_fields = build_buy_price_none_diagnostic_fields(
+            rules=rules,
+            resolution=buy_price_none_resolution,
+        )
         if getattr(resolved_rules, "fallback_used", False):
             print(
                 "    "
@@ -963,13 +966,13 @@ def cmd_health() -> None:
         print(
             "    "
             "buy_price_none_resolution="
-            f"raw_buy_supported_types={list(raw_buy_supported_types)} "
-            f"support_source={buy_price_none_resolution.support_source} "
-            f"resolved_order_type={buy_price_none_resolution.resolved_order_type} "
-            f"allowed={buy_price_none_resolution.allowed} "
-            f"decision_basis={buy_price_none_resolution.decision_basis} "
-            f"alias_used={buy_price_none_resolution.alias_used} "
-            f"block_reason={buy_price_none_resolution.block_reason or '-'}"
+            f"raw_buy_supported_types={buy_price_none_fields['raw_buy_supported_types']} "
+            f"support_source={buy_price_none_fields['support_source']} "
+            f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
+            f"allowed={buy_price_none_fields['allowed']} "
+            f"decision_basis={buy_price_none_fields['decision_basis']} "
+            f"alias_used={buy_price_none_fields['alias_used']} "
+            f"block_reason={buy_price_none_fields['block_reason']}"
         )
     except Exception as exc:
         print(f"    failed_to_load={type(exc).__name__}: {exc}")
@@ -1539,7 +1542,10 @@ def cmd_broker_diagnose() -> None:
         rules = rr.rules
         source = rr.source or {}
         buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
-        raw_buy_supported_types = buy_price_none_resolution.raw_supported_types
+        buy_price_none_fields = build_buy_price_none_diagnostic_fields(
+            rules=rules,
+            resolution=buy_price_none_resolution,
+        )
         add_check(
             "symbol/order rule query",
             "PASS",
@@ -1559,15 +1565,15 @@ def cmd_broker_diagnose() -> None:
             "BUY price=None chance resolution",
             "PASS" if buy_price_none_resolution.allowed else "WARN",
             (
-                f"raw_bid_types={list(getattr(rules, 'bid_types', ()) or [])} "
-                f"raw_order_types={list(getattr(rules, 'order_types', ()) or [])} "
-                f"raw_buy_supported_types={list(raw_buy_supported_types)} "
-                f"support_source={buy_price_none_resolution.support_source} "
-                f"resolved_order_type={buy_price_none_resolution.resolved_order_type} "
-                f"allowed={buy_price_none_resolution.allowed} "
-                f"decision_basis={buy_price_none_resolution.decision_basis} "
-                f"alias_used={buy_price_none_resolution.alias_used} "
-                f"block_reason={buy_price_none_resolution.block_reason or '-'}"
+                f"raw_bid_types={buy_price_none_fields['raw_bid_types']} "
+                f"raw_order_types={buy_price_none_fields['raw_order_types']} "
+                f"raw_buy_supported_types={buy_price_none_fields['raw_buy_supported_types']} "
+                f"support_source={buy_price_none_fields['support_source']} "
+                f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
+                f"allowed={buy_price_none_fields['allowed']} "
+                f"decision_basis={buy_price_none_fields['decision_basis']} "
+                f"alias_used={buy_price_none_fields['alias_used']} "
+                f"block_reason={buy_price_none_fields['block_reason']}"
             ),
             critical=False,
         )

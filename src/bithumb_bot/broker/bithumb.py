@@ -2148,6 +2148,7 @@ class BithumbBroker:
         normalized_side = normalize_order_side(side)
         market = self._market()
         from .order_rules import (
+            build_buy_price_none_submit_contract_context,
             get_effective_order_rules,
             normalize_limit_price_for_side,
             resolve_buy_price_none_resolution,
@@ -2177,49 +2178,29 @@ class BithumbBroker:
             exchange_submit_field_hint = (
                 "price" if buy_price_none_resolution is not None else "volume"
             )
+            if buy_price_none_resolution is not None:
+                submit_contract_context.update(
+                    build_buy_price_none_submit_contract_context(
+                        rules=rules,
+                        resolution=buy_price_none_resolution,
+                    )
+                )
+            else:
+                submit_contract_context.update(
+                    {
+                        "chance_validation_order_type": chance_validation_order_type,
+                        "chance_supported_order_types": list(chance_supported_order_types),
+                        "exchange_submit_field": exchange_submit_field_hint,
+                        "exchange_order_type": chance_validation_order_type,
+                        "exchange_submit_notional_krw": None,
+                        "exchange_submit_qty": None,
+                        "internal_executable_qty": None,
+                    }
+                )
             submit_contract_context.update(
                 {
                     "market": market,
                     "order_side": order_side,
-                    "chance_validation_order_type": chance_validation_order_type,
-                    "chance_supported_order_types": list(chance_supported_order_types),
-                    "buy_price_none_allowed": (
-                        None if buy_price_none_resolution is None else bool(buy_price_none_resolution.allowed)
-                    ),
-                    "buy_price_none_decision_outcome": (
-                        None
-                        if buy_price_none_resolution is None
-                        else ("pass" if buy_price_none_resolution.allowed else "block")
-                    ),
-                    "buy_price_none_decision_basis": (
-                        None
-                        if buy_price_none_resolution is None
-                        else buy_price_none_resolution.decision_basis
-                    ),
-                    "buy_price_none_alias_used": (
-                        None if buy_price_none_resolution is None else bool(buy_price_none_resolution.alias_used)
-                    ),
-                    "buy_price_none_block_reason": (
-                        None if buy_price_none_resolution is None else buy_price_none_resolution.block_reason
-                    ),
-                    "buy_price_none_support_source": (
-                        None if buy_price_none_resolution is None else buy_price_none_resolution.support_source
-                    ),
-                    "buy_price_none_raw_supported_types": (
-                        None
-                        if buy_price_none_resolution is None
-                        else list(buy_price_none_resolution.raw_supported_types)
-                    ),
-                    "buy_price_none_resolved_order_type": (
-                        None
-                        if buy_price_none_resolution is None
-                        else buy_price_none_resolution.resolved_order_type
-                    ),
-                    "exchange_submit_field": exchange_submit_field_hint,
-                    "exchange_order_type": chance_validation_order_type,
-                    "exchange_submit_notional_krw": None,
-                    "exchange_submit_qty": None,
-                    "internal_executable_qty": None,
                 }
             )
             RUN_LOG.info(

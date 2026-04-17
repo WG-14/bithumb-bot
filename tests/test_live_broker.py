@@ -1480,6 +1480,14 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_evidence["exchange_order_type"] == "price"
     assert submit_evidence["exchange_submit_field"] == "price"
     assert submit_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert submit_evidence["buy_price_none_allowed"] is True
+    assert submit_evidence["buy_price_none_decision_outcome"] == "pass"
+    assert submit_evidence["buy_price_none_decision_basis"] == "raw"
+    assert submit_evidence["buy_price_none_alias_used"] is False
+    assert submit_evidence["buy_price_none_block_reason"] == ""
+    assert submit_evidence["buy_price_none_support_source"] == "order_types"
+    assert submit_evidence["buy_price_none_raw_supported_types"] == ["price"]
+    assert submit_evidence["buy_price_none_resolved_order_type"] == "price"
     assert submit_evidence["internal_executable_qty"] == pytest.approx(float(submit_evidence["normalized_qty"]))
     assert submit_evidence["exchange_submit_notional_krw"] is None
     assert submit_evidence["submit_failure_category"] == "none"
@@ -1490,6 +1498,14 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight_evidence["exchange_order_type"] == "price"
     assert preflight_evidence["exchange_submit_field"] == "price"
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert preflight_evidence["buy_price_none_allowed"] is True
+    assert preflight_evidence["buy_price_none_decision_outcome"] == "pass"
+    assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
+    assert preflight_evidence["buy_price_none_alias_used"] is False
+    assert preflight_evidence["buy_price_none_block_reason"] == ""
+    assert preflight_evidence["buy_price_none_support_source"] == "order_types"
+    assert preflight_evidence["buy_price_none_raw_supported_types"] == ["price"]
+    assert preflight_evidence["buy_price_none_resolved_order_type"] == "price"
     assert preflight_evidence["internal_executable_qty"] == pytest.approx(float(preflight_evidence["normalized_qty"]))
     assert preflight_evidence["exchange_submit_notional_krw"] is None
     assert preflight_evidence["submit_failure_category"] == "none"
@@ -1649,7 +1665,7 @@ def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit
 
 
 @pytest.mark.fast_regression
-def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismatch(tmp_path):
+def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismatch(monkeypatch, tmp_path):
     class _RejectingBuyBroker(_FakeBroker):
         def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
             raise BrokerRejectError(
@@ -1659,6 +1675,29 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
 
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_chance_order_type_reject.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    monkeypatch.setattr(
+        "bithumb_bot.order_sizing.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=SimpleNamespace(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+                bid_types=("market",),
+                ask_types=("limit", "market"),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+            )
+        ),
+    )
 
     trade = live_execute_signal(_RejectingBuyBroker(), "BUY", 1000, 100_000_000.0)
     assert trade is None
@@ -1695,12 +1734,28 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
     assert submit_evidence["exchange_order_type"] == "price"
     assert submit_evidence["exchange_submit_field"] == "price"
     assert submit_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert submit_evidence["buy_price_none_allowed"] is False
+    assert submit_evidence["buy_price_none_decision_outcome"] == "block"
+    assert submit_evidence["buy_price_none_decision_basis"] == "raw"
+    assert submit_evidence["buy_price_none_alias_used"] is False
+    assert submit_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
+    assert submit_evidence["buy_price_none_support_source"] == "bid_types"
+    assert submit_evidence["buy_price_none_raw_supported_types"] == ["market"]
+    assert submit_evidence["buy_price_none_resolved_order_type"] == "price"
     assert submit_evidence["submit_failure_category"] == "chance_order_type_mismatch"
     assert submit_evidence["submit_failure_detail"] == "chance_order_type_mismatch"
     assert "qty_step_mismatch" not in json.dumps(submit_evidence, sort_keys=True)
     assert preflight_evidence["exchange_order_type"] == "price"
     assert preflight_evidence["exchange_submit_field"] == "price"
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert preflight_evidence["buy_price_none_allowed"] is False
+    assert preflight_evidence["buy_price_none_decision_outcome"] == "block"
+    assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
+    assert preflight_evidence["buy_price_none_alias_used"] is False
+    assert preflight_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
+    assert preflight_evidence["buy_price_none_support_source"] == "bid_types"
+    assert preflight_evidence["buy_price_none_raw_supported_types"] == ["market"]
+    assert preflight_evidence["buy_price_none_resolved_order_type"] == "price"
     assert "qty_step_mismatch" not in json.dumps(preflight_evidence, sort_keys=True)
 
 
