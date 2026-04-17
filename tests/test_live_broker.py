@@ -1462,7 +1462,27 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_success.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
 
-    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+    original_effective_order_rules = live_module._effective_order_rules
+    live_module._effective_order_rules = lambda _pair: SimpleNamespace(
+        rules=order_rules.DerivedOrderConstraints(
+            order_types=("price",),
+            bid_types=("price",),
+            ask_types=("limit", "market"),
+            order_sides=("bid", "ask"),
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5000.0,
+            max_qty_decimals=8,
+        )
+    )
+    try:
+        trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+    finally:
+        live_module._effective_order_rules = original_effective_order_rules
     assert trade is not None
 
     conn = ensure_db(str(tmp_path / "submit_success.sqlite"))
@@ -1519,7 +1539,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_evidence["buy_price_none_alias_used"] is False
     assert submit_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert submit_evidence["buy_price_none_block_reason"] == ""
-    assert submit_evidence["buy_price_none_support_source"] == "order_types"
+    assert submit_evidence["buy_price_none_support_source"] == "bid_types"
     assert submit_evidence["buy_price_none_raw_supported_types"] == ["price"]
     assert submit_evidence["buy_price_none_resolved_order_type"] == "price"
     assert submit_evidence["internal_executable_qty"] == pytest.approx(float(submit_evidence["normalized_qty"]))
@@ -1538,7 +1558,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight_evidence["buy_price_none_alias_used"] is False
     assert preflight_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert preflight_evidence["buy_price_none_block_reason"] == ""
-    assert preflight_evidence["buy_price_none_support_source"] == "order_types"
+    assert preflight_evidence["buy_price_none_support_source"] == "bid_types"
     assert preflight_evidence["buy_price_none_raw_supported_types"] == ["price"]
     assert preflight_evidence["buy_price_none_resolved_order_type"] == "price"
     assert preflight_evidence["internal_executable_qty"] == pytest.approx(float(preflight_evidence["normalized_qty"]))
