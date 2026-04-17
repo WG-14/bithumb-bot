@@ -1442,6 +1442,11 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "price": broker._format_krw_amount(Decimal("150000000.0") * Decimal(str(qty))),
         "client_order_id": "cid-1",
     }
+    assert order.submit_contract_context is not None
+    assert order.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
+    assert order.submit_contract_context["buy_price_none_decision_basis"] == "raw"
+    assert order.submit_contract_context["buy_price_none_resolved_order_type"] == "price"
+    assert order.submit_contract_context["buy_price_none_raw_supported_types"] == ["limit", "price"]
 
 
 def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
@@ -1730,6 +1735,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monk
         order_types=("limit", "market"),
     )
     resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    observed: dict[str, object] = {}
 
     assert resolution.allowed is False
     assert resolution.resolved_order_type == "price"
@@ -1738,9 +1744,23 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monk
     with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
         order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
 
+    original_validate = order_rules.validate_order_chance_support
+
+    def _capture_validate(**kwargs):
+        observed["buy_price_none_resolution"] = kwargs.get("buy_price_none_resolution")
+        return original_validate(**kwargs)
+
     monkeypatch.setattr(
         "bithumb_bot.broker.order_rules.get_effective_order_rules",
         lambda _pair: SimpleNamespace(rules=rules),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.resolve_buy_price_none_resolution",
+        lambda *, rules: resolution,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.validate_order_chance_support",
+        _capture_validate,
     )
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
@@ -1759,6 +1779,8 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monk
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
         )
+
+    assert observed["buy_price_none_resolution"] is resolution
 
 
 def test_place_order_blocks_volume_that_would_be_silently_truncated():

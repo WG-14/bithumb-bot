@@ -2805,6 +2805,11 @@ def _submit_contract_fields(
         chance_supported_order_types = [str(item) for item in chance_supported_order_types]
     elif chance_supported_order_types is not None:
         chance_supported_order_types = [str(chance_supported_order_types)]
+    buy_price_none_raw_supported_types = context.get("buy_price_none_raw_supported_types")
+    if isinstance(buy_price_none_raw_supported_types, (tuple, list)):
+        buy_price_none_raw_supported_types = [str(item) for item in buy_price_none_raw_supported_types]
+    elif buy_price_none_raw_supported_types is not None:
+        buy_price_none_raw_supported_types = [str(buy_price_none_raw_supported_types)]
     return {
         "submit_contract_kind": (
             "market_buy_notional"
@@ -2823,6 +2828,14 @@ def _submit_contract_fields(
             if context.get("exchange_submit_notional_krw") is None
             else float(context["exchange_submit_notional_krw"])
         ),
+        "buy_price_none_allowed": context.get("buy_price_none_allowed"),
+        "buy_price_none_decision_outcome": context.get("buy_price_none_decision_outcome"),
+        "buy_price_none_decision_basis": context.get("buy_price_none_decision_basis"),
+        "buy_price_none_alias_used": context.get("buy_price_none_alias_used"),
+        "buy_price_none_block_reason": context.get("buy_price_none_block_reason"),
+        "buy_price_none_support_source": context.get("buy_price_none_support_source"),
+        "buy_price_none_raw_supported_types": buy_price_none_raw_supported_types,
+        "buy_price_none_resolved_order_type": context.get("buy_price_none_resolved_order_type"),
         "internal_executable_qty": float(
             context.get("internal_executable_qty")
             if context.get("internal_executable_qty") is not None

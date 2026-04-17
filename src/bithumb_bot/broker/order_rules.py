@@ -89,6 +89,7 @@ class ExchangeDerivedConstraints:
 class BuyPriceNoneResolution:
     allowed: bool
     resolved_order_type: str
+    decision_basis: str
     alias_used: bool
     block_reason: str
     raw_supported_types: tuple[str, ...]
@@ -261,6 +262,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
         return BuyPriceNoneResolution(
             allowed=True,
             resolved_order_type="price",
+            decision_basis="raw",
             alias_used=False,
             block_reason="",
             raw_supported_types=raw_supported_types,
@@ -270,6 +272,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
         return BuyPriceNoneResolution(
             allowed=False,
             resolved_order_type="price",
+            decision_basis="raw",
             alias_used=False,
             block_reason="buy_price_none_requires_explicit_price_support",
             raw_supported_types=raw_supported_types,
@@ -278,6 +281,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
     return BuyPriceNoneResolution(
         allowed=False,
         resolved_order_type="price",
+        decision_basis="raw",
         alias_used=False,
         block_reason="buy_price_none_unsupported",
         raw_supported_types=raw_supported_types,
@@ -294,6 +298,7 @@ def validate_order_chance_support(
     rules: DerivedOrderConstraints,
     side: str,
     order_type: str,
+    buy_price_none_resolution: BuyPriceNoneResolution | None = None,
 ) -> None:
     normalized_side = _normalize_chance_side(side)
     normalized_order_type = _normalize_chance_order_type(order_type)
@@ -310,7 +315,7 @@ def validate_order_chance_support(
         )
 
     if normalized_side == "bid" and normalized_order_type == "price":
-        buy_resolution = resolve_buy_price_none_resolution(rules=rules)
+        buy_resolution = buy_price_none_resolution or resolve_buy_price_none_resolution(rules=rules)
         if buy_resolution.allowed:
             return
         raise BrokerRejectError(

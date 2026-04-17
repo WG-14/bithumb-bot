@@ -659,32 +659,49 @@ def test_validate_order_chance_support_uses_shared_market_fallback_only_when_bid
 
 
 def test_resolve_buy_price_none_resolution_default_mode_is_fail_closed() -> None:
-    limit_only = order_rules.resolve_buy_price_none_resolution(
-        rules=order_rules.DerivedOrderConstraints(
-            bid_types=("limit",),
-            order_sides=("bid", "ask"),
-        )
+    cases = (
+        (("price",), True, "", "raw"),
+        (("limit", "price"), True, "", "raw"),
+        (("limit",), False, "buy_price_none_unsupported", "raw"),
+        (("market",), False, "buy_price_none_requires_explicit_price_support", "raw"),
     )
-    assert limit_only.allowed is False
-    assert limit_only.alias_used is False
-    assert limit_only.block_reason == "buy_price_none_unsupported"
 
-    market_only = order_rules.resolve_buy_price_none_resolution(
-        rules=order_rules.DerivedOrderConstraints(
-            bid_types=("market",),
-            order_sides=("bid", "ask"),
+    for bid_types, allowed, block_reason, decision_basis in cases:
+        resolution = order_rules.resolve_buy_price_none_resolution(
+            rules=order_rules.DerivedOrderConstraints(
+                bid_types=bid_types,
+                order_sides=("bid", "ask"),
+            )
         )
-    )
-    assert market_only.allowed is False
-    assert market_only.alias_used is False
-    assert market_only.block_reason == "buy_price_none_requires_explicit_price_support"
+        assert resolution.allowed is allowed
+        assert resolution.alias_used is False
+        assert resolution.resolved_order_type == "price"
+        assert resolution.block_reason == block_reason
+        assert resolution.decision_basis == decision_basis
 
-    explicit_price = order_rules.resolve_buy_price_none_resolution(
-        rules=order_rules.DerivedOrderConstraints(
-            bid_types=("limit", "price"),
-            order_sides=("bid", "ask"),
-        )
+
+@pytest.mark.parametrize(
+    ("bid_types", "allowed", "block_reason"),
+    (
+        (("price",), True, ""),
+        (("limit", "price"), True, ""),
+        (("limit",), False, "buy_price_none_unsupported"),
+        (("market",), False, "buy_price_none_requires_explicit_price_support"),
+    ),
+)
+def test_validate_order_chance_support_buy_price_none_default_matrix(
+    bid_types: tuple[str, ...],
+    allowed: bool,
+    block_reason: str,
+) -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        bid_types=bid_types,
+        order_sides=("bid", "ask"),
     )
-    assert explicit_price.allowed is True
-    assert explicit_price.alias_used is False
-    assert explicit_price.resolved_order_type == "price"
+
+    if allowed:
+        order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+        return
+
+    with pytest.raises(BrokerRejectError, match=block_reason):
+        order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")

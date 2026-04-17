@@ -1552,6 +1552,7 @@ def cmd_broker_diagnose() -> None:
                 f"support_source={buy_price_none_resolution.support_source} "
                 f"resolved_order_type={buy_price_none_resolution.resolved_order_type} "
                 f"allowed={buy_price_none_resolution.allowed} "
+                f"decision_basis={buy_price_none_resolution.decision_basis} "
                 f"alias_used={buy_price_none_resolution.alias_used} "
                 f"block_reason={buy_price_none_resolution.block_reason or '-'}"
             ),

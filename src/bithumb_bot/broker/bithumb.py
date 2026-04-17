@@ -2186,6 +2186,16 @@ class BithumbBroker:
                     "buy_price_none_allowed": (
                         None if buy_price_none_resolution is None else bool(buy_price_none_resolution.allowed)
                     ),
+                    "buy_price_none_decision_outcome": (
+                        None
+                        if buy_price_none_resolution is None
+                        else ("pass" if buy_price_none_resolution.allowed else "block")
+                    ),
+                    "buy_price_none_decision_basis": (
+                        None
+                        if buy_price_none_resolution is None
+                        else buy_price_none_resolution.decision_basis
+                    ),
                     "buy_price_none_alias_used": (
                         None if buy_price_none_resolution is None else bool(buy_price_none_resolution.alias_used)
                     ),
@@ -2199,6 +2209,11 @@ class BithumbBroker:
                         None
                         if buy_price_none_resolution is None
                         else list(buy_price_none_resolution.raw_supported_types)
+                    ),
+                    "buy_price_none_resolved_order_type": (
+                        None
+                        if buy_price_none_resolution is None
+                        else buy_price_none_resolution.resolved_order_type
                     ),
                     "exchange_submit_field": exchange_submit_field_hint,
                     "exchange_order_type": chance_validation_order_type,
@@ -2219,6 +2234,11 @@ class BithumbBroker:
                         "-"
                         if buy_price_none_resolution is None
                         else int(buy_price_none_resolution.allowed)
+                    ),
+                    buy_price_none_decision_basis=(
+                        "-"
+                        if buy_price_none_resolution is None
+                        else buy_price_none_resolution.decision_basis
                     ),
                     buy_price_none_alias_used=(
                         "-"
@@ -2243,6 +2263,7 @@ class BithumbBroker:
                 rules=rules,
                 side=side,
                 order_type=chance_validation_order_type,
+                buy_price_none_resolution=buy_price_none_resolution,
             )
             if price is None and normalized_side == "ask":
                 broker_precision_qty = self._truncate_volume(float(qty))
