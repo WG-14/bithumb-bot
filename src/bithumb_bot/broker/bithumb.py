@@ -2148,7 +2148,7 @@ class BithumbBroker:
         normalized_side = normalize_order_side(side)
         market = self._market()
         from .order_rules import (
-            build_buy_price_none_submit_contract_context,
+            build_buy_price_none_submit_contract,
             buy_price_none_submit_contract_mismatch,
             get_effective_order_rules,
             normalize_limit_price_for_side,
@@ -2172,25 +2172,36 @@ class BithumbBroker:
                 if price is None and normalized_side == "bid"
                 else None
             )
-            chance_validation_order_type = (
-                buy_price_none_resolution.resolved_order_type
+            buy_price_none_submit_contract = (
+                build_buy_price_none_submit_contract(
+                    rules=rules,
+                    resolution=buy_price_none_resolution,
+                )
                 if buy_price_none_resolution is not None
+                else None
+            )
+            chance_validation_order_type = (
+                buy_price_none_submit_contract.chance_validation_order_type
+                if buy_price_none_submit_contract is not None
                 else ("market" if price is None else "limit")
             )
-            chance_supported_order_types = supported_order_types_for_chance_validation(
-                side=order_side,
-                rules=rules,
+            chance_supported_order_types = (
+                buy_price_none_submit_contract.chance_supported_order_types
+                if buy_price_none_submit_contract is not None
+                else supported_order_types_for_chance_validation(
+                    side=order_side,
+                    rules=rules,
+                )
             )
             exchange_submit_field_hint = (
-                "price" if buy_price_none_resolution is not None else "volume"
-            )
-            if buy_price_none_resolution is not None:
-                submit_contract_context.update(
-                    build_buy_price_none_submit_contract_context(
-                        rules=rules,
-                        resolution=buy_price_none_resolution,
-                    )
+                (
+                    buy_price_none_submit_contract.exchange_submit_field
+                    if buy_price_none_submit_contract is not None
+                    else "volume"
                 )
+            )
+            if buy_price_none_submit_contract is not None:
+                submit_contract_context.update(buy_price_none_submit_contract.as_context())
             else:
                 submit_contract_context.update(
                     {
@@ -2324,7 +2335,7 @@ class BithumbBroker:
                     # Bithumb market BUY still submits KRW notional (ord_type=price).
                     # Internal execution stays lot-first, while the exchange-side
                     # submit field is the KRW notional derived from that lot quantity.
-                    exchange_submit_field = "price"
+                    exchange_submit_field = exchange_submit_field_hint
                     exchange_submit_notional = self._decimal_from_value(effective_market_price) * self._decimal_from_value(internal_lot_qty)
                     bid_price_unit = self._decimal_from_value(submit_price_tick_policy.price_unit)
                     if bid_price_unit > 0:
@@ -2339,7 +2350,11 @@ class BithumbBroker:
                     payload = build_order_payload(
                         market=market,
                         side=normalized_side,
-                        ord_type="price",
+                        ord_type=(
+                            buy_price_none_submit_contract.exchange_order_type
+                            if buy_price_none_submit_contract is not None
+                            else chance_validation_order_type
+                        ),
                         price=self._format_krw_amount(exchange_submit_notional),
                         client_order_id=validated_client_order_id,
                     )
@@ -2388,7 +2403,11 @@ class BithumbBroker:
             submit_contract_context.update(
                 {
                     "exchange_submit_field": exchange_submit_field,
-                    "exchange_order_type": str(payload.get("order_type") or chance_validation_order_type),
+                    "exchange_order_type": (
+                        buy_price_none_submit_contract.exchange_order_type
+                        if buy_price_none_submit_contract is not None
+                        else str(payload.get("order_type") or chance_validation_order_type)
+                    ),
                     "exchange_submit_notional_krw": exchange_submit_notional_krw,
                     "exchange_submit_qty": float(exchange_submit_qty) if exchange_submit_field == "volume" else None,
                     "internal_executable_qty": float(internal_lot_qty),

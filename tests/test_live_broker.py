@@ -1748,10 +1748,11 @@ def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(mon
 
     broker = BithumbBroker()
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-    expected_context = order_rules.build_buy_price_none_submit_contract_context(
+    expected_contract = order_rules.build_buy_price_none_submit_contract(
         rules=resolved_rules,
         resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
     )
+    expected_context = expected_contract.as_context()
     expected_context.update({"market": "KRW-BTC", "order_side": "BUY"})
     setattr(broker, "_live_submit_contract_context", dict(expected_context))
 
@@ -1762,10 +1763,56 @@ def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(mon
     assert captured["payload"] == {
         "market": "KRW-BTC",
         "side": "bid",
-        "order_type": "price",
+        "order_type": expected_contract.exchange_order_type,
         "price": "80000",
         "client_order_id": "cid-match",
     }
+
+
+def test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_support(monkeypatch) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "test-key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "test-secret")
+
+    resolved_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=0.0,
+        min_notional_krw=0.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        max_qty_decimals=8,
+        bid_price_unit=10.0,
+        ask_price_unit=1.0,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _market: SimpleNamespace(rules=resolved_rules),
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
+
+    broker = BithumbBroker()
+    dispatch_attempted = False
+
+    def _unexpected_post_private(_endpoint: str, payload: dict[str, object], *, retry_safe: bool = False) -> dict[str, object]:
+        nonlocal dispatch_attempted
+        dispatch_attempted = True
+        return {"status": "0000", "data": {"order_id": "should-not-dispatch", "client_order_id": payload["client_order_id"]}}
+
+    monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
+
+    with pytest.raises(BrokerRejectError, match="BUY price=None before submit") as excinfo:
+        broker.place_order(client_order_id="cid-market-alias-blocked", side="BUY", qty=0.001, price=None)
+
+    assert "reason=buy_price_none_requires_explicit_price_support" in str(excinfo.value)
+    assert "raw_supported_types=['market']" in str(excinfo.value)
+    assert dispatch_attempted is False
 
 
 def test_bithumb_broker_buy_price_none_rejects_live_submit_contract_mismatch_before_dispatch(monkeypatch) -> None:
@@ -1823,6 +1870,35 @@ def test_bithumb_broker_buy_price_none_rejects_live_submit_contract_mismatch_bef
         broker.place_order(client_order_id="cid-mismatch", side="BUY", qty=0.001, price=None)
 
     assert dispatch_attempted is False
+
+
+def test_buy_price_none_diagnostics_reuse_submit_contract_fields() -> None:
+    resolved_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=resolved_rules)
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=resolved_rules,
+        resolution=resolution,
+    )
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=resolved_rules,
+        resolution=resolution,
+    )
+
+    assert diagnostic_fields["raw_buy_supported_types"] == submit_context["buy_price_none_raw_supported_types"]
+    assert diagnostic_fields["support_source"] == submit_context["buy_price_none_support_source"]
+    assert diagnostic_fields["resolved_order_type"] == submit_context["buy_price_none_resolved_order_type"]
+    assert diagnostic_fields["allowed"] == submit_context["buy_price_none_allowed"]
+    assert diagnostic_fields["decision_outcome"] == submit_context["buy_price_none_decision_outcome"]
+    assert diagnostic_fields["decision_basis"] == submit_context["buy_price_none_decision_basis"]
+    assert diagnostic_fields["alias_used"] == submit_context["buy_price_none_alias_used"]
+    assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
+    assert diagnostic_fields["block_reason"] == "-"
 
 
 @pytest.mark.fast_regression
