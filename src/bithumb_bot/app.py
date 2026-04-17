@@ -937,7 +937,7 @@ def cmd_health() -> None:
         rules = resolved_rules.rules
         source = resolved_rules.source or {}
         buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
-        raw_buy_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
+        raw_buy_supported_types = buy_price_none_resolution.raw_supported_types
         if getattr(resolved_rules, "fallback_used", False):
             print(
                 "    "
@@ -1539,7 +1539,7 @@ def cmd_broker_diagnose() -> None:
         rules = rr.rules
         source = rr.source or {}
         buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
-        raw_buy_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
+        raw_buy_supported_types = buy_price_none_resolution.raw_supported_types
         add_check(
             "symbol/order rule query",
             "PASS",
