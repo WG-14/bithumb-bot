@@ -836,3 +836,54 @@ def test_validate_order_chance_support_buy_price_none_default_matrix(
 
     with pytest.raises(BrokerRejectError, match=block_reason):
         order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+
+
+@pytest.mark.parametrize(
+    ("rules", "expected_allowed", "expected_block_reason"),
+    (
+        (
+            order_rules.DerivedOrderConstraints(
+                order_types=("limit",),
+                bid_types=("limit", "price"),
+                order_sides=("bid", "ask"),
+            ),
+            True,
+            "",
+        ),
+        (
+            order_rules.DerivedOrderConstraints(
+                order_types=("limit", "market"),
+                bid_types=("market",),
+                order_sides=("bid", "ask"),
+            ),
+            False,
+            "buy_price_none_requires_explicit_price_support",
+        ),
+    ),
+    ids=("allow_explicit_price_support", "block_market_only_support"),
+)
+def test_buy_price_none_diagnostic_fields_share_submit_contract_decision(
+    rules: order_rules.DerivedOrderConstraints,
+    expected_allowed: bool,
+    expected_block_reason: str,
+) -> None:
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert diagnostic_fields["raw_buy_supported_types"] == submit_context["buy_price_none_raw_supported_types"]
+    assert diagnostic_fields["support_source"] == submit_context["buy_price_none_support_source"]
+    assert diagnostic_fields["resolved_order_type"] == submit_context["buy_price_none_resolved_order_type"]
+    assert diagnostic_fields["allowed"] is expected_allowed
+    assert diagnostic_fields["allowed"] == submit_context["buy_price_none_allowed"]
+    assert diagnostic_fields["decision_basis"] == submit_context["buy_price_none_decision_basis"]
+    assert diagnostic_fields["alias_used"] == submit_context["buy_price_none_alias_used"]
+    assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
+    assert diagnostic_fields["block_reason"] == (expected_block_reason or "-")
+    assert diagnostic_fields["block_reason"] == (submit_context["buy_price_none_block_reason"] or "-")

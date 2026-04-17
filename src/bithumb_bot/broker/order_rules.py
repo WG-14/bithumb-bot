@@ -358,17 +358,21 @@ def build_buy_price_none_diagnostic_fields(
     resolution: BuyPriceNoneResolution | None = None,
 ) -> dict[str, object]:
     buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
+    submit_context = build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=buy_resolution,
+    )
     return {
         "raw_bid_types": [str(item) for item in getattr(rules, "bid_types", ()) or ()],
         "raw_order_types": [str(item) for item in getattr(rules, "order_types", ()) or ()],
-        "raw_buy_supported_types": list(buy_resolution.raw_supported_types),
-        "support_source": buy_resolution.support_source,
-        "resolved_order_type": buy_resolution.resolved_order_type,
-        "allowed": bool(buy_resolution.allowed),
-        "decision_basis": buy_resolution.decision_basis,
-        "alias_used": bool(buy_resolution.alias_used),
-        "alias_policy": buy_resolution.alias_policy,
-        "block_reason": (buy_resolution.block_reason or "-"),
+        "raw_buy_supported_types": list(submit_context["buy_price_none_raw_supported_types"]),
+        "support_source": submit_context["buy_price_none_support_source"],
+        "resolved_order_type": submit_context["buy_price_none_resolved_order_type"],
+        "allowed": bool(submit_context["buy_price_none_allowed"]),
+        "decision_basis": submit_context["buy_price_none_decision_basis"],
+        "alias_used": bool(submit_context["buy_price_none_alias_used"]),
+        "alias_policy": submit_context["buy_price_none_alias_policy"],
+        "block_reason": (str(submit_context["buy_price_none_block_reason"]) or "-"),
     }
 
 
