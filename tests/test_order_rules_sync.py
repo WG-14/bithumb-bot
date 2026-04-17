@@ -675,9 +675,43 @@ def test_resolve_buy_price_none_resolution_default_mode_is_fail_closed() -> None
         )
         assert resolution.allowed is allowed
         assert resolution.alias_used is False
+        assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
         assert resolution.resolved_order_type == "price"
         assert resolution.block_reason == block_reason
         assert resolution.decision_basis == decision_basis
+
+
+def test_buy_price_none_market_only_default_policy_blocks_without_alias_exception() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        order_sides=("bid", "ask"),
+    )
+
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert resolution.allowed is False
+    assert resolution.alias_used is False
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+    assert diagnostic_fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert submit_context["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(
+            rules=rules,
+            side="BUY",
+            order_type="price",
+            buy_price_none_resolution=resolution,
+        )
 
 
 @pytest.mark.parametrize(

@@ -1822,6 +1822,7 @@ def test_buy_price_none_blocked_exception_context_matches_shared_diagnostic_fiel
     assert context["buy_price_none_decision_outcome"] == "block"
     assert context["buy_price_none_decision_basis"] == diagnostic_fields["decision_basis"]
     assert context["buy_price_none_alias_used"] == diagnostic_fields["alias_used"]
+    assert context["buy_price_none_alias_policy"] == diagnostic_fields["alias_policy"]
     assert context["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
     assert context["buy_price_none_support_source"] == diagnostic_fields["support_source"]
     assert context["buy_price_none_raw_supported_types"] == diagnostic_fields["raw_buy_supported_types"]
@@ -1912,6 +1913,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert order.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
         assert order.submit_contract_context["buy_price_none_decision_basis"] == "raw"
         assert order.submit_contract_context["buy_price_none_alias_used"] is False
+        assert order.submit_contract_context["buy_price_none_alias_policy"] == resolution.alias_policy
         assert order.submit_contract_context["buy_price_none_block_reason"] == ""
         assert order.submit_contract_context["buy_price_none_raw_supported_types"] == list(
             resolution.raw_supported_types
@@ -1932,6 +1934,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert context["buy_price_none_decision_outcome"] == "block"
         assert context["buy_price_none_decision_basis"] == "raw"
         assert context["buy_price_none_alias_used"] is False
+        assert context["buy_price_none_alias_policy"] == resolution.alias_policy
         assert context["buy_price_none_block_reason"] == block_reason
         assert context["buy_price_none_raw_supported_types"] == list(resolution.raw_supported_types)
         assert context["buy_price_none_support_source"] == resolution.support_source

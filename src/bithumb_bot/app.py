@@ -972,6 +972,7 @@ def cmd_health() -> None:
             f"allowed={buy_price_none_fields['allowed']} "
             f"decision_basis={buy_price_none_fields['decision_basis']} "
             f"alias_used={buy_price_none_fields['alias_used']} "
+            f"alias_policy={buy_price_none_fields['alias_policy']} "
             f"block_reason={buy_price_none_fields['block_reason']}"
         )
     except Exception as exc:
@@ -1573,6 +1574,7 @@ def cmd_broker_diagnose() -> None:
                 f"allowed={buy_price_none_fields['allowed']} "
                 f"decision_basis={buy_price_none_fields['decision_basis']} "
                 f"alias_used={buy_price_none_fields['alias_used']} "
+                f"alias_policy={buy_price_none_fields['alias_policy']} "
                 f"block_reason={buy_price_none_fields['block_reason']}"
             ),
             critical=False,

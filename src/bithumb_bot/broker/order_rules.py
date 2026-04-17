@@ -25,6 +25,11 @@ KNOWN_RULE_SOURCES = frozenset(
     }
 )
 
+# BUY price=None stays fail-closed by default: a raw "market" capability is
+# not treated as a compatible alias for the required exchange "price" submit
+# field unless a future compatibility mode is added explicitly and safely gated.
+BUY_PRICE_NONE_ALIAS_POLICY = "market_to_price_alias_disabled"
+
 
 @dataclass(frozen=True)
 class OrderChanceSide:
@@ -91,6 +96,7 @@ class BuyPriceNoneResolution:
     resolved_order_type: str
     decision_basis: str
     alias_used: bool
+    alias_policy: str
     block_reason: str
     raw_supported_types: tuple[str, ...]
     support_source: str
@@ -264,6 +270,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
             resolved_order_type="price",
             decision_basis="raw",
             alias_used=False,
+            alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
             block_reason="",
             raw_supported_types=raw_supported_types,
             support_source=support_source,
@@ -274,6 +281,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
             resolved_order_type="price",
             decision_basis="raw",
             alias_used=False,
+            alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
             block_reason="buy_price_none_requires_explicit_price_support",
             raw_supported_types=raw_supported_types,
             support_source=support_source,
@@ -283,6 +291,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
         resolved_order_type="price",
         decision_basis="raw",
         alias_used=False,
+        alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
         block_reason="buy_price_none_unsupported",
         raw_supported_types=raw_supported_types,
         support_source=support_source,
@@ -311,6 +320,7 @@ def build_buy_price_none_submit_contract_context(
         "buy_price_none_decision_outcome": ("pass" if buy_resolution.allowed else "block"),
         "buy_price_none_decision_basis": buy_resolution.decision_basis,
         "buy_price_none_alias_used": bool(buy_resolution.alias_used),
+        "buy_price_none_alias_policy": buy_resolution.alias_policy,
         "buy_price_none_block_reason": buy_resolution.block_reason,
         "buy_price_none_support_source": buy_resolution.support_source,
         "buy_price_none_raw_supported_types": list(buy_resolution.raw_supported_types),
@@ -357,6 +367,7 @@ def build_buy_price_none_diagnostic_fields(
         "allowed": bool(buy_resolution.allowed),
         "decision_basis": buy_resolution.decision_basis,
         "alias_used": bool(buy_resolution.alias_used),
+        "alias_policy": buy_resolution.alias_policy,
         "block_reason": (buy_resolution.block_reason or "-"),
     }
 

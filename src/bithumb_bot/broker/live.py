@@ -2839,6 +2839,7 @@ def _submit_contract_fields(
         "buy_price_none_decision_outcome": context.get("buy_price_none_decision_outcome"),
         "buy_price_none_decision_basis": context.get("buy_price_none_decision_basis"),
         "buy_price_none_alias_used": context.get("buy_price_none_alias_used"),
+        "buy_price_none_alias_policy": context.get("buy_price_none_alias_policy"),
         "buy_price_none_block_reason": context.get("buy_price_none_block_reason"),
         "buy_price_none_support_source": context.get("buy_price_none_support_source"),
         "buy_price_none_raw_supported_types": buy_price_none_raw_supported_types,

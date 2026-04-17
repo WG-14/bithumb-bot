@@ -11,6 +11,7 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.broker import live as live_module
+from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
     adjust_buy_order_qty_for_dust_safety,
@@ -1484,6 +1485,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_evidence["buy_price_none_decision_outcome"] == "pass"
     assert submit_evidence["buy_price_none_decision_basis"] == "raw"
     assert submit_evidence["buy_price_none_alias_used"] is False
+    assert submit_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert submit_evidence["buy_price_none_block_reason"] == ""
     assert submit_evidence["buy_price_none_support_source"] == "order_types"
     assert submit_evidence["buy_price_none_raw_supported_types"] == ["price"]
@@ -1502,6 +1504,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight_evidence["buy_price_none_decision_outcome"] == "pass"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
     assert preflight_evidence["buy_price_none_alias_used"] is False
+    assert preflight_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert preflight_evidence["buy_price_none_block_reason"] == ""
     assert preflight_evidence["buy_price_none_support_source"] == "order_types"
     assert preflight_evidence["buy_price_none_raw_supported_types"] == ["price"]
@@ -1653,6 +1656,7 @@ def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contra
         "buy_price_none_decision_outcome",
         "buy_price_none_decision_basis",
         "buy_price_none_alias_used",
+        "buy_price_none_alias_policy",
         "buy_price_none_block_reason",
         "buy_price_none_support_source",
         "buy_price_none_raw_supported_types",
@@ -1794,6 +1798,7 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
     assert submit_evidence["buy_price_none_decision_outcome"] == "block"
     assert submit_evidence["buy_price_none_decision_basis"] == "raw"
     assert submit_evidence["buy_price_none_alias_used"] is False
+    assert submit_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert submit_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
     assert submit_evidence["buy_price_none_support_source"] == "bid_types"
     assert submit_evidence["buy_price_none_raw_supported_types"] == ["market"]
@@ -1808,6 +1813,7 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
     assert preflight_evidence["buy_price_none_decision_outcome"] == "block"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
     assert preflight_evidence["buy_price_none_alias_used"] is False
+    assert preflight_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert preflight_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
     assert preflight_evidence["buy_price_none_support_source"] == "bid_types"
     assert preflight_evidence["buy_price_none_raw_supported_types"] == ["market"]

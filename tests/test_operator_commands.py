@@ -2519,7 +2519,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "raw_order_types=['limit']" in out
     assert "raw_buy_supported_types=['limit', 'price']" in out
     assert "support_source=bid_types" in out
-    assert "resolved_order_type=price allowed=True decision_basis=raw alias_used=False block_reason=-" in out
+    assert "resolved_order_type=price allowed=True decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled block_reason=-" in out
     assert "overall=WARN" not in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
     assert "execution_mode=- quote_currency=- base_currency=-" in out
@@ -2612,7 +2612,7 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
     assert "raw_order_types=['limit', 'market']" in out
     assert "raw_buy_supported_types=['market']" in out
     assert "support_source=bid_types" in out
-    assert "resolved_order_type=price allowed=False decision_basis=raw alias_used=False" in out
+    assert "resolved_order_type=price allowed=False decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled" in out
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
@@ -3739,6 +3739,7 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
     assert "allowed=False" in out
     assert "decision_basis=raw" in out
     assert "alias_used=False" in out
+    assert "alias_policy=market_to_price_alias_disabled" in out
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
