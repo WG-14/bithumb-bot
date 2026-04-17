@@ -970,6 +970,7 @@ def cmd_health() -> None:
             f"support_source={buy_price_none_fields['support_source']} "
             f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
             f"allowed={buy_price_none_fields['allowed']} "
+            f"decision_outcome={buy_price_none_fields['decision_outcome']} "
             f"decision_basis={buy_price_none_fields['decision_basis']} "
             f"alias_used={buy_price_none_fields['alias_used']} "
             f"alias_policy={buy_price_none_fields['alias_policy']} "
@@ -1564,7 +1565,7 @@ def cmd_broker_diagnose() -> None:
         )
         add_check(
             "BUY price=None chance resolution",
-            "PASS" if buy_price_none_resolution.allowed else "WARN",
+            "PASS" if buy_price_none_resolution.allowed else "FAIL",
             (
                 f"raw_bid_types={buy_price_none_fields['raw_bid_types']} "
                 f"raw_order_types={buy_price_none_fields['raw_order_types']} "
@@ -1572,12 +1573,13 @@ def cmd_broker_diagnose() -> None:
                 f"support_source={buy_price_none_fields['support_source']} "
                 f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
                 f"allowed={buy_price_none_fields['allowed']} "
+                f"decision_outcome={buy_price_none_fields['decision_outcome']} "
                 f"decision_basis={buy_price_none_fields['decision_basis']} "
                 f"alias_used={buy_price_none_fields['alias_used']} "
                 f"alias_policy={buy_price_none_fields['alias_policy']} "
                 f"block_reason={buy_price_none_fields['block_reason']}"
             ),
-            critical=False,
+            critical=True,
         )
     except Exception as e:
         add_check(

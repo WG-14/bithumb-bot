@@ -369,6 +369,7 @@ def build_buy_price_none_diagnostic_fields(
         "support_source": submit_context["buy_price_none_support_source"],
         "resolved_order_type": submit_context["buy_price_none_resolved_order_type"],
         "allowed": bool(submit_context["buy_price_none_allowed"]),
+        "decision_outcome": submit_context["buy_price_none_decision_outcome"],
         "decision_basis": submit_context["buy_price_none_decision_basis"],
         "alias_used": bool(submit_context["buy_price_none_alias_used"]),
         "alias_policy": submit_context["buy_price_none_alias_policy"],

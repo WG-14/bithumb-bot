@@ -2519,7 +2519,7 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "raw_order_types=['limit']" in out
     assert "raw_buy_supported_types=['limit', 'price']" in out
     assert "support_source=bid_types" in out
-    assert "resolved_order_type=price allowed=True decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled block_reason=-" in out
+    assert "resolved_order_type=price allowed=True decision_outcome=pass decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled block_reason=-" in out
     assert "overall=WARN" not in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
     assert "execution_mode=- quote_currency=- base_currency=-" in out
@@ -2597,22 +2597,21 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
         )(),
     )
 
-    try:
+    with pytest.raises(SystemExit, match="1"):
         cmd_broker_diagnose()
-    finally:
-        object.__setattr__(settings, "MODE", original_mode)
-        object.__setattr__(app_module.settings, "MODE", original_mode)
-        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+    object.__setattr__(settings, "MODE", original_mode)
+    object.__setattr__(app_module.settings, "MODE", original_mode)
+    object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
 
     out = capsys.readouterr().out
-    assert "overall=WARN" in out
+    assert "overall=FAIL" in out
     assert "overall=PASS" not in out
-    assert "[WARN] BUY price=None chance resolution:" in out
+    assert "[FAIL] BUY price=None chance resolution:" in out
     assert "raw_bid_types=['market']" in out
     assert "raw_order_types=['limit', 'market']" in out
     assert "raw_buy_supported_types=['market']" in out
     assert "support_source=bid_types" in out
-    assert "resolved_order_type=price allowed=False decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled" in out
+    assert "resolved_order_type=price allowed=False decision_outcome=block decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled" in out
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
@@ -3738,6 +3737,7 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
     assert "support_source=bid_types" in out
     assert "resolved_order_type=price" in out
     assert "allowed=False" in out
+    assert "decision_outcome=block" in out
     assert "decision_basis=raw" in out
     assert "alias_used=False" in out
     assert "alias_policy=market_to_price_alias_disabled" in out

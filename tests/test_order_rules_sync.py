@@ -882,6 +882,7 @@ def test_buy_price_none_diagnostic_fields_share_submit_contract_decision(
     assert diagnostic_fields["resolved_order_type"] == submit_context["buy_price_none_resolved_order_type"]
     assert diagnostic_fields["allowed"] is expected_allowed
     assert diagnostic_fields["allowed"] == submit_context["buy_price_none_allowed"]
+    assert diagnostic_fields["decision_outcome"] == submit_context["buy_price_none_decision_outcome"]
     assert diagnostic_fields["decision_basis"] == submit_context["buy_price_none_decision_basis"]
     assert diagnostic_fields["alias_used"] == submit_context["buy_price_none_alias_used"]
     assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
