@@ -323,6 +323,25 @@ def build_buy_price_none_submit_contract_context(
     }
 
 
+def buy_price_none_submit_contract_mismatch(
+    *,
+    expected: dict[str, object] | None,
+    actual: dict[str, object] | None,
+) -> str | None:
+    if not isinstance(expected, dict) or not isinstance(actual, dict):
+        return "submit contract missing"
+    if dict(expected) == dict(actual):
+        return None
+    all_keys = sorted(set(expected) | set(actual))
+    mismatches: list[str] = []
+    for key in all_keys:
+        expected_value = expected.get(key)
+        actual_value = actual.get(key)
+        if expected_value != actual_value:
+            mismatches.append(f"{key}: expected={expected_value!r} actual={actual_value!r}")
+    return "; ".join(mismatches) if mismatches else "submit contract mismatch"
+
+
 def build_buy_price_none_diagnostic_fields(
     *,
     rules: DerivedOrderConstraints,

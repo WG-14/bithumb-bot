@@ -1611,6 +1611,62 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg and "state_to=SUBMIT_UNKNOWN" in msg for msg in notifications)
 
 
+def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contract(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_price_none_shared_contract.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+
+    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100_000_000.0)
+    assert trade is not None
+
+    conn = ensure_db(str(tmp_path / "buy_price_none_shared_contract.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    preflight = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    preflight_evidence = json.loads(str(preflight["submit_evidence"]))
+    contract_keys = (
+        "chance_validation_order_type",
+        "chance_supported_order_types",
+        "buy_price_none_allowed",
+        "buy_price_none_decision_outcome",
+        "buy_price_none_decision_basis",
+        "buy_price_none_alias_used",
+        "buy_price_none_block_reason",
+        "buy_price_none_support_source",
+        "buy_price_none_raw_supported_types",
+        "buy_price_none_resolved_order_type",
+        "exchange_submit_field",
+        "exchange_order_type",
+        "market",
+        "order_side",
+    )
+    assert {key: preflight_evidence[key] for key in contract_keys} == {
+        key: submit_evidence[key] for key in contract_keys
+    }
+
+
 @pytest.mark.fast_regression
 def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit_as_qty_step_mismatch(tmp_path):
     class _RejectingBuyBroker(_FakeBroker):

@@ -2149,6 +2149,7 @@ class BithumbBroker:
         market = self._market()
         from .order_rules import (
             build_buy_price_none_submit_contract_context,
+            buy_price_none_submit_contract_mismatch,
             get_effective_order_rules,
             normalize_limit_price_for_side,
             resolve_buy_price_none_resolution,
@@ -2161,6 +2162,11 @@ class BithumbBroker:
             order_rules_resolution = get_effective_order_rules(market)
             rules = order_rules_resolution.rules
             order_side = "BUY" if normalized_side == "bid" else "SELL"
+            expected_submit_contract_context = (
+                dict(getattr(self, "_live_submit_contract_context"))
+                if isinstance(getattr(self, "_live_submit_contract_context", None), dict)
+                else None
+            )
             buy_price_none_resolution = (
                 resolve_buy_price_none_resolution(rules=rules)
                 if price is None and normalized_side == "bid"
@@ -2203,6 +2209,16 @@ class BithumbBroker:
                     "order_side": order_side,
                 }
             )
+            if buy_price_none_resolution is not None and expected_submit_contract_context is not None:
+                mismatch_detail = buy_price_none_submit_contract_mismatch(
+                    expected=expected_submit_contract_context,
+                    actual=submit_contract_context,
+                )
+                if mismatch_detail is not None:
+                    raise BrokerRejectError(
+                        "BUY price=None submit contract mismatch before broker dispatch: "
+                        f"{mismatch_detail}"
+                    )
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SUBMIT] chance contract",

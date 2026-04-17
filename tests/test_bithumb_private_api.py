@@ -1940,6 +1940,52 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
     assert observed["buy_price_none_resolution"] is resolution
 
 
+def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("limit",),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(rules=rules),
+    )
+    setattr(
+        broker,
+        "_live_submit_contract_context",
+        {
+            **order_rules.build_buy_price_none_submit_contract_context(rules=rules),
+            "market": "KRW-BTC",
+            "order_side": "BUY",
+            "buy_price_none_allowed": False,
+            "buy_price_none_decision_outcome": "block",
+            "buy_price_none_block_reason": "forced_mismatch",
+        },
+    )
+
+    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract mismatch before broker dispatch") as excinfo:
+        broker.place_order(
+            client_order_id="cid-buy-price-none-mismatch",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+        )
+
+    context = getattr(excinfo.value, "submit_contract_context", None)
+    assert context is not None
+    assert context["buy_price_none_allowed"] is True
+    assert context["buy_price_none_decision_outcome"] == "pass"
+    assert context["buy_price_none_block_reason"] == ""
+
+
 def test_place_order_blocks_volume_that_would_be_silently_truncated():
     _configure_live()
     broker = BithumbBroker()

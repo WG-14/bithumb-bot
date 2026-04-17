@@ -2821,6 +2821,8 @@ def _submit_contract_fields(
             if is_buy_market_notional
             else ("market_qty" if normalized_order_type == "market" else "limit_qty_price")
         ),
+        "market": context.get("market"),
+        "order_side": context.get("order_side"),
         "exchange_order_type": str(context.get("exchange_order_type") or normalized_order_type or "-"),
         "chance_validation_order_type": str(
             context.get("chance_validation_order_type") or normalized_order_type or "-"
@@ -3189,7 +3191,13 @@ def _submit_via_standard_path(
                 exchange_submit_notional_krw=base_submit_contract_fields["exchange_submit_notional_krw"] or "",
             )
         )
-        order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
+        if submit_contract_context is not None:
+            setattr(broker, "_live_submit_contract_context", dict(submit_contract_context))
+        try:
+            order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
+        finally:
+            if submit_contract_context is not None and hasattr(broker, "_live_submit_contract_context"):
+                delattr(broker, "_live_submit_contract_context")
         response_ts = int(time.time() * 1000)
     except BrokerTemporaryError as e:
         response_ts = int(time.time() * 1000)
@@ -4479,9 +4487,13 @@ def _evaluate_live_execution_feasibility(
         return None
 
     submit_contract_context = (
-        build_buy_price_none_submit_contract_context(
-            rules=position_state.effective_rules,
-        )
+        {
+            **build_buy_price_none_submit_contract_context(
+                rules=position_state.effective_rules,
+            ),
+            "market": settings.PAIR,
+            "order_side": "BUY",
+        }
         if intent.side == "BUY"
         else None
     )
