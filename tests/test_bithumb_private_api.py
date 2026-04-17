@@ -1722,6 +1722,63 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
     assert call == {}
 
 
+def test_buy_price_none_resolution_allows_explicit_price_only_support():
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("price",),
+        bid_types=("price",),
+    )
+
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+
+    assert resolution.allowed is True
+    assert resolution.resolved_order_type == "price"
+    assert resolution.block_reason == ""
+    assert resolution.raw_supported_types == ("price",)
+    assert resolution.support_source == "bid_types"
+
+    order_rules.validate_order_chance_support(
+        rules=rules,
+        side="BUY",
+        order_type="price",
+        buy_price_none_resolution=resolution,
+    )
+
+
+def test_buy_price_none_resolution_blocks_limit_only_support():
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("limit",),
+        bid_types=("limit",),
+    )
+
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+
+    assert resolution.allowed is False
+    assert resolution.resolved_order_type == "price"
+    assert resolution.block_reason == "buy_price_none_unsupported"
+    assert resolution.raw_supported_types == ("limit",)
+    assert resolution.support_source == "bid_types"
+
+    with pytest.raises(BrokerRejectError, match="buy_price_none_unsupported"):
+        order_rules.validate_order_chance_support(
+            rules=rules,
+            side="BUY",
+            order_type="price",
+            buy_price_none_resolution=resolution,
+        )
+
+
 @pytest.mark.parametrize(
     ("order_types", "bid_types", "allowed", "block_reason"),
     (
