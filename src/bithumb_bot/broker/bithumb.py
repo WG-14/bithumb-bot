@@ -2220,7 +2220,11 @@ class BithumbBroker:
                     "order_side": order_side,
                 }
             )
-            if buy_price_none_resolution is not None and expected_submit_contract_context is not None:
+            if buy_price_none_resolution is not None:
+                if expected_submit_contract_context is None:
+                    raise BrokerRejectError(
+                        "BUY price=None submit contract missing before broker dispatch"
+                    )
                 mismatch_detail = buy_price_none_submit_contract_mismatch(
                     expected=expected_submit_contract_context,
                     actual=submit_contract_context,

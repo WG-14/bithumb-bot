@@ -399,6 +399,7 @@ def build_buy_price_none_diagnostic_fields(
         "raw_buy_supported_types": list(submit_context["buy_price_none_raw_supported_types"]),
         "support_source": submit_context["buy_price_none_support_source"],
         "resolved_order_type": submit_context["buy_price_none_resolved_order_type"],
+        "submit_field": submit_context["exchange_submit_field"],
         "allowed": bool(submit_context["buy_price_none_allowed"]),
         "decision_outcome": submit_context["buy_price_none_decision_outcome"],
         "decision_basis": submit_context["buy_price_none_decision_basis"],

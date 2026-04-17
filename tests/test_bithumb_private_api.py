@@ -88,6 +88,18 @@ def _configure_live():
     object.__setattr__(settings, "BITHUMB_API_SECRET", "s")
 
 
+def _set_buy_price_none_submit_contract(
+    broker: BithumbBroker,
+    *,
+    rules: object,
+    market: str = "KRW-BTC",
+) -> dict[str, object]:
+    context = order_rules.build_buy_price_none_submit_contract_context(rules=rules)
+    context.update({"market": market, "order_side": "BUY"})
+    setattr(broker, "_live_submit_contract_context", dict(context))
+    return context
+
+
 def _exact_lot_qty(
     *,
     market_price: float | None,
@@ -1414,6 +1426,10 @@ def test_order_chance_keeps_market_param_and_auth_query_hash(monkeypatch):
 def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     call: dict[str, object] = {}
 
@@ -1452,6 +1468,10 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
 def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
     call: dict[str, object] = {}
     valid_client_order_id = "Abc_123-xyz_456-7890_ABC-def-ghi-jkl"
 
@@ -1498,6 +1518,10 @@ def test_place_order_rejects_invalid_characters_in_client_order_id():
 def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
@@ -1511,6 +1535,10 @@ def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
 def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
@@ -1620,6 +1648,10 @@ def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypa
     with pytest.raises(BrokerRejectError, match="rejected order side before submit"):
         broker.place_order(client_order_id="cid-side", side="SELL", qty=0.4320, price=None)
 
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
     with pytest.raises(BrokerRejectError, match="buy_price_none_unsupported"):
         broker.place_order(client_order_id="cid-type", side="BUY", qty=0.4320, price=None)
 
@@ -1664,6 +1696,10 @@ def test_place_order_accepts_buy_market_notional_from_side_specific_chance_types
         return {"uuid": "mkt-chance-ok"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     order = broker.place_order(client_order_id="cid-chance-ok", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
 
@@ -1710,6 +1746,10 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
         return {"uuid": "mkt-chance-market-ok"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
         broker.place_order(
@@ -1807,6 +1847,7 @@ def test_buy_price_none_blocked_exception_context_matches_shared_diagnostic_fiel
         "bithumb_bot.broker.order_rules.resolve_buy_price_none_resolution",
         lambda *, rules: resolution,
     )
+    _set_buy_price_none_submit_contract(broker, rules=rules)
 
     with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support") as excinfo:
         broker.place_order(
@@ -1906,6 +1947,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     if allowed:
+        _set_buy_price_none_submit_contract(broker, rules=rules)
         order = broker.place_order(
             client_order_id="cid-chance-shared-resolution",
             side="BUY",
@@ -1930,6 +1972,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert call["retry_safe"] is False
         assert call["payload"]["order_type"] == resolution.resolved_order_type
     else:
+        _set_buy_price_none_submit_contract(broker, rules=rules)
         with pytest.raises(BrokerRejectError, match=block_reason) as excinfo:
             broker.place_order(
                 client_order_id="cid-chance-shared-resolution",
@@ -1998,6 +2041,34 @@ def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkey
     assert context["buy_price_none_allowed"] is True
     assert context["buy_price_none_decision_outcome"] == "pass"
     assert context["buy_price_none_block_reason"] == ""
+
+
+def test_place_order_rejects_buy_price_none_missing_precomputed_contract(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        min_notional_krw=5000.0,
+        order_sides=("bid", "ask"),
+        order_types=("limit",),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(rules=rules),
+    )
+
+    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract missing before broker dispatch"):
+        broker.place_order(
+            client_order_id="cid-buy-price-none-missing-contract",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+        )
 
 
 def test_place_order_blocks_volume_that_would_be_silently_truncated():
@@ -2410,6 +2481,10 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
         return {"uuid": "mkt-unit-1"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
+    )
 
     qty = _exact_lot_qty(market_price=99_999_990.0)
     broker.place_order(client_order_id="cid-mkt-unit", side="BUY", qty=qty, price=None)
