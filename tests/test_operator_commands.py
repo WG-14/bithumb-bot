@@ -2517,6 +2517,8 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "[PASS] BUY price=None chance resolution:" in out
     assert "raw_bid_types=['limit', 'price']" in out
     assert "raw_order_types=['limit']" in out
+    assert "raw_buy_supported_types=['limit', 'price']" in out
+    assert "support_source=bid_types" in out
     assert "resolved_order_type=price allowed=True decision_basis=raw alias_used=False block_reason=-" in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
     assert "execution_mode=- quote_currency=- base_currency=-" in out
