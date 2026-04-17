@@ -1725,7 +1725,9 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
 @pytest.mark.parametrize(
     ("order_types", "bid_types", "allowed", "block_reason"),
     (
+        (("price",), ("price",), True, ""),
         (("limit",), ("limit", "price"), True, ""),
+        (("limit",), ("limit",), False, "buy_price_none_unsupported"),
         (("limit", "market"), (), False, "buy_price_none_requires_explicit_price_support"),
     ),
 )
