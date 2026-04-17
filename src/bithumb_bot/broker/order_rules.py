@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..config import settings
-from ..db_core import ensure_db, record_order_rule_snapshot
+from ..db_core import ensure_db, fetch_latest_order_rule_snapshot, record_order_rule_snapshot
 from ..markets import ExchangeMarketCodeError, canonical_market_id, canonical_market_with_raw, parse_documented_market_code
 from ..notifier import notify
 from .base import BrokerRejectError
@@ -24,6 +25,7 @@ KNOWN_RULE_SOURCES = frozenset(
         "missing",
     }
 )
+TRACKED_CHANCE_CONTRACT_FIELDS = ("order_types", "bid_types", "ask_types", "order_sides")
 
 # BUY price=None stays fail-closed by default: a raw "market" capability is
 # not treated as a compatible alias for the required exchange "price" submit
@@ -114,6 +116,48 @@ class BuyPriceNoneSubmitContract:
     exchange_submit_qty: float | None = None
     internal_executable_qty: float | None = None
 
+    @property
+    def contract_id(self) -> str:
+        payload = {
+            "chance_validation_order_type": self.chance_validation_order_type,
+            "chance_supported_order_types": self.chance_supported_order_types,
+            "exchange_submit_field": self.exchange_submit_field,
+            "exchange_order_type": self.exchange_order_type,
+            "allowed": self.resolution.allowed,
+            "decision_basis": self.resolution.decision_basis,
+            "alias_used": self.resolution.alias_used,
+            "alias_policy": self.resolution.alias_policy,
+            "block_reason": self.resolution.block_reason,
+            "raw_supported_types": self.resolution.raw_supported_types,
+            "support_source": self.resolution.support_source,
+            "resolved_order_type": self.resolution.resolved_order_type,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12]
+
+    @property
+    def resolved_contract(self) -> str:
+        return (
+            f"validation_order_type={self.chance_validation_order_type} "
+            f"exchange_order_type={self.exchange_order_type} "
+            f"submit_field={self.exchange_submit_field}"
+        )
+
+    def with_execution_fields(
+        self,
+        *,
+        exchange_submit_notional_krw: float | None = None,
+        exchange_submit_qty: float | None = None,
+        internal_executable_qty: float | None = None,
+    ) -> "BuyPriceNoneSubmitContract":
+        return replace(
+            self,
+            exchange_submit_notional_krw=exchange_submit_notional_krw,
+            exchange_submit_qty=exchange_submit_qty,
+            internal_executable_qty=internal_executable_qty,
+        )
+
     def as_context(self) -> dict[str, object]:
         return {
             "chance_validation_order_type": self.chance_validation_order_type,
@@ -127,6 +171,8 @@ class BuyPriceNoneSubmitContract:
             "buy_price_none_support_source": self.resolution.support_source,
             "buy_price_none_raw_supported_types": list(self.resolution.raw_supported_types),
             "buy_price_none_resolved_order_type": self.resolution.resolved_order_type,
+            "buy_price_none_resolved_contract": self.resolved_contract,
+            "buy_price_none_contract_id": self.contract_id,
             "exchange_submit_field": self.exchange_submit_field,
             "exchange_order_type": self.exchange_order_type,
             "exchange_submit_notional_krw": self.exchange_submit_notional_krw,
@@ -159,6 +205,7 @@ class RuleResolution:
     stale: bool = False
     source_mode: str = "exchange"
     snapshot_persisted: bool = False
+    chance_contract_change: "ChanceContractChange | None" = None
 
     def is_stale(self, *, now_sec: float | None = None) -> bool:
         if self.stale:
@@ -175,6 +222,15 @@ class OrderChanceSchemaError(RuntimeError):
 
 class OrderChanceMarketMismatchError(OrderChanceSchemaError):
     """Raised when /v1/orders/chance response market does not match request market."""
+
+
+@dataclass(frozen=True)
+class ChanceContractChange:
+    detected: bool
+    changed_fields: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    previous_snapshot: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    current_snapshot: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    previous_fetched_ts: int = 0
 
 
 def side_min_total_krw(*, rules: DerivedOrderConstraints, side: str) -> float:
@@ -343,10 +399,12 @@ def build_buy_price_none_submit_contract_context(
     routing, and operator-facing submit evidence on the same contract.
     """
 
-    return build_buy_price_none_submit_contract(
-        rules=rules,
-        resolution=resolution,
-    ).as_context()
+    return serialize_buy_price_none_submit_contract(
+        build_buy_price_none_submit_contract(
+            rules=rules,
+            resolution=resolution,
+        )
+    )
 
 
 def build_buy_price_none_submit_contract(
@@ -361,6 +419,31 @@ def build_buy_price_none_submit_contract(
         chance_supported_order_types=supported_order_types_for_chance_validation(side="BUY", rules=rules),
         exchange_submit_field="price",
         exchange_order_type=buy_resolution.resolved_order_type,
+    )
+
+
+def serialize_buy_price_none_submit_contract(
+    contract: BuyPriceNoneSubmitContract,
+    *,
+    market: str | None = None,
+    order_side: str | None = None,
+) -> dict[str, object]:
+    context = contract.as_context()
+    if market is not None:
+        context["market"] = market
+    if order_side is not None:
+        context["order_side"] = order_side
+    return context
+
+
+def validate_buy_price_none_submit_contract(*, submit_contract: BuyPriceNoneSubmitContract) -> None:
+    if submit_contract.resolution.allowed:
+        return
+    raise BrokerRejectError(
+        "/v1/orders/chance rejected BUY price=None before submit: "
+        f"reason={submit_contract.resolution.block_reason} "
+        f"support_source={submit_contract.resolution.support_source} "
+        f"raw_supported_types={sorted(set(submit_contract.resolution.raw_supported_types))}"
     )
 
 
@@ -387,18 +470,21 @@ def build_buy_price_none_diagnostic_fields(
     *,
     rules: DerivedOrderConstraints,
     resolution: BuyPriceNoneResolution | None = None,
+    submit_contract: BuyPriceNoneSubmitContract | None = None,
 ) -> dict[str, object]:
-    buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
-    submit_context = build_buy_price_none_submit_contract_context(
+    contract = submit_contract or build_buy_price_none_submit_contract(
         rules=rules,
-        resolution=buy_resolution,
+        resolution=resolution,
     )
+    submit_context = serialize_buy_price_none_submit_contract(contract)
     return {
         "raw_bid_types": [str(item) for item in getattr(rules, "bid_types", ()) or ()],
         "raw_order_types": [str(item) for item in getattr(rules, "order_types", ()) or ()],
         "raw_buy_supported_types": list(submit_context["buy_price_none_raw_supported_types"]),
         "support_source": submit_context["buy_price_none_support_source"],
         "resolved_order_type": submit_context["buy_price_none_resolved_order_type"],
+        "resolved_contract": submit_context["buy_price_none_resolved_contract"],
+        "contract_id": submit_context["buy_price_none_contract_id"],
         "submit_field": submit_context["exchange_submit_field"],
         "allowed": bool(submit_context["buy_price_none_allowed"]),
         "decision_outcome": submit_context["buy_price_none_decision_outcome"],
@@ -787,6 +873,58 @@ def get_cached_order_rule_snapshot(pair: str) -> RuleResolution | None:
     return cached[1]
 
 
+def _coerce_tracked_contract_tokens(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    if value is None:
+        return ()
+    return (str(value),)
+
+
+def _tracked_chance_contract_snapshot_from_payload(payload: dict[str, object] | None) -> dict[str, tuple[str, ...]]:
+    source = payload or {}
+    return {
+        field: _coerce_tracked_contract_tokens(source.get(field))
+        for field in TRACKED_CHANCE_CONTRACT_FIELDS
+    }
+
+
+def _tracked_chance_contract_snapshot_from_rules(rules: DerivedOrderConstraints) -> dict[str, tuple[str, ...]]:
+    return _tracked_chance_contract_snapshot_from_payload(
+        {
+            field: getattr(rules, field, ())
+            for field in TRACKED_CHANCE_CONTRACT_FIELDS
+        }
+    )
+
+
+def _detect_chance_contract_change(
+    *,
+    previous_rules_payload: dict[str, object] | None,
+    current_rules_payload: dict[str, object],
+    previous_fetched_ts: int = 0,
+) -> ChanceContractChange | None:
+    if previous_rules_payload is None:
+        return None
+    previous_snapshot = _tracked_chance_contract_snapshot_from_payload(previous_rules_payload)
+    current_snapshot = _tracked_chance_contract_snapshot_from_payload(current_rules_payload)
+    changed_fields = {
+        field: {
+            "previous": previous_snapshot[field],
+            "current": current_snapshot[field],
+        }
+        for field in TRACKED_CHANCE_CONTRACT_FIELDS
+        if previous_snapshot[field] != current_snapshot[field]
+    }
+    return ChanceContractChange(
+        detected=bool(changed_fields),
+        changed_fields=changed_fields,
+        previous_snapshot=previous_snapshot,
+        current_snapshot=current_snapshot,
+        previous_fetched_ts=int(previous_fetched_ts or 0),
+    )
+
+
 def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolution:
     fallback_market, _raw_market = canonical_market_with_raw(settings.PAIR)
     market = str(getattr(resolution.rules, "market_id", "") or parse_documented_market_code(fallback_market))
@@ -811,6 +949,22 @@ def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolu
     conn = None
     try:
         conn = ensure_db()
+        previous_snapshot_record = fetch_latest_order_rule_snapshot(conn, market=market)
+        previous_rules_payload = None
+        if previous_snapshot_record is not None:
+            try:
+                previous_rules_payload = json.loads(previous_snapshot_record.rules_json)
+            except Exception:
+                previous_rules_payload = None
+        chance_contract_change = _detect_chance_contract_change(
+            previous_rules_payload=previous_rules_payload,
+            current_rules_payload=rules_payload,
+            previous_fetched_ts=(
+                previous_snapshot_record.fetched_ts
+                if previous_snapshot_record is not None
+                else 0
+            ),
+        )
         record_order_rule_snapshot(
             conn,
             market=market,
@@ -838,6 +992,7 @@ def _persist_rule_snapshot_if_possible(resolution: RuleResolution) -> RuleResolu
             stale=resolution.stale,
             source_mode=resolution.source_mode,
             snapshot_persisted=True,
+            chance_contract_change=chance_contract_change,
         )
     except Exception:
         if conn is not None:

@@ -889,3 +889,56 @@ def test_buy_price_none_diagnostic_fields_share_submit_contract_decision(
     assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
     assert diagnostic_fields["block_reason"] == (expected_block_reason or "-")
     assert diagnostic_fields["block_reason"] == (submit_context["buy_price_none_block_reason"] or "-")
+
+
+def test_get_effective_order_rules_detects_tracked_chance_contract_change_from_prior_snapshot(monkeypatch, tmp_path) -> None:
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_rule_snapshots.sqlite"))
+    object.__setattr__(settings, "MODE", "paper")
+    order_rules._cached_rules.clear()
+
+    first = order_rules.ExchangeDerivedConstraints(
+        market_id="KRW-BTC",
+        order_types=("limit",),
+        bid_types=("limit", "price"),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+    )
+    second = order_rules.ExchangeDerivedConstraints(
+        market_id="KRW-BTC",
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+    )
+
+    monkeypatch.setattr(order_rules, "fetch_exchange_order_rules", lambda _pair: first)
+    initial = order_rules.get_effective_order_rules("KRW-BTC")
+    assert initial.chance_contract_change is None
+
+    order_rules._cached_rules.clear()
+    monkeypatch.setattr(order_rules, "fetch_exchange_order_rules", lambda _pair: second)
+    changed = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert changed.chance_contract_change is not None
+    assert changed.chance_contract_change.detected is True
+    assert changed.chance_contract_change.changed_fields["order_types"] == {
+        "previous": ("limit",),
+        "current": ("limit", "market"),
+    }
+    assert changed.chance_contract_change.changed_fields["bid_types"] == {
+        "previous": ("limit", "price"),
+        "current": ("market",),
+    }
+    conn = ensure_db()
+    try:
+        assert fetch_latest_order_rule_snapshot(conn, market="KRW-BTC") is not None
+    finally:
+        conn.close()

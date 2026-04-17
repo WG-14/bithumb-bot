@@ -115,6 +115,24 @@ def _format_rule_value_with_source(*, field: str, value: object, source: dict[st
     return f"{value} (source={rule_source_for(field, source)})"
 
 
+def _format_chance_contract_change_detail(change: object | None) -> str:
+    if change is None:
+        return "tracked_fields=order_types,bid_types,ask_types,order_sides previous_snapshot=none change_detected=0"
+    detected = bool(getattr(change, "detected", False))
+    changed_fields = getattr(change, "changed_fields", {}) or {}
+    if not detected:
+        return "tracked_fields=order_types,bid_types,ask_types,order_sides previous_snapshot=present change_detected=0"
+    rendered = ",".join(
+        f"{field}:{list(values.get('previous', ()))}->{list(values.get('current', ()))}"
+        for field, values in changed_fields.items()
+    ) or "-"
+    return (
+        "tracked_fields=order_types,bid_types,ask_types,order_sides "
+        f"previous_snapshot=present previous_fetched_ts={int(getattr(change, 'previous_fetched_ts', 0) or 0)} "
+        f"change_detected=1 changed_fields={rendered}"
+    )
+
+
 def _clarify_dust_observational_summary(summary: object | None) -> str:
     text = str(summary or "").strip()
     if not text:
@@ -966,8 +984,12 @@ def cmd_health() -> None:
         print(
             "    "
             "buy_price_none_resolution="
+            f"raw_bid_types={buy_price_none_fields['raw_bid_types']} "
+            f"raw_order_types={buy_price_none_fields['raw_order_types']} "
             f"raw_buy_supported_types={buy_price_none_fields['raw_buy_supported_types']} "
             f"support_source={buy_price_none_fields['support_source']} "
+            f"resolved_contract={buy_price_none_fields['resolved_contract']} "
+            f"contract_id={buy_price_none_fields['contract_id']} "
             f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
             f"submit_field={buy_price_none_fields['submit_field']} "
             f"allowed={buy_price_none_fields['allowed']} "
@@ -976,6 +998,11 @@ def cmd_health() -> None:
             f"alias_used={buy_price_none_fields['alias_used']} "
             f"alias_policy={buy_price_none_fields['alias_policy']} "
             f"block_reason={buy_price_none_fields['block_reason']}"
+        )
+        print(
+            "    "
+            "chance_contract_canary="
+            f"{_format_chance_contract_change_detail(getattr(resolved_rules, 'chance_contract_change', None))}"
         )
     except Exception as exc:
         print(f"    failed_to_load={type(exc).__name__}: {exc}")
@@ -1572,6 +1599,8 @@ def cmd_broker_diagnose() -> None:
                 f"raw_order_types={buy_price_none_fields['raw_order_types']} "
                 f"raw_buy_supported_types={buy_price_none_fields['raw_buy_supported_types']} "
                 f"support_source={buy_price_none_fields['support_source']} "
+                f"resolved_contract={buy_price_none_fields['resolved_contract']} "
+                f"contract_id={buy_price_none_fields['contract_id']} "
                 f"resolved_order_type={buy_price_none_fields['resolved_order_type']} "
                 f"submit_field={buy_price_none_fields['submit_field']} "
                 f"allowed={buy_price_none_fields['allowed']} "
@@ -1581,6 +1610,13 @@ def cmd_broker_diagnose() -> None:
                 f"alias_policy={buy_price_none_fields['alias_policy']} "
                 f"block_reason={buy_price_none_fields['block_reason']}"
             ),
+            critical=True,
+        )
+        contract_change = getattr(rr, "chance_contract_change", None)
+        add_check(
+            "chance contract drift canary",
+            "FAIL" if getattr(contract_change, "detected", False) else "PASS",
+            _format_chance_contract_change_detail(contract_change),
             critical=True,
         )
     except Exception as e:
@@ -1594,6 +1630,12 @@ def cmd_broker_diagnose() -> None:
             "BUY price=None chance resolution",
             "WARN",
             f"resolution unavailable ({type(e).__name__}: {e})",
+            critical=False,
+        )
+        add_check(
+            "chance contract drift canary",
+            "WARN",
+            f"canary unavailable ({type(e).__name__}: {e})",
             critical=False,
         )
 

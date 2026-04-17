@@ -195,26 +195,15 @@ class _CommitCheckingBroker(_FakeBroker):
 class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
     def __init__(self) -> None:
         super().__init__()
-        self.captured_live_submit_contract_context: dict[str, object] | None = None
-        self.captured_broker_submit_contract_context: dict[str, object] | None = None
+        self.captured_live_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
+        self.captured_broker_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
 
     def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
-        captured_live_contract = getattr(self, "_live_submit_contract_context", None)
-        assert isinstance(captured_live_contract, dict)
-        self.captured_live_submit_contract_context = dict(captured_live_contract)
+        captured_live_contract = getattr(self, "_live_buy_price_none_submit_contract", None)
+        assert isinstance(captured_live_contract, order_rules.BuyPriceNoneSubmitContract)
+        self.captured_live_submit_contract = captured_live_contract
 
-        resolved_rules = order_rules.get_effective_order_rules(settings.PAIR).rules
-        buy_price_none_resolution = order_rules.resolve_buy_price_none_resolution(rules=resolved_rules)
-        self.captured_broker_submit_contract_context = order_rules.build_buy_price_none_submit_contract_context(
-            rules=resolved_rules,
-            resolution=buy_price_none_resolution,
-        )
-        self.captured_broker_submit_contract_context.update(
-            {
-                "market": settings.PAIR,
-                "order_side": side,
-            }
-        )
+        self.captured_broker_submit_contract = captured_live_contract
 
         return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
 
@@ -726,12 +715,8 @@ def test_bithumb_broker_dry_run(monkeypatch):
     broker = BithumbBroker()
     setattr(
         broker,
-        "_live_submit_contract_context",
-        {
-            **order_rules.build_buy_price_none_submit_contract_context(rules=resolved_rules),
-            "market": settings.PAIR,
-            "order_side": "BUY",
-        },
+        "_live_buy_price_none_submit_contract",
+        order_rules.build_buy_price_none_submit_contract(rules=resolved_rules),
     )
     order = broker.place_order(client_order_id="a", side="BUY", qty=0.1, price=None)
 
@@ -1715,10 +1700,17 @@ def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contra
     )
     expected_contract = {key: preflight_evidence[key] for key in contract_keys}
     assert expected_contract == {key: submit_evidence[key] for key in contract_keys}
-    assert broker.captured_live_submit_contract_context is not None
-    assert broker.captured_broker_submit_contract_context is not None
-    assert expected_contract == {key: broker.captured_live_submit_contract_context[key] for key in contract_keys}
-    assert expected_contract == {key: broker.captured_broker_submit_contract_context[key] for key in contract_keys}
+    assert broker.captured_live_submit_contract is not None
+    assert broker.captured_broker_submit_contract is not None
+    assert broker.captured_live_submit_contract is broker.captured_broker_submit_contract
+    assert expected_contract == {
+        key: order_rules.serialize_buy_price_none_submit_contract(
+            broker.captured_live_submit_contract,
+            market=settings.PAIR,
+            order_side="BUY",
+        )[key]
+        for key in contract_keys
+    }
 
 
 def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(monkeypatch) -> None:
@@ -1771,9 +1763,7 @@ def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(mon
         rules=resolved_rules,
         resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
     )
-    expected_context = expected_contract.as_context()
-    expected_context.update({"market": "KRW-BTC", "order_side": "BUY"})
-    setattr(broker, "_live_submit_contract_context", dict(expected_context))
+    setattr(broker, "_live_buy_price_none_submit_contract", expected_contract)
 
     order = broker.place_order(client_order_id="cid-match", side="BUY", qty=0.0008, price=None)
 
@@ -1827,15 +1817,11 @@ def test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_supp
     monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
     setattr(
         broker,
-        "_live_submit_contract_context",
-        {
-            **order_rules.build_buy_price_none_submit_contract_context(
-                rules=resolved_rules,
-                resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
-            ),
-            "market": "KRW-BTC",
-            "order_side": "BUY",
-        },
+        "_live_buy_price_none_submit_contract",
+        order_rules.build_buy_price_none_submit_contract(
+            rules=resolved_rules,
+            resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
+        ),
     )
 
     with pytest.raises(BrokerRejectError, match="BUY price=None before submit") as excinfo:
@@ -1846,7 +1832,7 @@ def test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_supp
     assert dispatch_attempted is False
 
 
-def test_bithumb_broker_buy_price_none_rejects_live_submit_contract_mismatch_before_dispatch(monkeypatch) -> None:
+def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_routing_and_diagnostics(monkeypatch) -> None:
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "PAIR", "KRW-BTC")
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
@@ -1876,31 +1862,65 @@ def test_bithumb_broker_buy_price_none_rejects_live_submit_contract_mismatch_bef
     monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
 
     broker = BithumbBroker()
-    dispatch_attempted = False
+    captured: dict[str, object] = {}
 
-    def _unexpected_post_private(_endpoint: str, payload: dict[str, object], *, retry_safe: bool = False) -> dict[str, object]:
-        nonlocal dispatch_attempted
-        dispatch_attempted = True
-        return {"status": "0000", "data": {"order_id": "should-not-dispatch", "client_order_id": payload["client_order_id"]}}
+    def _fake_post_private(_endpoint: str, payload: dict[str, object], *, retry_safe: bool = False) -> dict[str, object]:
+        captured["payload"] = dict(payload)
+        return {"status": "0000", "data": {"order_id": "ex-reused-contract", "client_order_id": payload["client_order_id"]}}
 
-    monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
-    mismatched_context = order_rules.build_buy_price_none_submit_contract_context(
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.fetch_orderbook_top",
+        lambda _market: BestQuote(market="KRW-BTC", bid_price=99_900_000.0, ask_price=100_000_000.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.bithumb.validated_best_quote_ask_price",
+        lambda _quote, requested_market: 100_000_000.0,
+    )
+    resolution = order_rules.BuyPriceNoneResolution(
+        allowed=True,
+        resolved_order_type="price",
+        decision_basis="sentinel_basis",
+        alias_used=False,
+        alias_policy="sentinel_alias_policy",
+        block_reason="",
+        raw_supported_types=("price",),
+        support_source="bid_types",
+    )
+    submit_contract = order_rules.BuyPriceNoneSubmitContract(
+        resolution=resolution,
+        chance_validation_order_type="price",
+        chance_supported_order_types=("price",),
+        exchange_submit_field="price",
+        exchange_order_type="price",
+    )
+    validated: dict[str, object] = {}
+    original_validate = order_rules.validate_buy_price_none_submit_contract
+
+    def _capture_validate(*, submit_contract: order_rules.BuyPriceNoneSubmitContract) -> None:
+        validated["contract"] = submit_contract
+        original_validate(submit_contract=submit_contract)
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.validate_buy_price_none_submit_contract",
+        _capture_validate,
+    )
+    setattr(broker, "_live_buy_price_none_submit_contract", submit_contract)
+
+    order = broker.place_order(client_order_id="cid-reused-contract", side="BUY", qty=0.0008, price=None)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
         rules=resolved_rules,
-        resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
+        submit_contract=submit_contract,
     )
-    mismatched_context.update(
-        {
-            "market": "KRW-BTC",
-            "order_side": "BUY",
-            "buy_price_none_alias_policy": "forced_mismatch",
-        }
-    )
-    setattr(broker, "_live_submit_contract_context", mismatched_context)
 
-    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract mismatch before broker dispatch"):
-        broker.place_order(client_order_id="cid-mismatch", side="BUY", qty=0.001, price=None)
-
-    assert dispatch_attempted is False
+    assert order.exchange_order_id == "ex-reused-contract"
+    assert validated["contract"] is submit_contract
+    assert captured["payload"]["order_type"] == submit_contract.exchange_order_type
+    assert order.submit_contract_context is not None
+    assert order.submit_contract_context["buy_price_none_decision_basis"] == "sentinel_basis"
+    assert order.submit_contract_context["buy_price_none_alias_policy"] == "sentinel_alias_policy"
+    assert diagnostic_fields["decision_basis"] == "sentinel_basis"
+    assert diagnostic_fields["alias_policy"] == "sentinel_alias_policy"
 
 
 def test_bithumb_broker_buy_price_none_rejects_missing_live_submit_contract_before_dispatch(monkeypatch) -> None:
@@ -1956,14 +1976,15 @@ def test_buy_price_none_diagnostics_reuse_submit_contract_fields() -> None:
     )
 
     resolution = order_rules.resolve_buy_price_none_resolution(rules=resolved_rules)
-    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+    submit_contract = order_rules.build_buy_price_none_submit_contract(
         rules=resolved_rules,
         resolution=resolution,
     )
     diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
         rules=resolved_rules,
-        resolution=resolution,
+        submit_contract=submit_contract,
     )
+    submit_context = order_rules.serialize_buy_price_none_submit_contract(submit_contract)
 
     assert diagnostic_fields["raw_buy_supported_types"] == submit_context["buy_price_none_raw_supported_types"]
     assert diagnostic_fields["support_source"] == submit_context["buy_price_none_support_source"]

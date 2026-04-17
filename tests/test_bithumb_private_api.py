@@ -93,11 +93,10 @@ def _set_buy_price_none_submit_contract(
     *,
     rules: object,
     market: str = "KRW-BTC",
-) -> dict[str, object]:
-    context = order_rules.build_buy_price_none_submit_contract_context(rules=rules)
-    context.update({"market": market, "order_side": "BUY"})
-    setattr(broker, "_live_submit_contract_context", dict(context))
-    return context
+) -> order_rules.BuyPriceNoneSubmitContract:
+    contract = order_rules.build_buy_price_none_submit_contract(rules=rules)
+    setattr(broker, "_live_buy_price_none_submit_contract", contract)
+    return contract
 
 
 def _exact_lot_qty(
@@ -353,6 +352,23 @@ def test_market_buy_chance_contract_log_includes_supported_types_and_submit_fiel
         "_post_private",
         lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("forced stop after logging")),
     )
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.DerivedOrderConstraints(
+            order_types=("limit", "price", "market"),
+            bid_types=("price",),
+            ask_types=("limit", "market"),
+            order_sides=("ask", "bid"),
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5000.0,
+            max_qty_decimals=8,
+        ),
+    )
 
     with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
         with pytest.raises(BrokerRejectError, match="forced stop after logging"):
@@ -364,7 +380,7 @@ def test_market_buy_chance_contract_log_includes_supported_types_and_submit_fiel
             )
 
     assert "chance_validation_order_type=price" in caplog.text
-    assert "supported_order_types=limit,market,price" in caplog.text
+    assert "supported_order_types=price" in caplog.text
     assert "submit_field=price" in caplog.text
 
 
@@ -412,6 +428,23 @@ def test_market_buy_chance_contract_log_surfaces_blocked_market_only_support(mon
         "_post_private",
         lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("forced stop after logging")),
     )
+    _set_buy_price_none_submit_contract(
+        broker,
+        rules=order_rules.DerivedOrderConstraints(
+            order_types=("limit", "market"),
+            bid_types=("market",),
+            ask_types=("limit", "market"),
+            order_sides=("ask", "bid"),
+            bid_min_total_krw=5000.0,
+            ask_min_total_krw=5000.0,
+            bid_price_unit=1.0,
+            ask_price_unit=1.0,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=5000.0,
+            max_qty_decimals=8,
+        ),
+    )
 
     with caplog.at_level(logging.INFO, logger="bithumb_bot.run"):
         with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
@@ -423,7 +456,7 @@ def test_market_buy_chance_contract_log_surfaces_blocked_market_only_support(mon
             )
 
     assert "chance_validation_order_type=price" in caplog.text
-    assert "supported_order_types=limit,market" in caplog.text
+    assert "supported_order_types=market" in caplog.text
     assert "buy_price_none_allowed=0" in caplog.text
     assert "buy_price_none_alias_used=0" in caplog.text
     assert "buy_price_none_block_reason=buy_price_none_requires_explicit_price_support" in caplog.text
@@ -2017,7 +2050,7 @@ def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkey
     )
     setattr(
         broker,
-        "_live_submit_contract_context",
+        "_live_buy_price_none_submit_contract",
         {
             **order_rules.build_buy_price_none_submit_contract_context(rules=rules),
             "market": "KRW-BTC",
@@ -2028,7 +2061,7 @@ def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkey
         },
     )
 
-    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract mismatch before broker dispatch") as excinfo:
+    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract invalid before broker dispatch") as excinfo:
         broker.place_order(
             client_order_id="cid-buy-price-none-mismatch",
             side="BUY",
@@ -2037,10 +2070,7 @@ def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkey
         )
 
     context = getattr(excinfo.value, "submit_contract_context", None)
-    assert context is not None
-    assert context["buy_price_none_allowed"] is True
-    assert context["buy_price_none_decision_outcome"] == "pass"
-    assert context["buy_price_none_block_reason"] == ""
+    assert context == {}
 
 
 def test_place_order_rejects_buy_price_none_missing_precomputed_contract(monkeypatch):

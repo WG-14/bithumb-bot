@@ -51,8 +51,10 @@ from ..reason_codes import (
     sell_failure_detail_from_category,
 )
 from .order_rules import (
-    build_buy_price_none_submit_contract_context,
+    BuyPriceNoneSubmitContract,
+    build_buy_price_none_submit_contract,
     get_effective_order_rules,
+    serialize_buy_price_none_submit_contract,
     side_min_total_krw,
 )
 from .balance_source import fetch_balance_snapshot
@@ -208,7 +210,7 @@ class _LiveExecutionFeasibility:
     reference_quote: dict[str, float | str] | None
     entry_sizing: object | None
     exit_sizing: object | None
-    submit_contract_context: dict[str, object] | None = None
+    submit_contract_context: BuyPriceNoneSubmitContract | None = None
 
 
 def _resolve_non_authoritative_sell_basis_qty(
@@ -2792,9 +2794,17 @@ def _submit_contract_fields(
     side: str,
     order_type: str | None,
     normalized_qty: float,
-    contract_context: dict[str, object] | None = None,
+    contract_context: dict[str, object] | BuyPriceNoneSubmitContract | None = None,
 ) -> dict[str, object]:
-    context = contract_context or {}
+    context = (
+        serialize_buy_price_none_submit_contract(
+            contract_context,
+            market=settings.PAIR,
+            order_side=str(side or "").strip().upper() or None,
+        )
+        if isinstance(contract_context, BuyPriceNoneSubmitContract)
+        else (contract_context or {})
+    )
     normalized_side = str(side or "").strip().upper()
     normalized_order_type = str(order_type or "").strip().lower()
     is_buy_market_notional = normalized_side == "BUY" and normalized_order_type == "price"
@@ -3190,15 +3200,15 @@ def _submit_via_standard_path(
                 exchange_order_type=base_submit_contract_fields["exchange_order_type"],
                 exchange_submit_field=base_submit_contract_fields["exchange_submit_field"],
                 exchange_submit_notional_krw=base_submit_contract_fields["exchange_submit_notional_krw"] or "",
-            )
+        )
         )
         if submit_contract_context is not None:
-            setattr(broker, "_live_submit_contract_context", dict(submit_contract_context))
+            setattr(broker, "_live_buy_price_none_submit_contract", submit_contract_context)
         try:
             order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
         finally:
-            if submit_contract_context is not None and hasattr(broker, "_live_submit_contract_context"):
-                delattr(broker, "_live_submit_contract_context")
+            if submit_contract_context is not None and hasattr(broker, "_live_buy_price_none_submit_contract"):
+                delattr(broker, "_live_buy_price_none_submit_contract")
         response_ts = int(time.time() * 1000)
     except BrokerTemporaryError as e:
         response_ts = int(time.time() * 1000)
@@ -4488,13 +4498,9 @@ def _evaluate_live_execution_feasibility(
         return None
 
     submit_contract_context = (
-        {
-            **build_buy_price_none_submit_contract_context(
-                rules=position_state.effective_rules,
-            ),
-            "market": settings.PAIR,
-            "order_side": "BUY",
-        }
+        build_buy_price_none_submit_contract(
+            rules=position_state.effective_rules,
+        )
         if intent.side == "BUY"
         else None
     )

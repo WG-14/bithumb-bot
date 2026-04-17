@@ -2519,6 +2519,8 @@ def test_broker_diagnose_success_output(monkeypatch, tmp_path, capsys):
     assert "raw_order_types=['limit']" in out
     assert "raw_buy_supported_types=['limit', 'price']" in out
     assert "support_source=bid_types" in out
+    assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
+    assert "contract_id=" in out
     assert "resolved_order_type=price submit_field=price allowed=True decision_outcome=pass decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled block_reason=-" in out
     assert "overall=WARN" not in out
     assert "[PASS] accounts snapshot(/v1/accounts) validation diagnostic: reason=ok" in out
@@ -2611,8 +2613,105 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
     assert "raw_order_types=['limit', 'market']" in out
     assert "raw_buy_supported_types=['market']" in out
     assert "support_source=bid_types" in out
+    assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
+    assert "contract_id=" in out
     assert "resolved_order_type=price submit_field=price allowed=False decision_outcome=block decision_basis=raw alias_used=False alias_policy=market_to_price_alias_disabled" in out
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
+
+
+def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    import bithumb_bot.app as app_module
+
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1200000.0, 10000.0, 0.12, 0.01)
+
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
+            return []
+
+        def get_accounts_validation_diagnostics(self):
+            return {}
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.DerivedOrderConstraints(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=1.0,
+                ask_price_unit=1.0,
+                order_types=("limit", "market"),
+                bid_types=("market",),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+            chance_contract_change=order_rules.ChanceContractChange(
+                detected=True,
+                changed_fields={
+                    "bid_types": {
+                        "previous": ("limit", "price"),
+                        "current": ("market",),
+                    }
+                },
+                previous_snapshot={
+                    "order_types": ("limit",),
+                    "bid_types": ("limit", "price"),
+                    "ask_types": ("limit", "market"),
+                    "order_sides": ("bid", "ask"),
+                },
+                current_snapshot={
+                    "order_types": ("limit", "market"),
+                    "bid_types": ("market",),
+                    "ask_types": ("limit", "market"),
+                    "order_sides": ("bid", "ask"),
+                },
+                previous_fetched_ts=1710000000000,
+            ),
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        cmd_broker_diagnose()
+    object.__setattr__(settings, "MODE", original_mode)
+    object.__setattr__(app_module.settings, "MODE", original_mode)
+    object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+
+    out = capsys.readouterr().out
+    assert "overall=FAIL" in out
+    assert "[FAIL] chance contract drift canary:" in out
+    assert "change_detected=1" in out
+    assert "changed_fields=bid_types:['limit', 'price']->['market']" in out
 
 
 def test_broker_diagnose_partial_failure(monkeypatch, tmp_path, capsys):
@@ -3651,8 +3750,12 @@ def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys
     out = capsys.readouterr().out
 
     assert "buy_price_none_resolution=" in out
+    assert "raw_bid_types=['limit', 'price']" in out
+    assert "raw_order_types=['limit']" in out
     assert "raw_buy_supported_types=['limit', 'price']" in out
     assert "support_source=bid_types" in out
+    assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
+    assert "contract_id=" in out
     assert "resolved_order_type=price" in out
     assert "submit_field=price" in out
     assert "allowed=True" in out
@@ -3734,8 +3837,12 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
 
     assert "buy_price_none_resolution=" in out
     assert "allowed=True" not in out
+    assert "raw_bid_types=['market']" in out
+    assert "raw_order_types=['limit', 'market']" in out
     assert "raw_buy_supported_types=['market']" in out
     assert "support_source=bid_types" in out
+    assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
+    assert "contract_id=" in out
     assert "resolved_order_type=price" in out
     assert "submit_field=price" in out
     assert "allowed=False" in out

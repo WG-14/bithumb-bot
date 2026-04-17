@@ -2148,12 +2148,12 @@ class BithumbBroker:
         normalized_side = normalize_order_side(side)
         market = self._market()
         from .order_rules import (
-            build_buy_price_none_submit_contract,
-            buy_price_none_submit_contract_mismatch,
+            BuyPriceNoneSubmitContract,
             get_effective_order_rules,
             normalize_limit_price_for_side,
-            resolve_buy_price_none_resolution,
+            serialize_buy_price_none_submit_contract,
             supported_order_types_for_chance_validation,
+            validate_buy_price_none_submit_contract,
             validate_order_chance_support,
             side_min_total_krw,
         )
@@ -2162,24 +2162,18 @@ class BithumbBroker:
             order_rules_resolution = get_effective_order_rules(market)
             rules = order_rules_resolution.rules
             order_side = "BUY" if normalized_side == "bid" else "SELL"
-            expected_submit_contract_context = (
-                dict(getattr(self, "_live_submit_contract_context"))
-                if isinstance(getattr(self, "_live_submit_contract_context", None), dict)
-                else None
-            )
-            buy_price_none_resolution = (
-                resolve_buy_price_none_resolution(rules=rules)
+            buy_price_none_submit_contract = (
+                getattr(self, "_live_buy_price_none_submit_contract", None)
                 if price is None and normalized_side == "bid"
                 else None
             )
-            buy_price_none_submit_contract = (
-                build_buy_price_none_submit_contract(
-                    rules=rules,
-                    resolution=buy_price_none_resolution,
+            if buy_price_none_submit_contract is not None and not isinstance(
+                buy_price_none_submit_contract,
+                BuyPriceNoneSubmitContract,
+            ):
+                raise BrokerRejectError(
+                    "BUY price=None submit contract invalid before broker dispatch"
                 )
-                if buy_price_none_resolution is not None
-                else None
-            )
             chance_validation_order_type = (
                 buy_price_none_submit_contract.chance_validation_order_type
                 if buy_price_none_submit_contract is not None
@@ -2201,7 +2195,13 @@ class BithumbBroker:
                 )
             )
             if buy_price_none_submit_contract is not None:
-                submit_contract_context.update(buy_price_none_submit_contract.as_context())
+                submit_contract_context.update(
+                    serialize_buy_price_none_submit_contract(
+                        buy_price_none_submit_contract,
+                        market=market,
+                        order_side=order_side,
+                    )
+                )
             else:
                 submit_contract_context.update(
                     {
@@ -2214,26 +2214,16 @@ class BithumbBroker:
                         "internal_executable_qty": None,
                     }
                 )
-            submit_contract_context.update(
-                {
-                    "market": market,
-                    "order_side": order_side,
-                }
-            )
-            if buy_price_none_resolution is not None:
-                if expected_submit_contract_context is None:
-                    raise BrokerRejectError(
-                        "BUY price=None submit contract missing before broker dispatch"
-                    )
-                mismatch_detail = buy_price_none_submit_contract_mismatch(
-                    expected=expected_submit_contract_context,
-                    actual=submit_contract_context,
+                submit_contract_context.update(
+                    {
+                        "market": market,
+                        "order_side": order_side,
+                    }
                 )
-                if mismatch_detail is not None:
-                    raise BrokerRejectError(
-                        "BUY price=None submit contract mismatch before broker dispatch: "
-                        f"{mismatch_detail}"
-                    )
+            if buy_price_none_submit_contract is None and price is None and normalized_side == "bid":
+                raise BrokerRejectError(
+                    "BUY price=None submit contract missing before broker dispatch"
+                )
             RUN_LOG.info(
                 format_log_kv(
                     "[ORDER_SUBMIT] chance contract",
@@ -2244,23 +2234,23 @@ class BithumbBroker:
                     supported_order_types=",".join(chance_supported_order_types) or "-",
                     buy_price_none_allowed=(
                         "-"
-                        if buy_price_none_resolution is None
-                        else int(buy_price_none_resolution.allowed)
+                        if buy_price_none_submit_contract is None
+                        else int(buy_price_none_submit_contract.resolution.allowed)
                     ),
                     buy_price_none_decision_basis=(
                         "-"
-                        if buy_price_none_resolution is None
-                        else buy_price_none_resolution.decision_basis
+                        if buy_price_none_submit_contract is None
+                        else buy_price_none_submit_contract.resolution.decision_basis
                     ),
                     buy_price_none_alias_used=(
                         "-"
-                        if buy_price_none_resolution is None
-                        else int(buy_price_none_resolution.alias_used)
+                        if buy_price_none_submit_contract is None
+                        else int(buy_price_none_submit_contract.resolution.alias_used)
                     ),
                     buy_price_none_block_reason=(
                         "-"
-                        if buy_price_none_resolution is None
-                        else (buy_price_none_resolution.block_reason or "-")
+                        if buy_price_none_submit_contract is None
+                        else (buy_price_none_submit_contract.resolution.block_reason or "-")
                     ),
                     submit_field=exchange_submit_field_hint,
                 )
@@ -2275,8 +2265,16 @@ class BithumbBroker:
                 rules=rules,
                 side=side,
                 order_type=chance_validation_order_type,
-                buy_price_none_resolution=buy_price_none_resolution,
+                buy_price_none_resolution=(
+                    buy_price_none_submit_contract.resolution
+                    if buy_price_none_submit_contract is not None
+                    else None
+                ),
             )
+            if buy_price_none_submit_contract is not None:
+                validate_buy_price_none_submit_contract(
+                    submit_contract=buy_price_none_submit_contract,
+                )
             if price is None and normalized_side == "ask":
                 broker_precision_qty = self._truncate_volume(float(qty))
                 if abs(float(qty) - broker_precision_qty) > DUST_POSITION_EPS:
