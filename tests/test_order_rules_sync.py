@@ -715,6 +715,62 @@ def test_buy_price_none_market_only_default_policy_blocks_without_alias_exceptio
 
 
 @pytest.mark.parametrize(
+    ("rules", "support_source", "raw_supported_types"),
+    (
+        (
+            order_rules.DerivedOrderConstraints(
+                order_types=("limit", "market"),
+                bid_types=("market",),
+                order_sides=("bid", "ask"),
+            ),
+            "bid_types",
+            ("market",),
+        ),
+        (
+            order_rules.DerivedOrderConstraints(
+                order_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+            ),
+            "order_types",
+            ("limit", "market"),
+        ),
+    ),
+    ids=("side_specific_market_only", "shared_market_only_fallback"),
+)
+def test_buy_price_none_market_only_has_no_enabled_compatibility_path(
+    rules: order_rules.DerivedOrderConstraints,
+    support_source: str,
+    raw_supported_types: tuple[str, ...],
+) -> None:
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert resolution.allowed is False
+    assert resolution.decision_basis == "raw"
+    assert resolution.alias_used is False
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+    assert resolution.raw_supported_types == raw_supported_types
+    assert resolution.support_source == support_source
+    assert diagnostic_fields["alias_used"] is False
+    assert diagnostic_fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert diagnostic_fields["support_source"] == support_source
+    assert submit_context["buy_price_none_allowed"] is False
+    assert submit_context["buy_price_none_decision_outcome"] == "block"
+    assert submit_context["buy_price_none_alias_used"] is False
+    assert submit_context["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert submit_context["buy_price_none_support_source"] == support_source
+    assert submit_context["buy_price_none_raw_supported_types"] == list(raw_supported_types)
+
+
+@pytest.mark.parametrize(
     ("bid_types", "allowed", "block_reason"),
     (
         (("price",), True, ""),
