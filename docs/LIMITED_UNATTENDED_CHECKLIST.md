@@ -31,6 +31,8 @@ uv run bithumb-bot recovery-report
 Pass criteria:
 
 - `broker-diagnose` returns `overall=PASS`
+- BUY `price=None` / BUY market support is judged from `broker-diagnose`'s `BUY price=None chance resolution` output.
+- Confirm the `BUY price=None chance resolution` fields: `allowed`, `resolved_order_type`, `support_source`, `decision_basis`, `alias_used`, and `block_reason`.
 - `health` shows no stale-candle or error problem
 - `recovery-report` shows unresolved and recovery-required counts cleared
 

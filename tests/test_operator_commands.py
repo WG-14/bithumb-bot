@@ -3576,6 +3576,168 @@ def test_health_reports_order_rule_fallback_risk_when_autosync_degrades(monkeypa
     assert "risk=order-rule auto-sync unavailable" in out
 
 
+def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 2.0,
+            "last_candle_status": "ok",
+            "last_candle_sync_epoch_sec": 1.0,
+            "last_candle_ts_ms": 1000,
+            "last_candle_status_detail": "ok",
+            "error_count": 0,
+            "trading_enabled": True,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": None,
+            "halt_new_orders_blocked": False,
+            "halt_reason_code": None,
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.DerivedOrderConstraints(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5500.0,
+                bid_price_unit=10.0,
+                ask_price_unit=10.0,
+                order_types=("limit",),
+                bid_types=("limit", "price"),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.app.build_broker_with_auth_diagnostics",
+        lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "buy_price_none_resolution=" in out
+    assert "raw_buy_supported_types=['limit', 'price']" in out
+    assert "support_source=bid_types" in out
+    assert "resolved_order_type=price" in out
+    assert "allowed=True" in out
+    assert "decision_basis=raw" in out
+    assert "alias_used=False" in out
+    assert "block_reason=-" in out
+
+
+def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, tmp_path):
+    _set_tmp_db(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_health_status",
+        lambda: {
+            "last_candle_age_sec": 2.0,
+            "last_candle_status": "ok",
+            "last_candle_sync_epoch_sec": 1.0,
+            "last_candle_ts_ms": 1000,
+            "last_candle_status_detail": "ok",
+            "error_count": 0,
+            "trading_enabled": True,
+            "retry_at_epoch_sec": None,
+            "unresolved_open_order_count": 0,
+            "oldest_unresolved_order_age_sec": None,
+            "recovery_required_count": 0,
+            "last_reconcile_epoch_sec": None,
+            "last_reconcile_status": None,
+            "last_reconcile_error": None,
+            "last_reconcile_reason_code": None,
+            "last_reconcile_metadata": None,
+            "last_disable_reason": None,
+            "halt_new_orders_blocked": False,
+            "halt_reason_code": None,
+            "halt_state_unresolved": False,
+            "last_cancel_open_orders_epoch_sec": None,
+            "last_cancel_open_orders_trigger": None,
+            "last_cancel_open_orders_status": None,
+            "last_cancel_open_orders_summary": None,
+            "startup_gate_reason": None,
+        },
+    )
+    monkeypatch.setattr("bithumb_bot.app.evaluate_resume_eligibility", lambda: (True, []))
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.DerivedOrderConstraints(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5500.0,
+                bid_price_unit=10.0,
+                ask_price_unit=10.0,
+                order_types=("limit", "market"),
+                bid_types=("market",),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.app.build_broker_with_auth_diagnostics",
+        lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
+    )
+
+    cmd_health()
+    out = capsys.readouterr().out
+
+    assert "buy_price_none_resolution=" in out
+    assert "raw_buy_supported_types=['market']" in out
+    assert "support_source=bid_types" in out
+    assert "resolved_order_type=price" in out
+    assert "allowed=False" in out
+    assert "decision_basis=raw" in out
+    assert "alias_used=False" in out
+    assert "block_reason=buy_price_none_requires_explicit_price_support" in out
+
+
 def test_health_summary_shows_paused_state(monkeypatch, capsys, tmp_path):
     _set_tmp_db(tmp_path)
     monkeypatch.setattr("bithumb_bot.app.refresh_open_order_health", lambda: None)

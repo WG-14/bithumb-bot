@@ -1722,7 +1722,20 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
     assert call == {}
 
 
-def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monkeypatch):
+@pytest.mark.parametrize(
+    ("order_types", "bid_types", "allowed", "block_reason"),
+    (
+        (("limit",), ("limit", "price"), True, ""),
+        (("limit", "market"), (), False, "buy_price_none_requires_explicit_price_support"),
+    ),
+)
+def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
+    monkeypatch,
+    order_types,
+    bid_types,
+    allowed,
+    block_reason,
+):
     _configure_live()
     broker = BithumbBroker()
     rules = order_rules.DerivedOrderConstraints(
@@ -1732,17 +1745,21 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monk
         ask_price_unit=1.0,
         min_notional_krw=5000.0,
         order_sides=("bid", "ask"),
-        order_types=("limit", "market"),
+        order_types=order_types,
+        bid_types=bid_types,
     )
     resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
     observed: dict[str, object] = {}
 
-    assert resolution.allowed is False
+    assert resolution.allowed is allowed
     assert resolution.resolved_order_type == "price"
-    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+    assert resolution.block_reason == block_reason
 
-    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+    if allowed:
         order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
+    else:
+        with pytest.raises(BrokerRejectError, match=block_reason):
+            order_rules.validate_order_chance_support(rules=rules, side="BUY", order_type="price")
 
     original_validate = order_rules.validate_order_chance_support
 
@@ -1769,16 +1786,27 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(monk
     monkeypatch.setattr(
         broker,
         "_post_private",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("submit should stay blocked")),
+        lambda *args, **kwargs: {"uuid": "mkt-shared-resolution"},
     )
 
-    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
-        broker.place_order(
+    if allowed:
+        order = broker.place_order(
             client_order_id="cid-chance-shared-resolution",
             side="BUY",
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
         )
+        assert order.submit_contract_context is not None
+        assert order.submit_contract_context["buy_price_none_allowed"] is True
+        assert order.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
+    else:
+        with pytest.raises(BrokerRejectError, match=block_reason):
+            broker.place_order(
+                client_order_id="cid-chance-shared-resolution",
+                side="BUY",
+                qty=_exact_lot_qty(market_price=150_000_000.0),
+                price=None,
+            )
 
     assert observed["buy_price_none_resolution"] is resolution
 

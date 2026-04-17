@@ -114,6 +114,9 @@ uv run bithumb-bot recovery-report
 Interpretation:
 
 - `broker-diagnose` must pass before live arming.
+- Judge BUY `price=None` / BUY market support from `broker-diagnose`, not from indirect inference in other surfaces.
+- In `broker-diagnose`, inspect the `BUY price=None chance resolution` line and confirm:
+  `allowed`, `resolved_order_type`, `support_source`, `decision_basis`, `alias_used`, and `block_reason`.
 - `health` must show no stale-candle or error-condition problem.
 - `recovery-report` must show no unresolved or recovery-required blocker before resume.
 

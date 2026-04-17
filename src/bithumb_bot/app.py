@@ -936,6 +936,8 @@ def cmd_health() -> None:
         resolved_rules = get_effective_order_rules(PAIR)
         rules = resolved_rules.rules
         source = resolved_rules.source or {}
+        buy_price_none_resolution = resolve_buy_price_none_resolution(rules=rules)
+        raw_buy_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
         if getattr(resolved_rules, "fallback_used", False):
             print(
                 "    "
@@ -957,6 +959,17 @@ def cmd_health() -> None:
             f"price_unit={_format_rule_value_with_source(field='bid_price_unit', value=rules.bid_price_unit, source=source)}) "
             f"SELL(min_total_krw={_format_rule_value_with_source(field='ask_min_total_krw', value=rules.ask_min_total_krw, source=source)}, "
             f"price_unit={_format_rule_value_with_source(field='ask_price_unit', value=rules.ask_price_unit, source=source)})"
+        )
+        print(
+            "    "
+            "buy_price_none_resolution="
+            f"raw_buy_supported_types={list(raw_buy_supported_types)} "
+            f"support_source={buy_price_none_resolution.support_source} "
+            f"resolved_order_type={buy_price_none_resolution.resolved_order_type} "
+            f"allowed={buy_price_none_resolution.allowed} "
+            f"decision_basis={buy_price_none_resolution.decision_basis} "
+            f"alias_used={buy_price_none_resolution.alias_used} "
+            f"block_reason={buy_price_none_resolution.block_reason or '-'}"
         )
     except Exception as exc:
         print(f"    failed_to_load={type(exc).__name__}: {exc}")
