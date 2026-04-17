@@ -520,6 +520,9 @@ class Settings:
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
     LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
+    BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED: bool = parse_bool_env(
+        "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", "false"
+    )
 
     # risk
     MAX_ORDER_KRW: float = float(os.getenv("MAX_ORDER_KRW", "0"))

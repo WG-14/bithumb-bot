@@ -31,6 +31,7 @@ TRACKED_CHANCE_CONTRACT_FIELDS = ("order_types", "bid_types", "ask_types", "orde
 # not treated as a compatible alias for the required exchange "price" submit
 # field unless a future compatibility mode is added explicitly and safely gated.
 BUY_PRICE_NONE_ALIAS_POLICY = "market_to_price_alias_disabled"
+BUY_PRICE_NONE_ALIAS_POLICY_COMPAT = "market_to_price_alias_enabled"
 
 
 @dataclass(frozen=True)
@@ -159,11 +160,12 @@ class BuyPriceNoneSubmitContract:
         )
 
     def as_context(self) -> dict[str, object]:
+        decision_outcome = "pass" if self.resolution.allowed else "block"
         return {
             "chance_validation_order_type": self.chance_validation_order_type,
             "chance_supported_order_types": list(self.chance_supported_order_types),
             "buy_price_none_allowed": bool(self.resolution.allowed),
-            "buy_price_none_decision_outcome": ("pass" if self.resolution.allowed else "block"),
+            "buy_price_none_decision_outcome": decision_outcome,
             "buy_price_none_decision_basis": self.resolution.decision_basis,
             "buy_price_none_alias_used": bool(self.resolution.alias_used),
             "buy_price_none_alias_policy": self.resolution.alias_policy,
@@ -173,6 +175,18 @@ class BuyPriceNoneSubmitContract:
             "buy_price_none_resolved_order_type": self.resolution.resolved_order_type,
             "buy_price_none_resolved_contract": self.resolved_contract,
             "buy_price_none_contract_id": self.contract_id,
+            "allowed": bool(self.resolution.allowed),
+            "decision_outcome": decision_outcome,
+            "decision_basis": self.resolution.decision_basis,
+            "alias_used": bool(self.resolution.alias_used),
+            "alias_policy": self.resolution.alias_policy,
+            "block_reason": self.resolution.block_reason,
+            "support_source": self.resolution.support_source,
+            "raw_buy_supported_types": list(self.resolution.raw_supported_types),
+            "resolved_order_type": self.resolution.resolved_order_type,
+            "resolved_contract": self.resolved_contract,
+            "contract_id": self.contract_id,
+            "submit_field": self.exchange_submit_field,
             "exchange_submit_field": self.exchange_submit_field,
             "exchange_order_type": self.exchange_order_type,
             "exchange_submit_notional_krw": self.exchange_submit_notional_krw,
@@ -350,27 +364,45 @@ def raw_supported_order_types_for_chance_validation(*, side: str, rules: Derived
     return tuple(sorted(supported_types))
 
 
+def buy_price_none_alias_policy() -> str:
+    if bool(settings.BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED):
+        return BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    return BUY_PRICE_NONE_ALIAS_POLICY
+
+
 def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyPriceNoneResolution:
     raw_supported_types = raw_supported_order_types_for_chance_validation(side="BUY", rules=rules)
     support_source = "bid_types" if getattr(rules, "bid_types", ()) else "order_types"
+    alias_policy = buy_price_none_alias_policy()
     if "price" in raw_supported_types:
         return BuyPriceNoneResolution(
             allowed=True,
             resolved_order_type="price",
             decision_basis="raw",
             alias_used=False,
-            alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
+            alias_policy=alias_policy,
             block_reason="",
             raw_supported_types=raw_supported_types,
             support_source=support_source,
         )
     if "market" in raw_supported_types:
+        if bool(settings.BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED):
+            return BuyPriceNoneResolution(
+                allowed=True,
+                resolved_order_type="price",
+                decision_basis="alias_policy",
+                alias_used=True,
+                alias_policy=alias_policy,
+                block_reason="",
+                raw_supported_types=raw_supported_types,
+                support_source=support_source,
+            )
         return BuyPriceNoneResolution(
             allowed=False,
             resolved_order_type="price",
             decision_basis="raw",
             alias_used=False,
-            alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
+            alias_policy=alias_policy,
             block_reason="buy_price_none_requires_explicit_price_support",
             raw_supported_types=raw_supported_types,
             support_source=support_source,
@@ -380,7 +412,7 @@ def resolve_buy_price_none_resolution(*, rules: DerivedOrderConstraints) -> BuyP
         resolved_order_type="price",
         decision_basis="raw",
         alias_used=False,
-        alias_policy=BUY_PRICE_NONE_ALIAS_POLICY,
+        alias_policy=alias_policy,
         block_reason="buy_price_none_unsupported",
         raw_supported_types=raw_supported_types,
         support_source=support_source,
@@ -480,18 +512,18 @@ def build_buy_price_none_diagnostic_fields(
     return {
         "raw_bid_types": [str(item) for item in getattr(rules, "bid_types", ()) or ()],
         "raw_order_types": [str(item) for item in getattr(rules, "order_types", ()) or ()],
-        "raw_buy_supported_types": list(submit_context["buy_price_none_raw_supported_types"]),
-        "support_source": submit_context["buy_price_none_support_source"],
-        "resolved_order_type": submit_context["buy_price_none_resolved_order_type"],
-        "resolved_contract": submit_context["buy_price_none_resolved_contract"],
-        "contract_id": submit_context["buy_price_none_contract_id"],
-        "submit_field": submit_context["exchange_submit_field"],
-        "allowed": bool(submit_context["buy_price_none_allowed"]),
-        "decision_outcome": submit_context["buy_price_none_decision_outcome"],
-        "decision_basis": submit_context["buy_price_none_decision_basis"],
-        "alias_used": bool(submit_context["buy_price_none_alias_used"]),
-        "alias_policy": submit_context["buy_price_none_alias_policy"],
-        "block_reason": (str(submit_context["buy_price_none_block_reason"]) or "-"),
+        "raw_buy_supported_types": list(submit_context["raw_buy_supported_types"]),
+        "support_source": submit_context["support_source"],
+        "resolved_order_type": submit_context["resolved_order_type"],
+        "resolved_contract": submit_context["resolved_contract"],
+        "contract_id": submit_context["contract_id"],
+        "submit_field": submit_context["submit_field"],
+        "allowed": bool(submit_context["allowed"]),
+        "decision_outcome": submit_context["decision_outcome"],
+        "decision_basis": submit_context["decision_basis"],
+        "alias_used": bool(submit_context["alias_used"]),
+        "alias_policy": submit_context["alias_policy"],
+        "block_reason": (str(submit_context["block_reason"]) or "-"),
     }
 
 

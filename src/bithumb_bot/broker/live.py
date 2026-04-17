@@ -2854,6 +2854,22 @@ def _submit_contract_fields(
         "buy_price_none_support_source": context.get("buy_price_none_support_source"),
         "buy_price_none_raw_supported_types": buy_price_none_raw_supported_types,
         "buy_price_none_resolved_order_type": context.get("buy_price_none_resolved_order_type"),
+        "allowed": context.get("allowed"),
+        "decision_outcome": context.get("decision_outcome"),
+        "decision_basis": context.get("decision_basis"),
+        "alias_used": context.get("alias_used"),
+        "alias_policy": context.get("alias_policy"),
+        "block_reason": context.get("block_reason"),
+        "support_source": context.get("support_source"),
+        "raw_buy_supported_types": (
+            [str(item) for item in context.get("raw_buy_supported_types", ())]
+            if isinstance(context.get("raw_buy_supported_types"), (tuple, list))
+            else context.get("raw_buy_supported_types")
+        ),
+        "resolved_order_type": context.get("resolved_order_type"),
+        "resolved_contract": context.get("resolved_contract"),
+        "contract_id": context.get("contract_id"),
+        "submit_field": context.get("submit_field") or exchange_submit_field,
         "internal_executable_qty": float(
             context.get("internal_executable_qty")
             if context.get("internal_executable_qty") is not None

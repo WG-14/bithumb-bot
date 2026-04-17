@@ -2174,6 +2174,10 @@ class BithumbBroker:
                 raise BrokerRejectError(
                     "BUY price=None submit contract invalid before broker dispatch"
                 )
+            if buy_price_none_submit_contract is None and price is None and normalized_side == "bid":
+                raise BrokerRejectError(
+                    "BUY price=None submit contract missing before broker dispatch"
+                )
             chance_validation_order_type = (
                 buy_price_none_submit_contract.chance_validation_order_type
                 if buy_price_none_submit_contract is not None
@@ -2219,10 +2223,6 @@ class BithumbBroker:
                         "market": market,
                         "order_side": order_side,
                     }
-                )
-            if buy_price_none_submit_contract is None and price is None and normalized_side == "bid":
-                raise BrokerRejectError(
-                    "BUY price=None submit contract missing before broker dispatch"
                 )
             RUN_LOG.info(
                 format_log_kv(

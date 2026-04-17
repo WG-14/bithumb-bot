@@ -19,6 +19,7 @@ def _reset_settings():
         "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
         "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
         "LIVE_ORDER_MAX_QTY_DECIMALS": settings.LIVE_ORDER_MAX_QTY_DECIMALS,
+        "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED": settings.BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED,
     }
     yield
     for key, value in old.items():
@@ -714,6 +715,45 @@ def test_buy_price_none_market_only_default_policy_blocks_without_alias_exceptio
         )
 
 
+def test_buy_price_none_market_only_alias_requires_explicit_policy_gate() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        order_sides=("bid", "ask"),
+    )
+
+    object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", True)
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert resolution.allowed is True
+    assert resolution.decision_basis == "alias_policy"
+    assert resolution.alias_used is True
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert resolution.block_reason == ""
+    assert diagnostic_fields["alias_used"] is True
+    assert diagnostic_fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert diagnostic_fields["decision_basis"] == "alias_policy"
+    assert submit_context["alias_used"] is True
+    assert submit_context["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert submit_context["buy_price_none_alias_used"] is True
+    assert submit_context["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+
+    order_rules.validate_order_chance_support(
+        rules=rules,
+        side="BUY",
+        order_type="price",
+        buy_price_none_resolution=resolution,
+    )
+
+
 @pytest.mark.parametrize(
     ("rules", "support_source", "raw_supported_types"),
     (
@@ -889,6 +929,29 @@ def test_buy_price_none_diagnostic_fields_share_submit_contract_decision(
     assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
     assert diagnostic_fields["block_reason"] == (expected_block_reason or "-")
     assert diagnostic_fields["block_reason"] == (submit_context["buy_price_none_block_reason"] or "-")
+
+
+def test_buy_price_none_submit_contract_context_exposes_generic_and_prefixed_fields_consistently() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        order_sides=("bid", "ask"),
+    )
+
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(rules=rules)
+
+    assert submit_context["raw_buy_supported_types"] == submit_context["buy_price_none_raw_supported_types"]
+    assert submit_context["support_source"] == submit_context["buy_price_none_support_source"]
+    assert submit_context["resolved_order_type"] == submit_context["buy_price_none_resolved_order_type"]
+    assert submit_context["resolved_contract"] == submit_context["buy_price_none_resolved_contract"]
+    assert submit_context["contract_id"] == submit_context["buy_price_none_contract_id"]
+    assert submit_context["submit_field"] == submit_context["exchange_submit_field"]
+    assert submit_context["allowed"] == submit_context["buy_price_none_allowed"]
+    assert submit_context["decision_outcome"] == submit_context["buy_price_none_decision_outcome"]
+    assert submit_context["decision_basis"] == submit_context["buy_price_none_decision_basis"]
+    assert submit_context["alias_used"] == submit_context["buy_price_none_alias_used"]
+    assert submit_context["alias_policy"] == submit_context["buy_price_none_alias_policy"]
+    assert submit_context["block_reason"] == submit_context["buy_price_none_block_reason"]
 
 
 def test_get_effective_order_rules_detects_tracked_chance_contract_change_from_prior_snapshot(monkeypatch, tmp_path) -> None:

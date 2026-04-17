@@ -14,6 +14,7 @@ from bithumb_bot.broker import live as live_module
 from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
+    _submit_contract_fields,
     adjust_buy_order_qty_for_dust_safety,
     adjust_sell_order_qty_for_dust_safety,
     live_execute_signal,
@@ -1996,6 +1997,52 @@ def test_buy_price_none_diagnostics_reuse_submit_contract_fields() -> None:
     assert diagnostic_fields["alias_used"] == submit_context["buy_price_none_alias_used"]
     assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
     assert diagnostic_fields["block_reason"] == "-"
+
+
+def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> None:
+    contract = order_rules.BuyPriceNoneSubmitContract(
+        resolution=order_rules.BuyPriceNoneResolution(
+            allowed=True,
+            resolved_order_type="price",
+            decision_basis="alias_policy",
+            alias_used=True,
+            alias_policy=order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT,
+            block_reason="",
+            raw_supported_types=("market",),
+            support_source="bid_types",
+        ),
+        chance_validation_order_type="price",
+        chance_supported_order_types=("market",),
+        exchange_submit_field="price",
+        exchange_order_type="price",
+    ).with_execution_fields(
+        exchange_submit_notional_krw=120000.0,
+        internal_executable_qty=0.0012,
+    )
+
+    fields = _submit_contract_fields(
+        side="BUY",
+        order_type="price",
+        normalized_qty=0.0012,
+        contract_context=contract,
+    )
+
+    assert fields["raw_buy_supported_types"] == ["market"]
+    assert fields["support_source"] == "bid_types"
+    assert fields["decision_basis"] == "alias_policy"
+    assert fields["alias_used"] is True
+    assert fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert fields["block_reason"] == ""
+    assert fields["resolved_order_type"] == "price"
+    assert fields["resolved_contract"] == contract.resolved_contract
+    assert fields["contract_id"] == contract.contract_id
+    assert fields["submit_field"] == "price"
+    assert fields["buy_price_none_raw_supported_types"] == fields["raw_buy_supported_types"]
+    assert fields["buy_price_none_support_source"] == fields["support_source"]
+    assert fields["buy_price_none_decision_basis"] == fields["decision_basis"]
+    assert fields["buy_price_none_alias_used"] == fields["alias_used"]
+    assert fields["buy_price_none_alias_policy"] == fields["alias_policy"]
+    assert fields["buy_price_none_resolved_order_type"] == fields["resolved_order_type"]
 
 
 @pytest.mark.fast_regression

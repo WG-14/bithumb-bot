@@ -159,6 +159,7 @@ def _restore_settings_state():
         "LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW",
         "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW",
         "LIVE_ALLOW_ORDER_RULE_FALLBACK",
+        "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED",
         "PAIR",
     ]
     original = {key: getattr(settings, key) for key in keys if hasattr(settings, key)}
