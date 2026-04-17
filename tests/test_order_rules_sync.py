@@ -770,6 +770,47 @@ def test_buy_price_none_market_only_has_no_enabled_compatibility_path(
     assert submit_context["buy_price_none_raw_supported_types"] == list(raw_supported_types)
 
 
+def test_buy_price_none_default_path_does_not_allow_implicit_market_alias_without_gate() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("market",),
+        order_sides=("bid", "ask"),
+    )
+
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_context = order_rules.build_buy_price_none_submit_contract_context(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert resolution.allowed is False
+    assert resolution.decision_basis == "raw"
+    assert resolution.alias_used is False
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+    assert resolution.support_source == "order_types"
+    assert resolution.raw_supported_types == ("market",)
+    assert diagnostic_fields["allowed"] is False
+    assert diagnostic_fields["alias_used"] is False
+    assert diagnostic_fields["support_source"] == "order_types"
+    assert submit_context["buy_price_none_allowed"] is False
+    assert submit_context["buy_price_none_decision_outcome"] == "block"
+    assert submit_context["buy_price_none_alias_used"] is False
+    assert submit_context["buy_price_none_support_source"] == "order_types"
+    assert submit_context["buy_price_none_raw_supported_types"] == ["market"]
+
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(
+            rules=rules,
+            side="BUY",
+            order_type="price",
+            buy_price_none_resolution=resolution,
+        )
+
+
 @pytest.mark.parametrize(
     ("bid_types", "allowed", "block_reason"),
     (

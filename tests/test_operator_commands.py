@@ -3733,6 +3733,7 @@ def test_health_surfaces_blocked_buy_price_none_resolution(monkeypatch, capsys, 
     out = capsys.readouterr().out
 
     assert "buy_price_none_resolution=" in out
+    assert "allowed=True" not in out
     assert "raw_buy_supported_types=['market']" in out
     assert "support_source=bid_types" in out
     assert "resolved_order_type=price" in out
