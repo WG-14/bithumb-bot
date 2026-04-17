@@ -1862,6 +1862,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
     )
     resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
     observed: dict[str, object] = {}
+    call: dict[str, object] = {}
 
     assert resolution.allowed is allowed
     assert resolution.resolved_order_type == "price"
@@ -1895,11 +1896,14 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
     )
-    monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda *args, **kwargs: {"uuid": "mkt-shared-resolution"},
-    )
+
+    def _fake_post_private(endpoint, payload, retry_safe=False):
+        call["endpoint"] = endpoint
+        call["payload"] = payload
+        call["retry_safe"] = retry_safe
+        return {"uuid": "mkt-shared-resolution"}
+
+    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     if allowed:
         order = broker.place_order(
@@ -1912,6 +1916,7 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert order.submit_contract_context["buy_price_none_allowed"] is True
         assert order.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
         assert order.submit_contract_context["buy_price_none_decision_basis"] == "raw"
+        assert order.submit_contract_context["chance_validation_order_type"] == resolution.resolved_order_type
         assert order.submit_contract_context["buy_price_none_alias_used"] is False
         assert order.submit_contract_context["buy_price_none_alias_policy"] == resolution.alias_policy
         assert order.submit_contract_context["buy_price_none_block_reason"] == ""
@@ -1919,7 +1924,11 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
             resolution.raw_supported_types
         )
         assert order.submit_contract_context["buy_price_none_support_source"] == resolution.support_source
-        assert order.submit_contract_context["buy_price_none_resolved_order_type"] == "price"
+        assert order.submit_contract_context["buy_price_none_resolved_order_type"] == resolution.resolved_order_type
+        assert order.submit_contract_context["exchange_order_type"] == resolution.resolved_order_type
+        assert call["endpoint"] == "/v2/orders"
+        assert call["retry_safe"] is False
+        assert call["payload"]["order_type"] == resolution.resolved_order_type
     else:
         with pytest.raises(BrokerRejectError, match=block_reason) as excinfo:
             broker.place_order(
@@ -1938,7 +1947,9 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert context["buy_price_none_block_reason"] == block_reason
         assert context["buy_price_none_raw_supported_types"] == list(resolution.raw_supported_types)
         assert context["buy_price_none_support_source"] == resolution.support_source
-        assert context["buy_price_none_resolved_order_type"] == "price"
+        assert context["buy_price_none_resolved_order_type"] == resolution.resolved_order_type
+        assert context["chance_validation_order_type"] == resolution.resolved_order_type
+        assert call == {}
 
     assert observed["buy_price_none_resolution"] is resolution
 
