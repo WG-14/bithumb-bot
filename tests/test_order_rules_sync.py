@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.base import BrokerRejectError
+from bithumb_bot import config as config_module
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, fetch_latest_order_rule_snapshot, record_order_rule_snapshot
 
@@ -409,6 +410,19 @@ def test_get_effective_order_rules_rejects_invalid_live_fallback_config(monkeypa
 
     with pytest.raises(BrokerRejectError, match="live order rule fallback invalid"):
         order_rules.get_effective_order_rules("KRW-BTC")
+
+
+def test_buy_price_none_market_to_price_alias_flag_is_deprecated_and_ignored(monkeypatch, caplog):
+    monkeypatch.setenv("BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", "true")
+
+    with caplog.at_level("WARNING"):
+        loaded = config_module.parse_deprecated_ignored_bool_env(
+            "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED",
+            fixed_value=False,
+        )
+
+    assert loaded is False
+    assert "deprecated and ignored" in caplog.text
 
 
 def test_get_effective_order_rules_uses_auto_values_when_metadata_available(monkeypatch):

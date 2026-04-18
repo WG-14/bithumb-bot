@@ -129,9 +129,6 @@ def test_build_order_payload_from_submit_plan_uses_planned_fields() -> None:
 
     payload_plan = build_order_payload_from_plan(
         plan=plan,
-        decimal_from_value=lambda value: __import__("decimal").Decimal(str(value)),
-        format_krw_amount=lambda value: format(value, "f").rstrip("0").rstrip("."),
-        format_volume=lambda value: format(value, ".8f").rstrip("0").rstrip("."),
     )
 
     assert payload_plan.payload == {

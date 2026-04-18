@@ -13,6 +13,7 @@ from ..execution_models import (
 from ..observability import format_log_kv
 from .base import BrokerOrder, BrokerRejectError
 from .order_payloads import build_order_payload_from_plan, normalize_order_side
+from .order_serialization import truncate_volume
 from .bithumb_execution import execute_signed_order_request
 
 RUN_LOG = logging.getLogger("bithumb_bot.run")
@@ -50,13 +51,18 @@ def plan_place_order(
     rules=None,
     skip_qty_revalidation: bool = False,
 ) -> SubmitPlan:
+    volume_truncator = getattr(broker, "_truncate_volume", None)
     return build_submit_plan(
         intent=intent,
         rules=rules,
         fetch_order_rules=__import__("bithumb_bot.broker.order_rules", fromlist=["get_effective_order_rules"]).get_effective_order_rules,
         fetch_top_of_book=fetch_orderbook_top,
         resolve_best_ask=lambda quote, market: validated_best_quote_ask_price(quote, requested_market=market),
-        truncate_volume=lambda qty: broker._truncate_volume(float(qty)),
+        truncate_volume=(
+            (lambda qty: volume_truncator(float(qty)))
+            if callable(volume_truncator)
+            else (lambda qty: truncate_volume(float(qty)))
+        ),
         skip_qty_revalidation=skip_qty_revalidation,
     )
 
@@ -64,9 +70,6 @@ def plan_place_order(
 def build_place_order_payload(broker, *, plan: SubmitPlan) -> SignedOrderRequest:
     planned_payload = build_order_payload_from_plan(
         plan=plan,
-        decimal_from_value=broker._decimal_from_value,
-        format_krw_amount=broker._format_krw_amount,
-        format_volume=broker._format_volume,
     )
 
     canonical_payload = type(broker._private_api)._query_string(planned_payload.payload)
@@ -134,32 +137,11 @@ def execute_place_order(
 def build_place_order_submission_flow(
     broker,
     *,
-    validated_client_order_id: str,
-    side: str,
-    qty: float,
-    price: float | None,
-    buy_price_none_submit_contract,
-    now: int,
+    plan: SubmitPlan,
 ) -> PlaceOrderSubmissionFlow:
-    normalized_side = normalize_order_side(side)
-    intent = OrderIntent(
-        client_order_id=validated_client_order_id,
-        market=broker._market(),
-        side=side,
-        normalized_side=normalized_side,
-        qty=float(qty),
-        price=price,
-        created_ts=now,
-        submit_contract=buy_price_none_submit_contract,
-        trace_id=validated_client_order_id,
-    )
-    plan = plan_place_order(
-        broker,
-        intent=intent,
-    )
     signed_request = build_place_order_payload(broker, plan=plan)
     return PlaceOrderSubmissionFlow(
-        intent=intent,
+        intent=plan.intent,
         plan=plan,
         signed_request=signed_request,
     )

@@ -84,6 +84,13 @@ def parse_non_negative_float_env(key: str, default: str) -> float:
     return value
 
 
+def parse_deprecated_ignored_bool_env(key: str, *, fixed_value: bool = False) -> bool:
+    raw = os.getenv(key)
+    if raw is not None and str(raw).strip() != "":
+        LOG.warning("%s is deprecated and ignored; runtime behavior remains fixed at %s", key, int(bool(fixed_value)))
+    return bool(fixed_value)
+
+
 def resolve_db_path(path: str) -> str:
     p = Path(path)
     if str(p) == ":memory:":
@@ -520,8 +527,9 @@ class Settings:
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
     LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
-    BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED: bool = parse_bool_env(
-        "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", "false"
+    BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED: bool = parse_deprecated_ignored_bool_env(
+        "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED",
+        fixed_value=False,
     )
 
     # risk

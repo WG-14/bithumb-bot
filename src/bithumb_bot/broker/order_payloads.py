@@ -8,6 +8,7 @@ from typing import Literal
 from ..execution_models import SubmitPlan
 from ..markets import ExchangeMarketCodeError, parse_documented_market_code
 from .base import BrokerRejectError
+from .order_serialization import format_krw_amount, format_volume
 
 OrderSide = Literal["bid", "ask"]
 OrderKind = Literal["limit", "price", "market"]
@@ -178,16 +179,13 @@ def build_order_payload(
 def build_order_payload_from_plan(
     *,
     plan: SubmitPlan,
-    decimal_from_value,
-    format_krw_amount,
-    format_volume,
 ) -> OrderPayloadFromPlan:
     from .order_rules import serialize_buy_price_none_submit_contract
 
     exchange_submit_field = str(plan.exchange_submit_field)
     exchange_submit_notional_krw = plan.exchange_submit_notional_krw
     price_text = (
-        format_krw_amount(decimal_from_value(plan.exchange_submit_price))
+        format_krw_amount(plan.exchange_submit_price)
         if plan.exchange_submit_price is not None
         else None
     )

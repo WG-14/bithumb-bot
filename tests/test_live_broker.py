@@ -8505,6 +8505,94 @@ def test_live_execute_signal_sell_runtime_flow_varies_by_normalized_state(
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_records_signed_request_phase_event(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "signed_request_phase.sqlite")
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda _msg: None)
+
+    runtime_state.record_reconcile_result(success=True, metadata={"dust_residual_present": 0})
+
+    conn = ensure_db(db_path)
+    init_portfolio(conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=1_000_000.0,
+        cash_locked=0.0,
+        asset_available=0.0002,
+        asset_locked=0.0,
+    )
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            settings.PAIR,
+            1,
+            "entry_signed_phase",
+            1_700_000_000_000,
+            100_000_000.0,
+            0.0002,
+            2,
+            0,
+            "lot-native",
+            "open_exposure",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    trade = live_execute_signal(
+        _FakeBroker(),
+        "SELL",
+        1000,
+        100_000_000.0,
+        strategy_name="signed_phase_test",
+        decision_reason="signed_phase_test",
+        exit_rule_name="exit_signal",
+    )
+
+    assert trade is not None
+
+    conn = ensure_db(db_path)
+    signed_event = conn.execute(
+        """
+        SELECT event_type, submission_reason_code, submit_evidence
+        FROM order_events
+        WHERE event_type='submit_attempt_signed'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert signed_event is not None
+    assert str(signed_event["submission_reason_code"]) == "signed_request_prepared"
+    signed_evidence = json.loads(str(signed_event["submit_evidence"]))
+    assert signed_evidence["submit_phase"] == "signed_request"
+    assert signed_evidence["execution_state"] == "signed_request_prepared"
+    assert signed_evidence["signed_request_id"].endswith(":signed_request")
+
+
+@pytest.mark.fast_regression
 @pytest.mark.lot_native_regression_gate
 def test_live_execute_signal_sell_reserved_exit_stops_before_execution_stage(monkeypatch, tmp_path):
     db_path = str(tmp_path / "reserved_exit_flow.sqlite")

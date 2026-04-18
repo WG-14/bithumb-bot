@@ -10,7 +10,6 @@ import re
 import time
 import uuid
 import threading
-from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 import math
 from urllib.parse import urlencode
@@ -41,6 +40,7 @@ from .accounts_v1 import (
 from .myasset_ws import MyAssetWsBalanceSource
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
 from .myorder_runtime import MyOrderIngestResult, ingest_myorder_event
+from ..execution_models import OrderIntent
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -52,16 +52,28 @@ from .order_lookup_v1 import (
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
-from .bithumb_adapter import build_signed_order_request, build_submission_flow
+from .bithumb_adapter import build_signed_order_request
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
 from .order_list_v1 import build_recovery_order_list_params
 from .order_list_v1 import V1ListNormalizedOrder
+from .order_read_models import (
+    normalize_order_side as normalize_order_row_side,
+    normalize_v1_order_row_lenient_for_fills,
+    normalize_v1_order_row_strict,
+    normalize_v2_order_row,
+    parse_ts,
+    strict_parse_ts,
+)
 from .order_payloads import (
+    normalize_order_side,
     validate_client_order_id,
     validate_order_submit_payload,
 )
+from .order_serialization import decimal_from_value, format_krw_amount, format_volume, truncate_volume
 from .order_submit import (
     PlaceOrderSubmissionFlow,
+    build_place_order_submission_flow,
+    plan_place_order,
     resolve_submit_price_tick_policy as _resolve_submit_price_tick_policy,
     run_place_order_submission_flow,
 )
@@ -1144,12 +1156,7 @@ class BithumbBroker:
         return rendered
 
     def _normalize_order_side(self, side: str | None, *, default: str = "BUY") -> str:
-        token = str(side or "").strip().lower()
-        if token in {"buy", "bid"}:
-            return "BUY"
-        if token in {"sell", "ask"}:
-            return "SELL"
-        return default
+        return normalize_order_row_side(side, default=default)
 
     @staticmethod
     def _clean_identifier(value: object) -> str:
@@ -1594,34 +1601,19 @@ class BithumbBroker:
 
     @staticmethod
     def _decimal_from_value(value: object) -> Decimal:
-        try:
-            decimal_value = Decimal(str(value))
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise BrokerRejectError(f"invalid numeric value for order serialization: {value}") from exc
-        if not decimal_value.is_finite():
-            raise BrokerRejectError(f"invalid non-finite numeric value for order serialization: {value}")
-        return decimal_value
+        return decimal_from_value(value)
 
     @classmethod
     def _format_krw_amount(cls, value: object) -> str:
-        amount = cls._decimal_from_value(value)
-        if amount <= 0:
-            return "0"
-        rounded = amount.quantize(Decimal("1"), rounding=ROUND_DOWN)
-        return format(rounded, "f").split(".", 1)[0]
+        return format_krw_amount(value)
 
     @classmethod
     def _format_volume(cls, qty: object, *, places: int = 8) -> str:
-        quantizer = Decimal("1").scaleb(-places)
-        volume = cls._decimal_from_value(qty)
-        if volume <= 0:
-            return "0"
-        rounded = volume.quantize(quantizer, rounding=ROUND_DOWN)
-        return format(rounded, "f").rstrip("0").rstrip(".") or "0"
+        return format_volume(qty, places=places)
 
     @classmethod
     def _truncate_volume(cls, qty: object, *, places: int = 8) -> float:
-        return float(cls._format_volume(qty, places=places))
+        return truncate_volume(qty, places=places)
 
     @classmethod
     def _validate_volume_constraints(
@@ -1665,26 +1657,7 @@ class BithumbBroker:
 
     @staticmethod
     def _parse_ts(raw: object) -> int:
-        if raw in (None, ""):
-            return int(time.time() * 1000)
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            text = str(raw).strip()
-            try:
-                if text.endswith("Z"):
-                    text = text[:-1] + "+00:00"
-                dt = datetime.fromisoformat(text)
-            except ValueError:
-                return int(time.time() * 1000)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1000)
-        if value > 1_000_000_000_000:
-            return int(value)
-        if value > 1_000_000_000:
-            return int(value * 1000)
-        return int(value * 1000)
+        return parse_ts(raw)
 
     @staticmethod
     def _number(payload: dict[str, object], *keys: str) -> float:
@@ -1732,28 +1705,7 @@ class BithumbBroker:
 
     @staticmethod
     def _strict_parse_ts(raw: object, *, field_name: str, context: str) -> int:
-        if raw in (None, ""):
-            raise BrokerRejectError(f"{context} schema mismatch: missing required timestamp field '{field_name}'")
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            text = str(raw).strip()
-            try:
-                if text.endswith("Z"):
-                    text = text[:-1] + "+00:00"
-                dt = datetime.fromisoformat(text)
-            except ValueError as exc:
-                raise BrokerRejectError(
-                    f"{context} schema mismatch: invalid timestamp field '{field_name}'={raw}"
-                ) from exc
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp() * 1000)
-        if not math.isfinite(value):
-            raise BrokerRejectError(f"{context} schema mismatch: non-finite timestamp field '{field_name}'={raw}")
-        if value > 1_000_000_000_000:
-            return int(value)
-        return int(value * 1000)
+        return strict_parse_ts(raw, field_name=field_name, context=context)
 
     @staticmethod
     def _optional_number(payload: dict[str, object], *keys: str) -> float | None:
@@ -1878,123 +1830,13 @@ class BithumbBroker:
         return None
 
     def _normalize_v2_order_row(self, row: dict[str, object]) -> dict[str, object]:
-        """Lenient normalization for /v2/orders response rows.
-
-        /v2 orders submit/cancel responses are not part of the strict /v1 read-schema
-        contract and may omit fields. This helper is intentionally tolerant and is
-        scoped to v2 response shaping only.
-        """
-        volume = self._number(row, "volume", "units")
-        remaining = self._number(row, "remaining_volume", "units_remaining")
-        executed = self._number(row, "executed_volume")
-        if executed <= 0 and volume > 0 and remaining >= 0:
-            executed = max(0.0, volume - remaining)
-        return {
-            "uuid": str(row.get("uuid") or row.get("order_id") or ""),
-            "side": self._normalize_order_side(str(row.get("side") or row.get("type")), default="BUY"),
-            "state": str(row.get("state") or ""),
-            "price": self._resolve_fill_price(row),
-            "volume": volume,
-            "remaining_volume": remaining,
-            "executed_volume": executed,
-            "created_ts": self._parse_ts(row.get("created_at") or row.get("timestamp")),
-            "updated_ts": self._parse_ts(row.get("updated_at") or row.get("created_at") or row.get("timestamp")),
-            "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
-        }
+        return normalize_v2_order_row(row)
 
     def _normalize_v1_order_row_lenient_for_fills(self, row: dict[str, object]) -> dict[str, object]:
-        """Compatibility fallback for /v1/order fill aggregation.
-
-        Strict parsing is always preferred for /v1/order and /v1/orders.
-        This lenient path exists only for legacy cases where `/v1/order` omits
-        trade-level fills but still exposes aggregate executed fields.
-        """
-        volume = self._number(row, "volume")
-        remaining = self._number(row, "remaining_volume")
-        executed = self._number(row, "executed_volume")
-        if executed <= 0 and volume > 0 and remaining >= 0:
-            executed = max(0.0, volume - remaining)
-        return {
-            "uuid": str(row.get("uuid") or ""),
-            "side": self._normalize_order_side(str(row.get("side")), default="BUY"),
-            "state": str(row.get("state") or ""),
-            "price": self._resolve_fill_price(row),
-            "volume": volume,
-            "remaining_volume": remaining,
-            "executed_volume": executed,
-            "created_ts": self._parse_ts(row.get("created_at")),
-            "updated_ts": self._parse_ts(row.get("updated_at") or row.get("created_at")),
-            "trades": row.get("trades") if isinstance(row.get("trades"), list) else [],
-        }
+        return normalize_v1_order_row_lenient_for_fills(row)
 
     def _normalize_v1_order_row_strict(self, row: dict[str, object]) -> V1NormalizedOrder:
-        context = "/v1/order"
-        state = require_v1_known_state(row.get("state"), context=context)
-        volume = self._strict_optional_number(row, "volume", context=context)
-        if volume is None:
-            volume = self._strict_optional_number(row, "units", context=context)
-
-        remaining = self._strict_optional_number(row, "remaining_volume", context=context)
-        if remaining is None:
-            remaining = self._strict_optional_number(row, "units_remaining", context=context)
-
-        executed = self._strict_optional_number(row, "executed_volume", context=context)
-        if executed is None:
-            executed = self._strict_optional_number(row, "filled_volume", context=context)
-
-        if remaining is None and volume is not None and executed is not None:
-            remaining = max(0.0, volume - executed)
-        if executed is None and volume is not None and remaining is not None:
-            executed = max(0.0, volume - remaining)
-        if volume is None and remaining is not None and executed is not None:
-            volume = max(0.0, remaining + executed)
-
-        executed_funds = self._strict_optional_number(row, "executed_funds", context=context)
-        price = self._strict_optional_number(row, "price", context=context)
-        avg_price = self._strict_optional_number(row, "avg_price", context=context)
-        reference_price = avg_price if avg_price is not None and avg_price > 0 else price
-        if volume is None and state == "done":
-            if executed is not None:
-                volume = max(0.0, executed)
-            elif executed_funds is not None and reference_price is not None and reference_price > 0:
-                volume = max(0.0, executed_funds / reference_price)
-                executed = volume
-        if remaining is None and state == "done":
-            remaining = 0.0
-        if volume is None:
-            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'volume'")
-        if remaining is None:
-            raise BrokerRejectError(f"{context} schema mismatch: missing required numeric field 'remaining_volume'")
-        if executed is None:
-            executed = max(0.0, volume - remaining)
-
-        raw_trades = row.get("trades")
-        if raw_trades is None:
-            trades: list[object] = []
-        elif isinstance(raw_trades, list):
-            trades = raw_trades
-        else:
-            raise BrokerRejectError(f"{context} schema mismatch: trades must be a list when present")
-
-        created_ts = self._strict_parse_ts(row.get("created_at"), field_name="created_at", context=context)
-        updated_raw = row.get("updated_at")
-        updated_ts = (
-            self._strict_parse_ts(updated_raw, field_name="updated_at", context=context)
-            if updated_raw not in (None, "")
-            else created_ts
-        )
-        return V1NormalizedOrder(
-            side=self._normalize_order_side(str(row.get("side")), default="BUY"),
-            state=state,
-            price=price,
-            volume=volume,
-            remaining_volume=remaining,
-            executed_volume=executed,
-            created_ts=created_ts,
-            updated_ts=updated_ts,
-            trades=trades,
-            executed_funds=executed_funds,
-        )
+        return normalize_v1_order_row_strict(row)
 
     @staticmethod
     def _raw_v2_order_fields(
@@ -2153,45 +1995,80 @@ class BithumbBroker:
 
         submit_contract_context: dict[str, object] = {}
         try:
-            if submit_plan is not None:
-                if validated_client_order_id != submit_plan.intent.client_order_id:
-                    raise BrokerRejectError(
-                        "submit_plan client_order_id mismatch: "
-                        f"requested={validated_client_order_id} planned={submit_plan.intent.client_order_id}"
+            if submit_plan is None:
+                normalized_side = normalize_order_side(side)
+                if (
+                    price is None
+                    and normalized_side == "bid"
+                    and buy_price_none_submit_contract is not None
+                ):
+                    from . import order_rules as order_rules_module
+
+                    resolved_rules = order_rules_module.get_effective_order_rules(self._market()).rules
+                    buy_price_none_resolution = order_rules_module.resolve_buy_price_none_resolution(
+                        rules=resolved_rules,
                     )
-                if str(side).strip().upper() != str(submit_plan.intent.side).strip().upper():
-                    raise BrokerRejectError(
-                        "submit_plan side mismatch: "
-                        f"requested={side} planned={submit_plan.intent.side}"
+                    contract_context = buy_price_none_submit_contract.as_context()
+                    submit_contract_context = dict(contract_context)
+                    supported_order_types = ",".join(
+                        str(item)
+                        for item in buy_price_none_submit_contract.chance_supported_order_types
+                    ) or "-"
+                    RUN_LOG.info(
+                        format_log_kv(
+                            "[ORDER_SUBMIT] buy submit contract preflight",
+                            chance_validation_order_type=buy_price_none_submit_contract.chance_validation_order_type,
+                            supported_order_types=supported_order_types,
+                            buy_price_none_allowed=1 if bool(contract_context.get("buy_price_none_allowed")) else 0,
+                            buy_price_none_alias_used=1 if bool(contract_context.get("buy_price_none_alias_used")) else 0,
+                            buy_price_none_block_reason=str(contract_context.get("buy_price_none_block_reason") or "-"),
+                            submit_field=str(contract_context.get("exchange_submit_field") or "-"),
+                        )
                     )
-                if not math.isclose(float(qty), float(submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
-                    raise BrokerRejectError(
-                        "submit_plan qty mismatch: "
-                        f"requested={float(qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+                    order_rules_module.validate_order_chance_support(
+                        rules=resolved_rules,
+                        side="BUY",
+                        order_type=buy_price_none_submit_contract.chance_validation_order_type,
+                        buy_price_none_resolution=buy_price_none_resolution,
                     )
-                if price != submit_plan.intent.price:
-                    raise BrokerRejectError(
-                        "submit_plan price mismatch: "
-                        f"requested={price} planned={submit_plan.intent.price}"
-                    )
-                flow = PlaceOrderSubmissionFlow(
-                    intent=submit_plan.intent,
-                    plan=submit_plan,
-                    signed_request=build_signed_order_request(
-                        self,
-                        plan=submit_plan,
+                submit_plan = plan_place_order(
+                    self,
+                    intent=OrderIntent(
+                        client_order_id=validated_client_order_id,
+                        market=self._market(),
+                        side=side,
+                        normalized_side=normalized_side,
+                        qty=float(qty),
+                        price=price,
+                        created_ts=now,
+                        submit_contract=buy_price_none_submit_contract,
+                        trace_id=validated_client_order_id,
                     ),
                 )
-            else:
-                flow = build_submission_flow(
-                    self,
-                    validated_client_order_id=validated_client_order_id,
-                    side=side,
-                    qty=float(qty),
-                    price=price,
-                    buy_price_none_submit_contract=buy_price_none_submit_contract,
-                    now=now,
+            if validated_client_order_id != submit_plan.intent.client_order_id:
+                raise BrokerRejectError(
+                    "submit_plan client_order_id mismatch: "
+                    f"requested={validated_client_order_id} planned={submit_plan.intent.client_order_id}"
                 )
+            if str(side).strip().upper() != str(submit_plan.intent.side).strip().upper():
+                raise BrokerRejectError(
+                    "submit_plan side mismatch: "
+                    f"requested={side} planned={submit_plan.intent.side}"
+                )
+            if not math.isclose(float(qty), float(submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
+                raise BrokerRejectError(
+                    "submit_plan qty mismatch: "
+                    f"requested={float(qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+                )
+            if price != submit_plan.intent.price:
+                raise BrokerRejectError(
+                    "submit_plan price mismatch: "
+                    f"requested={price} planned={submit_plan.intent.price}"
+                )
+            flow = build_place_order_submission_flow(
+                self,
+                plan=submit_plan,
+            )
             submit_contract_context = dict(flow.signed_request.submit_contract_context)
             return run_place_order_submission_flow(self, flow=flow)
         except BrokerRejectError as exc:
