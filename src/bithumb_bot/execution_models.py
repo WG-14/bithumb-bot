@@ -22,6 +22,7 @@ class OrderIntent:
     created_ts: int
     submit_contract: Any | None = None
     market_price_hint: float | None = None
+    trace_id: str | None = None
 
     @property
     def order_side(self) -> str:
@@ -47,6 +48,10 @@ class SubmitPlan:
     internal_lot_qty: float
     exchange_submit_qty: float
     buy_price_none_submit_contract: Any | None = None
+    trace_id: str | None = None
+    plan_id: str | None = None
+    phase_identity: str = "planning"
+    phase_result: str = "planned"
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,11 @@ class SignedOrderRequest:
     exchange_submit_qty: float
     internal_lot_qty: float
     canonical_payload: str
+    trace_id: str | None = None
+    plan_id: str | None = None
+    request_id: str | None = None
+    phase_identity: str = "signed_request"
+    phase_result: str = "signed"
 
 
 @dataclass(frozen=True)
@@ -69,6 +79,12 @@ class SubmissionRecord:
     signed_request: SignedOrderRequest
     request_ts: int
     retry_safe: bool = False
+    trace_id: str | None = None
+    plan_id: str | None = None
+    request_id: str | None = None
+    submission_id: str | None = None
+    phase_identity: str = "submission"
+    phase_result: str = "submitted"
 
 
 @dataclass(frozen=True)
@@ -85,3 +101,10 @@ class OrderConfirmation:
     updated_ts: int
     raw: dict[str, object]
     submit_contract_context: dict[str, object]
+    trace_id: str | None = None
+    plan_id: str | None = None
+    request_id: str | None = None
+    submission_id: str | None = None
+    confirmation_id: str | None = None
+    phase_identity: str = "confirmation"
+    phase_result: str = "confirmed"

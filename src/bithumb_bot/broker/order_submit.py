@@ -106,6 +106,11 @@ def build_place_order_payload(broker, *, plan: SubmitPlan) -> SignedOrderRequest
         exchange_submit_qty=float(plan.exchange_submit_qty),
         internal_lot_qty=float(plan.internal_lot_qty),
         canonical_payload=canonical_payload,
+        trace_id=plan.trace_id,
+        plan_id=plan.plan_id,
+        request_id=f"{plan.trace_id or plan.intent.client_order_id}:signed_request",
+        phase_identity="signed_request",
+        phase_result="signed",
     )
 
 
@@ -146,6 +151,7 @@ def build_place_order_submission_flow(
         price=price,
         created_ts=now,
         submit_contract=buy_price_none_submit_contract,
+        trace_id=validated_client_order_id,
     )
     plan = plan_place_order(
         broker,

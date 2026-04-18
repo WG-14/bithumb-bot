@@ -59,6 +59,7 @@ def build_submit_plan(
     )
 
     submit_contract_context: dict[str, object] = {}
+    trace_id = str(intent.trace_id or intent.client_order_id)
     try:
         resolved_rules = rules
         if resolved_rules is None:
@@ -263,6 +264,10 @@ def build_submit_plan(
             internal_lot_qty=float(internal_lot_qty),
             exchange_submit_qty=float(exchange_submit_qty),
             buy_price_none_submit_contract=buy_submit_contract,
+            trace_id=trace_id,
+            plan_id=f"{trace_id}:plan",
+            phase_identity="planning",
+            phase_result="planned",
         )
     except BrokerRejectError as exc:
         exc_submit_contract_context = getattr(exc, "submit_contract_context", None)

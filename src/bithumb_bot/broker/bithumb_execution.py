@@ -20,6 +20,12 @@ def execute_signed_order_request(
         signed_request=signed_request,
         request_ts=now,
         retry_safe=retry_safe,
+        trace_id=signed_request.trace_id or plan.trace_id,
+        plan_id=signed_request.plan_id or plan.plan_id,
+        request_id=signed_request.request_id,
+        submission_id=f"{signed_request.trace_id or plan.trace_id or plan.intent.client_order_id}:submission",
+        phase_identity="submission",
+        phase_result="submitted",
     )
     data = submit_signed_order_request(
         broker,

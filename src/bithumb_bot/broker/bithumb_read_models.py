@@ -34,6 +34,10 @@ def parse_order_confirmation(
     raw.setdefault("market", signed_request.payload.get("market"))
     raw.setdefault("order_type", signed_request.payload.get("order_type"))
     raw.setdefault("ord_type", signed_request.payload.get("order_type"))
+    submission_trace_id = getattr(submission_record, "trace_id", None)
+    submission_plan_id = getattr(submission_record, "plan_id", None)
+    submission_request_id = getattr(submission_record, "request_id", None)
+    submission_id = getattr(submission_record, "submission_id", None)
     return OrderConfirmation(
         submission=submission_record,
         client_order_id=plan.intent.client_order_id,
@@ -47,4 +51,11 @@ def parse_order_confirmation(
         updated_ts=now,
         raw=raw,
         submit_contract_context=dict(signed_request.submit_contract_context),
+        trace_id=submission_trace_id or signed_request.trace_id or plan.trace_id,
+        plan_id=submission_plan_id or signed_request.plan_id or plan.plan_id,
+        request_id=submission_request_id or signed_request.request_id,
+        submission_id=submission_id,
+        confirmation_id=f"{submission_trace_id or signed_request.trace_id or plan.trace_id or plan.intent.client_order_id}:confirmation",
+        phase_identity="confirmation",
+        phase_result="confirmed",
     )

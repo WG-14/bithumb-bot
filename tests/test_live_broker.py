@@ -1624,6 +1624,11 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert submit_evidence["submit_path"] == "live_standard_market"
     assert submit_evidence["submit_phase"] == "confirmation"
     assert submit_evidence["execution_state"] == "broker_response_received"
+    assert submit_evidence["execution_trace_id"] == row["client_order_id"]
+    assert submit_evidence["submit_plan_id"] == f"{row['client_order_id']}:plan"
+    assert submit_evidence["signed_request_id"] == f"{row['client_order_id']}:signed_request"
+    assert submit_evidence["submission_id"] == f"{row['client_order_id']}:submission"
+    assert submit_evidence["confirmation_id"] == f"{row['client_order_id']}:confirmation"
     assert submit_evidence["submit_mode"] == settings.MODE
     assert submit_evidence["exchange_order_type"] == "price"
     assert submit_evidence["exchange_submit_field"] == "price"
@@ -1649,6 +1654,11 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
     assert preflight_evidence["submit_phase"] == "planning"
     assert preflight_evidence["execution_state"] == "validated_pre_submit"
+    assert preflight_evidence["execution_trace_id"] == row["client_order_id"]
+    assert preflight_evidence["submit_plan_id"] == f"{row['client_order_id']}:plan"
+    assert preflight_evidence["signed_request_id"] == f"{row['client_order_id']}:signed_request"
+    assert preflight_evidence["submission_id"] == f"{row['client_order_id']}:submission"
+    assert preflight_evidence["confirmation_id"] == f"{row['client_order_id']}:confirmation"
     assert preflight_evidence["buy_price_none_allowed"] is True
     assert preflight_evidence["buy_price_none_decision_outcome"] == "pass"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
@@ -2482,8 +2492,7 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     _stub_live_effective_order_rules(monkeypatch)
 
     monkeypatch.setattr(
-        live_module,
-        "plan_place_order",
+        "bithumb_bot.broker.live_submit_orchestrator.plan_place_order",
         lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
     )
 
@@ -2522,6 +2531,11 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["submit_phase"] == "planning"
     assert submit_evidence["execution_state"] == "planning_failed"
+    assert submit_evidence["execution_trace_id"] == row["client_order_id"]
+    assert submit_evidence["submit_plan_id"] == f"{row['client_order_id']}:plan"
+    assert submit_evidence["signed_request_id"] == f"{row['client_order_id']}:signed_request"
+    assert submit_evidence["submission_id"] == f"{row['client_order_id']}:submission"
+    assert submit_evidence["confirmation_id"] == f"{row['client_order_id']}:confirmation"
     assert submit_evidence["error_summary"] == "planner contract mismatch"
     assert started_event is None
 

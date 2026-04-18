@@ -42,6 +42,7 @@ def test_execution_contract_models_are_instantiable() -> None:
         price=None,
         created_ts=1_700_000_000_000,
         submit_contract={"shape": "explicit"},
+        trace_id="cid-model",
     )
     plan = SubmitPlan(
         intent=intent,
@@ -61,6 +62,8 @@ def test_execution_contract_models_are_instantiable() -> None:
         internal_lot_qty=0.001,
         exchange_submit_qty=0.001,
         buy_price_none_submit_contract={"kind": "market-buy"},
+        trace_id="cid-model",
+        plan_id="cid-model:plan",
     )
     signed_request = SignedOrderRequest(
         intent=intent,
@@ -72,12 +75,19 @@ def test_execution_contract_models_are_instantiable() -> None:
         exchange_submit_qty=0.001,
         internal_lot_qty=0.001,
         canonical_payload="market=KRW-BTC",
+        trace_id="cid-model",
+        plan_id="cid-model:plan",
+        request_id="cid-model:signed_request",
     )
     submission = SubmissionRecord(
         intent=intent,
         plan=plan,
         signed_request=signed_request,
         request_ts=intent.created_ts,
+        trace_id="cid-model",
+        plan_id="cid-model:plan",
+        request_id="cid-model:signed_request",
+        submission_id="cid-model:submission",
     )
     confirmation = OrderConfirmation(
         submission=submission,
@@ -92,12 +102,25 @@ def test_execution_contract_models_are_instantiable() -> None:
         updated_ts=intent.created_ts,
         raw={"order_id": "ex-model"},
         submit_contract_context={"market": "KRW-BTC"},
+        trace_id="cid-model",
+        plan_id="cid-model:plan",
+        request_id="cid-model:signed_request",
+        submission_id="cid-model:submission",
+        confirmation_id="cid-model:confirmation",
     )
 
     assert plan.intent is intent
     assert signed_request.plan is plan
     assert submission.signed_request is signed_request
     assert confirmation.submission is submission
+    assert plan.phase_identity == "planning"
+    assert plan.phase_result == "planned"
+    assert signed_request.phase_identity == "signed_request"
+    assert signed_request.phase_result == "signed"
+    assert submission.phase_identity == "submission"
+    assert submission.phase_result == "submitted"
+    assert confirmation.phase_identity == "confirmation"
+    assert confirmation.phase_result == "confirmed"
 
 
 def test_live_submit_flow_creates_explicit_execution_contract_models(monkeypatch) -> None:
@@ -169,3 +192,8 @@ def test_live_submit_flow_creates_explicit_execution_contract_models(monkeypatch
     assert confirmation.client_order_id == "cid-contract-flow"
     assert confirmation.exchange_order_id == "ex-contract-flow"
     assert confirmation.submit_contract_context["exchange_order_type"] == submit_contract.exchange_order_type
+    assert flow.plan.trace_id == "cid-contract-flow"
+    assert flow.plan.plan_id == "cid-contract-flow:plan"
+    assert flow.signed_request.request_id == "cid-contract-flow:signed_request"
+    assert confirmation.submission.submission_id == "cid-contract-flow:submission"
+    assert confirmation.confirmation_id == "cid-contract-flow:confirmation"

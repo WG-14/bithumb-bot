@@ -57,7 +57,12 @@ from .order_rules import (
     serialize_buy_price_none_submit_contract,
     side_min_total_krw,
 )
-from .order_submit import plan_place_order
+from .live_submit_orchestrator import (
+    StandardSubmitPipelineRequest,
+    _submit_contract_fields,
+    _submit_failure_fields,
+    run_standard_submit_pipeline,
+)
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -77,16 +82,12 @@ from ..oms import (
     evaluate_unresolved_order_gate,
     new_client_order_id,
     payload_fingerprint,
-    record_status_transition,
     record_order_suppression,
-    record_submit_attempt,
     record_submit_blocked,
-    record_submit_started,
-    set_exchange_order_id,
     set_status,
     update_order_intent_dedup,
 )
-from .base import Broker, BrokerFill, BrokerSubmissionUnknownError, BrokerTemporaryError
+from .base import Broker, BrokerFill
 
 POSITION_EPSILON = 1e-12
 BROKER_MARKET_SELL_QTY_DECIMALS = 8
@@ -98,11 +99,6 @@ _CANONICAL_SELL_SUBMIT_QTY_SOURCE = "position_state.normalized_exposure.sellable
 _CANONICAL_SELL_SUBMIT_LOT_SOURCE = "position_state.normalized_exposure.sellable_executable_lot_count"
 _NON_AUTHORITATIVE_SELL_QTY_OBSERVATION_SOURCE = "observation.sell_qty_preview"
 
-SUBMISSION_REASON_FAILED_BEFORE_SEND = "failed_before_send"
-SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
-SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
-SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
-SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 _DECIMAL_ZERO = Decimal("0")
 
@@ -211,53 +207,6 @@ class _LiveExecutionFeasibility:
     reference_quote: dict[str, float | str] | None
     entry_sizing: object | None
     exit_sizing: object | None
-
-
-@dataclass(frozen=True)
-class _StandardSubmitAttemptContext:
-    conn: object
-    signal: str
-    client_order_id: str
-    submit_attempt_id: str
-    side: str
-    order_qty: float
-    position_qty: float
-    qty: float
-    ts: int
-    intent_key: str
-    market_price: float
-    raw_total_asset_qty: float
-    open_exposure_qty: float
-    dust_tracking_qty: float
-    submit_qty_source: str
-    position_state_source: str
-    reference_price: float | None
-    top_of_book_summary: dict[str, float | str] | None
-    strategy_name: str | None
-    decision_id: int | None
-    decision_reason: str | None
-    exit_rule_name: str | None
-    order_type: str
-    internal_lot_size: float | None
-    effective_min_trade_qty: float | None
-    qty_step: float | None
-    min_notional_krw: float | None
-    intended_lot_count: int | None
-    executable_lot_count: int | None
-    final_intended_qty: float
-    final_submitted_qty: float
-    decision_reason_code: str | None
-    submit_plan: SubmitPlan
-    submit_contract_context: dict[str, object] | None
-    submit_path: str
-    symbol: str
-    payload_hash: str
-    lot_evidence_fields: dict[str, object]
-    submit_truth_source_fields: dict[str, object]
-    submit_observability_fields: dict[str, object]
-    sell_observability: dict[str, object]
-    base_submit_contract_fields: dict[str, object]
-    base_submit_failure_fields: dict[str, object]
 
 
 def _resolve_non_authoritative_sell_basis_qty(
@@ -474,13 +423,6 @@ def _aggregate_fills_for_apply(
             exchange_order_id=exchange_order_id,
         )
     ]
-
-
-def _classify_temporary_submit_error(exc: Exception) -> tuple[str, bool]:
-    detail = str(exc).lower()
-    if "timeout" in detail or "timed out" in detail:
-        return SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT, True
-    return SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR, False
 
 
 def _classify_sell_failure_category(
@@ -2571,78 +2513,6 @@ def validate_pretrade(
     return reference_quote
 
 
-def _mark_submit_unknown(
-    *,
-    conn,
-    client_order_id: str,
-    submit_attempt_id: str,
-    side: str,
-    reason: str,
-    ts: int,
-) -> None:
-    record_status_transition(
-        client_order_id,
-        from_status="PENDING_SUBMIT",
-        to_status="SUBMIT_UNKNOWN",
-        reason=reason,
-        conn=conn,
-    )
-    set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=reason, conn=conn)
-    notify(
-        safety_event(
-            "order_submit_unknown",
-            client_order_id=client_order_id,
-            submit_attempt_id=submit_attempt_id,
-            exchange_order_id=UNSET_EVENT_FIELD,
-            state_from="PENDING_SUBMIT",
-            state_to="SUBMIT_UNKNOWN",
-            reason_code=SUBMIT_TIMEOUT,
-            signal_ts=int(ts),
-            decision_ts=int(ts),
-            decision_id=str(submit_attempt_id),
-            side=side,
-            status="SUBMIT_UNKNOWN",
-            reason=reason,
-        )
-    )
-
-
-def _mark_submit_failed(
-    *,
-    conn,
-    client_order_id: str,
-    submit_attempt_id: str,
-    side: str,
-    reason: str,
-    ts: int,
-) -> None:
-    record_status_transition(
-        client_order_id,
-        from_status="PENDING_SUBMIT",
-        to_status="FAILED",
-        reason=reason,
-        conn=conn,
-    )
-    set_status(client_order_id, "FAILED", last_error=reason, conn=conn)
-    notify(
-        safety_event(
-            "order_submit_failed",
-            client_order_id=client_order_id,
-            submit_attempt_id=submit_attempt_id,
-            exchange_order_id=UNSET_EVENT_FIELD,
-            state_from="PENDING_SUBMIT",
-            state_to="FAILED",
-            reason_code=SUBMIT_FAILED,
-            signal_ts=int(ts),
-            decision_ts=int(ts),
-            decision_id=str(submit_attempt_id),
-            side=side,
-            status="FAILED",
-            reason=reason,
-        )
-    )
-
-
 def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_status: str, reason: str) -> None:
     record_status_transition(
         client_order_id,
@@ -2716,259 +2586,12 @@ def _block_new_submission_for_unresolved_risk(
     )
 
 
-def _record_submit_attempt_result(
-    *,
-    conn,
-    client_order_id: str,
-    submit_attempt_id: str,
-    symbol: str,
-    side: str,
-    qty: float,
-    ts: int,
-    payload_hash: str,
-    reference_price: float | None,
-    order_status: str,
-    broker_response_summary: str,
-    submission_reason_code: str,
-    exception_class: str | None,
-    timeout_flag: bool,
-    submit_evidence: str | None,
-    exchange_order_id_obtained: bool,
-    order_type: str | None = None,
-    internal_lot_size: float | None = None,
-    effective_min_trade_qty: float | None = None,
-    qty_step: float | None = None,
-    min_notional_krw: float | None = None,
-    intended_lot_count: int | None = None,
-    executable_lot_count: int | None = None,
-    final_intended_qty: float | None = None,
-    final_submitted_qty: float | None = None,
-    decision_reason_code: str | None = None,
-) -> None:
-    record_submit_attempt(
-        conn=conn,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        symbol=symbol,
-        side=side,
-        qty=qty,
-        price=reference_price,
-        submit_ts=ts,
-        payload_fingerprint=payload_hash,
-        broker_response_summary=broker_response_summary,
-        submission_reason_code=submission_reason_code,
-        exception_class=exception_class,
-        timeout_flag=timeout_flag,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=exchange_order_id_obtained,
-        order_status=order_status,
-        order_type=order_type,
-        internal_lot_size=internal_lot_size,
-        effective_min_trade_qty=effective_min_trade_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional_krw,
-        intended_lot_count=intended_lot_count,
-        executable_lot_count=executable_lot_count,
-        final_intended_qty=final_intended_qty,
-        final_submitted_qty=final_submitted_qty,
-        decision_reason_code=decision_reason_code,
-    )
-
-
-def _record_submit_attempt_preflight(
-    *,
-    conn,
-    client_order_id: str,
-    submit_attempt_id: str,
-    symbol: str,
-    side: str,
-    qty: float,
-    ts: int,
-    payload_hash: str,
-    reference_price: float | None,
-    submit_evidence: str | None,
-    order_type: str | None = None,
-    internal_lot_size: float | None = None,
-    effective_min_trade_qty: float | None = None,
-    qty_step: float | None = None,
-    min_notional_krw: float | None = None,
-    intended_lot_count: int | None = None,
-    executable_lot_count: int | None = None,
-    final_intended_qty: float | None = None,
-    final_submitted_qty: float | None = None,
-    decision_reason_code: str | None = None,
-) -> None:
-    record_submit_attempt(
-        conn=conn,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        symbol=symbol,
-        side=side,
-        qty=qty,
-        price=reference_price,
-        submit_ts=ts,
-        payload_fingerprint=payload_hash,
-        broker_response_summary="submit_dispatched",
-        submission_reason_code="submit_dispatched_preflight",
-        exception_class=None,
-        timeout_flag=False,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=False,
-        order_status="PENDING_SUBMIT",
-        event_type="submit_attempt_preflight",
-        order_type=order_type,
-        internal_lot_size=internal_lot_size,
-        effective_min_trade_qty=effective_min_trade_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional_krw,
-        intended_lot_count=intended_lot_count,
-        executable_lot_count=executable_lot_count,
-        final_intended_qty=final_intended_qty,
-        final_submitted_qty=final_submitted_qty,
-        decision_reason_code=decision_reason_code,
-    )
-
-
 def _order_intent_strategy_context() -> str:
     return f"{settings.MODE}:{settings.STRATEGY_NAME}:{settings.INTERVAL}"
 
 
 def _order_intent_type(*, side: str) -> str:
     return "market_entry" if side == "BUY" else "market_exit"
-
-def _encode_submit_evidence(*, payload: dict) -> str:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-def _submit_contract_fields(
-    *,
-    side: str,
-    order_type: str | None,
-    normalized_qty: float,
-    contract_context: dict[str, object] | BuyPriceNoneSubmitContract | None = None,
-) -> dict[str, object]:
-    context = (
-        serialize_buy_price_none_submit_contract(
-            contract_context,
-            market=settings.PAIR,
-            order_side=str(side or "").strip().upper() or None,
-        )
-        if isinstance(contract_context, BuyPriceNoneSubmitContract)
-        else (contract_context or {})
-    )
-    normalized_side = str(side or "").strip().upper()
-    normalized_order_type = str(order_type or "").strip().lower()
-    is_buy_market_notional = normalized_side == "BUY" and normalized_order_type == "price"
-    exchange_submit_field = str(
-        context.get("exchange_submit_field")
-        or ("price" if is_buy_market_notional else "volume")
-    )
-    exchange_submit_qty = context.get("exchange_submit_qty")
-    if exchange_submit_qty is None and exchange_submit_field == "volume":
-        exchange_submit_qty = float(normalized_qty)
-    chance_supported_order_types = context.get("chance_supported_order_types")
-    if isinstance(chance_supported_order_types, (tuple, list)):
-        chance_supported_order_types = [str(item) for item in chance_supported_order_types]
-    elif chance_supported_order_types is not None:
-        chance_supported_order_types = [str(chance_supported_order_types)]
-    buy_price_none_raw_supported_types = context.get("buy_price_none_raw_supported_types")
-    if isinstance(buy_price_none_raw_supported_types, (tuple, list)):
-        buy_price_none_raw_supported_types = [str(item) for item in buy_price_none_raw_supported_types]
-    elif buy_price_none_raw_supported_types is not None:
-        buy_price_none_raw_supported_types = [str(buy_price_none_raw_supported_types)]
-    return {
-        "submit_contract_kind": (
-            "market_buy_notional"
-            if is_buy_market_notional
-            else ("market_qty" if normalized_order_type == "market" else "limit_qty_price")
-        ),
-        "market": context.get("market"),
-        "order_side": context.get("order_side"),
-        "exchange_order_type": str(context.get("exchange_order_type") or normalized_order_type or "-"),
-        "chance_validation_order_type": str(
-            context.get("chance_validation_order_type") or normalized_order_type or "-"
-        ),
-        "chance_supported_order_types": chance_supported_order_types,
-        "exchange_submit_field": exchange_submit_field,
-        "exchange_submit_qty": None if exchange_submit_qty is None else float(exchange_submit_qty),
-        "exchange_submit_notional_krw": (
-            None
-            if context.get("exchange_submit_notional_krw") is None
-            else float(context["exchange_submit_notional_krw"])
-        ),
-        "buy_price_none_allowed": context.get("buy_price_none_allowed"),
-        "buy_price_none_decision_outcome": context.get("buy_price_none_decision_outcome"),
-        "buy_price_none_decision_basis": context.get("buy_price_none_decision_basis"),
-        "buy_price_none_alias_used": context.get("buy_price_none_alias_used"),
-        "buy_price_none_alias_policy": context.get("buy_price_none_alias_policy"),
-        "buy_price_none_block_reason": context.get("buy_price_none_block_reason"),
-        "buy_price_none_support_source": context.get("buy_price_none_support_source"),
-        "buy_price_none_raw_supported_types": buy_price_none_raw_supported_types,
-        "buy_price_none_resolved_order_type": context.get("buy_price_none_resolved_order_type"),
-        "allowed": context.get("allowed"),
-        "decision_outcome": context.get("decision_outcome"),
-        "decision_basis": context.get("decision_basis"),
-        "alias_used": context.get("alias_used"),
-        "alias_policy": context.get("alias_policy"),
-        "block_reason": context.get("block_reason"),
-        "support_source": context.get("support_source"),
-        "raw_buy_supported_types": (
-            [str(item) for item in context.get("raw_buy_supported_types", ())]
-            if isinstance(context.get("raw_buy_supported_types"), (tuple, list))
-            else context.get("raw_buy_supported_types")
-        ),
-        "resolved_order_type": context.get("resolved_order_type"),
-        "resolved_contract": context.get("resolved_contract"),
-        "contract_id": context.get("contract_id"),
-        "submit_field": context.get("submit_field") or exchange_submit_field,
-        "internal_executable_qty": float(
-            context.get("internal_executable_qty")
-            if context.get("internal_executable_qty") is not None
-            else normalized_qty
-        ),
-    }
-
-
-def _submit_failure_fields(
-    *,
-    side: str,
-    order_type: str | None,
-    error_class: str | None,
-    error_summary: str | None,
-) -> dict[str, str]:
-    if not str(error_class or "").strip() and not str(error_summary or "").strip():
-        return {
-            "submit_failure_category": "none",
-            "submit_failure_detail": "none",
-        }
-    normalized_side = str(side or "").strip().upper()
-    normalized_order_type = str(order_type or "").strip().lower()
-    detail = str(error_summary or "")
-    detail_lower = detail.lower()
-    if normalized_side == "BUY" and normalized_order_type == "price":
-        if "/v1/orders/chance rejected order type" in detail_lower:
-            category = "chance_order_type_mismatch"
-        elif "under_min_total" in detail_lower or "order notional below side minimum" in detail_lower:
-            category = "notional_rule_reject"
-        else:
-            category = "broker_reject"
-        return {
-            "submit_failure_category": category,
-            "submit_failure_detail": (
-                "buy_market_notional_contract" if category == "broker_reject" else category
-            ),
-        }
-    sell_failure_category = _classify_sell_failure_category(
-        error_class=error_class,
-        error_summary=error_summary,
-    )
-    return {
-        "submit_failure_category": sell_failure_category,
-        "submit_failure_detail": _sell_failure_detail_from_observability(
-            sell_failure_category=sell_failure_category
-        ),
-    }
-
 
 def _decision_truth_sources_payload(decision_observability: dict[str, object]) -> dict[str, str]:
     return {
@@ -2990,1123 +2613,6 @@ def _decision_truth_sources_payload(decision_observability: dict[str, object]) -
         "submit_lot_source": str(decision_observability.get("submit_lot_source_truth_source") or "-"),
         "position_state_source": str(decision_observability.get("position_state_source_truth_source") or "-"),
     }
-
-
-def _submit_via_standard_path(
-    *,
-    conn,
-    broker: Broker,
-    signal: str,
-    client_order_id: str,
-    submit_attempt_id: str,
-    side: str,
-    order_qty: float,
-    position_qty: float,
-    qty: float,
-    ts: int,
-    intent_key: str,
-    market_price: float,
-    raw_total_asset_qty: float,
-    open_exposure_qty: float,
-    dust_tracking_qty: float,
-    effective_rules,
-    decision_observability: dict[str, object] | None,
-    submit_qty_source: str,
-    position_state_source: str,
-    reference_price: float | None,
-    top_of_book_summary: dict[str, float | str] | None,
-    strategy_name: str | None,
-    decision_id: int | None,
-    decision_reason: str | None,
-    exit_rule_name: str | None,
-    order_type: str,
-    internal_lot_size: float | None,
-    effective_min_trade_qty: float | None,
-    qty_step: float | None,
-    min_notional_krw: float | None,
-    intended_lot_count: int | None,
-    executable_lot_count: int | None,
-    final_intended_qty: float,
-    final_submitted_qty: float,
-    decision_reason_code: str | None,
-):
-    symbol = settings.PAIR
-    decision_observability = decision_observability or {}
-    submit_intent = OrderIntent(
-        client_order_id=client_order_id,
-        market=symbol,
-        side=side,
-        normalized_side=("bid" if side == "BUY" else "ask"),
-        qty=float(qty),
-        price=None,
-        created_ts=int(ts),
-        market_price_hint=reference_price,
-    )
-    try:
-        submit_plan = plan_place_order(
-            broker,
-            intent=submit_intent,
-            rules=effective_rules,
-            skip_qty_revalidation=True,
-        )
-    except Exception as error:
-        _handle_standard_submit_planning_error(
-            conn=conn,
-            signal=signal,
-            client_order_id=client_order_id,
-            submit_attempt_id=submit_attempt_id,
-            side=side,
-            qty=float(qty),
-            ts=int(ts),
-            intent_key=intent_key,
-            symbol=symbol,
-            reference_price=reference_price,
-            top_of_book_summary=top_of_book_summary,
-            strategy_name=strategy_name,
-            decision_id=decision_id,
-            decision_reason=decision_reason,
-            exit_rule_name=exit_rule_name,
-            order_type=order_type,
-            payload_hash=payload_fingerprint(
-                {
-                    "client_order_id": client_order_id,
-                    "submit_attempt_id": submit_attempt_id,
-                    "symbol": symbol,
-                    "side": side,
-                    "qty": float(qty),
-                    "price": reference_price,
-                    "submit_ts": int(ts),
-                }
-            ),
-            internal_lot_size=internal_lot_size,
-            effective_min_trade_qty=effective_min_trade_qty,
-            qty_step=qty_step,
-            min_notional_krw=min_notional_krw,
-            intended_lot_count=intended_lot_count,
-            executable_lot_count=executable_lot_count,
-            final_intended_qty=float(final_intended_qty),
-            final_submitted_qty=float(final_submitted_qty),
-            decision_reason_code=decision_reason_code,
-            error=error,
-        )
-        return None
-    sell_truth_source_fields = _sell_truth_source_fields(
-        decision_observability=decision_observability,
-        submit_qty_source=submit_qty_source,
-    )
-    canonical_sell_submit = _CanonicalSellSubmitObservability(
-        submit_qty_source=submit_qty_source,
-        submit_lot_source=str(
-            decision_observability.get("sell_submit_lot_source")
-            or decision_observability.get("submit_lot_source")
-            or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
-        ),
-        submit_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
-        normalized_qty=qty,
-        position_state_source=position_state_source,
-        position_state_source_truth_source=sell_truth_source_fields["position_state_source_truth_source"],
-        submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
-        submit_lot_source_truth_source=sell_truth_source_fields["submit_lot_source_truth_source"],
-    )
-    observed_sell_telemetry = _ObservedSellSubmitTelemetry(
-        position_qty=position_qty,
-        submit_payload_qty=qty,
-        raw_total_asset_qty=raw_total_asset_qty,
-        open_exposure_qty=open_exposure_qty,
-        dust_tracking_qty=dust_tracking_qty,
-        sell_qty_basis_qty=float(decision_observability.get("sell_qty_basis_qty") or open_exposure_qty),
-        sell_qty_basis_source=str(submit_qty_source or decision_observability.get("sell_qty_basis_source") or "-"),
-        sell_qty_basis_qty_truth_source=sell_truth_source_fields["sell_qty_basis_qty_truth_source"],
-        sell_qty_basis_source_truth_source=sell_truth_source_fields["sell_qty_basis_source_truth_source"],
-        sell_qty_boundary_kind=str(decision_observability.get("sell_qty_boundary_kind") or "none"),
-        sell_qty_boundary_kind_truth_source=sell_truth_source_fields["sell_qty_boundary_kind_truth_source"],
-        sell_normalized_exposure_qty_truth_source=sell_truth_source_fields[
-            "sell_normalized_exposure_qty_truth_source"
-        ],
-        sell_open_exposure_qty_truth_source=sell_truth_source_fields["sell_open_exposure_qty_truth_source"],
-        sell_dust_tracking_qty_truth_source=sell_truth_source_fields["sell_dust_tracking_qty_truth_source"],
-    )
-    sell_observability = _sell_submit_observability_fields(
-        decision_observability=decision_observability,
-        canonical_submit=canonical_sell_submit,
-        observed_inputs=observed_sell_telemetry,
-        sell_failure_category="none",
-        sell_failure_detail="none",
-    )
-    base_submit_contract_fields = _submit_contract_fields(
-        side=side,
-        order_type=order_type,
-        normalized_qty=float(qty),
-        contract_context=submit_plan.submit_contract_context,
-    )
-    base_submit_failure_fields = _submit_failure_fields(
-        side=side,
-        order_type=order_type,
-        error_class=None,
-        error_summary=None,
-    )
-    submit_truth_source_fields: dict[str, object] = dict(sell_truth_source_fields)
-    submit_observability_fields: dict[str, object] = dict(sell_observability)
-    if side != "SELL":
-        submit_truth_source_fields = {
-            key: sell_truth_source_fields[key]
-            for key in (
-                "entry_allowed_truth_source",
-                "effective_flat_truth_source",
-                "raw_qty_open_truth_source",
-                "raw_total_asset_qty_truth_source",
-                "position_qty_truth_source",
-                "submit_payload_qty_truth_source",
-                "normalized_exposure_active_truth_source",
-                "normalized_exposure_qty_truth_source",
-                "open_exposure_qty_truth_source",
-                "dust_tracking_qty_truth_source",
-                "submit_qty_source_truth_source",
-                "position_state_source_truth_source",
-            )
-        }
-        submit_observability_fields = {
-            "observed_position_qty": float(position_qty),
-            "submit_payload_qty": float(qty),
-            "submit_qty_source": submit_qty_source,
-            "position_state_source": position_state_source,
-            "raw_total_asset_qty": float(raw_total_asset_qty),
-            "open_exposure_qty": float(open_exposure_qty),
-            "dust_tracking_qty": float(dust_tracking_qty),
-        }
-    lot_evidence_fields = {
-        "order_type": order_type,
-        "internal_lot_size": None if internal_lot_size is None else float(internal_lot_size),
-        "effective_min_trade_qty": None if effective_min_trade_qty is None else float(effective_min_trade_qty),
-        "qty_step": None if qty_step is None else float(qty_step),
-        "min_notional_krw": None if min_notional_krw is None else float(min_notional_krw),
-        "intended_lot_count": None if intended_lot_count is None else int(intended_lot_count),
-        "executable_lot_count": None if executable_lot_count is None else int(executable_lot_count),
-        "final_intended_qty": float(final_intended_qty),
-        "final_submitted_qty": float(final_submitted_qty),
-        "decision_reason_code": decision_reason_code,
-    }
-    context = _StandardSubmitAttemptContext(
-        conn=conn,
-        signal=signal,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        side=side,
-        order_qty=float(order_qty),
-        position_qty=float(position_qty),
-        qty=float(qty),
-        ts=int(ts),
-        intent_key=intent_key,
-        market_price=float(market_price),
-        raw_total_asset_qty=float(raw_total_asset_qty),
-        open_exposure_qty=float(open_exposure_qty),
-        dust_tracking_qty=float(dust_tracking_qty),
-        submit_qty_source=submit_qty_source,
-        position_state_source=position_state_source,
-        reference_price=reference_price,
-        top_of_book_summary=top_of_book_summary,
-        strategy_name=strategy_name,
-        decision_id=decision_id,
-        decision_reason=decision_reason,
-        exit_rule_name=exit_rule_name,
-        order_type=order_type,
-        internal_lot_size=internal_lot_size,
-        effective_min_trade_qty=effective_min_trade_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional_krw,
-        intended_lot_count=intended_lot_count,
-        executable_lot_count=executable_lot_count,
-        final_intended_qty=float(final_intended_qty),
-        final_submitted_qty=float(final_submitted_qty),
-        decision_reason_code=decision_reason_code,
-        submit_plan=submit_plan,
-        submit_contract_context=submit_plan.submit_contract_context,
-        submit_path="live_standard_market",
-        symbol=symbol,
-        payload_hash=payload_fingerprint(
-            {
-                "client_order_id": client_order_id,
-                "submit_attempt_id": submit_attempt_id,
-                "symbol": symbol,
-                "side": side,
-                "qty": float(qty),
-                "price": reference_price,
-                "submit_ts": int(ts),
-            }
-        ),
-        lot_evidence_fields=lot_evidence_fields,
-        submit_truth_source_fields=submit_truth_source_fields,
-        submit_observability_fields=submit_observability_fields,
-        sell_observability=sell_observability,
-        base_submit_contract_fields=base_submit_contract_fields,
-        base_submit_failure_fields=base_submit_failure_fields,
-    )
-    _plan_standard_submit_attempt(context=context)
-    submission = _dispatch_standard_submit_attempt(context=context, broker=broker)
-    if submission is None:
-        return None
-    order, request_ts, response_ts = submission
-    return _confirm_standard_submit_attempt(
-        context=context,
-        order=order,
-        request_ts=request_ts,
-        response_ts=response_ts,
-    )
-
-
-def _handle_standard_submit_planning_error(
-    *,
-    conn,
-    signal: str,
-    client_order_id: str,
-    submit_attempt_id: str,
-    side: str,
-    qty: float,
-    ts: int,
-    intent_key: str,
-    symbol: str,
-    reference_price: float | None,
-    top_of_book_summary: dict[str, float | str] | None,
-    strategy_name: str | None,
-    decision_id: int | None,
-    decision_reason: str | None,
-    exit_rule_name: str | None,
-    order_type: str,
-    payload_hash: str,
-    internal_lot_size: float | None,
-    effective_min_trade_qty: float | None,
-    qty_step: float | None,
-    min_notional_krw: float | None,
-    intended_lot_count: int | None,
-    executable_lot_count: int | None,
-    final_intended_qty: float,
-    final_submitted_qty: float,
-    decision_reason_code: str | None,
-    error: Exception,
-) -> None:
-    failure_submit_contract_fields = _submit_contract_fields(
-        side=side,
-        order_type=order_type,
-        normalized_qty=qty,
-        contract_context=getattr(error, "submit_contract_context", None),
-    )
-    failure_submit_fields = _submit_failure_fields(
-        side=side,
-        order_type=order_type,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": symbol,
-            "side": side,
-            "intended_qty": qty,
-            "normalized_qty": qty,
-            "reference_price": reference_price,
-            "top_of_book": top_of_book_summary,
-            "request_ts": None,
-            "response_ts": None,
-            "submit_path": "live_standard_market",
-            "submit_phase": "planning",
-            "execution_state": "planning_failed",
-            "submit_mode": settings.MODE,
-            **failure_submit_contract_fields,
-            **failure_submit_fields,
-            "error_class": type(error).__name__,
-            "error_summary": str(error),
-            "internal_lot_size": internal_lot_size,
-            "effective_min_trade_qty": effective_min_trade_qty,
-            "qty_step": qty_step,
-            "min_notional_krw": min_notional_krw,
-            "intended_lot_count": intended_lot_count,
-            "executable_lot_count": executable_lot_count,
-            "final_intended_qty": final_intended_qty,
-            "final_submitted_qty": final_submitted_qty,
-            "decision_reason_code": decision_reason_code,
-        }
-    )
-    reason = f"submit planning failed: {type(error).__name__}: {error}"
-    record_order_if_missing(
-        conn,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        side=side,
-        qty_req=qty,
-        price=None,
-        strategy_name=strategy_name,
-        entry_decision_id=(decision_id if side == "BUY" else None),
-        exit_decision_id=(decision_id if side == "SELL" else None),
-        decision_reason=decision_reason,
-        exit_rule_name=exit_rule_name,
-        order_type=order_type,
-        internal_lot_size=internal_lot_size,
-        effective_min_trade_qty=effective_min_trade_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional_krw,
-        intended_lot_count=intended_lot_count,
-        executable_lot_count=executable_lot_count,
-        final_intended_qty=final_intended_qty,
-        final_submitted_qty=final_submitted_qty,
-        decision_reason_code=decision_reason_code,
-        local_intent_state="PLAN_REJECTED",
-        ts_ms=ts,
-        status="FAILED",
-    )
-    conn.execute(
-        "UPDATE orders SET last_error=?, updated_ts=? WHERE client_order_id=?",
-        (reason[:500], int(time.time() * 1000), client_order_id),
-    )
-    _record_submit_attempt_result(
-        conn=conn,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        symbol=symbol,
-        side=side,
-        qty=qty,
-        ts=ts,
-        payload_hash=payload_hash,
-        reference_price=reference_price,
-        order_status="FAILED",
-        broker_response_summary=f"planning_exception={type(error).__name__};error={error}",
-        submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
-        exception_class=type(error).__name__,
-        timeout_flag=False,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=False,
-        order_type=order_type,
-        internal_lot_size=internal_lot_size,
-        effective_min_trade_qty=effective_min_trade_qty,
-        qty_step=qty_step,
-        min_notional_krw=min_notional_krw,
-        intended_lot_count=intended_lot_count,
-        executable_lot_count=executable_lot_count,
-        final_intended_qty=final_intended_qty,
-        final_submitted_qty=final_submitted_qty,
-        decision_reason_code=decision_reason_code,
-    )
-    update_order_intent_dedup(
-        conn,
-        intent_key=intent_key,
-        client_order_id=client_order_id,
-        order_status="FAILED",
-        last_error=reason,
-    )
-    RUN_LOG.info(
-        format_log_kv(
-            "[ORDER_SKIP] submit planning failed",
-            signal=signal,
-            side=side,
-            client_order_id=client_order_id,
-            reason=reason,
-        )
-    )
-    conn.commit()
-
-
-def _plan_standard_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
-    preflight_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            **context.submit_observability_fields,
-            **context.submit_truth_source_fields,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": None,
-            "response_ts": None,
-            "submit_path": context.submit_path,
-            "submit_phase": "planning",
-            "execution_state": "validated_pre_submit",
-            "submit_mode": settings.MODE,
-            **context.base_submit_contract_fields,
-            **context.base_submit_failure_fields,
-            "error_class": None,
-            "error_summary": None,
-            **context.lot_evidence_fields,
-        }
-    )
-    record_order_if_missing(
-        context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        side=context.side,
-        qty_req=context.qty,
-        price=None,
-        strategy_name=context.strategy_name,
-        entry_decision_id=(context.decision_id if context.side == "BUY" else None),
-        exit_decision_id=(context.decision_id if context.side == "SELL" else None),
-        decision_reason=context.decision_reason,
-        exit_rule_name=context.exit_rule_name,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-        local_intent_state="PENDING_SUBMIT",
-        ts_ms=context.ts,
-        status="PENDING_SUBMIT",
-    )
-    record_submit_started(
-        context.client_order_id,
-        conn=context.conn,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        mode=settings.MODE,
-    )
-    _record_submit_attempt_preflight(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        ts=context.ts,
-        payload_hash=context.payload_hash,
-        reference_price=context.reference_price,
-        submit_evidence=preflight_evidence,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-    )
-    notify(
-        safety_event(
-            "order_submit_started",
-            client_order_id=context.client_order_id,
-            submit_attempt_id=context.submit_attempt_id,
-            exchange_order_id=UNSET_EVENT_FIELD,
-            state_to="PENDING_SUBMIT",
-            reason_code=UNSET_EVENT_FIELD,
-            signal_ts=context.ts,
-            decision_ts=context.ts,
-            decision_id=str(context.submit_attempt_id),
-            side=context.side,
-            status="PENDING_SUBMIT",
-        )
-    )
-    context.conn.commit()
-
-
-def _dispatch_standard_submit_attempt(
-    *,
-    context: _StandardSubmitAttemptContext,
-    broker: Broker,
-) -> tuple[BrokerOrder, int, int] | None:
-    try:
-        request_ts = int(time.time() * 1000)
-        RUN_LOG.info(
-            format_log_kv(
-                "[ORDER_DECISION] broker.place_order dispatch",
-                signal=context.signal,
-                signal_ts=context.ts,
-                candle_ts=context.ts,
-                side=context.side,
-                market_price=context.market_price,
-                position_qty=context.position_qty,
-                order_qty=context.order_qty,
-                normalized_qty=context.qty,
-                submit_payload_qty=context.qty,
-                submit_qty=context.qty,
-                submit_qty_source=context.submit_qty_source,
-                position_state_source=context.position_state_source,
-                raw_total_asset_qty=context.raw_total_asset_qty,
-                open_exposure_qty=context.open_exposure_qty,
-                dust_tracking_qty=context.dust_tracking_qty,
-                reference_price=context.reference_price,
-                client_order_id=context.client_order_id,
-                internal_lot_size=context.internal_lot_size,
-                intended_lot_count=context.intended_lot_count,
-                executable_lot_count=context.executable_lot_count,
-                final_intended_qty=context.final_intended_qty,
-                final_submitted_qty=context.final_submitted_qty,
-                decision_reason_code=context.decision_reason_code,
-                exchange_order_type=context.base_submit_contract_fields["exchange_order_type"],
-                exchange_submit_field=context.base_submit_contract_fields["exchange_submit_field"],
-                exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
-            )
-        )
-        order = broker.place_order(
-            client_order_id=context.client_order_id,
-            side=context.side,
-            qty=context.qty,
-            price=None,
-            submit_plan=context.submit_plan,
-        )
-        response_ts = int(time.time() * 1000)
-        return order, request_ts, response_ts
-    except BrokerTemporaryError as e:
-        return _handle_standard_submit_temporary_error(
-            context=context,
-            error=e,
-            request_ts=request_ts,
-            response_ts=int(time.time() * 1000),
-        )
-    except BrokerRejectError as e:
-        return _handle_standard_submit_reject_error(
-            context=context,
-            error=e,
-            request_ts=request_ts,
-            response_ts=int(time.time() * 1000),
-        )
-    except Exception as e:
-        return _handle_standard_submit_unexpected_error(
-            context=context,
-            error=e,
-            request_ts=request_ts,
-            response_ts=int(time.time() * 1000),
-        )
-
-
-def _handle_standard_submit_temporary_error(
-    *,
-    context: _StandardSubmitAttemptContext,
-    error: BrokerTemporaryError,
-    request_ts: int,
-    response_ts: int,
-) -> None:
-    err = BrokerSubmissionUnknownError(f"submit unknown: {type(error).__name__}: {error}")
-    submission_reason_code, timeout_flag = _classify_temporary_submit_error(error)
-    failure_submit_contract_fields = _submit_contract_fields(
-        side=context.side,
-        order_type=context.order_type,
-        normalized_qty=context.qty,
-        contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
-    )
-    failure_submit_fields = _submit_failure_fields(
-        side=context.side,
-        order_type=context.order_type,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-    )
-    error_observability_fields = _submission_error_observability_fields(
-        context=context,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-        include_operator_actions=True,
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            **error_observability_fields,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": request_ts,
-            "response_ts": response_ts,
-            "submit_path": context.submit_path,
-            "submit_phase": "submission",
-            "execution_state": "dispatch_attempted",
-            "submit_mode": settings.MODE,
-            **failure_submit_contract_fields,
-            **failure_submit_fields,
-            **context.lot_evidence_fields,
-            "error_class": type(error).__name__,
-            "error_summary": str(error),
-        }
-    )
-    _mark_submit_unknown(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        side=context.side,
-        reason=str(err),
-        ts=context.ts,
-    )
-    _record_submit_attempt_result(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        ts=context.ts,
-        payload_hash=context.payload_hash,
-        reference_price=context.reference_price,
-        order_status="SUBMIT_UNKNOWN",
-        broker_response_summary=f"submit_exception={type(error).__name__};error={error}",
-        submission_reason_code=submission_reason_code,
-        exception_class=type(error).__name__,
-        timeout_flag=timeout_flag,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=False,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-    )
-    update_order_intent_dedup(
-        context.conn,
-        intent_key=context.intent_key,
-        client_order_id=context.client_order_id,
-        order_status="SUBMIT_UNKNOWN",
-        last_error=str(err),
-    )
-    context.conn.commit()
-    return None
-
-
-def _handle_standard_submit_reject_error(
-    *,
-    context: _StandardSubmitAttemptContext,
-    error: BrokerRejectError,
-    request_ts: int,
-    response_ts: int,
-) -> None:
-    reason = f"submit rejected: {type(error).__name__}: {error}"
-    is_sell_qty_step_reject = context.side == "SELL" and "qty does not match qty_step" in str(error)
-    failure_submit_contract_fields = _submit_contract_fields(
-        side=context.side,
-        order_type=context.order_type,
-        normalized_qty=context.qty,
-        contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
-    )
-    failure_submit_fields = _submit_failure_fields(
-        side=context.side,
-        order_type=context.order_type,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-    )
-    error_observability_fields = _submission_error_observability_fields(
-        context=context,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-        include_operator_actions=True,
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            **error_observability_fields,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": request_ts,
-            "response_ts": response_ts,
-            "submit_path": context.submit_path,
-            "submit_phase": "submission",
-            "execution_state": "dispatch_attempted",
-            "submit_mode": settings.MODE,
-            **failure_submit_contract_fields,
-            **failure_submit_fields,
-            **context.lot_evidence_fields,
-            "error_class": type(error).__name__,
-            "error_summary": str(error),
-        }
-    )
-    _mark_submit_failed(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        side=context.side,
-        reason=reason,
-        ts=context.ts,
-    )
-    if not is_sell_qty_step_reject:
-        _record_submit_attempt_result(
-            conn=context.conn,
-            client_order_id=context.client_order_id,
-            submit_attempt_id=context.submit_attempt_id,
-            symbol=context.symbol,
-            side=context.side,
-            qty=context.qty,
-            ts=context.ts,
-            payload_hash=context.payload_hash,
-            reference_price=context.reference_price,
-            order_status="FAILED",
-            broker_response_summary=f"submit_reject={type(error).__name__};error={error}",
-            submission_reason_code=SUBMIT_FAILED,
-            exception_class=type(error).__name__,
-            timeout_flag=False,
-            submit_evidence=submit_evidence,
-            exchange_order_id_obtained=False,
-            order_type=context.order_type,
-            internal_lot_size=context.internal_lot_size,
-            effective_min_trade_qty=context.effective_min_trade_qty,
-            qty_step=context.qty_step,
-            min_notional_krw=context.min_notional_krw,
-            intended_lot_count=context.intended_lot_count,
-            executable_lot_count=context.executable_lot_count,
-            final_intended_qty=context.final_intended_qty,
-            final_submitted_qty=context.final_submitted_qty,
-            decision_reason_code=context.decision_reason_code,
-        )
-    update_order_intent_dedup(
-        context.conn,
-        intent_key=context.intent_key,
-        client_order_id=context.client_order_id,
-        order_status="FAILED",
-        last_error=reason,
-    )
-    context.conn.commit()
-    return None
-
-
-def _handle_standard_submit_unexpected_error(
-    *,
-    context: _StandardSubmitAttemptContext,
-    error: Exception,
-    request_ts: int,
-    response_ts: int,
-) -> None:
-    reason = f"submit failed: {type(error).__name__}: {error}"
-    failure_submit_contract_fields = _submit_contract_fields(
-        side=context.side,
-        order_type=context.order_type,
-        normalized_qty=context.qty,
-        contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
-    )
-    failure_submit_fields = _submit_failure_fields(
-        side=context.side,
-        order_type=context.order_type,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-    )
-    error_observability_fields = _submission_error_observability_fields(
-        context=context,
-        error_class=type(error).__name__,
-        error_summary=str(error),
-        include_operator_actions=False,
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            **error_observability_fields,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": request_ts,
-            "response_ts": response_ts,
-            "submit_path": context.submit_path,
-            "submit_phase": "submission",
-            "execution_state": "dispatch_attempted",
-            "submit_mode": settings.MODE,
-            **failure_submit_contract_fields,
-            **failure_submit_fields,
-            **context.lot_evidence_fields,
-            "error_class": type(error).__name__,
-            "error_summary": str(error),
-        }
-    )
-    _mark_submit_failed(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        side=context.side,
-        reason=reason,
-        ts=context.ts,
-    )
-    _record_submit_attempt_result(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        ts=context.ts,
-        payload_hash=context.payload_hash,
-        reference_price=context.reference_price,
-        order_status="FAILED",
-        broker_response_summary=f"submit_exception={type(error).__name__};error={error}",
-        submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
-        exception_class=type(error).__name__,
-        timeout_flag=False,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=False,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-    )
-    update_order_intent_dedup(
-        context.conn,
-        intent_key=context.intent_key,
-        client_order_id=context.client_order_id,
-        order_status="FAILED",
-        last_error=reason,
-    )
-    context.conn.commit()
-    return None
-
-
-def _submission_error_observability_fields(
-    *,
-    context: _StandardSubmitAttemptContext,
-    error_class: str,
-    error_summary: str,
-    include_operator_actions: bool,
-) -> dict[str, object]:
-    fields: dict[str, object] = {
-        **context.submit_observability_fields,
-        **context.submit_truth_source_fields,
-    }
-    if context.side != "SELL":
-        return fields
-    if include_operator_actions:
-        fields.update(
-            {
-                "operator_action": (
-                    str(context.sell_observability.get("operator_action") or "")
-                    if str(context.sell_observability.get("operator_action") or "").strip() not in {"", "-"}
-                    else MANUAL_DUST_REVIEW_REQUIRED
-                ),
-                "dust_action": (
-                    str(context.sell_observability.get("dust_action") or "")
-                    if str(context.sell_observability.get("dust_action") or "").strip() not in {"", "-"}
-                    else MANUAL_DUST_REVIEW_REQUIRED
-                ),
-            }
-        )
-    fields.update(
-        {
-            "sell_failure_category": _classify_sell_failure_category(
-                error_class=error_class,
-                error_summary=error_summary,
-            ),
-            "sell_failure_detail": _sell_failure_detail_from_observability(
-                sell_failure_category=_classify_sell_failure_category(
-                    error_class=error_class,
-                    error_summary=error_summary,
-                )
-            ),
-        }
-    )
-    return fields
-
-
-def _confirm_standard_submit_attempt(
-    *,
-    context: _StandardSubmitAttemptContext,
-    order: BrokerOrder,
-    request_ts: int,
-    response_ts: int,
-) -> BrokerOrder | None:
-    if order.exchange_order_id:
-        set_exchange_order_id(context.client_order_id, order.exchange_order_id, conn=context.conn)
-        notify(
-            safety_event(
-                "exchange_order_id_attached",
-                client_order_id=context.client_order_id,
-                submit_attempt_id=context.submit_attempt_id,
-                exchange_order_id=order.exchange_order_id,
-                reason_code=UNSET_EVENT_FIELD,
-                signal_ts=context.ts,
-                decision_ts=context.ts,
-                decision_id=str(context.submit_attempt_id),
-                side=context.side,
-                status=order.status,
-            )
-        )
-    if not order.exchange_order_id:
-        return _confirm_standard_submit_missing_exchange_id(
-            context=context,
-            order=order,
-            request_ts=request_ts,
-            response_ts=response_ts,
-        )
-    set_status(context.client_order_id, order.status, conn=context.conn)
-    success_submit_contract_fields = _submit_contract_fields(
-        side=context.side,
-        order_type=context.order_type,
-        normalized_qty=context.qty,
-        contract_context=(getattr(order, "submit_contract_context", None) or context.submit_contract_context),
-    )
-    success_submit_failure_fields = _submit_failure_fields(
-        side=context.side,
-        order_type=context.order_type,
-        error_class=None,
-        error_summary=None,
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            **context.submit_observability_fields,
-            **context.submit_truth_source_fields,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": request_ts,
-            "response_ts": response_ts,
-            "submit_path": context.submit_path,
-            "submit_phase": "confirmation",
-            "execution_state": "broker_response_received",
-            "submit_mode": settings.MODE,
-            **success_submit_contract_fields,
-            **success_submit_failure_fields,
-            **context.lot_evidence_fields,
-            "error_class": None,
-            "error_summary": None,
-        }
-    )
-    _record_submit_attempt_result(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        ts=context.ts,
-        payload_hash=context.payload_hash,
-        reference_price=context.reference_price,
-        order_status=order.status,
-        broker_response_summary=f"broker_status={order.status};exchange_order_id={order.exchange_order_id}",
-        submission_reason_code=SUBMISSION_REASON_CONFIRMED_SUCCESS,
-        exception_class=None,
-        timeout_flag=False,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=True,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-    )
-    update_order_intent_dedup(
-        context.conn,
-        intent_key=context.intent_key,
-        client_order_id=context.client_order_id,
-        order_status=order.status,
-    )
-    context.conn.commit()
-    return order
-
-
-def _confirm_standard_submit_missing_exchange_id(
-    *,
-    context: _StandardSubmitAttemptContext,
-    order: BrokerOrder,
-    request_ts: int,
-    response_ts: int,
-) -> None:
-    reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
-    missing_id_submit_contract_fields = _submit_contract_fields(
-        side=context.side,
-        order_type=context.order_type,
-        normalized_qty=context.qty,
-        contract_context=(getattr(order, "submit_contract_context", None) or context.submit_contract_context),
-    )
-    missing_id_submit_failure_fields = _submit_failure_fields(
-        side=context.side,
-        order_type=context.order_type,
-        error_class=None,
-        error_summary="missing exchange_order_id",
-    )
-    submit_evidence = _encode_submit_evidence(
-        payload={
-            "symbol": context.symbol,
-            "side": context.side,
-            "order_qty": context.order_qty,
-            "intended_qty": context.qty,
-            "normalized_qty": context.qty,
-            "submit_qty_source": context.submit_qty_source,
-            "position_state_source": context.position_state_source,
-            **context.submit_truth_source_fields,
-            "raw_total_asset_qty": context.raw_total_asset_qty,
-            "open_exposure_qty": context.open_exposure_qty,
-            "dust_tracking_qty": context.dust_tracking_qty,
-            "reference_price": context.reference_price,
-            "top_of_book": context.top_of_book_summary,
-            "request_ts": request_ts,
-            "response_ts": response_ts,
-            "submit_path": context.submit_path,
-            "submit_phase": "confirmation",
-            "execution_state": "broker_response_received",
-            "submit_mode": settings.MODE,
-            **missing_id_submit_contract_fields,
-            **missing_id_submit_failure_fields,
-            **context.lot_evidence_fields,
-            "error_class": None,
-            "error_summary": "missing exchange_order_id",
-        }
-    )
-    _mark_submit_unknown(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        side=context.side,
-        reason=reason,
-        ts=context.ts,
-    )
-    _record_submit_attempt_result(
-        conn=context.conn,
-        client_order_id=context.client_order_id,
-        submit_attempt_id=context.submit_attempt_id,
-        symbol=context.symbol,
-        side=context.side,
-        qty=context.qty,
-        ts=context.ts,
-        payload_hash=context.payload_hash,
-        reference_price=context.reference_price,
-        order_status="SUBMIT_UNKNOWN",
-        broker_response_summary=f"broker_status={order.status};exchange_order_id=-",
-        submission_reason_code=SUBMISSION_REASON_AMBIGUOUS_RESPONSE,
-        exception_class=None,
-        timeout_flag=False,
-        submit_evidence=submit_evidence,
-        exchange_order_id_obtained=False,
-        order_type=context.order_type,
-        internal_lot_size=context.internal_lot_size,
-        effective_min_trade_qty=context.effective_min_trade_qty,
-        qty_step=context.qty_step,
-        min_notional_krw=context.min_notional_krw,
-        intended_lot_count=context.intended_lot_count,
-        executable_lot_count=context.executable_lot_count,
-        final_intended_qty=context.final_intended_qty,
-        final_submitted_qty=context.final_submitted_qty,
-        decision_reason_code=context.decision_reason_code,
-    )
-    update_order_intent_dedup(
-        context.conn,
-        intent_key=context.intent_key,
-        client_order_id=context.client_order_id,
-        order_status="SUBMIT_UNKNOWN",
-        last_error=reason,
-    )
-    context.conn.commit()
-    return None
 
 
 def _determine_live_execution_position_state(
@@ -5213,42 +3719,133 @@ def _execute_live_submission_and_application(
         )
     )
 
-    order = _submit_via_standard_path(
-        conn=conn,
-        broker=broker,
-        signal=signal,
-        client_order_id=client_order_id,
-        submit_attempt_id=submit_attempt_id,
-        side=feasibility.side,
-        order_qty=feasibility.order_qty,
-        position_qty=float(intent.order_qty),
-        qty=feasibility.normalized_qty,
-        ts=ts,
-        intent_key=intent_key,
-        market_price=market_price,
-        raw_total_asset_qty=position_state.raw_total_asset_qty,
-        open_exposure_qty=float(position_state.open_exposure_qty),
-        dust_tracking_qty=float(position_state.dust_tracking_qty),
-        effective_rules=position_state.effective_rules,
+    sell_truth_source_fields = _sell_truth_source_fields(
         decision_observability=decision_observability,
         submit_qty_source=feasibility.submit_qty_source,
-        position_state_source=str(decision_observability["position_state_source"]),
-        reference_price=reference_price,
-        top_of_book_summary=top_of_book_summary,
-        strategy_name=(strategy_name or settings.STRATEGY_NAME),
-        decision_id=decision_id,
-        decision_reason=decision_reason,
-        exit_rule_name=exit_rule_name,
-        order_type=("price" if feasibility.side == "BUY" else "market"),
-        internal_lot_size=float(lot_sizing.internal_lot_size),
-        effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
-        qty_step=float(lot_sizing.qty_step),
-        min_notional_krw=float(lot_sizing.min_notional_krw),
-        intended_lot_count=int(lot_sizing.intended_lot_count),
-        executable_lot_count=int(lot_sizing.executable_lot_count),
-        final_intended_qty=float(feasibility.order_qty),
-        final_submitted_qty=float(feasibility.normalized_qty),
-        decision_reason_code=str(lot_sizing.decision_reason_code),
+    )
+    submit_truth_source_fields: dict[str, object] = dict(sell_truth_source_fields)
+    submit_observability_fields: dict[str, object]
+    sell_observability: dict[str, object]
+    if feasibility.side == "SELL":
+        canonical_sell_submit = _CanonicalSellSubmitObservability(
+            submit_qty_source=feasibility.submit_qty_source,
+            submit_lot_source=str(
+                decision_observability.get("sell_submit_lot_source")
+                or decision_observability.get("submit_lot_source")
+                or _CANONICAL_SELL_SUBMIT_LOT_SOURCE
+            ),
+            submit_lot_count=int(decision_observability.get("sell_submit_lot_count") or 0),
+            normalized_qty=feasibility.normalized_qty,
+            position_state_source=str(decision_observability["position_state_source"]),
+            position_state_source_truth_source=sell_truth_source_fields["position_state_source_truth_source"],
+            submit_qty_source_truth_source=sell_truth_source_fields["submit_qty_source_truth_source"],
+            submit_lot_source_truth_source=sell_truth_source_fields["submit_lot_source_truth_source"],
+        )
+        observed_sell_telemetry = _ObservedSellSubmitTelemetry(
+            position_qty=float(intent.order_qty),
+            submit_payload_qty=feasibility.normalized_qty,
+            raw_total_asset_qty=position_state.raw_total_asset_qty,
+            open_exposure_qty=float(position_state.open_exposure_qty),
+            dust_tracking_qty=float(position_state.dust_tracking_qty),
+            sell_qty_basis_qty=float(decision_observability.get("sell_qty_basis_qty") or position_state.open_exposure_qty),
+            sell_qty_basis_source=str(feasibility.submit_qty_source or decision_observability.get("sell_qty_basis_source") or "-"),
+            sell_qty_basis_qty_truth_source=sell_truth_source_fields["sell_qty_basis_qty_truth_source"],
+            sell_qty_basis_source_truth_source=sell_truth_source_fields["sell_qty_basis_source_truth_source"],
+            sell_qty_boundary_kind=str(decision_observability.get("sell_qty_boundary_kind") or "none"),
+            sell_qty_boundary_kind_truth_source=sell_truth_source_fields["sell_qty_boundary_kind_truth_source"],
+            sell_normalized_exposure_qty_truth_source=sell_truth_source_fields["sell_normalized_exposure_qty_truth_source"],
+            sell_open_exposure_qty_truth_source=sell_truth_source_fields["sell_open_exposure_qty_truth_source"],
+            sell_dust_tracking_qty_truth_source=sell_truth_source_fields["sell_dust_tracking_qty_truth_source"],
+        )
+        sell_observability = _sell_submit_observability_fields(
+            decision_observability=decision_observability,
+            canonical_submit=canonical_sell_submit,
+            observed_inputs=observed_sell_telemetry,
+            sell_failure_category="none",
+            sell_failure_detail="none",
+        )
+        submit_observability_fields = dict(sell_observability)
+    else:
+        submit_truth_source_fields = {
+            key: sell_truth_source_fields[key]
+            for key in (
+                "entry_allowed_truth_source",
+                "effective_flat_truth_source",
+                "raw_qty_open_truth_source",
+                "raw_total_asset_qty_truth_source",
+                "position_qty_truth_source",
+                "submit_payload_qty_truth_source",
+                "normalized_exposure_active_truth_source",
+                "normalized_exposure_qty_truth_source",
+                "open_exposure_qty_truth_source",
+                "dust_tracking_qty_truth_source",
+                "submit_qty_source_truth_source",
+                "position_state_source_truth_source",
+            )
+        }
+        submit_observability_fields = {
+            "observed_position_qty": float(intent.order_qty),
+            "submit_payload_qty": float(feasibility.normalized_qty),
+            "submit_qty_source": feasibility.submit_qty_source,
+            "position_state_source": str(decision_observability["position_state_source"]),
+            "raw_total_asset_qty": float(position_state.raw_total_asset_qty),
+            "open_exposure_qty": float(position_state.open_exposure_qty),
+            "dust_tracking_qty": float(position_state.dust_tracking_qty),
+        }
+        sell_observability = {}
+
+    payload_hash = payload_fingerprint(
+        {
+            "client_order_id": client_order_id,
+            "submit_attempt_id": submit_attempt_id,
+            "symbol": settings.PAIR,
+            "side": feasibility.side,
+            "qty": float(feasibility.normalized_qty),
+            "price": reference_price,
+            "submit_ts": int(ts),
+        }
+    )
+    order = run_standard_submit_pipeline(
+        broker=broker,
+        request=StandardSubmitPipelineRequest(
+            conn=conn,
+            signal=signal,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            side=feasibility.side,
+            order_qty=float(feasibility.order_qty),
+            position_qty=float(intent.order_qty),
+            qty=float(feasibility.normalized_qty),
+            ts=int(ts),
+            intent_key=intent_key,
+            market_price=float(market_price),
+            raw_total_asset_qty=float(position_state.raw_total_asset_qty),
+            open_exposure_qty=float(position_state.open_exposure_qty),
+            dust_tracking_qty=float(position_state.dust_tracking_qty),
+            effective_rules=position_state.effective_rules,
+            submit_qty_source=feasibility.submit_qty_source,
+            position_state_source=str(decision_observability["position_state_source"]),
+            reference_price=reference_price,
+            top_of_book_summary=top_of_book_summary,
+            strategy_name=(strategy_name or settings.STRATEGY_NAME),
+            decision_id=decision_id,
+            decision_reason=decision_reason,
+            exit_rule_name=exit_rule_name,
+            order_type=("price" if feasibility.side == "BUY" else "market"),
+            payload_hash=payload_hash,
+            internal_lot_size=float(lot_sizing.internal_lot_size),
+            effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
+            qty_step=float(lot_sizing.qty_step),
+            min_notional_krw=float(lot_sizing.min_notional_krw),
+            intended_lot_count=int(lot_sizing.intended_lot_count),
+            executable_lot_count=int(lot_sizing.executable_lot_count),
+            final_intended_qty=float(feasibility.order_qty),
+            final_submitted_qty=float(feasibility.normalized_qty),
+            decision_reason_code=str(lot_sizing.decision_reason_code),
+            submit_truth_source_fields=submit_truth_source_fields,
+            submit_observability_fields=submit_observability_fields,
+            sell_observability=sell_observability,
+        ),
     )
     if order is None:
         return None
