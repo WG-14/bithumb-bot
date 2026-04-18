@@ -11,7 +11,13 @@ from typing import Any
 
 import httpx
 
-from prompts import get_default_prompt
+from prompts import (
+    CODEX_INSTRUCTIONS,
+    CODEX_TEMPLATE,
+    DEFAULT_PROMPT,
+    NORMALIZE_INSTRUCTIONS,
+    NORMALIZE_TEMPLATE,
+)
 
 ROOT = Path(__file__).resolve().parent
 SRC_ROOT = ROOT / "src"
@@ -84,32 +90,18 @@ def call_responses_api(
 
 def build_normalization_request(review_text: str) -> tuple[str, str]:
     """Build the first-pass normalization request."""
-    instructions = (
-        "You rewrite raw review notes into a concise normalized spec. "
-        "Return plain text only. Keep the original intent, remove fluff, "
-        "and organize the output under short headings when useful."
-    )
-    user_input = (
-        "Normalize the following review notes into an implementation-ready "
-        "summary.\n\n"
-        f"{review_text}"
-    )
+    instructions = NORMALIZE_INSTRUCTIONS
+    user_input = NORMALIZE_TEMPLATE.format(review_text=review_text)
     return instructions, user_input
 
 
 def build_codex_prompt_request(review_text: str, normalized_text: str) -> tuple[str, str]:
     """Build the second-pass Codex prompt request."""
-    instructions = (
-        "You produce a single Codex-ready implementation prompt. "
-        "Return plain text only. Be direct, specific, and execution-oriented."
-    )
-    user_input = (
-        f"Base objective:\n{get_default_prompt()}\n\n"
-        "Original review notes:\n"
-        f"{review_text}\n\n"
-        "Normalized summary:\n"
-        f"{normalized_text}\n\n"
-        "Write one Codex prompt that tells an agent what to implement next."
+    instructions = CODEX_INSTRUCTIONS
+    user_input = CODEX_TEMPLATE.format(
+        default_prompt=DEFAULT_PROMPT,
+        review_text=review_text,
+        normalized_text=normalized_text,
     )
     return instructions, user_input
 
