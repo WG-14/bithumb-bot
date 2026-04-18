@@ -95,7 +95,6 @@ def _set_buy_price_none_submit_contract(
     market: str = "KRW-BTC",
 ) -> order_rules.BuyPriceNoneSubmitContract:
     contract = order_rules.build_buy_price_none_submit_contract(rules=rules)
-    setattr(broker, "_live_buy_price_none_submit_contract", contract)
     return contract
 
 
@@ -352,7 +351,7 @@ def test_market_buy_chance_contract_log_includes_supported_types_and_submit_fiel
         "_post_private",
         lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("forced stop after logging")),
     )
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.DerivedOrderConstraints(
             order_types=("limit", "price", "market"),
@@ -377,6 +376,7 @@ def test_market_buy_chance_contract_log_includes_supported_types_and_submit_fiel
                 side="BUY",
                 qty=0.0004,
                 price=None,
+                buy_price_none_submit_contract=submit_contract,
             )
 
     assert "chance_validation_order_type=price" in caplog.text
@@ -428,7 +428,7 @@ def test_market_buy_chance_contract_log_surfaces_blocked_market_only_support(mon
         "_post_private",
         lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("forced stop after logging")),
     )
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.DerivedOrderConstraints(
             order_types=("limit", "market"),
@@ -453,6 +453,7 @@ def test_market_buy_chance_contract_log_surfaces_blocked_market_only_support(mon
                 side="BUY",
                 qty=0.0004,
                 price=None,
+                buy_price_none_submit_contract=submit_contract,
             )
 
     assert "chance_validation_order_type=price" in caplog.text
@@ -1459,7 +1460,7 @@ def test_order_chance_keeps_market_param_and_auth_query_hash(monkeypatch):
 def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
@@ -1479,7 +1480,13 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     qty = _exact_lot_qty(market_price=150_000_000.0)
-    order = broker.place_order(client_order_id="cid-1", side="BUY", qty=qty, price=None)
+    order = broker.place_order(
+        client_order_id="cid-1",
+        side="BUY",
+        qty=qty,
+        price=None,
+        buy_price_none_submit_contract=submit_contract,
+    )
 
     assert order.exchange_order_id == "mkt-1"
     assert call["endpoint"] == "/v2/orders"
@@ -1501,7 +1508,7 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
 def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
@@ -1521,7 +1528,13 @@ def test_place_order_accepts_valid_client_order_id_format(monkeypatch):
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     qty = _exact_lot_qty(market_price=150_000_000.0)
-    order = broker.place_order(client_order_id=valid_client_order_id, side="BUY", qty=qty, price=None)
+    order = broker.place_order(
+        client_order_id=valid_client_order_id,
+        side="BUY",
+        qty=qty,
+        price=None,
+        buy_price_none_submit_contract=submit_contract,
+    )
 
     assert order.client_order_id == valid_client_order_id
     assert call["payload"]["client_order_id"] == valid_client_order_id
@@ -1551,7 +1564,7 @@ def test_place_order_rejects_invalid_characters_in_client_order_id():
 def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
@@ -1562,13 +1575,19 @@ def test_place_order_market_buy_blocks_invalid_ask_quote(monkeypatch):
     )
 
     with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
-        broker.place_order(client_order_id="cid-invalid-ask", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
+        broker.place_order(
+            client_order_id="cid-invalid-ask",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+            buy_price_none_submit_contract=submit_contract,
+        )
 
 
 def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
@@ -1579,7 +1598,13 @@ def test_place_order_market_buy_blocks_on_quote_fetch_failure(monkeypatch):
     )
 
     with pytest.raises(BrokerTemporaryError, match="failed to load validated best ask"):
-        broker.place_order(client_order_id="cid-quote-fail", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
+        broker.place_order(
+            client_order_id="cid-quote-fail",
+            side="BUY",
+            qty=_exact_lot_qty(market_price=150_000_000.0),
+            price=None,
+            buy_price_none_submit_contract=submit_contract,
+        )
 
 
 
@@ -1681,12 +1706,18 @@ def test_place_order_rejects_unsupported_side_or_type_from_chance_rules(monkeypa
     with pytest.raises(BrokerRejectError, match="rejected order side before submit"):
         broker.place_order(client_order_id="cid-side", side="SELL", qty=0.4320, price=None)
 
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
     with pytest.raises(BrokerRejectError, match="buy_price_none_unsupported"):
-        broker.place_order(client_order_id="cid-type", side="BUY", qty=0.4320, price=None)
+        broker.place_order(
+            client_order_id="cid-type",
+            side="BUY",
+            qty=0.4320,
+            price=None,
+            buy_price_none_submit_contract=submit_contract,
+        )
 
 
 def test_place_order_accepts_buy_market_notional_from_side_specific_chance_types(monkeypatch):
@@ -1729,12 +1760,18 @@ def test_place_order_accepts_buy_market_notional_from_side_specific_chance_types
         return {"uuid": "mkt-chance-ok"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
 
-    order = broker.place_order(client_order_id="cid-chance-ok", side="BUY", qty=_exact_lot_qty(market_price=150_000_000.0), price=None)
+    order = broker.place_order(
+        client_order_id="cid-chance-ok",
+        side="BUY",
+        qty=_exact_lot_qty(market_price=150_000_000.0),
+        price=None,
+        buy_price_none_submit_contract=submit_contract,
+    )
 
     assert order.exchange_order_id == "mkt-chance-ok"
     assert call["endpoint"] == "/v2/orders"
@@ -1779,7 +1816,7 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
         return {"uuid": "mkt-chance-market-ok"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
@@ -1790,6 +1827,7 @@ def test_place_order_blocks_buy_market_notional_when_chance_only_advertises_mark
             side="BUY",
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
+            buy_price_none_submit_contract=submit_contract,
         )
 
     assert call == {}
@@ -1880,7 +1918,7 @@ def test_buy_price_none_blocked_exception_context_matches_shared_diagnostic_fiel
         "bithumb_bot.broker.order_rules.resolve_buy_price_none_resolution",
         lambda *, rules: resolution,
     )
-    _set_buy_price_none_submit_contract(broker, rules=rules)
+    submit_contract = _set_buy_price_none_submit_contract(broker, rules=rules)
 
     with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support") as excinfo:
         broker.place_order(
@@ -1888,6 +1926,7 @@ def test_buy_price_none_blocked_exception_context_matches_shared_diagnostic_fiel
             side="BUY",
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
+            buy_price_none_submit_contract=submit_contract,
         )
 
     context = getattr(excinfo.value, "submit_contract_context", None)
@@ -1980,12 +2019,13 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
 
     if allowed:
-        _set_buy_price_none_submit_contract(broker, rules=rules)
+        submit_contract = _set_buy_price_none_submit_contract(broker, rules=rules)
         order = broker.place_order(
             client_order_id="cid-chance-shared-resolution",
             side="BUY",
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
+            buy_price_none_submit_contract=submit_contract,
         )
         assert order.submit_contract_context is not None
         assert order.submit_contract_context["buy_price_none_allowed"] is True
@@ -2005,13 +2045,14 @@ def test_buy_price_none_validation_and_submit_routing_share_same_resolution(
         assert call["retry_safe"] is False
         assert call["payload"]["order_type"] == resolution.resolved_order_type
     else:
-        _set_buy_price_none_submit_contract(broker, rules=rules)
+        submit_contract = _set_buy_price_none_submit_contract(broker, rules=rules)
         with pytest.raises(BrokerRejectError, match=block_reason) as excinfo:
             broker.place_order(
                 client_order_id="cid-chance-shared-resolution",
                 side="BUY",
                 qty=_exact_lot_qty(market_price=150_000_000.0),
                 price=None,
+                buy_price_none_submit_contract=submit_contract,
             )
         context = getattr(excinfo.value, "submit_contract_context", None)
         assert context is not None
@@ -2048,25 +2089,20 @@ def test_place_order_rejects_buy_price_none_precomputed_contract_mismatch(monkey
         "bithumb_bot.broker.order_rules.get_effective_order_rules",
         lambda _pair: SimpleNamespace(rules=rules),
     )
-    setattr(
-        broker,
-        "_live_buy_price_none_submit_contract",
-        {
-            **order_rules.build_buy_price_none_submit_contract_context(rules=rules),
-            "market": "KRW-BTC",
-            "order_side": "BUY",
-            "buy_price_none_allowed": False,
-            "buy_price_none_decision_outcome": "block",
-            "buy_price_none_block_reason": "forced_mismatch",
-        },
-    )
-
     with pytest.raises(BrokerRejectError, match="BUY price=None submit contract invalid before broker dispatch") as excinfo:
         broker.place_order(
             client_order_id="cid-buy-price-none-mismatch",
             side="BUY",
             qty=_exact_lot_qty(market_price=150_000_000.0),
             price=None,
+            buy_price_none_submit_contract={
+                **order_rules.build_buy_price_none_submit_contract_context(rules=rules),
+                "market": "KRW-BTC",
+                "order_side": "BUY",
+                "buy_price_none_allowed": False,
+                "buy_price_none_decision_outcome": "block",
+                "buy_price_none_block_reason": "forced_mismatch",
+            },
         )
 
     context = getattr(excinfo.value, "submit_contract_context", None)
@@ -2511,13 +2547,19 @@ def test_place_order_market_buy_normalizes_total_to_bid_price_unit(monkeypatch):
         return {"uuid": "mkt-unit-1"}
 
     monkeypatch.setattr(broker, "_post_private", _fake_post_private)
-    _set_buy_price_none_submit_contract(
+    submit_contract = _set_buy_price_none_submit_contract(
         broker,
         rules=order_rules.get_effective_order_rules("KRW-BTC").rules,
     )
 
     qty = _exact_lot_qty(market_price=99_999_990.0)
-    broker.place_order(client_order_id="cid-mkt-unit", side="BUY", qty=qty, price=None)
+    broker.place_order(
+        client_order_id="cid-mkt-unit",
+        side="BUY",
+        qty=qty,
+        price=None,
+        buy_price_none_submit_contract=submit_contract,
+    )
 
     assert call["endpoint"] == "/v2/orders"
     assert call["payload"] == {

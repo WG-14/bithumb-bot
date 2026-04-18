@@ -954,6 +954,37 @@ def test_buy_price_none_submit_contract_context_exposes_generic_and_prefixed_fie
     assert submit_context["block_reason"] == submit_context["buy_price_none_block_reason"]
 
 
+def test_buy_price_none_submit_policy_is_resolved_separately_from_contract_assembly() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "market"),
+        bid_types=("market",),
+        order_sides=("bid", "ask"),
+    )
+    resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
+    submit_policy = order_rules.resolve_buy_price_none_submit_policy(
+        rules=rules,
+        resolution=resolution,
+    )
+    submit_contract = order_rules.build_buy_price_none_submit_contract(
+        rules=rules,
+        resolution=resolution,
+    )
+
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert submit_policy.exchange_submit_field == "price"
+    assert submit_policy.exchange_order_type == resolution.resolved_order_type
+    assert submit_policy.chance_validation_order_type == resolution.resolved_order_type
+    assert submit_policy.chance_supported_order_types == order_rules.supported_order_types_for_chance_validation(
+        side="BUY",
+        rules=rules,
+    )
+    assert submit_contract.resolution is resolution
+    assert submit_contract.exchange_submit_field == submit_policy.exchange_submit_field
+    assert submit_contract.exchange_order_type == submit_policy.exchange_order_type
+    assert submit_contract.chance_validation_order_type == submit_policy.chance_validation_order_type
+    assert submit_contract.chance_supported_order_types == submit_policy.chance_supported_order_types
+
+
 def test_get_effective_order_rules_detects_tracked_chance_contract_change_from_prior_snapshot(monkeypatch, tmp_path) -> None:
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_rule_snapshots.sqlite"))
     object.__setattr__(settings, "MODE", "paper")

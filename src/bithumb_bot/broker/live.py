@@ -3102,6 +3102,7 @@ def _submit_via_standard_path(
             "request_ts": None,
             "response_ts": None,
             "submit_path": submit_path,
+            "submit_phase": "planning",
             "submit_mode": settings.MODE,
             **base_submit_contract_fields,
             **base_submit_failure_fields,
@@ -3218,13 +3219,13 @@ def _submit_via_standard_path(
                 exchange_submit_notional_krw=base_submit_contract_fields["exchange_submit_notional_krw"] or "",
         )
         )
-        if submit_contract_context is not None:
-            setattr(broker, "_live_buy_price_none_submit_contract", submit_contract_context)
-        try:
-            order = broker.place_order(client_order_id=client_order_id, side=side, qty=qty, price=None)
-        finally:
-            if submit_contract_context is not None and hasattr(broker, "_live_buy_price_none_submit_contract"):
-                delattr(broker, "_live_buy_price_none_submit_contract")
+        order = broker.place_order(
+            client_order_id=client_order_id,
+            side=side,
+            qty=qty,
+            price=None,
+            buy_price_none_submit_contract=submit_contract_context,
+        )
         response_ts = int(time.time() * 1000)
     except BrokerTemporaryError as e:
         response_ts = int(time.time() * 1000)
@@ -3284,6 +3285,7 @@ def _submit_via_standard_path(
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
+                "submit_phase": "submission",
                 "submit_mode": settings.MODE,
                 **failure_submit_contract_fields,
                 **failure_submit_fields,
@@ -3395,6 +3397,7 @@ def _submit_via_standard_path(
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
+                "submit_phase": "submission",
                 "submit_mode": settings.MODE,
                 **failure_submit_contract_fields,
                 **failure_submit_fields,
@@ -3496,6 +3499,7 @@ def _submit_via_standard_path(
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
+                "submit_phase": "submission",
                 "submit_mode": settings.MODE,
                 **failure_submit_contract_fields,
                 **failure_submit_fields,
@@ -3598,6 +3602,7 @@ def _submit_via_standard_path(
                 "request_ts": request_ts,
                 "response_ts": response_ts,
                 "submit_path": submit_path,
+                "submit_phase": "confirmation",
                 "submit_mode": settings.MODE,
                 **missing_id_submit_contract_fields,
                 **missing_id_submit_failure_fields,
@@ -3680,6 +3685,7 @@ def _submit_via_standard_path(
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": submit_path,
+            "submit_phase": "confirmation",
             "submit_mode": settings.MODE,
             **success_submit_contract_fields,
             **success_submit_failure_fields,

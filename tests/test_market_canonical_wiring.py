@@ -120,15 +120,15 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
     )
     monkeypatch.setattr(broker, "_get_private", _fake_get)
     monkeypatch.setattr(broker, "_post_private", _fake_post)
-    setattr(
-        broker,
-        "_live_buy_price_none_submit_contract",
-        order_rules.build_buy_price_none_submit_contract(rules=rules),
-    )
-
     try:
         broker.get_order_chance()
-        broker.place_order(client_order_id="cid-1", side="BUY", qty=1.0, price=None)
+        broker.place_order(
+            client_order_id="cid-1",
+            side="BUY",
+            qty=1.0,
+            price=None,
+            buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+        )
 
         assert chance_call == {"endpoint": "/v1/orders/chance", "params": {"market": "KRW-BTC"}}
         assert submit_call["endpoint"] == "/v2/orders"

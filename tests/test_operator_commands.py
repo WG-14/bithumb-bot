@@ -2186,7 +2186,15 @@ class _PanicStopBroker:
     def get_balance(self) -> BrokerBalance:
         return self._balance
 
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract=None,
+    ):
         self.place_order_calls.append(
             {
                 "client_order_id": client_order_id,
@@ -5857,7 +5865,15 @@ class _FlattenBrokerSuccess:
         self.calls: list[dict[str, str | float | None]] = []
         self.balance = BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
 
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract=None,
+    ):
         self.calls.append({"client_order_id": client_order_id, "side": side, "qty": qty, "price": price})
 
         class _Order:
@@ -6302,7 +6318,15 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
         def get_balance(self) -> BrokerBalance:
             return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
 
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract=None,
+        ):
             raise RuntimeError("submit boom")
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _FailBroker())
@@ -6367,7 +6391,15 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
         def get_balance(self) -> BrokerBalance:
             return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=0.0, asset_locked=0.0)
 
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract=None,
+        ):
             self.place_order_calls += 1
             raise AssertionError("place_order must not be called when pretrade fails")
 
@@ -6428,7 +6460,15 @@ def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, ca
         def get_balance(self) -> BrokerBalance:
             return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
 
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract=None,
+        ):
             raise AssertionError("place_order must not be called when best quote is invalid")
 
     monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoSubmitBroker())

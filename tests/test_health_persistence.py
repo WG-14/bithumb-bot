@@ -523,7 +523,15 @@ def test_open_order_health_fields_are_persisted(tmp_path):
 
 
 class _ReconcileOkBroker:
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract=None,
+    ):
         raise NotImplementedError
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None):

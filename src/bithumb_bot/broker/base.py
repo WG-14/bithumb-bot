@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+if False:  # pragma: no cover
+    from .order_rules import BuyPriceNoneSubmitContract
+
 
 class BrokerError(Exception):
     """Base broker exception."""
@@ -73,7 +76,15 @@ class BrokerBalance:
 
 
 class Broker(Protocol):
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None" = None,
+    ) -> BrokerOrder:
         ...
 
     def cancel_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:

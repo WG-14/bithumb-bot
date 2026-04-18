@@ -57,7 +57,15 @@ class _FakeBroker:
         self._last_price = None
         self._last_client_order_id = "live_1000_buy"
 
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         self.place_order_calls += 1
         self._last_client_order_id = client_order_id
         self._last_side = side
@@ -162,7 +170,15 @@ class _CommitCheckingBroker(_FakeBroker):
         super().__init__()
         self._db_path = db_path
 
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         conn = ensure_db(self._db_path)
         try:
             row = conn.execute(
@@ -190,7 +206,13 @@ class _CommitCheckingBroker(_FakeBroker):
         finally:
             conn.close()
 
-        return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
+        return super().place_order(
+            client_order_id=client_order_id,
+            side=side,
+            qty=qty,
+            price=price,
+            buy_price_none_submit_contract=buy_price_none_submit_contract,
+        )
 
 
 class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
@@ -199,28 +221,63 @@ class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
         self.captured_live_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
         self.captured_broker_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
 
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
-        captured_live_contract = getattr(self, "_live_buy_price_none_submit_contract", None)
-        assert isinstance(captured_live_contract, order_rules.BuyPriceNoneSubmitContract)
-        self.captured_live_submit_contract = captured_live_contract
-
-        self.captured_broker_submit_contract = captured_live_contract
-
-        return super().place_order(client_order_id=client_order_id, side=side, qty=qty, price=price)
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
+        assert isinstance(buy_price_none_submit_contract, order_rules.BuyPriceNoneSubmitContract)
+        self.captured_live_submit_contract = buy_price_none_submit_contract
+        self.captured_broker_submit_contract = buy_price_none_submit_contract
+        return super().place_order(
+            client_order_id=client_order_id,
+            side=side,
+            qty=qty,
+            price=price,
+            buy_price_none_submit_contract=buy_price_none_submit_contract,
+        )
 
 
 class _TimeoutBroker(_FakeBroker):
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         raise BrokerTemporaryError("timeout")
 
 
 class _FailingSubmitBroker(_FakeBroker):
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         raise RuntimeError("exchange rejected")
 
 
 class _TransportErrorBroker(_FakeBroker):
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         raise BrokerTemporaryError("connection reset by peer")
 
 
@@ -354,7 +411,15 @@ class _StrayBroker(_FakeBroker):
 
 
 class _NoExchangeIdBroker(_FakeBroker):
-    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+    def place_order(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None = None,
+        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+    ) -> BrokerOrder:
         self.place_order_calls += 1
         self._last_client_order_id = client_order_id
         self._last_side = side
@@ -714,12 +779,13 @@ def test_bithumb_broker_dry_run(monkeypatch):
     )
 
     broker = BithumbBroker()
-    setattr(
-        broker,
-        "_live_buy_price_none_submit_contract",
-        order_rules.build_buy_price_none_submit_contract(rules=resolved_rules),
+    order = broker.place_order(
+        client_order_id="a",
+        side="BUY",
+        qty=0.1,
+        price=None,
+        buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(rules=resolved_rules),
     )
-    order = broker.place_order(client_order_id="a", side="BUY", qty=0.1, price=None)
 
     assert order.exchange_order_id.startswith("dry_")
 
@@ -1529,6 +1595,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert submit_evidence["side"] == "BUY"
     assert float(submit_evidence["intended_qty"]) > 0
     assert submit_evidence["submit_path"] == "live_standard_market"
+    assert submit_evidence["submit_phase"] == "confirmation"
     assert submit_evidence["submit_mode"] == settings.MODE
     assert submit_evidence["exchange_order_type"] == "price"
     assert submit_evidence["exchange_submit_field"] == "price"
@@ -1552,6 +1619,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight_evidence["exchange_order_type"] == "price"
     assert preflight_evidence["exchange_submit_field"] == "price"
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert preflight_evidence["submit_phase"] == "planning"
     assert preflight_evidence["buy_price_none_allowed"] is True
     assert preflight_evidence["buy_price_none_decision_outcome"] == "pass"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
@@ -1784,9 +1852,13 @@ def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(mon
         rules=resolved_rules,
         resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
     )
-    setattr(broker, "_live_buy_price_none_submit_contract", expected_contract)
-
-    order = broker.place_order(client_order_id="cid-match", side="BUY", qty=0.0008, price=None)
+    order = broker.place_order(
+        client_order_id="cid-match",
+        side="BUY",
+        qty=0.0008,
+        price=None,
+        buy_price_none_submit_contract=expected_contract,
+    )
 
     assert order.exchange_order_id == "ex-live-contract"
     assert captured["retry_safe"] is False
@@ -1836,17 +1908,17 @@ def test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_supp
         return {"status": "0000", "data": {"order_id": "should-not-dispatch", "client_order_id": payload["client_order_id"]}}
 
     monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
-    setattr(
-        broker,
-        "_live_buy_price_none_submit_contract",
-        order_rules.build_buy_price_none_submit_contract(
-            rules=resolved_rules,
-            resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
-        ),
-    )
-
     with pytest.raises(BrokerRejectError, match="BUY price=None before submit") as excinfo:
-        broker.place_order(client_order_id="cid-market-alias-blocked", side="BUY", qty=0.001, price=None)
+        broker.place_order(
+            client_order_id="cid-market-alias-blocked",
+            side="BUY",
+            qty=0.001,
+            price=None,
+            buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(
+                rules=resolved_rules,
+                resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
+            ),
+        )
 
     assert "reason=buy_price_none_requires_explicit_price_support" in str(excinfo.value)
     assert "raw_supported_types=['market']" in str(excinfo.value)
@@ -1939,9 +2011,13 @@ def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_
         "bithumb_bot.broker.order_rules.validate_buy_price_none_order_chance_contract",
         _capture_validate_contract,
     )
-    setattr(broker, "_live_buy_price_none_submit_contract", submit_contract)
-
-    order = broker.place_order(client_order_id="cid-reused-contract", side="BUY", qty=0.0008, price=None)
+    order = broker.place_order(
+        client_order_id="cid-reused-contract",
+        side="BUY",
+        qty=0.0008,
+        price=None,
+        buy_price_none_submit_contract=submit_contract,
+    )
     diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
         rules=resolved_rules,
         submit_contract=submit_contract,
@@ -2104,7 +2180,15 @@ def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> Non
 @pytest.mark.fast_regression
 def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit_as_qty_step_mismatch(tmp_path):
     class _RejectingBuyBroker(_FakeBroker):
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        ) -> BrokerOrder:
             raise BrokerRejectError(f"{side} qty does not match qty_step: qty={qty} qty_step=0.0001")
 
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_notional_reject.sqlite"))
@@ -2157,7 +2241,15 @@ def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit
 @pytest.mark.fast_regression
 def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismatch(monkeypatch, tmp_path):
     class _RejectingBuyBroker(_FakeBroker):
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None) -> BrokerOrder:
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        ) -> BrokerOrder:
             raise BrokerRejectError(
                 "/v1/orders/chance rejected order type before submit: "
                 "order_type=price supported=['limit', 'market']"
@@ -6436,7 +6528,15 @@ def test_live_execute_signal_sell_classifies_qty_step_mismatch_broker_reject(mon
         def get_balance(self) -> BrokerBalance:
             return BrokerBalance(cash_available=1_000_000.0, cash_locked=0.0, asset_available=0.0002, asset_locked=0.0)
 
-        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None):
+        def place_order(
+            self,
+            *,
+            client_order_id: str,
+            side: str,
+            qty: float,
+            price: float | None = None,
+            buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        ):
             raise BrokerRejectError(f"{side} qty does not match qty_step: qty={qty} qty_step=0.0001")
 
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "sell_qty_step_reject.sqlite"))

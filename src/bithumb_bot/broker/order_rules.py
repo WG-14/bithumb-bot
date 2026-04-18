@@ -196,6 +196,14 @@ class BuyPriceNoneSubmitContract:
 
 
 @dataclass(frozen=True)
+class BuyPriceNoneSubmitPolicy:
+    chance_validation_order_type: str
+    chance_supported_order_types: tuple[str, ...]
+    exchange_submit_field: str
+    exchange_order_type: str
+
+
+@dataclass(frozen=True)
 class LocalFallbackConstraints:
     min_qty: float = 0.0
     qty_step: float = 0.0
@@ -445,8 +453,26 @@ def build_buy_price_none_submit_contract(
     resolution: BuyPriceNoneResolution | None = None,
 ) -> BuyPriceNoneSubmitContract:
     buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
+    submit_policy = resolve_buy_price_none_submit_policy(
+        rules=rules,
+        resolution=buy_resolution,
+    )
     return BuyPriceNoneSubmitContract(
         resolution=buy_resolution,
+        chance_validation_order_type=submit_policy.chance_validation_order_type,
+        chance_supported_order_types=submit_policy.chance_supported_order_types,
+        exchange_submit_field=submit_policy.exchange_submit_field,
+        exchange_order_type=submit_policy.exchange_order_type,
+    )
+
+
+def resolve_buy_price_none_submit_policy(
+    *,
+    rules: DerivedOrderConstraints,
+    resolution: BuyPriceNoneResolution | None = None,
+) -> BuyPriceNoneSubmitPolicy:
+    buy_resolution = resolution or resolve_buy_price_none_resolution(rules=rules)
+    return BuyPriceNoneSubmitPolicy(
         chance_validation_order_type=buy_resolution.resolved_order_type,
         chance_supported_order_types=supported_order_types_for_chance_validation(side="BUY", rules=rules),
         exchange_submit_field="price",
