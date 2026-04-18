@@ -1,3 +1,12 @@
-Minimal review draft.
+현재 저장소에서 아래 작업만 수행해라.
 
-This file is a placeholder for future pipeline output or human notes.
+- 주문 재시도 로직의 중복을 줄여라.
+- 예외 로그를 더 명확하게 만들어라.
+- 환경변수 누락 시 조기 실패하도록 검증을 강화해라.
+- 기존 동작 범위를 불필요하게 넓히지 마라.
+- 가능하면 관련 테스트를 업데이트해라.
+
+이번 배치에서 하지 말 것:
+- 대규모 리팩터링
+- 새로운 전략 추가
+- 문서 전체 개편
