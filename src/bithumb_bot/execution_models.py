@@ -21,6 +21,7 @@ class OrderIntent:
     price: float | None
     created_ts: int
     submit_contract: Any | None = None
+    market_price_hint: float | None = None
 
     @property
     def order_side(self) -> str:
@@ -33,7 +34,11 @@ class SubmitPlan:
     rules: Any
     chance_validation_order_type: str
     chance_supported_order_types: tuple[str, ...]
-    exchange_submit_field_hint: str
+    exchange_submit_field: str
+    exchange_order_type: str
+    exchange_submit_price: float | None
+    exchange_submit_volume: float | None
+    exchange_submit_notional_krw: float | None
     submit_contract_context: dict[str, object]
     submit_price_tick_policy: SubmitPriceTickPolicy
     effective_market_price: float | None

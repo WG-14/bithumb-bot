@@ -58,7 +58,11 @@ def test_planner_builds_buy_market_notional_submit_plan() -> None:
 
     assert plan.intent is intent
     assert plan.chance_validation_order_type == "price"
-    assert plan.exchange_submit_field_hint == "price"
+    assert plan.exchange_submit_field == "price"
+    assert plan.exchange_order_type == "price"
+    assert plan.exchange_submit_price == pytest.approx(80_000.0)
+    assert plan.exchange_submit_volume is None
+    assert plan.exchange_submit_notional_krw == pytest.approx(80_000.0)
     assert plan.submit_contract_context["buy_price_none_decision_outcome"] == "pass"
     assert plan.submit_contract_context["exchange_order_type"] == "price"
 
@@ -103,7 +107,10 @@ def test_planner_builds_sell_market_qty_submit_plan() -> None:
 
     assert plan.intent is intent
     assert plan.chance_validation_order_type == "market"
-    assert plan.exchange_submit_field_hint == "volume"
+    assert plan.exchange_submit_field == "volume"
+    assert plan.exchange_order_type == "market"
+    assert plan.exchange_submit_price is None
+    assert plan.exchange_submit_volume == pytest.approx(0.0008)
     assert plan.buy_price_none_submit_contract is None
     assert plan.submit_contract_context["exchange_order_type"] == "market"
 

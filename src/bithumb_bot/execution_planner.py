@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 from .config import settings
@@ -47,7 +48,10 @@ def build_submit_plan(
 ) -> SubmitPlan:
     from .broker.order_rules import (
         BuyPriceNoneSubmitContract,
+        build_buy_price_none_submit_contract,
+        normalize_limit_price_for_side,
         serialize_buy_price_none_submit_contract,
+        side_min_total_krw,
         supported_order_types_for_chance_validation,
         validate_buy_price_none_order_chance_contract,
         validate_buy_price_none_submit_contract,
@@ -61,15 +65,19 @@ def build_submit_plan(
             order_rules_resolution = fetch_order_rules(intent.market)
             resolved_rules = order_rules_resolution.rules
         order_side = intent.order_side
-        buy_submit_contract = (
-            intent.submit_contract
-            if intent.price is None and intent.normalized_side == "bid"
-            else None
-        )
+        buy_submit_contract = None
+        provided_submit_contract = intent.submit_contract
+        if intent.price is None and intent.normalized_side == "bid":
+            buy_submit_contract = build_buy_price_none_submit_contract(
+                rules=resolved_rules,
+            )
         if buy_submit_contract is not None and not isinstance(buy_submit_contract, BuyPriceNoneSubmitContract):
             raise BrokerRejectError("BUY price=None submit contract invalid before broker dispatch")
-        if buy_submit_contract is None and intent.price is None and intent.normalized_side == "bid":
-            raise BrokerRejectError("BUY price=None submit contract missing before broker dispatch")
+        if provided_submit_contract is not None and buy_submit_contract is not None:
+            if not isinstance(provided_submit_contract, BuyPriceNoneSubmitContract):
+                raise BrokerRejectError("BUY price=None submit contract invalid before broker dispatch")
+            if provided_submit_contract != buy_submit_contract:
+                raise BrokerRejectError("BUY price=None submit contract mismatch before broker dispatch")
 
         chance_validation_order_type = "limit"
         chance_supported_order_types: tuple[str, ...] = ()
@@ -88,10 +96,15 @@ def build_submit_plan(
                 rules=resolved_rules,
             )
 
-        exchange_submit_field_hint = (
+        exchange_submit_field = (
             buy_submit_contract.exchange_submit_field
             if buy_submit_contract is not None
             else "volume"
+        )
+        exchange_order_type = (
+            buy_submit_contract.exchange_order_type
+            if buy_submit_contract is not None
+            else chance_validation_order_type
         )
         if buy_submit_contract is not None:
             submit_contract_context = serialize_buy_price_none_submit_contract(
@@ -103,8 +116,8 @@ def build_submit_plan(
             submit_contract_context = {
                 "chance_validation_order_type": chance_validation_order_type,
                 "chance_supported_order_types": list(chance_supported_order_types),
-                "exchange_submit_field": exchange_submit_field_hint,
-                "exchange_order_type": chance_validation_order_type,
+                "exchange_submit_field": exchange_submit_field,
+                "exchange_order_type": exchange_order_type,
                 "exchange_submit_notional_krw": None,
                 "exchange_submit_qty": None,
                 "internal_executable_qty": None,
@@ -142,14 +155,17 @@ def build_submit_plan(
 
         effective_market_price: float | None = intent.price
         if intent.price is None and intent.normalized_side == "bid":
-            try:
-                quote = fetch_top_of_book(intent.market)
-                effective_market_price = resolve_best_ask(quote, intent.market)
-            except Exception as exc:
-                raise BrokerTemporaryError(
-                    "market buy blocked: failed to load validated best ask "
-                    f"market={intent.market} client_order_id={intent.client_order_id} cause={type(exc).__name__}: {exc}"
-                ) from exc
+            if intent.market_price_hint is not None:
+                effective_market_price = float(intent.market_price_hint)
+            else:
+                try:
+                    quote = fetch_top_of_book(intent.market)
+                    effective_market_price = resolve_best_ask(quote, intent.market)
+                except Exception as exc:
+                    raise BrokerTemporaryError(
+                        "market buy blocked: failed to load validated best ask "
+                        f"market={intent.market} client_order_id={intent.client_order_id} cause={type(exc).__name__}: {exc}"
+                    ) from exc
 
         lot_rules = build_market_lot_rules(
             market_id=intent.market,
@@ -184,20 +200,68 @@ def build_submit_plan(
             if has_explicit_qty_controls
             else float(intent.qty)
         )
+        exchange_submit_qty = float(internal_lot_qty)
+        exchange_submit_price: float | None = None
+        exchange_submit_volume: float | None = None
+        exchange_submit_notional_krw: float | None = None
+
+        if intent.price is None and intent.normalized_side == "bid":
+            if effective_market_price is None:
+                raise BrokerRejectError("market BUY planning requires effective market price")
+            exchange_submit_notional_krw = float(effective_market_price) * float(internal_lot_qty)
+            price_unit = float(submit_price_tick_policy.price_unit)
+            if price_unit > 0:
+                exchange_submit_notional_krw = math.floor(exchange_submit_notional_krw / price_unit) * price_unit
+            min_total = side_min_total_krw(rules=resolved_rules, side=order_side)
+            if min_total > 0 and exchange_submit_notional_krw < float(min_total):
+                raise BrokerRejectError(
+                    "order notional below side minimum for market BUY: "
+                    f"side={order_side} notional={exchange_submit_notional_krw:.8f} min_total={min_total:.8f}"
+                )
+            exchange_submit_price = float(exchange_submit_notional_krw)
+        elif intent.price is None:
+            exchange_submit_volume = float(exchange_submit_qty)
+        else:
+            normalized_limit_price = float(
+                normalize_limit_price_for_side(
+                    price=float(intent.price),
+                    side=order_side,
+                    rules=resolved_rules,
+                )
+            )
+            if normalized_limit_price <= 0:
+                raise BrokerRejectError(
+                    "limit price normalization produced non-positive executable price: "
+                    f"side={order_side} requested={float(intent.price):.8f} "
+                    f"price_unit={submit_price_tick_policy.price_unit:.8f} normalized={normalized_limit_price:.8f}"
+                )
+            exchange_submit_notional_krw = normalized_limit_price * float(internal_lot_qty)
+            min_total = side_min_total_krw(rules=resolved_rules, side=order_side)
+            if min_total > 0 and exchange_submit_notional_krw < float(min_total):
+                raise BrokerRejectError(
+                    "order notional below side minimum for limit order: "
+                    f"side={order_side} notional={exchange_submit_notional_krw:.8f} min_total={min_total:.8f}"
+                )
+            exchange_submit_price = normalized_limit_price
+            exchange_submit_volume = float(exchange_submit_qty)
 
         return SubmitPlan(
             intent=intent,
             rules=resolved_rules,
             chance_validation_order_type=chance_validation_order_type,
             chance_supported_order_types=chance_supported_order_types,
-            exchange_submit_field_hint=exchange_submit_field_hint,
+            exchange_submit_field=exchange_submit_field,
+            exchange_order_type=exchange_order_type,
+            exchange_submit_price=exchange_submit_price,
+            exchange_submit_volume=exchange_submit_volume,
+            exchange_submit_notional_krw=exchange_submit_notional_krw,
             submit_contract_context=submit_contract_context,
             submit_price_tick_policy=submit_price_tick_policy,
             effective_market_price=effective_market_price,
             lot_rules=lot_rules,
             qty_split=qty_split,
             internal_lot_qty=float(internal_lot_qty),
-            exchange_submit_qty=float(internal_lot_qty),
+            exchange_submit_qty=float(exchange_submit_qty),
             buy_price_none_submit_contract=buy_submit_contract,
         )
     except BrokerRejectError as exc:

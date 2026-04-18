@@ -166,6 +166,43 @@ def _record_test_order(conn, *, client_order_id: str, side: str, qty_req: float,
     )
 
 
+def _stub_live_reference_quote(monkeypatch, *, price: float = 100000000.0) -> None:
+    monkeypatch.setattr(
+        live_module,
+        "_load_live_reference_quote",
+        lambda **kwargs: {
+            "bid": float(price) - 1000.0,
+            "ask": float(price),
+            "reference_price": float(price),
+            "reference_ts_epoch_sec": 1700000000.0,
+            "reference_source": "test_stub",
+        },
+    )
+
+
+def _stub_live_effective_order_rules(monkeypatch) -> None:
+    monkeypatch.setattr(
+        live_module,
+        "_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=order_rules.DerivedOrderConstraints(
+                order_types=("price",),
+                bid_types=("price",),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=1.0,
+                ask_price_unit=1.0,
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+            )
+        ),
+    )
+
+
 class _CommitCheckingBroker(_FakeBroker):
     def __init__(self, *, db_path: str) -> None:
         super().__init__()
@@ -257,6 +294,7 @@ class _TimeoutBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         raise BrokerTemporaryError("timeout")
 
@@ -270,6 +308,7 @@ class _FailingSubmitBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         raise RuntimeError("exchange rejected")
 
@@ -283,6 +322,7 @@ class _TransportErrorBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         raise BrokerTemporaryError("connection reset by peer")
 
@@ -1530,31 +1570,12 @@ def test_extension_invariant_live_submit_requires_persisted_local_intent_and_pre
     assert trade is not None
 
 
-def test_live_success_persists_submit_attempt_record(tmp_path):
+def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_success.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
-
-    original_effective_order_rules = live_module._effective_order_rules
-    live_module._effective_order_rules = lambda _pair: SimpleNamespace(
-        rules=order_rules.DerivedOrderConstraints(
-            order_types=("price",),
-            bid_types=("price",),
-            ask_types=("limit", "market"),
-            order_sides=("bid", "ask"),
-            bid_min_total_krw=5000.0,
-            ask_min_total_krw=5000.0,
-            bid_price_unit=1.0,
-            ask_price_unit=1.0,
-            min_qty=0.0001,
-            qty_step=0.0001,
-            min_notional_krw=5000.0,
-            max_qty_decimals=8,
-        )
-    )
-    try:
-        trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
-    finally:
-        live_module._effective_order_rules = original_effective_order_rules
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
+    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
     assert trade is not None
 
     conn = ensure_db(str(tmp_path / "submit_success.sqlite"))
@@ -1667,6 +1688,8 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
 def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_unknown.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
 
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
@@ -2385,6 +2408,8 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
 def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_failed.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
 
     notifications: list[str] = []
     monkeypatch.setattr("bithumb_bot.broker.live.notify", lambda msg: notifications.append(msg))
@@ -2448,6 +2473,57 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
     assert "to=FAILED" in str(transition["message"])
     assert any("event=order_submit_started" in msg for msg in notifications)
     assert any("event=order_submit_failed" in msg for msg in notifications)
+
+
+def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_planning_failed.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    monkeypatch.setattr(
+        live_module,
+        "plan_place_order",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 100000000.0)
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "submit_planning_failed.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id, status, last_error, local_intent_state FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_attempt_id, submission_reason_code, exception_class, order_status, submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
+    started_event = conn.execute(
+        "SELECT 1 FROM order_events WHERE client_order_id=? AND event_type='submit_started'",
+        (row["client_order_id"],),
+    ).fetchone()
+    conn.close()
+
+    assert row["status"] == "FAILED"
+    assert row["local_intent_state"] == "PLAN_REJECTED"
+    assert "submit planning failed" in str(row["last_error"])
+    assert submit_attempt is not None
+    assert submit_attempt["submission_reason_code"] == "failed_before_send"
+    assert submit_attempt["exception_class"] == "BrokerRejectError"
+    assert submit_attempt["order_status"] == "FAILED"
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["submit_phase"] == "planning"
+    assert submit_evidence["execution_state"] == "planning_failed"
+    assert submit_evidence["error_summary"] == "planner contract mismatch"
+    assert started_event is None
 
 
 def test_each_submit_attempt_records_exactly_one_classification(tmp_path):

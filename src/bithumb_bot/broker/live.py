@@ -53,7 +53,6 @@ from ..reason_codes import (
 )
 from .order_rules import (
     BuyPriceNoneSubmitContract,
-    build_buy_price_none_submit_contract,
     get_effective_order_rules,
     serialize_buy_price_none_submit_contract,
     side_min_total_krw,
@@ -212,7 +211,6 @@ class _LiveExecutionFeasibility:
     reference_quote: dict[str, float | str] | None
     entry_sizing: object | None
     exit_sizing: object | None
-    submit_contract_context: BuyPriceNoneSubmitContract | None = None
 
 
 @dataclass(frozen=True)
@@ -2695,6 +2693,10 @@ def _block_new_submission_for_unresolved_risk(
         ts_ms=ts,
         status="FAILED",
     )
+    conn.execute(
+        "UPDATE orders SET last_error=?, updated_ts=? WHERE client_order_id=?",
+        (reason[:500], int(time.time() * 1000), client_order_id),
+    )
     persisted_reason = f"category=unresolved_risk_gate;code={reason_code};reason={reason}"
     record_submit_blocked(client_order_id, status="FAILED", reason=persisted_reason, conn=conn)
     notify(
@@ -3027,7 +3029,6 @@ def _submit_via_standard_path(
     final_intended_qty: float,
     final_submitted_qty: float,
     decision_reason_code: str | None,
-    submit_contract_context: dict[str, object] | None = None,
 ):
     symbol = settings.PAIR
     decision_observability = decision_observability or {}
@@ -3039,14 +3040,56 @@ def _submit_via_standard_path(
         qty=float(qty),
         price=None,
         created_ts=int(ts),
-        submit_contract=submit_contract_context,
+        market_price_hint=reference_price,
     )
-    submit_plan = plan_place_order(
-        broker,
-        intent=submit_intent,
-        rules=effective_rules,
-        skip_qty_revalidation=True,
-    )
+    try:
+        submit_plan = plan_place_order(
+            broker,
+            intent=submit_intent,
+            rules=effective_rules,
+            skip_qty_revalidation=True,
+        )
+    except Exception as error:
+        _handle_standard_submit_planning_error(
+            conn=conn,
+            signal=signal,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            side=side,
+            qty=float(qty),
+            ts=int(ts),
+            intent_key=intent_key,
+            symbol=symbol,
+            reference_price=reference_price,
+            top_of_book_summary=top_of_book_summary,
+            strategy_name=strategy_name,
+            decision_id=decision_id,
+            decision_reason=decision_reason,
+            exit_rule_name=exit_rule_name,
+            order_type=order_type,
+            payload_hash=payload_fingerprint(
+                {
+                    "client_order_id": client_order_id,
+                    "submit_attempt_id": submit_attempt_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "qty": float(qty),
+                    "price": reference_price,
+                    "submit_ts": int(ts),
+                }
+            ),
+            internal_lot_size=internal_lot_size,
+            effective_min_trade_qty=effective_min_trade_qty,
+            qty_step=qty_step,
+            min_notional_krw=min_notional_krw,
+            intended_lot_count=intended_lot_count,
+            executable_lot_count=executable_lot_count,
+            final_intended_qty=float(final_intended_qty),
+            final_submitted_qty=float(final_submitted_qty),
+            decision_reason_code=decision_reason_code,
+            error=error,
+        )
+        return None
     sell_truth_source_fields = _sell_truth_source_fields(
         decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
@@ -3143,15 +3186,6 @@ def _submit_via_standard_path(
         "final_submitted_qty": float(final_submitted_qty),
         "decision_reason_code": decision_reason_code,
     }
-    payload = {
-        "client_order_id": client_order_id,
-        "submit_attempt_id": submit_attempt_id,
-        "symbol": symbol,
-        "side": side,
-        "qty": float(qty),
-        "price": reference_price,
-        "submit_ts": int(ts),
-    }
     context = _StandardSubmitAttemptContext(
         conn=conn,
         signal=signal,
@@ -3189,7 +3223,17 @@ def _submit_via_standard_path(
         submit_contract_context=submit_plan.submit_contract_context,
         submit_path="live_standard_market",
         symbol=symbol,
-        payload_hash=payload_fingerprint(payload),
+        payload_hash=payload_fingerprint(
+            {
+                "client_order_id": client_order_id,
+                "submit_attempt_id": submit_attempt_id,
+                "symbol": symbol,
+                "side": side,
+                "qty": float(qty),
+                "price": reference_price,
+                "submit_ts": int(ts),
+            }
+        ),
         lot_evidence_fields=lot_evidence_fields,
         submit_truth_source_fields=submit_truth_source_fields,
         submit_observability_fields=submit_observability_fields,
@@ -3208,6 +3252,155 @@ def _submit_via_standard_path(
         request_ts=request_ts,
         response_ts=response_ts,
     )
+
+
+def _handle_standard_submit_planning_error(
+    *,
+    conn,
+    signal: str,
+    client_order_id: str,
+    submit_attempt_id: str,
+    side: str,
+    qty: float,
+    ts: int,
+    intent_key: str,
+    symbol: str,
+    reference_price: float | None,
+    top_of_book_summary: dict[str, float | str] | None,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+    order_type: str,
+    payload_hash: str,
+    internal_lot_size: float | None,
+    effective_min_trade_qty: float | None,
+    qty_step: float | None,
+    min_notional_krw: float | None,
+    intended_lot_count: int | None,
+    executable_lot_count: int | None,
+    final_intended_qty: float,
+    final_submitted_qty: float,
+    decision_reason_code: str | None,
+    error: Exception,
+) -> None:
+    failure_submit_contract_fields = _submit_contract_fields(
+        side=side,
+        order_type=order_type,
+        normalized_qty=qty,
+        contract_context=getattr(error, "submit_contract_context", None),
+    )
+    failure_submit_fields = _submit_failure_fields(
+        side=side,
+        order_type=order_type,
+        error_class=type(error).__name__,
+        error_summary=str(error),
+    )
+    submit_evidence = _encode_submit_evidence(
+        payload={
+            "symbol": symbol,
+            "side": side,
+            "intended_qty": qty,
+            "normalized_qty": qty,
+            "reference_price": reference_price,
+            "top_of_book": top_of_book_summary,
+            "request_ts": None,
+            "response_ts": None,
+            "submit_path": "live_standard_market",
+            "submit_phase": "planning",
+            "execution_state": "planning_failed",
+            "submit_mode": settings.MODE,
+            **failure_submit_contract_fields,
+            **failure_submit_fields,
+            "error_class": type(error).__name__,
+            "error_summary": str(error),
+            "internal_lot_size": internal_lot_size,
+            "effective_min_trade_qty": effective_min_trade_qty,
+            "qty_step": qty_step,
+            "min_notional_krw": min_notional_krw,
+            "intended_lot_count": intended_lot_count,
+            "executable_lot_count": executable_lot_count,
+            "final_intended_qty": final_intended_qty,
+            "final_submitted_qty": final_submitted_qty,
+            "decision_reason_code": decision_reason_code,
+        }
+    )
+    reason = f"submit planning failed: {type(error).__name__}: {error}"
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        side=side,
+        qty_req=qty,
+        price=None,
+        strategy_name=strategy_name,
+        entry_decision_id=(decision_id if side == "BUY" else None),
+        exit_decision_id=(decision_id if side == "SELL" else None),
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
+        local_intent_state="PLAN_REJECTED",
+        ts_ms=ts,
+        status="FAILED",
+    )
+    conn.execute(
+        "UPDATE orders SET last_error=?, updated_ts=? WHERE client_order_id=?",
+        (reason[:500], int(time.time() * 1000), client_order_id),
+    )
+    _record_submit_attempt_result(
+        conn=conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        ts=ts,
+        payload_hash=payload_hash,
+        reference_price=reference_price,
+        order_status="FAILED",
+        broker_response_summary=f"planning_exception={type(error).__name__};error={error}",
+        submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
+        exception_class=type(error).__name__,
+        timeout_flag=False,
+        submit_evidence=submit_evidence,
+        exchange_order_id_obtained=False,
+        order_type=order_type,
+        internal_lot_size=internal_lot_size,
+        effective_min_trade_qty=effective_min_trade_qty,
+        qty_step=qty_step,
+        min_notional_krw=min_notional_krw,
+        intended_lot_count=intended_lot_count,
+        executable_lot_count=executable_lot_count,
+        final_intended_qty=final_intended_qty,
+        final_submitted_qty=final_submitted_qty,
+        decision_reason_code=decision_reason_code,
+    )
+    update_order_intent_dedup(
+        conn,
+        intent_key=intent_key,
+        client_order_id=client_order_id,
+        order_status="FAILED",
+        last_error=reason,
+    )
+    RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_SKIP] submit planning failed",
+            signal=signal,
+            side=side,
+            client_order_id=client_order_id,
+            reason=reason,
+        )
+    )
+    conn.commit()
 
 
 def _plan_standard_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
@@ -3348,24 +3541,13 @@ def _dispatch_standard_submit_attempt(
                 exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
             )
         )
-        try:
-            order = broker.place_order(
-                client_order_id=context.client_order_id,
-                side=context.side,
-                qty=context.qty,
-                price=None,
-                submit_plan=context.submit_plan,
-            )
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            order = broker.place_order(
-                client_order_id=context.client_order_id,
-                side=context.side,
-                qty=context.qty,
-                price=None,
-                buy_price_none_submit_contract=context.submit_plan.buy_price_none_submit_contract,
-            )
+        order = broker.place_order(
+            client_order_id=context.client_order_id,
+            side=context.side,
+            qty=context.qty,
+            price=None,
+            submit_plan=context.submit_plan,
+        )
         response_ts = int(time.time() * 1000)
         return order, request_ts, response_ts
     except BrokerTemporaryError as e:
@@ -4713,14 +4895,6 @@ def _evaluate_live_execution_feasibility(
         notify(f"live pretrade validation blocked ({intent.side}): {e}")
         return None
 
-    submit_contract_context = (
-        build_buy_price_none_submit_contract(
-            rules=position_state.effective_rules,
-        )
-        if intent.side == "BUY"
-        else None
-    )
-
     return _LiveExecutionFeasibility(
         side=intent.side,
         order_qty=float(order_qty),
@@ -4729,7 +4903,6 @@ def _evaluate_live_execution_feasibility(
         reference_quote=reference_quote,
         entry_sizing=intent.entry_sizing,
         exit_sizing=intent.exit_sizing,
-        submit_contract_context=submit_contract_context,
     )
 
 
@@ -5076,7 +5249,6 @@ def _execute_live_submission_and_application(
         final_intended_qty=float(feasibility.order_qty),
         final_submitted_qty=float(feasibility.normalized_qty),
         decision_reason_code=str(lot_sizing.decision_reason_code),
-        submit_contract_context=feasibility.submit_contract_context,
     )
     if order is None:
         return None

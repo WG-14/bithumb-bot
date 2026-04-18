@@ -2154,6 +2154,26 @@ class BithumbBroker:
         submit_contract_context: dict[str, object] = {}
         try:
             if submit_plan is not None:
+                if validated_client_order_id != submit_plan.intent.client_order_id:
+                    raise BrokerRejectError(
+                        "submit_plan client_order_id mismatch: "
+                        f"requested={validated_client_order_id} planned={submit_plan.intent.client_order_id}"
+                    )
+                if str(side).strip().upper() != str(submit_plan.intent.side).strip().upper():
+                    raise BrokerRejectError(
+                        "submit_plan side mismatch: "
+                        f"requested={side} planned={submit_plan.intent.side}"
+                    )
+                if not math.isclose(float(qty), float(submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
+                    raise BrokerRejectError(
+                        "submit_plan qty mismatch: "
+                        f"requested={float(qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+                    )
+                if price != submit_plan.intent.price:
+                    raise BrokerRejectError(
+                        "submit_plan price mismatch: "
+                        f"requested={price} planned={submit_plan.intent.price}"
+                    )
                 flow = PlaceOrderSubmissionFlow(
                     intent=submit_plan.intent,
                     plan=submit_plan,

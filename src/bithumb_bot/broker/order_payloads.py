@@ -182,86 +182,33 @@ def build_order_payload_from_plan(
     format_krw_amount,
     format_volume,
 ) -> OrderPayloadFromPlan:
-    from .order_rules import (
-        normalize_limit_price_for_side,
-        serialize_buy_price_none_submit_contract,
-        side_min_total_krw,
+    from .order_rules import serialize_buy_price_none_submit_contract
+
+    exchange_submit_field = str(plan.exchange_submit_field)
+    exchange_submit_notional_krw = plan.exchange_submit_notional_krw
+    price_text = (
+        format_krw_amount(decimal_from_value(plan.exchange_submit_price))
+        if plan.exchange_submit_price is not None
+        else None
     )
-
-    exchange_submit_notional_krw: float | None = None
-    exchange_submit_field = "volume"
-    if plan.intent.price is None:
-        if plan.intent.normalized_side == "bid":
-            exchange_submit_field = plan.exchange_submit_field_hint
-            exchange_submit_notional = decimal_from_value(plan.effective_market_price) * decimal_from_value(plan.internal_lot_qty)
-            bid_price_unit = decimal_from_value(plan.submit_price_tick_policy.price_unit)
-            if bid_price_unit > 0:
-                exchange_submit_notional = (exchange_submit_notional / bid_price_unit).to_integral_value(rounding="ROUND_DOWN") * bid_price_unit
-            min_total = side_min_total_krw(rules=plan.rules, side=plan.intent.order_side)
-            if min_total > 0 and exchange_submit_notional < decimal_from_value(min_total):
-                raise BrokerRejectError(
-                    "order notional below side minimum for market BUY: "
-                    f"side={plan.intent.order_side} notional={format(exchange_submit_notional, 'f')} min_total={min_total:.8f}"
-                )
-            exchange_submit_notional_krw = float(exchange_submit_notional)
-            payload = build_order_payload(
-                market=plan.intent.market,
-                side=plan.intent.normalized_side,
-                ord_type=plan.buy_price_none_submit_contract.exchange_order_type,
-                price=format_krw_amount(exchange_submit_notional),
-                client_order_id=plan.intent.client_order_id,
-            )
-        else:
-            payload = build_order_payload(
-                market=plan.intent.market,
-                side=plan.intent.normalized_side,
-                ord_type="market",
-                volume=format_volume(plan.exchange_submit_qty),
-                client_order_id=plan.intent.client_order_id,
-            )
-    else:
-        requested_limit_price = decimal_from_value(plan.intent.price)
-        if requested_limit_price <= 0:
-            raise BrokerRejectError(f"limit price must be > 0 (got {plan.intent.price})")
-
-        normalized_limit_price = decimal_from_value(
-            normalize_limit_price_for_side(
-                price=float(requested_limit_price),
-                side=plan.intent.order_side,
-                rules=plan.rules,
-            )
-        )
-        if normalized_limit_price <= 0:
-            raise BrokerRejectError(
-                "limit price normalization produced non-positive executable price: "
-                f"side={plan.intent.order_side} requested={format(requested_limit_price, 'f')} "
-                f"price_unit={plan.submit_price_tick_policy.price_unit:.8f} normalized={format(normalized_limit_price, 'f')}"
-            )
-
-        exchange_submit_notional = normalized_limit_price * decimal_from_value(plan.internal_lot_qty)
-        min_total = side_min_total_krw(rules=plan.rules, side=plan.intent.order_side)
-        if min_total > 0 and exchange_submit_notional < decimal_from_value(min_total):
-            raise BrokerRejectError(
-                "order notional below side minimum for limit order: "
-                f"side={plan.intent.order_side} notional={format(exchange_submit_notional, 'f')} min_total={min_total:.8f}"
-            )
-        payload = build_order_payload(
-            market=plan.intent.market,
-            side=plan.intent.normalized_side,
-            ord_type="limit",
-            volume=format_volume(plan.exchange_submit_qty),
-            price=format_krw_amount(normalized_limit_price),
-            client_order_id=plan.intent.client_order_id,
-        )
+    volume_text = (
+        format_volume(plan.exchange_submit_volume)
+        if plan.exchange_submit_volume is not None
+        else None
+    )
+    payload = build_order_payload(
+        market=plan.intent.market,
+        side=plan.intent.normalized_side,
+        ord_type=plan.exchange_order_type,
+        volume=volume_text,
+        price=price_text,
+        client_order_id=plan.intent.client_order_id,
+    )
 
     if plan.buy_price_none_submit_contract is not None:
         executed_submit_contract = plan.buy_price_none_submit_contract.with_execution_fields(
-            exchange_submit_notional_krw=exchange_submit_notional_krw,
-            exchange_submit_qty=(
-                float(plan.exchange_submit_qty)
-                if exchange_submit_field == "volume"
-                else None
-            ),
+            exchange_submit_notional_krw=plan.exchange_submit_notional_krw,
+            exchange_submit_qty=plan.exchange_submit_volume,
             internal_executable_qty=float(plan.internal_lot_qty),
         )
         submit_contract_context = serialize_buy_price_none_submit_contract(
@@ -274,9 +221,9 @@ def build_order_payload_from_plan(
         submit_contract_context.update(
             {
                 "exchange_submit_field": exchange_submit_field,
-                "exchange_order_type": str(payload.get("order_type") or plan.chance_validation_order_type),
-                "exchange_submit_notional_krw": exchange_submit_notional_krw,
-                "exchange_submit_qty": float(plan.exchange_submit_qty) if exchange_submit_field == "volume" else None,
+                "exchange_order_type": str(plan.exchange_order_type),
+                "exchange_submit_notional_krw": plan.exchange_submit_notional_krw,
+                "exchange_submit_qty": plan.exchange_submit_volume,
                 "internal_executable_qty": float(plan.internal_lot_qty),
             }
         )
