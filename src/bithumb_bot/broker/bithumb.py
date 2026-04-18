@@ -146,6 +146,15 @@ class _PlaceOrderPayloadPlan:
     canonical_payload: str
 
 
+@dataclass(frozen=True)
+class _PlaceOrderSubmissionFlow:
+    plan: _PlaceOrderPlan
+    payload_plan: _PlaceOrderPayloadPlan
+    side: str
+    price: float | None
+    now: int
+
+
 def _resolve_submit_price_tick_policy(
     *,
     order_side: str,
@@ -2581,6 +2590,48 @@ class BithumbBroker:
             dict(payload_plan.submit_contract_context),
         )
 
+    def _build_place_order_submission_flow(
+        self,
+        *,
+        validated_client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None,
+        buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None",
+        now: int,
+    ) -> _PlaceOrderSubmissionFlow:
+        normalized_side = normalize_order_side(side)
+        plan = self._plan_place_order(
+            validated_client_order_id=validated_client_order_id,
+            normalized_side=normalized_side,
+            market=self._market(),
+            side=side,
+            qty=float(qty),
+            price=price,
+            buy_price_none_submit_contract=buy_price_none_submit_contract,
+        )
+        payload_plan = self._build_place_order_payload(plan=plan)
+        return _PlaceOrderSubmissionFlow(
+            plan=plan,
+            payload_plan=payload_plan,
+            side=side,
+            price=price,
+            now=now,
+        )
+
+    def _run_place_order_submission_flow(
+        self,
+        *,
+        flow: _PlaceOrderSubmissionFlow,
+    ) -> BrokerOrder:
+        return self._execute_place_order(
+            plan=flow.plan,
+            payload_plan=flow.payload_plan,
+            side=flow.side,
+            price=flow.price,
+            now=flow.now,
+        )
+
     def place_order(
         self,
         *,
@@ -2595,29 +2646,18 @@ class BithumbBroker:
         if self.dry_run:
             return BrokerOrder(validated_client_order_id, f"dry_{validated_client_order_id}", side, "NEW", price, qty, 0.0, now, now)
 
-        normalized_side = normalize_order_side(side)
-        market = self._market()
         submit_contract_context: dict[str, object] = {}
         try:
-            plan = self._plan_place_order(
+            flow = self._build_place_order_submission_flow(
                 validated_client_order_id=validated_client_order_id,
-                normalized_side=normalized_side,
-                market=market,
                 side=side,
                 qty=float(qty),
                 price=price,
                 buy_price_none_submit_contract=buy_price_none_submit_contract,
-            )
-            submit_contract_context = dict(plan.submit_contract_context)
-            payload_plan = self._build_place_order_payload(plan=plan)
-            submit_contract_context = dict(payload_plan.submit_contract_context)
-            return self._execute_place_order(
-                plan=plan,
-                payload_plan=payload_plan,
-                side=side,
-                price=price,
                 now=now,
             )
+            submit_contract_context = dict(flow.payload_plan.submit_contract_context)
+            return self._run_place_order_submission_flow(flow=flow)
         except BrokerRejectError as exc:
             exc_submit_contract_context = getattr(exc, "submit_contract_context", None)
             setattr(

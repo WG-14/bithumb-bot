@@ -782,105 +782,80 @@ def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
     return derive_order_rules_from_chance(chance)
 
 
-def get_effective_order_rules(pair: str) -> RuleResolution:
-    normalized_pair, _raw_pair = canonical_market_with_raw(pair)
-    now = time.time()
-    fallback = _local_fallback_rules()
+def _build_fallback_only_rule_resolution(
+    *,
+    pair: str,
+    now: float,
+    fallback: DerivedOrderConstraints,
+    reason_code: str,
+    reason_summary: str,
+    reason_detail: str,
+    fallback_risk: str,
+) -> RuleResolution:
+    source = {
+        **_fallback_rule_source_map(),
+        "market_id": "unsupported_by_doc",
+        "bid_min_total_krw": "unsupported_by_doc",
+        "ask_min_total_krw": "unsupported_by_doc",
+        "bid_price_unit": "unsupported_by_doc",
+        "ask_price_unit": "unsupported_by_doc",
+        "order_types": "unsupported_by_doc",
+        "bid_types": "unsupported_by_doc",
+        "ask_types": "unsupported_by_doc",
+        "order_sides": "unsupported_by_doc",
+        "bid_fee": "unsupported_by_doc",
+        "ask_fee": "unsupported_by_doc",
+        "maker_bid_fee": "unsupported_by_doc",
+        "maker_ask_fee": "unsupported_by_doc",
+        "ruleset": "merged",
+        "exchange_source_json": json.dumps({}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "local_fallback_source_json": json.dumps(
+            _fallback_rule_source_map(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    resolution = RuleResolution(
+        rules=fallback,
+        source=source,
+        exchange_source={},
+        local_fallback_source=_fallback_rule_source_map(),
+        fallback_used=True,
+        fallback_reason_code=reason_code,
+        fallback_reason_summary=reason_summary,
+        fallback_reason_detail=reason_detail,
+        fallback_risk=fallback_risk,
+        retrieved_at_sec=now,
+        expires_at_sec=now + _CACHE_TTL_SEC,
+        stale=False,
+        source_mode="local_fallback",
+    )
+    if settings.MODE == "live":
+        import logging
 
-    cached = _cached_rules.get(normalized_pair)
-    if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
-        cached_resolution = cached[1]
-        if (
-            cached_resolution.fallback_used
-            and settings.MODE == "live"
-            and not bool(settings.LIVE_DRY_RUN)
-            and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK)
-        ):
-            raise BrokerRejectError(
-                f"live order rule snapshot unavailable for {pair}; cached fallback is disabled"
-            )
-        return cached_resolution
-    try:
-        exchange = fetch_exchange_order_rules(normalized_pair)
-    except Exception as exc:
-        fallback_issues = required_rule_issues(fallback)
-        code, summary = classify_private_api_error(exc)
-        detail = f"{type(exc).__name__}: {exc}"
-        fallback_risk = (
-            "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
-            "may stay on local fallback until /v1/orders/chance succeeds again"
+        logging.getLogger(__name__).warning(
+            "live order rule snapshot fallback engaged pair=%s retrieved_at_sec=%.3f expires_at_sec=%.3f reason_code=%s reason=%s source_min_qty=%s source_qty_step=%s source_min_notional=%s source_max_qty_decimals=%s",
+            pair,
+            resolution.retrieved_at_sec,
+            resolution.expires_at_sec,
+            reason_code,
+            reason_summary,
+            resolution.source.get("min_qty", "missing"),
+            resolution.source.get("qty_step", "missing"),
+            resolution.source.get("min_notional_krw", "missing"),
+            resolution.source.get("max_qty_decimals", "missing"),
         )
-        if fallback_issues and settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
-            raise BrokerRejectError(
-                f"live order rule fallback invalid for {pair}: " + "; ".join(fallback_issues)
-            ) from exc
-        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN) and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK):
-            raise BrokerRejectError(
-                f"live order rule snapshot unavailable for {pair}; fallback disabled "
-                f"(reason_code={code}; reason={summary}; detail={detail})"
-            ) from exc
-        notify(
-            f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "
-            f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
-        )
-        source = {
-            **_fallback_rule_source_map(),
-            "market_id": "unsupported_by_doc",
-            "bid_min_total_krw": "unsupported_by_doc",
-            "ask_min_total_krw": "unsupported_by_doc",
-            "bid_price_unit": "unsupported_by_doc",
-            "ask_price_unit": "unsupported_by_doc",
-            "order_types": "unsupported_by_doc",
-            "bid_types": "unsupported_by_doc",
-            "ask_types": "unsupported_by_doc",
-            "order_sides": "unsupported_by_doc",
-            "bid_fee": "unsupported_by_doc",
-            "ask_fee": "unsupported_by_doc",
-            "maker_bid_fee": "unsupported_by_doc",
-            "maker_ask_fee": "unsupported_by_doc",
-            "ruleset": "merged",
-            "exchange_source_json": json.dumps({}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            "local_fallback_source_json": json.dumps(
-                _fallback_rule_source_map(),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        }
-        resolution = RuleResolution(
-            rules=fallback,
-            source=source,
-            exchange_source={},
-            local_fallback_source=_fallback_rule_source_map(),
-            fallback_used=True,
-            fallback_reason_code=code,
-            fallback_reason_summary=summary,
-            fallback_reason_detail=detail,
-            fallback_risk=fallback_risk,
-            retrieved_at_sec=now,
-            expires_at_sec=now + _CACHE_TTL_SEC,
-            stale=False,
-            source_mode="local_fallback",
-        )
-        if settings.MODE == "live":
-            import logging
+    return resolution
 
-            logging.getLogger(__name__).warning(
-                "live order rule snapshot fallback engaged pair=%s retrieved_at_sec=%.3f expires_at_sec=%.3f reason_code=%s reason=%s source_min_qty=%s source_qty_step=%s source_min_notional=%s source_max_qty_decimals=%s",
-                pair,
-                resolution.retrieved_at_sec,
-                resolution.expires_at_sec,
-                code,
-                summary,
-                resolution.source.get("min_qty", "missing"),
-                resolution.source.get("qty_step", "missing"),
-                resolution.source.get("min_notional_krw", "missing"),
-                resolution.source.get("max_qty_decimals", "missing"),
-            )
-        resolution = _persist_rule_snapshot_if_possible(resolution)
-        _cached_rules[normalized_pair] = (now, resolution, fallback)
-        return resolution
 
+def _build_merged_rule_resolution(
+    *,
+    pair: str,
+    now: float,
+    exchange: ExchangeDerivedConstraints,
+    fallback: DerivedOrderConstraints,
+) -> RuleResolution:
     merged = DerivedOrderConstraints(
         market_id=exchange.market_id,
         bid_min_total_krw=exchange.bid_min_total_krw,
@@ -942,6 +917,69 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
             resolution.source.get("min_notional_krw", "missing"),
             resolution.source.get("max_qty_decimals", "missing"),
         )
+    return resolution
+
+
+def get_effective_order_rules(pair: str) -> RuleResolution:
+    normalized_pair, _raw_pair = canonical_market_with_raw(pair)
+    now = time.time()
+    fallback = _local_fallback_rules()
+
+    cached = _cached_rules.get(normalized_pair)
+    if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
+        cached_resolution = cached[1]
+        if (
+            cached_resolution.fallback_used
+            and settings.MODE == "live"
+            and not bool(settings.LIVE_DRY_RUN)
+            and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK)
+        ):
+            raise BrokerRejectError(
+                f"live order rule snapshot unavailable for {pair}; cached fallback is disabled"
+            )
+        return cached_resolution
+    try:
+        exchange = fetch_exchange_order_rules(normalized_pair)
+    except Exception as exc:
+        fallback_issues = required_rule_issues(fallback)
+        code, summary = classify_private_api_error(exc)
+        detail = f"{type(exc).__name__}: {exc}"
+        fallback_risk = (
+            "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
+            "may stay on local fallback until /v1/orders/chance succeeds again"
+        )
+        if fallback_issues and settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
+            raise BrokerRejectError(
+                f"live order rule fallback invalid for {pair}: " + "; ".join(fallback_issues)
+            ) from exc
+        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN) and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK):
+            raise BrokerRejectError(
+                f"live order rule snapshot unavailable for {pair}; fallback disabled "
+                f"(reason_code={code}; reason={summary}; detail={detail})"
+            ) from exc
+        notify(
+            f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "
+            f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
+        )
+        resolution = _build_fallback_only_rule_resolution(
+            pair=pair,
+            now=now,
+            fallback=fallback,
+            reason_code=code,
+            reason_summary=summary,
+            reason_detail=detail,
+            fallback_risk=fallback_risk,
+        )
+        resolution = _persist_rule_snapshot_if_possible(resolution)
+        _cached_rules[normalized_pair] = (now, resolution, fallback)
+        return resolution
+
+    resolution = _build_merged_rule_resolution(
+        pair=pair,
+        now=now,
+        exchange=exchange,
+        fallback=fallback,
+    )
     resolution = _persist_rule_snapshot_if_possible(resolution)
     _cached_rules[normalized_pair] = (now, resolution, fallback)
     return resolution

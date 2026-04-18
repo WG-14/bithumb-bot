@@ -2363,7 +2363,7 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
     ).fetchone()
     submit_attempt = conn.execute(
         """
-        SELECT submit_attempt_id, symbol, side, qty, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, exchange_order_id_obtained, order_status
+        SELECT submit_attempt_id, symbol, side, qty, submit_ts, payload_fingerprint, broker_response_summary, submission_reason_code, exception_class, timeout_flag, exchange_order_id_obtained, order_status, submit_evidence
         FROM order_events
         WHERE client_order_id=? AND event_type='submit_attempt_recorded'
         ORDER BY id DESC
@@ -2400,6 +2400,8 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
     assert submit_attempt["timeout_flag"] == 0
     assert submit_attempt["exchange_order_id_obtained"] == 0
     assert submit_attempt["order_status"] == "FAILED"
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["submit_phase"] == "submission"
     assert transition is not None
     assert transition["order_status"] == "FAILED"
     assert "from=PENDING_SUBMIT" in str(transition["message"])
