@@ -1,0 +1,3 @@
+Minimal review draft.
+
+This file is a placeholder for future pipeline output or human notes.
