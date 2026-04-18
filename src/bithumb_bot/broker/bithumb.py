@@ -52,6 +52,7 @@ from .order_lookup_v1 import (
     resolve_identifiers as resolve_v1_order_identifiers,
     status_from_state as v1_status_from_state,
 )
+from .bithumb_adapter import build_signed_order_request, build_submission_flow
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
 from .order_list_v1 import build_recovery_order_list_params
 from .order_list_v1 import V1ListNormalizedOrder
@@ -60,7 +61,7 @@ from .order_payloads import (
     validate_order_submit_payload,
 )
 from .order_submit import (
-    build_place_order_submission_flow,
+    PlaceOrderSubmissionFlow,
     resolve_submit_price_tick_policy as _resolve_submit_price_tick_policy,
     run_place_order_submission_flow,
 )
@@ -1431,7 +1432,7 @@ class BithumbBroker:
     def _submit_validated_order_payload(
         self,
         *,
-        payload_plan: _PlaceOrderPayloadPlan,
+        payload_plan,
         retry_safe: bool = False,
     ) -> dict | list:
         compat_post_private = getattr(self, "_post_private")
@@ -2143,6 +2144,7 @@ class BithumbBroker:
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None" = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         now = int(time.time() * 1000)
         validated_client_order_id = validate_client_order_id(client_order_id)
@@ -2151,16 +2153,26 @@ class BithumbBroker:
 
         submit_contract_context: dict[str, object] = {}
         try:
-            flow = build_place_order_submission_flow(
-                self,
-                validated_client_order_id=validated_client_order_id,
-                side=side,
-                qty=float(qty),
-                price=price,
-                buy_price_none_submit_contract=buy_price_none_submit_contract,
-                now=now,
-            )
-            submit_contract_context = dict(flow.payload_plan.submit_contract_context)
+            if submit_plan is not None:
+                flow = PlaceOrderSubmissionFlow(
+                    intent=submit_plan.intent,
+                    plan=submit_plan,
+                    signed_request=build_signed_order_request(
+                        self,
+                        plan=submit_plan,
+                    ),
+                )
+            else:
+                flow = build_submission_flow(
+                    self,
+                    validated_client_order_id=validated_client_order_id,
+                    side=side,
+                    qty=float(qty),
+                    price=price,
+                    buy_price_none_submit_contract=buy_price_none_submit_contract,
+                    now=now,
+                )
+            submit_contract_context = dict(flow.signed_request.submit_contract_context)
             return run_place_order_submission_flow(self, flow=flow)
         except BrokerRejectError as exc:
             exc_submit_contract_context = getattr(exc, "submit_contract_context", None)

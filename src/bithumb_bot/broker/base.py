@@ -5,6 +5,7 @@ from typing import Protocol
 
 if False:  # pragma: no cover
     from .order_rules import BuyPriceNoneSubmitContract
+    from ..execution_models import SubmitPlan
 
 
 class BrokerError(Exception):
@@ -84,6 +85,7 @@ class Broker(Protocol):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None" = None,
+        submit_plan: "SubmitPlan | None" = None,
     ) -> BrokerOrder:
         ...
 

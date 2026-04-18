@@ -65,6 +65,7 @@ class _FakeBroker:
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         self.place_order_calls += 1
         self._last_client_order_id = client_order_id
@@ -178,6 +179,7 @@ class _CommitCheckingBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         conn = ensure_db(self._db_path)
         try:
@@ -212,6 +214,7 @@ class _CommitCheckingBroker(_FakeBroker):
             qty=qty,
             price=price,
             buy_price_none_submit_contract=buy_price_none_submit_contract,
+            submit_plan=submit_plan,
         )
 
 
@@ -229,16 +232,19 @@ class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
-        assert isinstance(buy_price_none_submit_contract, order_rules.BuyPriceNoneSubmitContract)
-        self.captured_live_submit_contract = buy_price_none_submit_contract
-        self.captured_broker_submit_contract = buy_price_none_submit_contract
+        assert submit_plan is not None
+        assert isinstance(submit_plan.buy_price_none_submit_contract, order_rules.BuyPriceNoneSubmitContract)
+        self.captured_live_submit_contract = submit_plan.buy_price_none_submit_contract
+        self.captured_broker_submit_contract = submit_plan.buy_price_none_submit_contract
         return super().place_order(
             client_order_id=client_order_id,
             side=side,
             qty=qty,
             price=price,
-            buy_price_none_submit_contract=buy_price_none_submit_contract,
+            buy_price_none_submit_contract=submit_plan.buy_price_none_submit_contract,
+            submit_plan=submit_plan,
         )
 
 
@@ -1736,9 +1742,40 @@ def test_live_timeout_marks_submit_unknown(monkeypatch, tmp_path):
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg and "state_to=SUBMIT_UNKNOWN" in msg for msg in notifications)
 
 
-def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contract(tmp_path):
+def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contract(monkeypatch, tmp_path):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_price_none_shared_contract.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    resolved_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_min_total_krw=0.0,
+        ask_min_total_krw=0.0,
+        min_notional_krw=0.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        max_qty_decimals=8,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _market: SimpleNamespace(rules=resolved_rules),
+    )
+    monkeypatch.setattr(
+        live_module,
+        "_effective_order_rules",
+        lambda _market: SimpleNamespace(rules=resolved_rules),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_submit.fetch_orderbook_top",
+        lambda _market: BestQuote(market="KRW-BTC", bid_price=99_900_000.0, ask_price=100_000_000.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_submit.validated_best_quote_ask_price",
+        lambda _quote, requested_market: 100_000_000.0,
+    )
 
     broker = _BuyPriceNoneContractCapturingBroker()
     trade = live_execute_signal(broker, "BUY", 1000, 100_000_000.0)

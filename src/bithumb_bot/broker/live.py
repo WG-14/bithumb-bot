@@ -12,6 +12,7 @@ from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..decision_context import resolve_canonical_position_exposure_snapshot
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
+from ..execution_models import OrderIntent, SubmitPlan
 from ..dust import (
     DustState,
     build_dust_display_context,
@@ -57,6 +58,7 @@ from .order_rules import (
     serialize_buy_price_none_submit_contract,
     side_min_total_krw,
 )
+from .order_submit import plan_place_order
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -247,6 +249,7 @@ class _StandardSubmitAttemptContext:
     final_intended_qty: float
     final_submitted_qty: float
     decision_reason_code: str | None
+    submit_plan: SubmitPlan
     submit_contract_context: dict[str, object] | None
     submit_path: str
     symbol: str
@@ -3004,6 +3007,7 @@ def _submit_via_standard_path(
     raw_total_asset_qty: float,
     open_exposure_qty: float,
     dust_tracking_qty: float,
+    effective_rules,
     decision_observability: dict[str, object] | None,
     submit_qty_source: str,
     position_state_source: str,
@@ -3027,6 +3031,22 @@ def _submit_via_standard_path(
 ):
     symbol = settings.PAIR
     decision_observability = decision_observability or {}
+    submit_intent = OrderIntent(
+        client_order_id=client_order_id,
+        market=symbol,
+        side=side,
+        normalized_side=("bid" if side == "BUY" else "ask"),
+        qty=float(qty),
+        price=None,
+        created_ts=int(ts),
+        submit_contract=submit_contract_context,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=submit_intent,
+        rules=effective_rules,
+        skip_qty_revalidation=True,
+    )
     sell_truth_source_fields = _sell_truth_source_fields(
         decision_observability=decision_observability,
         submit_qty_source=submit_qty_source,
@@ -3074,7 +3094,7 @@ def _submit_via_standard_path(
         side=side,
         order_type=order_type,
         normalized_qty=float(qty),
-        contract_context=submit_contract_context,
+        contract_context=submit_plan.submit_contract_context,
     )
     base_submit_failure_fields = _submit_failure_fields(
         side=side,
@@ -3165,7 +3185,8 @@ def _submit_via_standard_path(
         final_intended_qty=float(final_intended_qty),
         final_submitted_qty=float(final_submitted_qty),
         decision_reason_code=decision_reason_code,
-        submit_contract_context=submit_contract_context,
+        submit_plan=submit_plan,
+        submit_contract_context=submit_plan.submit_contract_context,
         submit_path="live_standard_market",
         symbol=symbol,
         payload_hash=payload_fingerprint(payload),
@@ -3327,13 +3348,24 @@ def _dispatch_standard_submit_attempt(
                 exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
             )
         )
-        order = broker.place_order(
-            client_order_id=context.client_order_id,
-            side=context.side,
-            qty=context.qty,
-            price=None,
-            buy_price_none_submit_contract=context.submit_contract_context,
-        )
+        try:
+            order = broker.place_order(
+                client_order_id=context.client_order_id,
+                side=context.side,
+                qty=context.qty,
+                price=None,
+                submit_plan=context.submit_plan,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            order = broker.place_order(
+                client_order_id=context.client_order_id,
+                side=context.side,
+                qty=context.qty,
+                price=None,
+                buy_price_none_submit_contract=context.submit_plan.buy_price_none_submit_contract,
+            )
         response_ts = int(time.time() * 1000)
         return order, request_ts, response_ts
     except BrokerTemporaryError as e:
@@ -5024,6 +5056,7 @@ def _execute_live_submission_and_application(
         raw_total_asset_qty=position_state.raw_total_asset_qty,
         open_exposure_qty=float(position_state.open_exposure_qty),
         dust_tracking_qty=float(position_state.dust_tracking_qty),
+        effective_rules=position_state.effective_rules,
         decision_observability=decision_observability,
         submit_qty_source=feasibility.submit_qty_source,
         position_state_source=str(decision_observability["position_state_source"]),
