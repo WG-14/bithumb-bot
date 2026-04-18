@@ -1917,14 +1917,27 @@ def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_
     )
     validated: dict[str, object] = {}
     original_validate = order_rules.validate_buy_price_none_submit_contract
+    original_validate_contract = order_rules.validate_buy_price_none_order_chance_contract
 
     def _capture_validate(*, submit_contract: order_rules.BuyPriceNoneSubmitContract) -> None:
         validated["contract"] = submit_contract
         original_validate(submit_contract=submit_contract)
 
+    def _capture_validate_contract(
+        *,
+        rules: order_rules.DerivedOrderConstraints,
+        submit_contract: order_rules.BuyPriceNoneSubmitContract,
+    ) -> None:
+        validated["chance_contract"] = submit_contract
+        original_validate_contract(rules=rules, submit_contract=submit_contract)
+
     monkeypatch.setattr(
         "bithumb_bot.broker.order_rules.validate_buy_price_none_submit_contract",
         _capture_validate,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.validate_buy_price_none_order_chance_contract",
+        _capture_validate_contract,
     )
     setattr(broker, "_live_buy_price_none_submit_contract", submit_contract)
 
@@ -1936,6 +1949,7 @@ def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_
 
     assert order.exchange_order_id == "ex-reused-contract"
     assert validated["contract"] is submit_contract
+    assert validated["chance_contract"] is submit_contract
     assert captured["payload"]["order_type"] == submit_contract.exchange_order_type
     assert order.submit_contract_context is not None
     assert order.submit_contract_context["buy_price_none_decision_basis"] == "sentinel_basis"
@@ -2017,6 +2031,28 @@ def test_buy_price_none_diagnostics_reuse_submit_contract_fields() -> None:
     assert diagnostic_fields["alias_used"] == submit_context["buy_price_none_alias_used"]
     assert diagnostic_fields["alias_policy"] == submit_context["buy_price_none_alias_policy"]
     assert diagnostic_fields["block_reason"] == "-"
+
+
+def test_buy_price_none_order_chance_contract_rejects_validation_type_drift() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+    )
+    submit_contract = order_rules.BuyPriceNoneSubmitContract(
+        resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+        chance_validation_order_type="market",
+        chance_supported_order_types=("price",),
+        exchange_submit_field="price",
+        exchange_order_type="price",
+    )
+
+    with pytest.raises(BrokerRejectError, match="chance validation mismatch"):
+        order_rules.validate_buy_price_none_order_chance_contract(
+            rules=rules,
+            submit_contract=submit_contract,
+        )
 
 
 def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> None:

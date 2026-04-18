@@ -2619,6 +2619,85 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
+def test_broker_diagnose_marks_alias_enabled_buy_price_none_as_warn(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    import bithumb_bot.app as app_module
+
+    original_mode = settings.MODE
+    original_live_dry_run = settings.LIVE_DRY_RUN
+    original_alias_enabled = settings.BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED
+
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(app_module.settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", True)
+
+    monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    class _DiagBroker:
+        def get_balance(self):
+            return BrokerBalance(1200000.0, 10000.0, 0.12, 0.01)
+
+        def get_open_orders(
+            self,
+            *,
+            exchange_order_ids: list[str] | tuple[str, ...] | None = None,
+            client_order_ids: list[str] | tuple[str, ...] | None = None,
+        ):
+            return []
+
+        def get_accounts_validation_diagnostics(self):
+            return {}
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _DiagBroker())
+    monkeypatch.setattr(
+        "bithumb_bot.app.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.DerivedOrderConstraints(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=1.0,
+                ask_price_unit=1.0,
+                order_types=("limit", "market"),
+                bid_types=("market",),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+            ),
+            source={
+                "min_qty": "local_fallback",
+                "qty_step": "local_fallback",
+                "min_notional_krw": "local_fallback",
+                "max_qty_decimals": "local_fallback",
+                "bid_min_total_krw": "chance_doc",
+                "ask_min_total_krw": "chance_doc",
+                "bid_price_unit": "chance_doc",
+                "ask_price_unit": "chance_doc",
+            },
+        ),
+    )
+
+    try:
+        cmd_broker_diagnose()
+    finally:
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(app_module.settings, "MODE", original_mode)
+        object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", original_alias_enabled)
+
+    out = capsys.readouterr().out
+    assert "overall=PASS" not in out
+    assert "overall=WARN" in out
+    assert "[WARN] BUY price=None chance resolution:" in out
+    assert "raw_buy_supported_types=['market']" in out
+    assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
+    assert "allowed=True decision_outcome=pass decision_basis=alias_policy alias_used=True alias_policy=market_to_price_alias_enabled block_reason=-" in out
+
+
 def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     import bithumb_bot.app as app_module

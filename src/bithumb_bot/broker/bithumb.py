@@ -2153,6 +2153,7 @@ class BithumbBroker:
             normalize_limit_price_for_side,
             serialize_buy_price_none_submit_contract,
             supported_order_types_for_chance_validation,
+            validate_buy_price_none_order_chance_contract,
             validate_buy_price_none_submit_contract,
             validate_order_chance_support,
             side_min_total_krw,
@@ -2178,19 +2179,26 @@ class BithumbBroker:
                 raise BrokerRejectError(
                     "BUY price=None submit contract missing before broker dispatch"
                 )
-            chance_validation_order_type = (
-                buy_price_none_submit_contract.chance_validation_order_type
-                if buy_price_none_submit_contract is not None
-                else ("market" if price is None else "limit")
-            )
-            chance_supported_order_types = (
-                buy_price_none_submit_contract.chance_supported_order_types
-                if buy_price_none_submit_contract is not None
-                else supported_order_types_for_chance_validation(
+            chance_validation_order_type = "limit"
+            chance_supported_order_types: tuple[str, ...] = ()
+            if buy_price_none_submit_contract is not None:
+                chance_validation_order_type = (
+                    buy_price_none_submit_contract.chance_validation_order_type
+                )
+                chance_supported_order_types = (
+                    buy_price_none_submit_contract.chance_supported_order_types
+                )
+            elif price is None:
+                chance_validation_order_type = "market"
+                chance_supported_order_types = supported_order_types_for_chance_validation(
                     side=order_side,
                     rules=rules,
                 )
-            )
+            else:
+                chance_supported_order_types = supported_order_types_for_chance_validation(
+                    side=order_side,
+                    rules=rules,
+                )
             exchange_submit_field_hint = (
                 (
                     buy_price_none_submit_contract.exchange_submit_field
@@ -2261,19 +2269,19 @@ class BithumbBroker:
                 price=price,
                 rules=rules,
             )
-            validate_order_chance_support(
-                rules=rules,
-                side=side,
-                order_type=chance_validation_order_type,
-                buy_price_none_resolution=(
-                    buy_price_none_submit_contract.resolution
-                    if buy_price_none_submit_contract is not None
-                    else None
-                ),
-            )
             if buy_price_none_submit_contract is not None:
+                validate_buy_price_none_order_chance_contract(
+                    rules=rules,
+                    submit_contract=buy_price_none_submit_contract,
+                )
                 validate_buy_price_none_submit_contract(
                     submit_contract=buy_price_none_submit_contract,
+                )
+            else:
+                validate_order_chance_support(
+                    rules=rules,
+                    side=side,
+                    order_type=chance_validation_order_type,
                 )
             if price is None and normalized_side == "ask":
                 broker_precision_qty = self._truncate_volume(float(qty))
@@ -2402,19 +2410,31 @@ class BithumbBroker:
                     client_order_id=validated_client_order_id,
                 )
 
-            submit_contract_context.update(
-                {
-                    "exchange_submit_field": exchange_submit_field,
-                    "exchange_order_type": (
-                        buy_price_none_submit_contract.exchange_order_type
-                        if buy_price_none_submit_contract is not None
-                        else str(payload.get("order_type") or chance_validation_order_type)
+            if buy_price_none_submit_contract is not None:
+                executed_submit_contract = buy_price_none_submit_contract.with_execution_fields(
+                    exchange_submit_notional_krw=exchange_submit_notional_krw,
+                    exchange_submit_qty=(
+                        float(exchange_submit_qty)
+                        if exchange_submit_field == "volume"
+                        else None
                     ),
-                    "exchange_submit_notional_krw": exchange_submit_notional_krw,
-                    "exchange_submit_qty": float(exchange_submit_qty) if exchange_submit_field == "volume" else None,
-                    "internal_executable_qty": float(internal_lot_qty),
-                }
-            )
+                    internal_executable_qty=float(internal_lot_qty),
+                )
+                submit_contract_context = serialize_buy_price_none_submit_contract(
+                    executed_submit_contract,
+                    market=market,
+                    order_side=order_side,
+                )
+            else:
+                submit_contract_context.update(
+                    {
+                        "exchange_submit_field": exchange_submit_field,
+                        "exchange_order_type": str(payload.get("order_type") or chance_validation_order_type),
+                        "exchange_submit_notional_krw": exchange_submit_notional_krw,
+                        "exchange_submit_qty": float(exchange_submit_qty) if exchange_submit_field == "volume" else None,
+                        "internal_executable_qty": float(internal_lot_qty),
+                    }
+                )
             canonical_payload = BithumbPrivateAPI._query_string(payload)
             RUN_LOG.info(
                 format_log_kv(

@@ -479,6 +479,29 @@ def validate_buy_price_none_submit_contract(*, submit_contract: BuyPriceNoneSubm
     )
 
 
+def validate_buy_price_none_order_chance_contract(
+    *,
+    rules: DerivedOrderConstraints,
+    submit_contract: BuyPriceNoneSubmitContract,
+) -> None:
+    normalized_order_type = _normalize_chance_order_type(
+        submit_contract.chance_validation_order_type
+    )
+    if normalized_order_type != submit_contract.resolution.resolved_order_type:
+        raise BrokerRejectError(
+            "BUY price=None submit contract chance validation mismatch before submit: "
+            f"chance_validation_order_type={submit_contract.chance_validation_order_type!r} "
+            f"resolved_order_type={submit_contract.resolution.resolved_order_type!r}"
+        )
+
+    validate_order_chance_support(
+        rules=rules,
+        side="BUY",
+        order_type=submit_contract.chance_validation_order_type,
+        buy_price_none_resolution=submit_contract.resolution,
+    )
+
+
 def buy_price_none_submit_contract_mismatch(
     *,
     expected: dict[str, object] | None,

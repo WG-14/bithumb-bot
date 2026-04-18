@@ -133,6 +133,14 @@ def _format_chance_contract_change_detail(change: object | None) -> str:
     )
 
 
+def _buy_price_none_readiness_status(*, fields: dict[str, object]) -> str:
+    if not bool(fields.get("allowed")):
+        return "FAIL"
+    if bool(fields.get("alias_used")):
+        return "WARN"
+    return "PASS"
+
+
 def _clarify_dust_observational_summary(summary: object | None) -> str:
     text = str(summary or "").strip()
     if not text:
@@ -1593,7 +1601,7 @@ def cmd_broker_diagnose() -> None:
         )
         add_check(
             "BUY price=None chance resolution",
-            "PASS" if buy_price_none_resolution.allowed else "FAIL",
+            _buy_price_none_readiness_status(fields=buy_price_none_fields),
             (
                 f"raw_bid_types={buy_price_none_fields['raw_bid_types']} "
                 f"raw_order_types={buy_price_none_fields['raw_order_types']} "
