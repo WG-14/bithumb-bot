@@ -34,6 +34,7 @@ SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
 SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
 SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
 SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
+LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE = "live_explicit_submit_plan_v1"
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class StandardSubmitPipelineRequest:
     decision_reason: str | None
     exit_rule_name: str | None
     order_type: str
+    contract_profile: str
     payload_hash: str
     internal_lot_size: float | None
     effective_min_trade_qty: float | None
@@ -503,6 +505,7 @@ def _planning_failure(
             "request_ts": None,
             "response_ts": None,
             "submit_path": "live_standard_market",
+            "contract_profile": LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
             "submit_phase": "planning",
             "execution_state": "planning_failed",
             "submit_mode": settings.MODE,
@@ -609,6 +612,28 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
     submit_plan = request.submit_plan
     if submit_plan is None:
         raise BrokerRejectError("live submit requires explicit submit_plan before dispatch")
+    if request.contract_profile != LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE:
+        raise BrokerRejectError(
+            "live submit contract profile invalid before dispatch: "
+            f"contract_profile={request.contract_profile!r}"
+        )
+    if str(submit_plan.phase_identity or "") != "planning":
+        raise BrokerRejectError(
+            "live submit_plan phase identity invalid before dispatch: "
+            f"phase_identity={submit_plan.phase_identity!r}"
+        )
+    if str(submit_plan.phase_result or "") != "planned":
+        raise BrokerRejectError(
+            "live submit_plan phase result invalid before dispatch: "
+            f"phase_result={submit_plan.phase_result!r}"
+        )
+    if not str(submit_plan.plan_id or "").strip():
+        raise BrokerRejectError("live submit_plan plan_id missing before dispatch")
+    if str(submit_plan.intent.market).strip() != str(settings.PAIR).strip():
+        raise BrokerRejectError(
+            "live submit_plan market mismatch before dispatch: "
+            f"request={settings.PAIR} planned={submit_plan.intent.market}"
+        )
     if request.client_order_id != submit_plan.intent.client_order_id:
         raise BrokerRejectError(
             "live submit_plan client_order_id mismatch before dispatch: "
@@ -630,6 +655,16 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
             f"request=None planned={submit_plan.intent.price}"
         )
     return submit_plan
+
+
+def _dispatch_kwargs_from_submit_plan(*, submit_plan: SubmitPlan) -> dict[str, object]:
+    return {
+        "client_order_id": submit_plan.intent.client_order_id,
+        "side": submit_plan.intent.side,
+        "qty": float(submit_plan.intent.qty),
+        "price": submit_plan.intent.price,
+        "submit_plan": submit_plan,
+    }
 
 
 def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: SubmitPlan) -> _StandardSubmitAttemptContext:
@@ -684,6 +719,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "request_ts": None,
             "response_ts": None,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "planning",
             "execution_state": "validated_pre_submit",
             "submit_mode": settings.MODE,
@@ -766,6 +802,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "request_ts": None,
             "response_ts": None,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "signed_request",
             "execution_state": "signed_request_prepared",
             "submit_mode": settings.MODE,
@@ -822,6 +859,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
 
 def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: Broker) -> tuple[BrokerOrder, int, int] | None:
     request = context.request
+    dispatch_kwargs = _dispatch_kwargs_from_submit_plan(submit_plan=context.submit_plan)
     try:
         request_ts = int(time.time() * 1000)
         RUN_LOG.info(
@@ -856,13 +894,7 @@ def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: 
                 exchange_submit_notional_krw=context.base_submit_contract_fields["exchange_submit_notional_krw"] or "",
             )
         )
-        order = broker.place_order(
-            client_order_id=request.client_order_id,
-            side=request.side,
-            qty=request.qty,
-            price=None,
-            submit_plan=context.submit_plan,
-        )
+        order = broker.place_order(**dispatch_kwargs)
         response_ts = int(time.time() * 1000)
         return order, request_ts, response_ts
     except BrokerTemporaryError as error:
@@ -897,6 +929,7 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
@@ -966,6 +999,7 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
@@ -1035,6 +1069,7 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
@@ -1122,6 +1157,7 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "confirmation",
             "execution_state": "broker_response_received",
             "submit_mode": settings.MODE,
@@ -1194,6 +1230,7 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
             "request_ts": request_ts,
             "response_ts": response_ts,
             "submit_path": context.submit_path,
+            "contract_profile": request.contract_profile,
             "submit_phase": "confirmation",
             "execution_state": "broker_response_received",
             "submit_mode": settings.MODE,

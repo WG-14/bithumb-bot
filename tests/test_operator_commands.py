@@ -5874,7 +5874,9 @@ class _FlattenBrokerSuccess:
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract=None,
+        submit_plan=None,
     ):
+        assert submit_plan is not None
         self.calls.append({"client_order_id": client_order_id, "side": side, "qty": qty, "price": price})
 
         class _Order:
@@ -5885,6 +5887,28 @@ class _FlattenBrokerSuccess:
 
     def get_balance(self) -> BrokerBalance:
         return self.balance
+
+
+def _stub_flatten_submit_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("limit", "price", "market"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _pair: SimpleNamespace(rules=rules),
+    )
 
 
 def test_flatten_position_no_position_safe_noop(monkeypatch, tmp_path, capsys):
@@ -6057,6 +6081,7 @@ def test_flatten_position_recorded_buy_below_effective_min_qty_is_normal_noop(
 
 def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
+    _stub_flatten_submit_rules(monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
     prev_step = settings.LIVE_ORDER_QTY_STEP
@@ -6281,6 +6306,7 @@ def test_flatten_position_reserved_exit_qty_does_not_bypass_canonical_sell_autho
 
 def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path, monkeypatch)
+    _stub_flatten_submit_rules(monkeypatch)
     monkeypatch.setenv("MODE", "live")
     object.__setattr__(settings, "MODE", "live")
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
@@ -6327,6 +6353,7 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract=None,
+            submit_plan=None,
         ):
             raise RuntimeError("submit boom")
 
@@ -6400,6 +6427,7 @@ def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract=None,
+            submit_plan=None,
         ):
             self.place_order_calls += 1
             raise AssertionError("place_order must not be called when pretrade fails")
@@ -6469,6 +6497,7 @@ def test_flatten_position_blocks_on_invalid_best_quote(monkeypatch, tmp_path, ca
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract=None,
+            submit_plan=None,
         ):
             raise AssertionError("place_order must not be called when best quote is invalid")
 

@@ -53,6 +53,13 @@ from .order_lookup_v1 import (
     status_from_state as v1_status_from_state,
 )
 from .bithumb_adapter import build_signed_order_request
+from .bithumb_order_queries import (
+    get_fills as load_bithumb_fills,
+    get_open_orders as load_bithumb_open_orders,
+    get_order as load_bithumb_order,
+    get_recent_orders as load_bithumb_recent_orders,
+    get_recent_orders_for_recovery as load_bithumb_recent_orders_for_recovery,
+)
 from .order_list_v1 import build_order_list_params, parse_v1_order_list_row
 from .order_list_v1 import build_recovery_order_list_params
 from .order_list_v1 import V1ListNormalizedOrder
@@ -1600,6 +1607,10 @@ class BithumbBroker:
         return canonical_market_id(settings.PAIR)
 
     @staticmethod
+    def _now_millis() -> int:
+        return int(time.time() * 1000)
+
+    @staticmethod
     def _decimal_from_value(value: object) -> Decimal:
         return decimal_from_value(value)
 
@@ -1996,54 +2007,15 @@ class BithumbBroker:
         submit_contract_context: dict[str, object] = {}
         try:
             if submit_plan is None:
-                normalized_side = normalize_order_side(side)
-                if (
-                    price is None
-                    and normalized_side == "bid"
-                    and buy_price_none_submit_contract is not None
-                ):
-                    from . import order_rules as order_rules_module
-
-                    resolved_rules = order_rules_module.get_effective_order_rules(self._market()).rules
-                    buy_price_none_resolution = order_rules_module.resolve_buy_price_none_resolution(
-                        rules=resolved_rules,
-                    )
-                    contract_context = buy_price_none_submit_contract.as_context()
-                    submit_contract_context = dict(contract_context)
-                    supported_order_types = ",".join(
-                        str(item)
-                        for item in buy_price_none_submit_contract.chance_supported_order_types
-                    ) or "-"
-                    RUN_LOG.info(
-                        format_log_kv(
-                            "[ORDER_SUBMIT] buy submit contract preflight",
-                            chance_validation_order_type=buy_price_none_submit_contract.chance_validation_order_type,
-                            supported_order_types=supported_order_types,
-                            buy_price_none_allowed=1 if bool(contract_context.get("buy_price_none_allowed")) else 0,
-                            buy_price_none_alias_used=1 if bool(contract_context.get("buy_price_none_alias_used")) else 0,
-                            buy_price_none_block_reason=str(contract_context.get("buy_price_none_block_reason") or "-"),
-                            submit_field=str(contract_context.get("exchange_submit_field") or "-"),
-                        )
-                    )
-                    order_rules_module.validate_order_chance_support(
-                        rules=resolved_rules,
-                        side="BUY",
-                        order_type=buy_price_none_submit_contract.chance_validation_order_type,
-                        buy_price_none_resolution=buy_price_none_resolution,
-                    )
-                submit_plan = plan_place_order(
-                    self,
-                    intent=OrderIntent(
-                        client_order_id=validated_client_order_id,
-                        market=self._market(),
-                        side=side,
-                        normalized_side=normalized_side,
-                        qty=float(qty),
-                        price=price,
-                        created_ts=now,
-                        submit_contract=buy_price_none_submit_contract,
-                        trace_id=validated_client_order_id,
-                    ),
+                if settings.MODE == "live":
+                    raise BrokerRejectError("live broker submit requires explicit submit_plan before dispatch")
+                submit_plan = self._plan_place_order_for_compat_dispatch(
+                    client_order_id=validated_client_order_id,
+                    side=side,
+                    qty=float(qty),
+                    price=price,
+                    now=now,
+                    buy_price_none_submit_contract=buy_price_none_submit_contract,
                 )
             if validated_client_order_id != submit_plan.intent.client_order_id:
                 raise BrokerRejectError(
@@ -2081,6 +2053,65 @@ class BithumbBroker:
                 else dict(submit_contract_context),
             )
             raise
+
+    def _plan_place_order_for_compat_dispatch(
+        self,
+        *,
+        client_order_id: str,
+        side: str,
+        qty: float,
+        price: float | None,
+        now: int,
+        buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None",
+    ):
+        normalized_side = normalize_order_side(side)
+        if (
+            price is None
+            and normalized_side == "bid"
+            and buy_price_none_submit_contract is not None
+        ):
+            from . import order_rules as order_rules_module
+
+            resolved_rules = order_rules_module.get_effective_order_rules(self._market()).rules
+            buy_price_none_resolution = order_rules_module.resolve_buy_price_none_resolution(
+                rules=resolved_rules,
+            )
+            contract_context = buy_price_none_submit_contract.as_context()
+            supported_order_types = ",".join(
+                str(item)
+                for item in buy_price_none_submit_contract.chance_supported_order_types
+            ) or "-"
+            RUN_LOG.info(
+                format_log_kv(
+                    "[ORDER_SUBMIT] buy submit contract preflight",
+                    chance_validation_order_type=buy_price_none_submit_contract.chance_validation_order_type,
+                    supported_order_types=supported_order_types,
+                    buy_price_none_allowed=1 if bool(contract_context.get("buy_price_none_allowed")) else 0,
+                    buy_price_none_alias_used=1 if bool(contract_context.get("buy_price_none_alias_used")) else 0,
+                    buy_price_none_block_reason=str(contract_context.get("buy_price_none_block_reason") or "-"),
+                    submit_field=str(contract_context.get("exchange_submit_field") or "-"),
+                )
+            )
+            order_rules_module.validate_order_chance_support(
+                rules=resolved_rules,
+                side="BUY",
+                order_type=buy_price_none_submit_contract.chance_validation_order_type,
+                buy_price_none_resolution=buy_price_none_resolution,
+            )
+        return plan_place_order(
+            self,
+            intent=OrderIntent(
+                client_order_id=client_order_id,
+                market=self._market(),
+                side=side,
+                normalized_side=normalized_side,
+                qty=float(qty),
+                price=price,
+                created_ts=now,
+                submit_contract=buy_price_none_submit_contract,
+                trace_id=client_order_id,
+            ),
+        )
 
     def request_cancel_order(
         self,
@@ -2327,75 +2358,11 @@ class BithumbBroker:
         client_order_id: str | None = None,
         exchange_order_id: str | None = None,
     ) -> BrokerOrder:
-        now = int(time.time() * 1000)
-        requested = resolve_v1_requested_identifiers(
+        return load_bithumb_order(
+            self,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
-        )
-        params = build_v1_order_lookup_params(
-            client_order_id=requested.client_order_id,
-            exchange_order_id=requested.exchange_order_id,
-        )
-
-        exid = requested.exchange_order_id or f"dry_{requested.client_order_id}"
-        if self.dry_run:
-            return BrokerOrder(requested.client_order_id, exid, "BUY", "NEW", None, 0.0, 0.0, now, now)
-
-        response_client_order_id = ""
-        response_exchange_order_id = ""
-        try:
-            # 1) transport/schema gate
-            payload = self._get_private("/v1/order", params, retry_safe=True)
-            data = require_v1_order_payload_dict(payload, context="order lookup response")
-            self._journal_read_summary(path="/v1/order", data=data)
-            response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
-            if not response_has_identifier:
-                raise BrokerSchemaError("order lookup response schema mismatch: missing both uuid and client_order_id in response")
-
-            # 2) identifier resolution and consistency
-            resolved_ids = resolve_v1_order_identifiers(
-                data,
-                fallback_client_order_id=requested.client_order_id,
-            )
-            response_client_order_id = resolved_ids.client_order_id
-            response_exchange_order_id = resolved_ids.exchange_order_id
-            ensure_v1_identifier_consistency(
-                requested=requested,
-                response=resolved_ids,
-                context="order lookup response",
-                require_response_identifier=True,
-            )
-
-            # 3) domain mapping
-            normalized = self._normalize_v1_order_row_strict(data)
-        except (BrokerSchemaError, BrokerIdentifierMismatchError, BrokerTemporaryError, BrokerRejectError) as exc:
-            self._log_v1_myorder_lookup_failure(
-                stage="get_order",
-                retry_safe=True,
-                requested_client_order_id=requested.client_order_id,
-                requested_exchange_order_id=requested.exchange_order_id,
-                response_client_order_id=response_client_order_id,
-                response_exchange_order_id=response_exchange_order_id,
-                reason=f"{classify_private_api_error(exc)[0]}:{exc}",
-            )
-            raise
-
-        state = normalized.state
-        qty_req = float(normalized.volume)
-        qty_filled = float(normalized.executed_volume)
-        status = v1_status_from_state(state=state, qty_req=qty_req, qty_filled=qty_filled)
-        order_raw = self._raw_v1_order_fields(data)
-        return BrokerOrder(
-            client_order_id=response_client_order_id,
-            exchange_order_id=response_exchange_order_id,
-            side=str(normalized.side),
-            status=status,
-            price=float(normalized.price) if normalized.price is not None else None,
-            qty_req=qty_req,
-            qty_filled=qty_filled,
-            created_ts=int(normalized.created_ts),
-            updated_ts=int(normalized.updated_ts),
-            raw=order_raw,
+            classify_private_api_error=classify_private_api_error,
         )
 
     def get_open_orders(
@@ -2404,217 +2371,19 @@ class BithumbBroker:
         exchange_order_ids: list[str] | tuple[str, ...] | None = None,
         client_order_ids: list[str] | tuple[str, ...] | None = None,
     ) -> list[BrokerOrder]:
-        if self.dry_run:
-            return []
-        if not exchange_order_ids and not client_order_ids:
-            raise BrokerRejectError(
-                "open order lookup is identifier-scoped by bot policy; /v1/orders broad market/state scans are reserved for recovery via get_recent_orders_for_recovery"
-            )
-        data = self._get_private(
-            "/v1/orders",
-            build_order_list_params(
-                uuids=exchange_order_ids,
-                client_order_ids=client_order_ids,
-                state="wait",
-                page=1,
-                order_by="desc",
-            ),
-            retry_safe=True,
+        return load_bithumb_open_orders(
+            self,
+            exchange_order_ids=exchange_order_ids,
+            client_order_ids=client_order_ids,
         )
-        self._journal_read_summary(path="/v1/orders(open_orders)", data=data)
-        if not isinstance(data, list):
-            raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
-
-        out: list[BrokerOrder] = []
-        exchange_ids_count = len(exchange_order_ids or [])
-        client_ids_count = len(client_order_ids or [])
-        for row in data:
-            if not isinstance(row, dict):
-                raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
-            try:
-                normalized = parse_v1_order_list_row(row)
-            except BrokerRejectError as exc:
-                self._log_v1_orders_parse_failure(
-                    endpoint="/v1/orders",
-                    state="wait",
-                    exchange_ids_count=exchange_ids_count,
-                    client_ids_count=client_ids_count,
-                    row=row,
-                    reason=str(exc),
-                )
-                raise
-            qty_req, qty_filled = self._v1_list_quantities(normalized)
-            status = v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled)
-            self._log_v1_orders_price_resolution(
-                endpoint="/v1/orders",
-                state="wait",
-                exchange_ids_count=exchange_ids_count,
-                client_ids_count=client_ids_count,
-                row=row,
-                normalized=normalized,
-            )
-            out.append(
-                BrokerOrder(
-                    client_order_id=normalized.client_order_id,
-                    exchange_order_id=normalized.uuid,
-                    side=normalized.side,
-                    status=status,
-                    price=normalized.price,
-                    qty_req=qty_req,
-                    qty_filled=qty_filled,
-                    created_ts=int(normalized.created_ts),
-                    updated_ts=int(normalized.updated_ts),
-                    raw=self._raw_v1_order_fields(row),
-                )
-            )
-        return out
 
     def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
-        if self.dry_run:
-            return []
-
-        requested = resolve_v1_requested_identifiers(
+        return load_bithumb_fills(
+            self,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
+            classify_private_api_error=classify_private_api_error,
         )
-
-        if not (requested.exchange_order_id or requested.client_order_id):
-            raise BrokerRejectError(
-                "fill lookup requires identifiers; /v1/order does not support broad recent fill scans without uuid/client_order_id"
-            )
-        params = build_v1_order_lookup_params(
-            client_order_id=requested.client_order_id,
-            exchange_order_id=requested.exchange_order_id,
-        )
-        response_client_order_id = ""
-        response_exchange_order_id = ""
-        try:
-            # 1) transport/schema gate
-            payload = self._get_private("/v1/order", params, retry_safe=True)
-            data = require_v1_order_payload_dict(payload, context="fill lookup response")
-            self._journal_read_summary(path="/v1/order(fills)", data=data)
-            response_has_identifier = any(self._clean_identifier(data.get(key)) for key in ("uuid", "client_order_id"))
-            if not response_has_identifier:
-                raise BrokerSchemaError("fill lookup response schema mismatch: missing both uuid and client_order_id in response")
-
-            # 2) identifier resolution and consistency
-            response_ids = resolve_v1_order_identifiers(
-                data,
-                fallback_client_order_id=requested.client_order_id,
-            )
-            response_client_order_id = response_ids.client_order_id
-            response_exchange_order_id = response_ids.exchange_order_id
-            ensure_v1_identifier_consistency(
-                requested=requested,
-                response=response_ids,
-                context="fill lookup response",
-                require_response_identifier=True,
-                enforce_client_match_with_exchange_lookup=True,
-            )
-        except (BrokerSchemaError, BrokerIdentifierMismatchError, BrokerTemporaryError, BrokerRejectError) as exc:
-            self._log_v1_myorder_lookup_failure(
-                stage="get_fills",
-                retry_safe=True,
-                requested_client_order_id=requested.client_order_id,
-                requested_exchange_order_id=requested.exchange_order_id,
-                response_client_order_id=response_client_order_id,
-                response_exchange_order_id=response_exchange_order_id,
-                reason=f"{classify_private_api_error(exc)[0]}:{exc}",
-            )
-            raise
-
-        fills: list[BrokerFill] = []
-        requires_removed_legacy_scan = False
-        for row in [data]:
-            if row.get("trades") not in (None, "") and not isinstance(row.get("trades"), list):
-                raise BrokerRejectError("/v1/order schema mismatch: trades must be a list when present")
-            require_v1_known_state(row.get("state"), context="/v1/order")
-            normalized = self._normalize_v1_order_row_lenient_for_fills(row)
-            trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
-            if trades:
-                for index, trade in enumerate(trades):
-                    if not isinstance(trade, dict):
-                        continue
-                    qty = self._strict_optional_number(trade, "volume", context="/v1/order.trades")
-                    price = self._resolve_fill_price(trade, normalized_row=normalized)
-                    if qty is None or qty <= 0:
-                        continue
-                    if price is None:
-                        raise BrokerRejectError("/v1/order.trades schema mismatch: missing required numeric field 'price'")
-                    fee = self._extract_fill_fee(
-                        trade,
-                        context="trade",
-                        qty=qty,
-                        price=price,
-                        strict=True,
-                    )
-                    ts_raw = trade.get("created_at")
-                    ts = self._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
-                    trade_client_order_id, _ = self._resolve_order_identifiers(
-                        trade,
-                        fallback_client_order_id=requested.client_order_id or row.get("client_order_id") or "",
-                    )
-                    fills.append(
-                        BrokerFill(
-                            client_order_id=trade_client_order_id,
-                            fill_id=str(trade.get("uuid") or trade.get("id") or f"{row.get('uuid') or ''}:{index}:{ts}"),
-                            fill_ts=ts,
-                            price=float(price),
-                            qty=float(qty),
-                            fee=fee,
-                            exchange_order_id=str(row.get("uuid") or ""),
-                        )
-                    )
-                continue
-
-            qty_filled = float(normalized["executed_volume"])
-            if qty_filled <= 0:
-                requires_removed_legacy_scan = True
-                continue
-            price = self._resolve_fill_price(row, normalized_row=normalized)
-            if price is None:
-                requires_removed_legacy_scan = True
-                continue
-            updated_raw = row.get("updated_at")
-            created_raw = row.get("created_at")
-            try:
-                if updated_raw not in (None, ""):
-                    ts = self._strict_parse_ts(updated_raw, field_name="updated_at", context="/v1/order")
-                elif created_raw not in (None, ""):
-                    ts = self._strict_parse_ts(created_raw, field_name="created_at", context="/v1/order")
-                else:
-                    raise BrokerRejectError("/v1/order schema mismatch: missing required timestamp field 'created_at'")
-            except BrokerRejectError:
-                requires_removed_legacy_scan = True
-                continue
-            fee = self._extract_fill_fee(
-                row,
-                context="aggregate",
-                qty=qty_filled,
-                price=price,
-                strict=False,
-            )
-            aggregate_client_order_id, aggregate_exchange_order_id = self._resolve_order_identifiers(
-                row,
-                fallback_client_order_id=requested.client_order_id or "",
-                fallback_exchange_order_id=str(normalized.get("uuid") or ""),
-            )
-            fills.append(
-                BrokerFill(
-                    client_order_id=aggregate_client_order_id,
-                    fill_id=f"{row.get('uuid') or ''}:aggregate:{ts}",
-                    fill_ts=ts,
-                    price=float(price),
-                    qty=qty_filled,
-                    fee=fee,
-                    exchange_order_id=aggregate_exchange_order_id,
-                )
-            )
-        if not fills and requires_removed_legacy_scan:
-            raise BrokerRejectError(
-                "fill lookup requires /v1/order trade payload completeness; broad /v1/orders done scan fallback is disabled"
-            )
-        return fills
 
     def get_balance(self) -> BrokerBalance:
         """Return broker balance via configured snapshot source abstraction."""
@@ -2630,76 +2399,12 @@ class BithumbBroker:
         exchange_order_ids: list[str] | tuple[str, ...] | None = None,
         client_order_ids: list[str] | tuple[str, ...] | None = None,
     ) -> list[BrokerOrder]:
-        lim = max(0, int(limit))
-        if lim == 0:
-            return []
-        if not exchange_order_ids and not client_order_ids:
-            raise BrokerRejectError(
-                "recent order lookup is identifier-scoped by bot policy; /v1/orders broad market/state scans are reserved for recovery via get_recent_orders_for_recovery"
-            )
-
-        snapshots: dict[str, BrokerOrder] = {}
-        exchange_ids_count = len(exchange_order_ids or [])
-        client_ids_count = len(client_order_ids or [])
-        for state, journal_path in (("wait", "/v1/orders(open_orders)"), ("done", "/v1/orders(done)"), ("cancel", "/v1/orders(cancel)")):
-            data = self._get_private(
-                "/v1/orders",
-                build_order_list_params(
-                    uuids=exchange_order_ids,
-                    client_order_ids=client_order_ids,
-                    state=state,
-                    page=1,
-                    order_by="desc",
-                    limit=min(lim, 100),
-                ),
-                retry_safe=True,
-            )
-            self._journal_read_summary(path=journal_path, data=data)
-            if not isinstance(data, list):
-                raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
-            for row in data:
-                if not isinstance(row, dict):
-                    raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
-                try:
-                    normalized = parse_v1_order_list_row(row)
-                except BrokerRejectError as exc:
-                    self._log_v1_orders_parse_failure(
-                        endpoint="/v1/orders",
-                        state=state,
-                        exchange_ids_count=exchange_ids_count,
-                        client_ids_count=client_ids_count,
-                        row=row,
-                        reason=str(exc),
-                    )
-                    raise
-                qty_req, qty_filled = self._v1_list_quantities(normalized)
-                self._log_v1_orders_price_resolution(
-                    endpoint="/v1/orders",
-                    state=state,
-                    exchange_ids_count=exchange_ids_count,
-                    client_ids_count=client_ids_count,
-                    row=row,
-                    normalized=normalized,
-                )
-                order = BrokerOrder(
-                    client_order_id=normalized.client_order_id,
-                    exchange_order_id=normalized.uuid,
-                    side=normalized.side,
-                    status=v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled),
-                    price=normalized.price,
-                    qty_req=qty_req,
-                    qty_filled=qty_filled,
-                    created_ts=int(normalized.created_ts),
-                    updated_ts=int(normalized.updated_ts),
-                    raw=self._raw_v1_order_fields(row),
-                )
-                snapshot_key = str(order.exchange_order_id or order.client_order_id or "")
-                if snapshot_key:
-                    snapshots[snapshot_key] = order
-
-        out = list(snapshots.values())
-        out.sort(key=lambda order: int(order.updated_ts), reverse=True)
-        return out[:lim]
+        return load_bithumb_recent_orders(
+            self,
+            limit=limit,
+            exchange_order_ids=exchange_order_ids,
+            client_order_ids=client_order_ids,
+        )
 
     def get_recent_orders_for_recovery(
         self,
@@ -2716,74 +2421,12 @@ class BithumbBroker:
             return []
 
         requested_market = parse_documented_market_code(market or self._market())
-        conservative_page_size = min(max(1, lim), max(1, int(page_size or 30)), 30)
-        recovery_states: tuple[tuple[str, ...], ...] = (("wait", "done", "cancel"), ("watch",))
-        snapshots: dict[str, BrokerOrder] = {}
-
-        for states in recovery_states:
-            page = 1
-            while len(snapshots) < lim:
-                params = build_recovery_order_list_params(
-                    market=requested_market,
-                    states=states,
-                    page=page,
-                    order_by="desc",
-                    limit=conservative_page_size,
-                )
-                data = self._get_private("/v1/orders", params, retry_safe=True)
-                self._journal_read_summary(path=f"/v1/orders(recovery:{'+'.join(states)})", data=data)
-                if not isinstance(data, list):
-                    raise BrokerRejectError(f"unexpected /v1/orders payload type: {type(data).__name__}")
-                if not data:
-                    break
-                for row in data:
-                    if not isinstance(row, dict):
-                        raise BrokerRejectError("/v1/orders schema mismatch: each row must be object")
-                    try:
-                        normalized = parse_v1_order_list_row(row)
-                    except BrokerRejectError as exc:
-                        self._log_v1_orders_parse_failure(
-                            endpoint="/v1/orders",
-                            state="+".join(states),
-                            exchange_ids_count=0,
-                            client_ids_count=0,
-                            row=row,
-                            reason=str(exc),
-                        )
-                        raise
-                    qty_req, qty_filled = self._v1_list_quantities(normalized)
-                    self._log_v1_orders_price_resolution(
-                        endpoint="/v1/orders",
-                        state="+".join(states),
-                        exchange_ids_count=0,
-                        client_ids_count=0,
-                        row=row,
-                        normalized=normalized,
-                    )
-                    order = BrokerOrder(
-                        client_order_id=normalized.client_order_id,
-                        exchange_order_id=normalized.uuid,
-                        side=normalized.side,
-                        status=v1_status_from_state(state=normalized.state, qty_req=qty_req, qty_filled=qty_filled),
-                        price=normalized.price,
-                        qty_req=qty_req,
-                        qty_filled=qty_filled,
-                        created_ts=int(normalized.created_ts),
-                        updated_ts=int(normalized.updated_ts),
-                        raw=self._raw_v1_order_fields(row),
-                    )
-                    snapshot_key = str(order.exchange_order_id or order.client_order_id or "")
-                    if snapshot_key:
-                        snapshots[snapshot_key] = order
-                    if len(snapshots) >= lim:
-                        break
-                if len(data) < conservative_page_size:
-                    break
-                page += 1
-
-        out = list(snapshots.values())
-        out.sort(key=lambda order: int(order.updated_ts), reverse=True)
-        return out[:lim]
+        return load_bithumb_recent_orders_for_recovery(
+            self,
+            limit=lim,
+            market=requested_market,
+            page_size=page_size,
+        )
 
     def get_recent_fills(self, *, limit: int = 100) -> list[BrokerFill]:
         raise BrokerRejectError(

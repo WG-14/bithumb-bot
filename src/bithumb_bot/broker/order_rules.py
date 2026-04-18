@@ -235,22 +235,9 @@ def _local_fallback_constraints() -> LocalFallbackConstraints:
 
 
 def fetch_exchange_order_rules(pair: str) -> ExchangeDerivedConstraints:
-    try:
-        market = parse_documented_market_code(pair)
-    except ExchangeMarketCodeError as exc:
-        raise OrderChanceSchemaError(
-            f"/v1/orders/chance request market must be canonical QUOTE-BASE: {pair!r}"
-        ) from exc
-    payload = BithumbBroker().get_order_chance(market=market)
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"unexpected order rules payload type: {type(payload).__name__}")
-    try:
-        chance = parse_order_chance_response(payload, requested_market=market)
-    except SourceOrderChanceMarketMismatchError as exc:
-        raise OrderChanceMarketMismatchError(str(exc)) from exc
-    except SourceOrderChanceSchemaError as exc:
-        raise OrderChanceSchemaError(str(exc)) from exc
-    return derive_order_rules_from_chance(chance)
+    from .order_rule_resolution import fetch_exchange_order_rules as resolve_exchange_order_rules
+
+    return resolve_exchange_order_rules(pair)
 
 
 def _local_fallback_rules() -> DerivedOrderConstraints:
@@ -448,65 +435,9 @@ def _resolution_from_persisted_snapshot(*, pair: str) -> RuleResolution | None:
 
 
 def get_effective_order_rules(pair: str) -> RuleResolution:
-    normalized_pair, _raw_pair = canonical_market_with_raw(pair)
-    now = time.time()
-    fallback = _local_fallback_rules()
+    from .order_rule_resolution import get_effective_order_rules as resolve_effective_order_rules
 
-    cached = _cached_rules.get(normalized_pair)
-    if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
-        return cached[1]
-    try:
-        exchange = fetch_exchange_order_rules(normalized_pair)
-    except Exception as exc:
-        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
-            persisted_resolution = _resolution_from_persisted_snapshot(pair=normalized_pair)
-            if persisted_resolution is not None:
-                _cached_rules[normalized_pair] = (now, persisted_resolution, fallback)
-                return persisted_resolution
-            fallback_issues = required_rule_issues(fallback)
-            if fallback_issues:
-                raise BrokerRejectError(
-                    f"live order rule fallback invalid for {pair}: " + "; ".join(fallback_issues)
-                ) from exc
-            code, summary = classify_private_api_error(exc)
-            detail = f"{type(exc).__name__}: {exc}"
-            raise BrokerRejectError(
-                f"live order rule snapshot unavailable for {pair}; persisted snapshot required "
-                f"(reason_code={code}; reason={summary}; detail={detail})"
-            ) from exc
-        fallback_issues = required_rule_issues(fallback)
-        code, summary = classify_private_api_error(exc)
-        detail = f"{type(exc).__name__}: {exc}"
-        fallback_risk = (
-            "order-rule auto-sync unavailable; side minimum totals, fees, and tick-size normalization "
-            "may stay on local fallback until /v1/orders/chance succeeds again"
-        )
-        notify(
-            f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "
-            f"(reason_code={code}; reason={summary}; detail={detail}; risk={fallback_risk})"
-        )
-        resolution = _build_fallback_only_rule_resolution(
-            pair=pair,
-            now=now,
-            fallback=fallback,
-            reason_code=code,
-            reason_summary=summary,
-            reason_detail=detail,
-            fallback_risk=fallback_risk,
-        )
-        resolution = _persist_rule_snapshot_if_possible(resolution)
-        _cached_rules[normalized_pair] = (now, resolution, fallback)
-        return resolution
-
-    resolution = _build_merged_rule_resolution(
-        pair=pair,
-        now=now,
-        exchange=exchange,
-        fallback=fallback,
-    )
-    resolution = _persist_rule_snapshot_if_possible(resolution)
-    _cached_rules[normalized_pair] = (now, resolution, fallback)
-    return resolution
+    return resolve_effective_order_rules(pair)
 
 
 def get_cached_order_rule_snapshot(pair: str) -> RuleResolution | None:

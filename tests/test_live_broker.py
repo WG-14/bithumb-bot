@@ -23,7 +23,11 @@ from bithumb_bot.broker.live import (
     validate_order,
     validate_pretrade,
 )
-from bithumb_bot.broker.live_submit_orchestrator import StandardSubmitPipelineRequest, run_standard_submit_pipeline
+from bithumb_bot.broker.live_submit_orchestrator import (
+    LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
+    StandardSubmitPipelineRequest,
+    run_standard_submit_pipeline,
+)
 from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.execution_models import OrderIntent
@@ -242,6 +246,7 @@ def _standard_submit_request(
         decision_reason="test",
         exit_rule_name=None,
         order_type=("price" if side == "BUY" else "market"),
+        contract_profile=LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
         payload_hash=payload_fingerprint(
             {
                 "client_order_id": client_order_id,
@@ -1684,6 +1689,7 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert submit_evidence["side"] == "BUY"
     assert float(submit_evidence["intended_qty"]) > 0
     assert submit_evidence["submit_path"] == "live_standard_market"
+    assert submit_evidence["contract_profile"] == LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE
     assert submit_evidence["submit_phase"] == "confirmation"
     assert submit_evidence["execution_state"] == "broker_response_received"
     assert submit_evidence["execution_trace_id"] == row["client_order_id"]
@@ -1714,6 +1720,7 @@ def test_live_success_persists_submit_attempt_record(monkeypatch, tmp_path):
     assert preflight_evidence["exchange_order_type"] == "price"
     assert preflight_evidence["exchange_submit_field"] == "price"
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert preflight_evidence["contract_profile"] == LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE
     assert preflight_evidence["submit_phase"] == "planning"
     assert preflight_evidence["execution_state"] == "validated_pre_submit"
     assert preflight_evidence["execution_trace_id"] == row["client_order_id"]
@@ -2168,7 +2175,7 @@ def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_
     assert diagnostic_fields["alias_policy"] == "sentinel_alias_policy"
 
 
-def test_bithumb_broker_buy_price_none_rejects_missing_live_submit_contract_before_dispatch(monkeypatch) -> None:
+def test_bithumb_broker_rejects_missing_live_submit_plan_before_dispatch(monkeypatch) -> None:
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "PAIR", "KRW-BTC")
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
@@ -2206,7 +2213,7 @@ def test_bithumb_broker_buy_price_none_rejects_missing_live_submit_contract_befo
 
     monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
 
-    with pytest.raises(BrokerRejectError, match="BUY price=None submit contract missing before broker dispatch"):
+    with pytest.raises(BrokerRejectError, match="explicit submit_plan"):
         broker.place_order(client_order_id="cid-missing", side="BUY", qty=0.001, price=None)
 
     assert dispatch_attempted is False
@@ -2554,8 +2561,7 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     _stub_live_effective_order_rules(monkeypatch)
 
     monkeypatch.setattr(
-        live_module,
-        "_build_live_submit_plan",
+        "bithumb_bot.broker.live_submission_execution.build_live_submit_plan",
         lambda **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
     )
 
@@ -2696,6 +2702,178 @@ def test_run_standard_submit_pipeline_dispatches_valid_explicit_submit_plan(monk
         assert order.client_order_id == "live_submit_plan_explicit"
     finally:
         conn.close()
+
+
+def test_run_standard_submit_pipeline_rejects_non_planning_submit_plan_metadata(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    db_path = tmp_path / "explicit_submit_plan_bad_phase.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _CommitCheckingBroker(db_path=str(db_path))
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = replace(
+        plan_place_order(
+            broker,
+            intent=OrderIntent(
+                client_order_id="live_submit_plan_bad_phase",
+                market="KRW-BTC",
+                side="BUY",
+                normalized_side="bid",
+                qty=0.01,
+                price=None,
+                created_ts=1000,
+                submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+                market_price_hint=100000000.0,
+                trace_id="live_submit_plan_bad_phase",
+            ),
+            rules=rules,
+            skip_qty_revalidation=True,
+        ),
+        phase_identity="signed_request",
+    )
+    request = _standard_submit_request(
+        conn=conn,
+        submit_plan=submit_plan,
+        effective_rules=rules,
+        client_order_id="live_submit_plan_bad_phase",
+    )
+
+    try:
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is None
+        assert broker.place_order_calls == 0
+        row = conn.execute(
+            "SELECT status, local_intent_state, last_error FROM orders WHERE client_order_id=?",
+            (request.client_order_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "FAILED"
+        assert row["local_intent_state"] == "PLAN_REJECTED"
+        assert "phase identity invalid" in str(row["last_error"])
+    finally:
+        conn.close()
+
+
+def test_run_standard_submit_pipeline_rejects_unknown_contract_profile(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    db_path = tmp_path / "explicit_submit_plan_bad_contract.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _CommitCheckingBroker(db_path=str(db_path))
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_submit_plan_bad_contract",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_submit_plan_bad_contract",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = replace(
+        _standard_submit_request(
+            conn=conn,
+            submit_plan=submit_plan,
+            effective_rules=rules,
+            client_order_id="live_submit_plan_bad_contract",
+        ),
+        contract_profile="legacy_bool_combo",
+    )
+
+    try:
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is None
+        assert broker.place_order_calls == 0
+        row = conn.execute(
+            "SELECT status, local_intent_state, last_error FROM orders WHERE client_order_id=?",
+            (request.client_order_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "FAILED"
+        assert row["local_intent_state"] == "PLAN_REJECTED"
+        assert "contract profile invalid" in str(row["last_error"])
+    finally:
+        conn.close()
+
+
+def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "submit_phase_progression.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
+    _stub_live_reference_quote(monkeypatch)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    trade = live_execute_signal(_FakeBroker(), "BUY", 1000, 100000000.0)
+    assert trade is not None
+
+    conn = ensure_db(str(tmp_path / "submit_phase_progression.sqlite"))
+    row = conn.execute(
+        "SELECT client_order_id FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    phases = conn.execute(
+        """
+        SELECT event_type, broker_response_summary, submit_evidence
+        FROM order_events
+        WHERE client_order_id=?
+          AND event_type IN (
+              'submit_attempt_preflight',
+              'submit_attempt_signed',
+              'submit_started',
+              'submit_attempt_recorded'
+          )
+        ORDER BY id ASC
+        """,
+        (row["client_order_id"],),
+    ).fetchall()
+    conn.close()
+
+    assert [str(phase["event_type"]) for phase in phases] == [
+        "submit_started",
+        "submit_attempt_preflight",
+        "submit_attempt_signed",
+        "submit_attempt_recorded",
+    ]
+    preflight_evidence = json.loads(str(phases[1]["submit_evidence"]))
+    signed_evidence = json.loads(str(phases[2]["submit_evidence"]))
+    confirmation_evidence = json.loads(str(phases[3]["submit_evidence"]))
+    assert preflight_evidence["submit_phase"] == "planning"
+    assert signed_evidence["submit_phase"] == "signed_request"
+    assert confirmation_evidence["submit_phase"] == "confirmation"
 
 
 def test_each_submit_attempt_records_exactly_one_classification(tmp_path):

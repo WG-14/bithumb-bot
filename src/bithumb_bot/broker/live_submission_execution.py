@@ -24,7 +24,13 @@ from ..reason_codes import (
     SELL_FAILURE_CATEGORY_UNRESOLVED_RISK_GATE,
 )
 from ..risk import evaluate_order_submission_halt
-from .live_submit_orchestrator import StandardSubmitPipelineRequest, record_standard_submit_planning_failure, run_standard_submit_pipeline
+from .live_submit_planning import build_live_submit_plan
+from .live_submit_orchestrator import (
+    LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
+    StandardSubmitPipelineRequest,
+    record_standard_submit_planning_failure,
+    run_standard_submit_pipeline,
+)
 
 
 def execute_live_submission_and_application(
@@ -448,6 +454,7 @@ def execute_live_submission_and_application(
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
         order_type=("price" if feasibility.side == "BUY" else "market"),
+        contract_profile=LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
         payload_hash=payload_hash,
         internal_lot_size=float(lot_sizing.internal_lot_size),
         effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
@@ -463,7 +470,7 @@ def execute_live_submission_and_application(
         sell_observability=sell_observability,
     )
     try:
-        submit_plan = live_module._build_live_submit_plan(
+        submit_plan = build_live_submit_plan(
             broker=broker,
             client_order_id=client_order_id,
             side=feasibility.side,

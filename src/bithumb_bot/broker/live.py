@@ -12,7 +12,6 @@ from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..decision_context import resolve_canonical_position_exposure_snapshot
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
-from ..execution_models import OrderIntent, SubmitPlan
 from ..dust import (
     DustState,
     build_dust_display_context,
@@ -52,8 +51,6 @@ from ..reason_codes import (
     sell_failure_detail_from_category,
 )
 from .order_rules import (
-    BuyPriceNoneSubmitContract,
-    build_buy_price_none_submit_contract,
     get_effective_order_rules,
     serialize_buy_price_none_submit_contract,
     side_min_total_krw,
@@ -66,7 +63,6 @@ from .live_submit_orchestrator import (
     run_standard_submit_pipeline,
 )
 from .live_submission_execution import execute_live_submission_and_application
-from .order_submit import plan_place_order
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -486,41 +482,6 @@ def _sell_qty_boundary_kind_from_dust_details(*, dust_details: dict[str, object]
     if "qty_step" in detail_text or "max_qty_decimals" in detail_text:
         return "qty_step"
     return "none"
-
-
-def _build_live_submit_plan(
-    *,
-    broker: Broker,
-    client_order_id: str,
-    side: str,
-    qty: float,
-    ts: int,
-    effective_rules,
-    reference_price: float | None,
-) -> SubmitPlan:
-    explicit_submit_contract: BuyPriceNoneSubmitContract | None = None
-    if side == "BUY":
-        explicit_submit_contract = build_buy_price_none_submit_contract(
-            rules=effective_rules,
-        )
-    submit_intent = OrderIntent(
-        client_order_id=client_order_id,
-        market=settings.PAIR,
-        side=side,
-        normalized_side=("bid" if side == "BUY" else "ask"),
-        qty=float(qty),
-        price=None,
-        created_ts=int(ts),
-        submit_contract=explicit_submit_contract,
-        market_price_hint=reference_price,
-        trace_id=client_order_id,
-    )
-    return plan_place_order(
-        broker,
-        intent=submit_intent,
-        rules=effective_rules,
-        skip_qty_revalidation=True,
-    )
 
 
 def _resolve_submit_qty_source_truth_source(
