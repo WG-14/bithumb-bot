@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
+from bithumb_bot.broker import order_rules
 from bithumb_bot.config import settings
 from bithumb_bot.marketdata import (
     fetch_orderbook_top,
@@ -96,29 +97,34 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
         orderbook_markets.append(market)
         return BestQuote(market=market, bid_price=100.0, ask_price=101.0)
 
+    rules = type(
+        "_Rules",
+        (),
+        {
+            "bid_min_total_krw": 100.0,
+            "ask_min_total_krw": 100.0,
+            "bid_price_unit": 1.0,
+            "ask_price_unit": 1.0,
+            "min_notional_krw": 100.0,
+            "order_types": ("limit", "price"),
+            "bid_types": ("price",),
+            "ask_types": ("limit", "market"),
+            "order_sides": ("bid", "ask"),
+        },
+    )()
+
     monkeypatch.setattr("bithumb_bot.broker.bithumb.fetch_orderbook_top", _fake_orderbook)
     monkeypatch.setattr(
         "bithumb_bot.broker.order_rules.get_effective_order_rules",
-        lambda _pair: type(
-            "_ResolvedRules",
-            (),
-            {
-                "rules": type(
-                    "_Rules",
-                    (),
-                    {
-                        "bid_min_total_krw": 100.0,
-                        "ask_min_total_krw": 100.0,
-                        "bid_price_unit": 1.0,
-                        "ask_price_unit": 1.0,
-                        "min_notional_krw": 100.0,
-                    },
-                )(),
-            },
-        )(),
+        lambda _pair: type("_ResolvedRules", (), {"rules": rules})(),
     )
     monkeypatch.setattr(broker, "_get_private", _fake_get)
     monkeypatch.setattr(broker, "_post_private", _fake_post)
+    setattr(
+        broker,
+        "_live_buy_price_none_submit_contract",
+        order_rules.build_buy_price_none_submit_contract(rules=rules),
+    )
 
     try:
         broker.get_order_chance()
