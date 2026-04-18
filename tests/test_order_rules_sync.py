@@ -3,7 +3,7 @@ from __future__ import annotations
 from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, fetch_latest_order_rule_snapshot
+from bithumb_bot.db_core import ensure_db, fetch_latest_order_rule_snapshot, record_order_rule_snapshot
 
 
 import pytest
@@ -258,6 +258,137 @@ def test_get_effective_order_rules_reports_schema_violation_even_with_manual_fal
     assert warnings
     assert "OrderChanceSchemaError" in warnings[0]
     assert "response.market.bid.min_total" in warnings[0]
+
+
+def test_live_order_rule_resolution_uses_persisted_snapshot_deterministically(monkeypatch, tmp_path):
+    order_rules._cached_rules.clear()
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_rules_snapshot.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", False)
+
+    conn = ensure_db(str(tmp_path / "order_rules_snapshot.sqlite"))
+    try:
+        record_order_rule_snapshot(
+            conn,
+            market="KRW-BTC",
+            fetched_ts=1000,
+            source_mode="merged",
+            fallback_used=False,
+            fallback_reason_code="",
+            fallback_reason_summary="",
+            rules_payload={
+                "market_id": "KRW-BTC",
+                "bid_min_total_krw": 5000.0,
+                "ask_min_total_krw": 5000.0,
+                "bid_price_unit": 1.0,
+                "ask_price_unit": 1.0,
+                "order_types": ["limit", "price", "market"],
+                "bid_types": ["price"],
+                "ask_types": ["limit", "market"],
+                "order_sides": ["ask", "bid"],
+                "bid_fee": 0.0025,
+                "ask_fee": 0.0025,
+                "maker_bid_fee": 0.0025,
+                "maker_ask_fee": 0.0025,
+                "min_qty": 0.0001,
+                "qty_step": 0.0001,
+                "min_notional_krw": 5000.0,
+                "max_qty_decimals": 8,
+            },
+            source_payload={
+                "ruleset": "merged",
+                "exchange_source_json": "{}",
+                "local_fallback_source_json": "{}",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _market: (_ for _ in ()).throw(BrokerRejectError("exchange unavailable")),
+    )
+
+    resolved_first = order_rules.get_effective_order_rules("KRW-BTC")
+    order_rules._cached_rules.clear()
+    resolved_second = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved_first.source_mode == "merged"
+    assert resolved_second.source_mode == "merged"
+    assert resolved_first.snapshot_persisted is True
+    assert resolved_second.snapshot_persisted is True
+    assert resolved_first.rules.bid_types == ("price",)
+    assert resolved_second.rules.bid_types == ("price",)
+    assert order_rules.build_buy_price_none_submit_contract(rules=resolved_first.rules).contract_id == order_rules.build_buy_price_none_submit_contract(
+        rules=resolved_second.rules
+    ).contract_id
+
+
+def test_live_order_rule_resolution_ignores_fallback_boolean_when_using_persisted_snapshot(monkeypatch, tmp_path):
+    order_rules._cached_rules.clear()
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_rules_snapshot_boolean.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+
+    conn = ensure_db(str(tmp_path / "order_rules_snapshot_boolean.sqlite"))
+    try:
+        record_order_rule_snapshot(
+            conn,
+            market="KRW-BTC",
+            fetched_ts=1000,
+            source_mode="merged",
+            fallback_used=False,
+            fallback_reason_code="",
+            fallback_reason_summary="",
+            rules_payload={
+                "market_id": "KRW-BTC",
+                "bid_min_total_krw": 5000.0,
+                "ask_min_total_krw": 5000.0,
+                "bid_price_unit": 1.0,
+                "ask_price_unit": 1.0,
+                "order_types": ["limit", "price", "market"],
+                "bid_types": ["price"],
+                "ask_types": ["limit", "market"],
+                "order_sides": ["ask", "bid"],
+                "bid_fee": 0.0025,
+                "ask_fee": 0.0025,
+                "maker_bid_fee": 0.0025,
+                "maker_ask_fee": 0.0025,
+                "min_qty": 0.0001,
+                "qty_step": 0.0001,
+                "min_notional_krw": 5000.0,
+                "max_qty_decimals": 8,
+            },
+            source_payload={
+                "ruleset": "merged",
+                "exchange_source_json": "{}",
+                "local_fallback_source_json": "{}",
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        order_rules,
+        "fetch_exchange_order_rules",
+        lambda _market: (_ for _ in ()).throw(BrokerRejectError("exchange unavailable")),
+    )
+
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", False)
+    resolved_with_flag_off = order_rules.get_effective_order_rules("KRW-BTC")
+    order_rules._cached_rules.clear()
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
+    resolved_with_flag_on = order_rules.get_effective_order_rules("KRW-BTC")
+
+    assert resolved_with_flag_off.rules == resolved_with_flag_on.rules
+    assert resolved_with_flag_off.source_mode == resolved_with_flag_on.source_mode
+    assert order_rules.build_buy_price_none_submit_contract(
+        rules=resolved_with_flag_off.rules
+    ).contract_id == order_rules.build_buy_price_none_submit_contract(rules=resolved_with_flag_on.rules).contract_id
 
 
 def test_get_effective_order_rules_rejects_invalid_live_fallback_config(monkeypatch):

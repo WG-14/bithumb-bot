@@ -27,8 +27,6 @@ from ..reason_codes import (
 )
 from .base import Broker, BrokerOrder, BrokerRejectError, BrokerSubmissionUnknownError, BrokerTemporaryError
 from .order_rules import BuyPriceNoneSubmitContract, serialize_buy_price_none_submit_contract
-from .order_submit import plan_place_order
-
 RUN_LOG = logging.getLogger("bithumb_bot.run")
 UNSET_EVENT_FIELD = "-"
 SUBMISSION_REASON_FAILED_BEFORE_SEND = "failed_before_send"
@@ -41,6 +39,7 @@ SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
 @dataclass(frozen=True)
 class StandardSubmitPipelineRequest:
     conn: object
+    submit_plan: SubmitPlan | None
     signal: str
     client_order_id: str
     submit_attempt_id: str
@@ -539,6 +538,45 @@ def _planning_failure(
     )
     RUN_LOG.info(format_log_kv("[ORDER_SKIP] submit planning failed", signal=request.signal, side=request.side, client_order_id=request.client_order_id, reason=reason))
     request.conn.commit()
+
+
+def record_standard_submit_planning_failure(
+    *,
+    request: StandardSubmitPipelineRequest,
+    error: Exception,
+) -> None:
+    _planning_failure(
+        request=request,
+        error=error,
+        phase_trace_fields=_submit_phase_trace_fields(client_order_id=request.client_order_id),
+    )
+
+
+def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) -> SubmitPlan:
+    submit_plan = request.submit_plan
+    if submit_plan is None:
+        raise BrokerRejectError("live submit requires explicit submit_plan before dispatch")
+    if request.client_order_id != submit_plan.intent.client_order_id:
+        raise BrokerRejectError(
+            "live submit_plan client_order_id mismatch before dispatch: "
+            f"request={request.client_order_id} planned={submit_plan.intent.client_order_id}"
+        )
+    if str(request.side).strip().upper() != str(submit_plan.intent.side).strip().upper():
+        raise BrokerRejectError(
+            "live submit_plan side mismatch before dispatch: "
+            f"request={request.side} planned={submit_plan.intent.side}"
+        )
+    if abs(float(request.qty) - float(submit_plan.intent.qty)) > 1e-12:
+        raise BrokerRejectError(
+            "live submit_plan qty mismatch before dispatch: "
+            f"request={float(request.qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+        )
+    if submit_plan.intent.price is not None:
+        raise BrokerRejectError(
+            "live submit_plan price mismatch before dispatch: "
+            f"request=None planned={submit_plan.intent.price}"
+        )
+    return submit_plan
 
 
 def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: SubmitPlan) -> _StandardSubmitAttemptContext:
@@ -1099,27 +1137,10 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
 
 
 def run_standard_submit_pipeline(*, broker: Broker, request: StandardSubmitPipelineRequest) -> BrokerOrder | None:
-    submit_intent = OrderIntent(
-        client_order_id=request.client_order_id,
-        market=settings.PAIR,
-        side=request.side,
-        normalized_side=("bid" if request.side == "BUY" else "ask"),
-        qty=float(request.qty),
-        price=None,
-        created_ts=int(request.ts),
-        market_price_hint=request.reference_price,
-        trace_id=request.client_order_id,
-    )
-    phase_trace_fields = _submit_phase_trace_fields(client_order_id=request.client_order_id)
     try:
-        submit_plan = plan_place_order(
-            broker,
-            intent=submit_intent,
-            rules=request.effective_rules,
-            skip_qty_revalidation=True,
-        )
+        submit_plan = _validate_explicit_submit_plan(request=request)
     except Exception as error:
-        _planning_failure(request=request, error=error, phase_trace_fields=phase_trace_fields)
+        record_standard_submit_planning_failure(request=request, error=error)
         return None
 
     context = _build_context(request=request, submit_plan=submit_plan)

@@ -53,6 +53,7 @@ from ..reason_codes import (
 )
 from .order_rules import (
     BuyPriceNoneSubmitContract,
+    build_buy_price_none_submit_contract,
     get_effective_order_rules,
     serialize_buy_price_none_submit_contract,
     side_min_total_krw,
@@ -61,8 +62,10 @@ from .live_submit_orchestrator import (
     StandardSubmitPipelineRequest,
     _submit_contract_fields,
     _submit_failure_fields,
+    record_standard_submit_planning_failure,
     run_standard_submit_pipeline,
 )
+from .order_submit import plan_place_order
 from .balance_source import fetch_balance_snapshot
 from ..risk import evaluate_buy_guardrails, evaluate_order_submission_halt
 from .. import runtime_state
@@ -476,6 +479,41 @@ def _sell_qty_boundary_kind_from_dust_details(*, dust_details: dict[str, object]
     if "qty_step" in detail_text or "max_qty_decimals" in detail_text:
         return "qty_step"
     return "none"
+
+
+def _build_live_submit_plan(
+    *,
+    broker: Broker,
+    client_order_id: str,
+    side: str,
+    qty: float,
+    ts: int,
+    effective_rules,
+    reference_price: float | None,
+) -> SubmitPlan:
+    explicit_submit_contract: BuyPriceNoneSubmitContract | None = None
+    if side == "BUY":
+        explicit_submit_contract = build_buy_price_none_submit_contract(
+            rules=effective_rules,
+        )
+    submit_intent = OrderIntent(
+        client_order_id=client_order_id,
+        market=settings.PAIR,
+        side=side,
+        normalized_side=("bid" if side == "BUY" else "ask"),
+        qty=float(qty),
+        price=None,
+        created_ts=int(ts),
+        submit_contract=explicit_submit_contract,
+        market_price_hint=reference_price,
+        trace_id=client_order_id,
+    )
+    return plan_place_order(
+        broker,
+        intent=submit_intent,
+        rules=effective_rules,
+        skip_qty_revalidation=True,
+    )
 
 
 def _resolve_submit_qty_source_truth_source(
@@ -3805,47 +3843,62 @@ def _execute_live_submission_and_application(
             "submit_ts": int(ts),
         }
     )
-    order = run_standard_submit_pipeline(
-        broker=broker,
-        request=StandardSubmitPipelineRequest(
-            conn=conn,
-            signal=signal,
+    request = StandardSubmitPipelineRequest(
+        conn=conn,
+        submit_plan=None,
+        signal=signal,
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        side=feasibility.side,
+        order_qty=float(feasibility.order_qty),
+        position_qty=float(intent.order_qty),
+        qty=float(feasibility.normalized_qty),
+        ts=int(ts),
+        intent_key=intent_key,
+        market_price=float(market_price),
+        raw_total_asset_qty=float(position_state.raw_total_asset_qty),
+        open_exposure_qty=float(position_state.open_exposure_qty),
+        dust_tracking_qty=float(position_state.dust_tracking_qty),
+        effective_rules=position_state.effective_rules,
+        submit_qty_source=feasibility.submit_qty_source,
+        position_state_source=str(decision_observability["position_state_source"]),
+        reference_price=reference_price,
+        top_of_book_summary=top_of_book_summary,
+        strategy_name=(strategy_name or settings.STRATEGY_NAME),
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+        order_type=("price" if feasibility.side == "BUY" else "market"),
+        payload_hash=payload_hash,
+        internal_lot_size=float(lot_sizing.internal_lot_size),
+        effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
+        qty_step=float(lot_sizing.qty_step),
+        min_notional_krw=float(lot_sizing.min_notional_krw),
+        intended_lot_count=int(lot_sizing.intended_lot_count),
+        executable_lot_count=int(lot_sizing.executable_lot_count),
+        final_intended_qty=float(feasibility.order_qty),
+        final_submitted_qty=float(feasibility.normalized_qty),
+        decision_reason_code=str(lot_sizing.decision_reason_code),
+        submit_truth_source_fields=submit_truth_source_fields,
+        submit_observability_fields=submit_observability_fields,
+        sell_observability=sell_observability,
+    )
+    try:
+        submit_plan = _build_live_submit_plan(
+            broker=broker,
             client_order_id=client_order_id,
-            submit_attempt_id=submit_attempt_id,
             side=feasibility.side,
-            order_qty=float(feasibility.order_qty),
-            position_qty=float(intent.order_qty),
             qty=float(feasibility.normalized_qty),
             ts=int(ts),
-            intent_key=intent_key,
-            market_price=float(market_price),
-            raw_total_asset_qty=float(position_state.raw_total_asset_qty),
-            open_exposure_qty=float(position_state.open_exposure_qty),
-            dust_tracking_qty=float(position_state.dust_tracking_qty),
             effective_rules=position_state.effective_rules,
-            submit_qty_source=feasibility.submit_qty_source,
-            position_state_source=str(decision_observability["position_state_source"]),
             reference_price=reference_price,
-            top_of_book_summary=top_of_book_summary,
-            strategy_name=(strategy_name or settings.STRATEGY_NAME),
-            decision_id=decision_id,
-            decision_reason=decision_reason,
-            exit_rule_name=exit_rule_name,
-            order_type=("price" if feasibility.side == "BUY" else "market"),
-            payload_hash=payload_hash,
-            internal_lot_size=float(lot_sizing.internal_lot_size),
-            effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
-            qty_step=float(lot_sizing.qty_step),
-            min_notional_krw=float(lot_sizing.min_notional_krw),
-            intended_lot_count=int(lot_sizing.intended_lot_count),
-            executable_lot_count=int(lot_sizing.executable_lot_count),
-            final_intended_qty=float(feasibility.order_qty),
-            final_submitted_qty=float(feasibility.normalized_qty),
-            decision_reason_code=str(lot_sizing.decision_reason_code),
-            submit_truth_source_fields=submit_truth_source_fields,
-            submit_observability_fields=submit_observability_fields,
-            sell_observability=sell_observability,
-        ),
+        )
+    except Exception as error:
+        record_standard_submit_planning_failure(request=request, error=error)
+        return None
+    order = run_standard_submit_pipeline(
+        broker=broker,
+        request=replace(request, submit_plan=submit_plan),
     )
     if order is None:
         return None

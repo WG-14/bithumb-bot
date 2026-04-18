@@ -48,7 +48,6 @@ def build_submit_plan(
 ) -> SubmitPlan:
     from .broker.order_rules import (
         BuyPriceNoneSubmitContract,
-        build_buy_price_none_submit_contract,
         normalize_limit_price_for_side,
         serialize_buy_price_none_submit_contract,
         side_min_total_krw,
@@ -69,16 +68,11 @@ def build_submit_plan(
         buy_submit_contract = None
         provided_submit_contract = intent.submit_contract
         if intent.price is None and intent.normalized_side == "bid":
-            buy_submit_contract = build_buy_price_none_submit_contract(
-                rules=resolved_rules,
-            )
-        if buy_submit_contract is not None and not isinstance(buy_submit_contract, BuyPriceNoneSubmitContract):
-            raise BrokerRejectError("BUY price=None submit contract invalid before broker dispatch")
-        if provided_submit_contract is not None and buy_submit_contract is not None:
+            if provided_submit_contract is None:
+                raise BrokerRejectError("BUY price=None submit contract missing before broker dispatch")
             if not isinstance(provided_submit_contract, BuyPriceNoneSubmitContract):
                 raise BrokerRejectError("BUY price=None submit contract invalid before broker dispatch")
-            if provided_submit_contract != buy_submit_contract:
-                raise BrokerRejectError("BUY price=None submit contract mismatch before broker dispatch")
+            buy_submit_contract = provided_submit_contract
 
         chance_validation_order_type = "limit"
         chance_supported_order_types: tuple[str, ...] = ()

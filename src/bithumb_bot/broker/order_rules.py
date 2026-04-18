@@ -402,6 +402,90 @@ def _build_merged_rule_resolution(
     return resolution
 
 
+def _derived_rules_from_snapshot_payload(payload: dict[str, object]) -> DerivedOrderConstraints:
+    default_rules = DerivedOrderConstraints()
+    sequence_fields = {
+        "order_types",
+        "bid_types",
+        "ask_types",
+        "order_sides",
+    }
+    numeric_float_fields = {
+        "bid_min_total_krw",
+        "ask_min_total_krw",
+        "bid_price_unit",
+        "ask_price_unit",
+        "bid_fee",
+        "ask_fee",
+        "maker_bid_fee",
+        "maker_ask_fee",
+        "min_qty",
+        "qty_step",
+        "min_notional_krw",
+    }
+    numeric_int_fields = {"max_qty_decimals"}
+    normalized: dict[str, object] = {}
+    for field_name in default_rules.__dataclass_fields__.keys():
+        raw_value = payload.get(field_name, getattr(default_rules, field_name))
+        if field_name in sequence_fields:
+            if isinstance(raw_value, (list, tuple)):
+                normalized[field_name] = tuple(str(item) for item in raw_value)
+            elif raw_value in (None, ""):
+                normalized[field_name] = ()
+            else:
+                normalized[field_name] = (str(raw_value),)
+        elif field_name in numeric_float_fields:
+            normalized[field_name] = float(raw_value or 0.0)
+        elif field_name in numeric_int_fields:
+            normalized[field_name] = int(raw_value or 0)
+        else:
+            normalized[field_name] = str(raw_value or "")
+    return DerivedOrderConstraints(**normalized)
+
+
+def _resolution_from_persisted_snapshot(*, pair: str) -> RuleResolution | None:
+    conn = None
+    try:
+        conn = ensure_db()
+        record = fetch_latest_order_rule_snapshot(conn, market=pair)
+        if record is None:
+            return None
+        rules_payload = json.loads(record.rules_json)
+        source_payload = json.loads(record.source_json)
+        exchange_source = {}
+        local_fallback_source = {}
+        try:
+            exchange_source = json.loads(str(source_payload.get("exchange_source_json") or "{}"))
+        except Exception:
+            exchange_source = {}
+        try:
+            local_fallback_source = json.loads(str(source_payload.get("local_fallback_source_json") or "{}"))
+        except Exception:
+            local_fallback_source = {}
+        retrieved_at_sec = float(record.fetched_ts) / 1000.0 if int(record.fetched_ts) > 0 else 0.0
+        return RuleResolution(
+            rules=_derived_rules_from_snapshot_payload(rules_payload),
+            source=dict(source_payload),
+            exchange_source=exchange_source if isinstance(exchange_source, dict) else {},
+            local_fallback_source=local_fallback_source if isinstance(local_fallback_source, dict) else {},
+            fallback_used=bool(record.fallback_used),
+            fallback_reason_code=str(record.fallback_reason_code or ""),
+            fallback_reason_summary=str(record.fallback_reason_summary or ""),
+            fallback_reason_detail="",
+            fallback_risk="",
+            retrieved_at_sec=retrieved_at_sec,
+            expires_at_sec=0.0,
+            stale=False,
+            source_mode=str(record.source_mode or "merged"),
+            snapshot_persisted=True,
+        )
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def get_effective_order_rules(pair: str) -> RuleResolution:
     normalized_pair, _raw_pair = canonical_market_with_raw(pair)
     now = time.time()
@@ -409,20 +493,21 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
 
     cached = _cached_rules.get(normalized_pair)
     if cached and now - cached[0] < _CACHE_TTL_SEC and cached[2] == fallback:
-        cached_resolution = cached[1]
-        if (
-            cached_resolution.fallback_used
-            and settings.MODE == "live"
-            and not bool(settings.LIVE_DRY_RUN)
-            and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK)
-        ):
-            raise BrokerRejectError(
-                f"live order rule snapshot unavailable for {pair}; cached fallback is disabled"
-            )
-        return cached_resolution
+        return cached[1]
     try:
         exchange = fetch_exchange_order_rules(normalized_pair)
     except Exception as exc:
+        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
+            persisted_resolution = _resolution_from_persisted_snapshot(pair=normalized_pair)
+            if persisted_resolution is not None:
+                _cached_rules[normalized_pair] = (now, persisted_resolution, fallback)
+                return persisted_resolution
+            code, summary = classify_private_api_error(exc)
+            detail = f"{type(exc).__name__}: {exc}"
+            raise BrokerRejectError(
+                f"live order rule snapshot unavailable for {pair}; persisted snapshot required "
+                f"(reason_code={code}; reason={summary}; detail={detail})"
+            ) from exc
         fallback_issues = required_rule_issues(fallback)
         code, summary = classify_private_api_error(exc)
         detail = f"{type(exc).__name__}: {exc}"
@@ -433,11 +518,6 @@ def get_effective_order_rules(pair: str) -> RuleResolution:
         if fallback_issues and settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
             raise BrokerRejectError(
                 f"live order rule fallback invalid for {pair}: " + "; ".join(fallback_issues)
-            ) from exc
-        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN) and not bool(settings.LIVE_ALLOW_ORDER_RULE_FALLBACK):
-            raise BrokerRejectError(
-                f"live order rule snapshot unavailable for {pair}; fallback disabled "
-                f"(reason_code={code}; reason={summary}; detail={detail})"
             ) from exc
         notify(
             f"[WARN] order rules auto-sync failed for {pair}; using local fallback only "

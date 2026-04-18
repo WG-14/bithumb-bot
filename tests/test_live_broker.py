@@ -23,7 +23,10 @@ from bithumb_bot.broker.live import (
     validate_order,
     validate_pretrade,
 )
+from bithumb_bot.broker.live_submit_orchestrator import StandardSubmitPipelineRequest, run_standard_submit_pipeline
+from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.dust import build_position_state_model
 from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from bithumb_bot.lifecycle import apply_fill_lifecycle
@@ -200,6 +203,65 @@ def _stub_live_effective_order_rules(monkeypatch) -> None:
                 max_qty_decimals=8,
             )
         ),
+    )
+
+
+def _standard_submit_request(
+    *,
+    conn,
+    submit_plan,
+    effective_rules,
+    client_order_id: str = "live_submit_plan_test",
+    side: str = "BUY",
+    qty: float = 0.01,
+    reference_price: float = 100000000.0,
+) -> StandardSubmitPipelineRequest:
+    return StandardSubmitPipelineRequest(
+        conn=conn,
+        submit_plan=submit_plan,
+        signal=side,
+        client_order_id=client_order_id,
+        submit_attempt_id=f"{client_order_id}:attempt",
+        side=side,
+        order_qty=float(qty),
+        position_qty=float(qty),
+        qty=float(qty),
+        ts=1000,
+        intent_key=f"{client_order_id}:intent",
+        market_price=float(reference_price),
+        raw_total_asset_qty=0.0,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.0,
+        effective_rules=effective_rules,
+        submit_qty_source="test.submit_qty_source",
+        position_state_source="test.position_state_source",
+        reference_price=float(reference_price),
+        top_of_book_summary={"ask": float(reference_price), "bid": float(reference_price) - 1000.0},
+        strategy_name="test_strategy",
+        decision_id=None,
+        decision_reason="test",
+        exit_rule_name=None,
+        order_type=("price" if side == "BUY" else "market"),
+        payload_hash=payload_fingerprint(
+            {
+                "client_order_id": client_order_id,
+                "side": side,
+                "qty": float(qty),
+                "ts": 1000,
+            }
+        ),
+        internal_lot_size=float(qty),
+        effective_min_trade_qty=float(qty),
+        qty_step=float(qty),
+        min_notional_krw=5000.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+        final_intended_qty=float(qty),
+        final_submitted_qty=float(qty),
+        decision_reason_code="test_reason",
+        submit_truth_source_fields={},
+        submit_observability_fields={},
+        sell_observability={},
     )
 
 
@@ -2492,8 +2554,9 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     _stub_live_effective_order_rules(monkeypatch)
 
     monkeypatch.setattr(
-        "bithumb_bot.broker.live_submit_orchestrator.plan_place_order",
-        lambda *args, **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
+        live_module,
+        "_build_live_submit_plan",
+        lambda **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
     )
 
     broker = _FakeBroker()
@@ -2538,6 +2601,101 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     assert submit_evidence["confirmation_id"] == f"{row['client_order_id']}:confirmation"
     assert submit_evidence["error_summary"] == "planner contract mismatch"
     assert started_event is None
+
+
+def test_run_standard_submit_pipeline_rejects_missing_explicit_submit_plan(tmp_path):
+    db_path = tmp_path / "missing_submit_plan.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        request = _standard_submit_request(
+            conn=conn,
+            submit_plan=None,
+            effective_rules=order_rules.DerivedOrderConstraints(
+                market_id="KRW-BTC",
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=1.0,
+                ask_price_unit=1.0,
+                order_types=("price", "market", "limit"),
+                bid_types=("price",),
+                ask_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+            ),
+        )
+        broker = _FakeBroker()
+
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is None
+        assert broker.place_order_calls == 0
+        row = conn.execute(
+            "SELECT status, local_intent_state, last_error FROM orders WHERE client_order_id=?",
+            (request.client_order_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "FAILED"
+        assert row["local_intent_state"] == "PLAN_REJECTED"
+        assert "explicit submit_plan" in str(row["last_error"])
+    finally:
+        conn.close()
+
+
+def test_run_standard_submit_pipeline_dispatches_valid_explicit_submit_plan(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    db_path = tmp_path / "explicit_submit_plan.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _CommitCheckingBroker(db_path=str(db_path))
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_submit_plan_explicit",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_submit_plan_explicit",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = _standard_submit_request(
+        conn=conn,
+        submit_plan=submit_plan,
+        effective_rules=rules,
+        client_order_id="live_submit_plan_explicit",
+    )
+
+    try:
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is not None
+        assert broker.place_order_calls == 1
+        assert order.client_order_id == "live_submit_plan_explicit"
+    finally:
+        conn.close()
 
 
 def test_each_submit_attempt_records_exactly_one_classification(tmp_path):
