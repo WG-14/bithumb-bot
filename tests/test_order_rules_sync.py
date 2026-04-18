@@ -722,7 +722,6 @@ def test_buy_price_none_market_only_alias_requires_explicit_policy_gate() -> Non
         order_sides=("bid", "ask"),
     )
 
-    object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", True)
     resolution = order_rules.resolve_buy_price_none_resolution(rules=rules)
     diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
         rules=rules,
@@ -733,25 +732,26 @@ def test_buy_price_none_market_only_alias_requires_explicit_policy_gate() -> Non
         resolution=resolution,
     )
 
-    assert resolution.allowed is True
-    assert resolution.decision_basis == "alias_policy"
-    assert resolution.alias_used is True
-    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
-    assert resolution.block_reason == ""
-    assert diagnostic_fields["alias_used"] is True
-    assert diagnostic_fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
-    assert diagnostic_fields["decision_basis"] == "alias_policy"
-    assert submit_context["alias_used"] is True
-    assert submit_context["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
-    assert submit_context["buy_price_none_alias_used"] is True
-    assert submit_context["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert resolution.allowed is False
+    assert resolution.decision_basis == "raw"
+    assert resolution.alias_used is False
+    assert resolution.alias_policy == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert resolution.block_reason == "buy_price_none_requires_explicit_price_support"
+    assert diagnostic_fields["alias_used"] is False
+    assert diagnostic_fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert diagnostic_fields["decision_basis"] == "raw"
+    assert submit_context["alias_used"] is False
+    assert submit_context["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
+    assert submit_context["buy_price_none_alias_used"] is False
+    assert submit_context["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
 
-    order_rules.validate_order_chance_support(
-        rules=rules,
-        side="BUY",
-        order_type="price",
-        buy_price_none_resolution=resolution,
-    )
+    with pytest.raises(BrokerRejectError, match="buy_price_none_requires_explicit_price_support"):
+        order_rules.validate_order_chance_support(
+            rules=rules,
+            side="BUY",
+            order_type="price",
+            buy_price_none_resolution=resolution,
+        )
 
 
 @pytest.mark.parametrize(

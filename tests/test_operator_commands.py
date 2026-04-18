@@ -2627,18 +2627,15 @@ def test_broker_diagnose_surfaces_blocked_buy_price_none_resolution(monkeypatch,
     assert "block_reason=buy_price_none_requires_explicit_price_support" in out
 
 
-def test_broker_diagnose_marks_alias_enabled_buy_price_none_as_warn(monkeypatch, tmp_path, capsys):
+def test_broker_diagnose_fails_market_only_buy_price_none(monkeypatch, tmp_path, capsys):
     _set_tmp_db(tmp_path)
     import bithumb_bot.app as app_module
 
     original_mode = settings.MODE
     original_live_dry_run = settings.LIVE_DRY_RUN
-    original_alias_enabled = settings.BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED
-
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(app_module.settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
-    object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", True)
 
     monkeypatch.setenv("NOTIFIER_WEBHOOK_URL", "https://example.com/hook")
     monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
@@ -2690,20 +2687,24 @@ def test_broker_diagnose_marks_alias_enabled_buy_price_none_as_warn(monkeypatch,
     )
 
     try:
-        cmd_broker_diagnose()
+        with pytest.raises(SystemExit, match="1"):
+            cmd_broker_diagnose()
     finally:
         object.__setattr__(settings, "MODE", original_mode)
         object.__setattr__(app_module.settings, "MODE", original_mode)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
-        object.__setattr__(settings, "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED", original_alias_enabled)
 
     out = capsys.readouterr().out
     assert "overall=PASS" not in out
-    assert "overall=WARN" in out
-    assert "[WARN] BUY price=None chance resolution:" in out
+    assert "overall=FAIL" in out
+    assert "[FAIL] BUY price=None chance resolution:" in out
     assert "raw_buy_supported_types=['market']" in out
     assert "resolved_contract=validation_order_type=price exchange_order_type=price submit_field=price" in out
-    assert "allowed=True decision_outcome=pass decision_basis=alias_policy alias_used=True alias_policy=market_to_price_alias_enabled block_reason=-" in out
+    assert (
+        "allowed=False decision_outcome=block decision_basis=raw "
+        "alias_used=False alias_policy=market_to_price_alias_disabled "
+        "block_reason=buy_price_none_requires_explicit_price_support"
+    ) in out
 
 
 def test_broker_diagnose_fails_when_tracked_chance_contract_change_is_detected(monkeypatch, tmp_path, capsys):

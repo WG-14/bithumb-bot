@@ -1596,6 +1596,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert float(submit_evidence["intended_qty"]) > 0
     assert submit_evidence["submit_path"] == "live_standard_market"
     assert submit_evidence["submit_phase"] == "confirmation"
+    assert submit_evidence["execution_state"] == "broker_response_received"
     assert submit_evidence["submit_mode"] == settings.MODE
     assert submit_evidence["exchange_order_type"] == "price"
     assert submit_evidence["exchange_submit_field"] == "price"
@@ -1620,6 +1621,7 @@ def test_live_success_persists_submit_attempt_record(tmp_path):
     assert preflight_evidence["exchange_submit_field"] == "price"
     assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
     assert preflight_evidence["submit_phase"] == "planning"
+    assert preflight_evidence["execution_state"] == "validated_pre_submit"
     assert preflight_evidence["buy_price_none_allowed"] is True
     assert preflight_evidence["buy_price_none_decision_outcome"] == "pass"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
@@ -2136,15 +2138,15 @@ def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> Non
         resolution=order_rules.BuyPriceNoneResolution(
             allowed=True,
             resolved_order_type="price",
-            decision_basis="alias_policy",
-            alias_used=True,
-            alias_policy=order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT,
+            decision_basis="raw",
+            alias_used=False,
+            alias_policy=order_rules.BUY_PRICE_NONE_ALIAS_POLICY,
             block_reason="",
-            raw_supported_types=("market",),
+            raw_supported_types=("price",),
             support_source="bid_types",
         ),
         chance_validation_order_type="price",
-        chance_supported_order_types=("market",),
+        chance_supported_order_types=("price",),
         exchange_submit_field="price",
         exchange_order_type="price",
     ).with_execution_fields(
@@ -2159,11 +2161,11 @@ def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> Non
         contract_context=contract,
     )
 
-    assert fields["raw_buy_supported_types"] == ["market"]
+    assert fields["raw_buy_supported_types"] == ["price"]
     assert fields["support_source"] == "bid_types"
-    assert fields["decision_basis"] == "alias_policy"
-    assert fields["alias_used"] is True
-    assert fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY_COMPAT
+    assert fields["decision_basis"] == "raw"
+    assert fields["alias_used"] is False
+    assert fields["alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
     assert fields["block_reason"] == ""
     assert fields["resolved_order_type"] == "price"
     assert fields["resolved_contract"] == contract.resolved_contract
@@ -2402,6 +2404,7 @@ def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, 
     assert submit_attempt["order_status"] == "FAILED"
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
     assert submit_evidence["submit_phase"] == "submission"
+    assert submit_evidence["execution_state"] == "dispatch_attempted"
     assert transition is not None
     assert transition["order_status"] == "FAILED"
     assert "from=PENDING_SUBMIT" in str(transition["message"])

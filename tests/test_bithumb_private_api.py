@@ -292,10 +292,11 @@ def test_private_order_submit_uses_utf8_json_content_type(monkeypatch):
     monkeypatch.setattr("httpx.Client", _SequencedClient)
     monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
 
-    broker = BithumbBroker()
-    broker._post_private(
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    api.request(
+        "POST",
         "/v2/orders",
-        {
+        json_body={
             "market": "KRW-BTC",
             "side": "bid",
             "order_type": "price",
@@ -797,7 +798,7 @@ def test_validate_order_submit_payload_blocks_invalid_request_shapes(payload, me
         validate_order_submit_payload(payload)
 
 
-def test_private_order_submit_rejects_legacy_ord_type_key_before_http(monkeypatch):
+def test_broker_raw_order_submit_bypass_is_disabled_before_http(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
     _SequencedClient.calls = 0
@@ -805,8 +806,16 @@ def test_private_order_submit_rejects_legacy_ord_type_key_before_http(monkeypatc
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     broker = BithumbBroker()
-    with pytest.raises(BrokerRejectError, match="documented key 'order_type'"):
+    with pytest.raises(BrokerRejectError, match="raw /v2/orders submit bypass is disabled"):
         broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "bid", "ord_type": "price", "price": "9999"}, retry_safe=False)
+
+    with pytest.raises(BrokerRejectError, match="raw /v2/orders submit bypass is disabled"):
+        broker._request_private(
+            "POST",
+            "/v2/orders",
+            json_body={"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
+            retry_safe=False,
+        )
 
     assert _SequencedClient.calls == 0
 
@@ -930,8 +939,8 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
     _SequencedClient.requests = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
-    broker = BithumbBroker()
-    broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}, retry_safe=False)
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}, retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -1477,7 +1486,15 @@ def test_place_order_market_buy_routes_to_v2_price_order(monkeypatch):
         "bithumb_bot.broker.bithumb.fetch_orderbook_top",
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=149_000_000.0, ask_price=150_000_000.0),
     )
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(
+        broker,
+        "_submit_validated_order_payload",
+        lambda *, payload_plan, retry_safe=False: _fake_post_private(
+            "/v2/orders",
+            payload_plan.payload,
+            retry_safe=retry_safe,
+        ),
+    )
 
     qty = _exact_lot_qty(market_price=150_000_000.0)
     order = broker.place_order(
@@ -1620,7 +1637,15 @@ def test_place_order_market_sell_routes_to_v2_market_order(monkeypatch):
         call["retry_safe"] = retry_safe
         return {"uuid": "mkt-2"}
 
-    monkeypatch.setattr(broker, "_post_private", _fake_post_private)
+    monkeypatch.setattr(
+        broker,
+        "_submit_validated_order_payload",
+        lambda *, payload_plan, retry_safe=False: _fake_post_private(
+            "/v2/orders",
+            payload_plan.payload,
+            retry_safe=retry_safe,
+        ),
+    )
 
     order = broker.place_order(client_order_id="cid-2", side="SELL", qty=0.4320, price=None)
 
@@ -4663,8 +4688,8 @@ def test_order_submit_uses_json_body_with_query_hash_from_canonical_payload(monk
     _SequencedClient.requests = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
-    broker = BithumbBroker()
-    broker._post_private("/v2/orders", payload, retry_safe=False)
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -4689,8 +4714,8 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
     monkeypatch.setattr("bithumb_bot.broker.bithumb.time.time", lambda: 1712230310.689)
 
     payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "10002"}
-    broker = BithumbBroker()
-    broker._post_private("/v2/orders", payload, retry_safe=False)
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -4713,11 +4738,12 @@ def test_order_http_debug_request_logs_query_hash_and_json_body(monkeypatch, cap
     _SequencedClient.requests = []
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
-    broker = BithumbBroker()
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
-        broker._post_private(
+        api.request(
+            "POST",
             "/v2/orders",
-            {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
+            json_body={"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
             retry_safe=False,
         )
 
@@ -4742,7 +4768,12 @@ def test_order_http_debug_response_body_masks_sensitive_fields(monkeypatch, capl
     broker = BithumbBroker()
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
         with pytest.raises(BrokerRejectError):
-            broker._post_private("/v2/orders", {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}, retry_safe=False)
+            broker.place_order(
+                client_order_id="cid-mask-1",
+                side="SELL",
+                qty=0.1,
+                price=None,
+            )
 
     order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] response" in record.message]
     assert order_logs

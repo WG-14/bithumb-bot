@@ -18,11 +18,8 @@ from .config import (
 )
 from .marketdata import cmd_sync
 from .strategy import create_strategy
-from .broker.paper import paper_execute
-from .broker.live import live_execute_signal, record_harmless_dust_exit_suppression
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
-from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, get_external_cash_adjustment_summary
 from .db_core import record_strategy_decision
 from .fee_gap_repair import build_fee_gap_accounting_repair_preview
@@ -54,6 +51,13 @@ from . import runtime_state
 from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
 from .oms import collect_risky_order_state
 from .flatten import flatten_btc_position
+from .execution_service import (
+    SignalExecutionRequest,
+    build_signal_execution_service,
+    live_execute_signal,
+    paper_execute,
+    record_harmless_dust_exit_suppression,
+)
 
 
 FAILSAFE_RETRY_DELAY_SEC = 180
@@ -61,9 +65,6 @@ STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
-_CANONICAL_SELL_SUBMIT_LOT_SOURCE = "position_state.normalized_exposure.sellable_executable_lot_count"
-
-
 def compute_signal(
     conn,
     short_n: int,
@@ -86,34 +87,6 @@ def compute_signal(
     payload = decision.as_dict()
     payload.setdefault("strategy", strategy.name)
     return payload
-
-
-def _canonical_harmless_dust_sell_preview(decision_context: dict[str, object] | None) -> dict[str, float | str] | None:
-    if not isinstance(decision_context, dict):
-        return None
-
-    canonical_exposure = resolve_canonical_position_exposure_snapshot(decision_context)
-    if bool(canonical_exposure.exit_allowed):
-        return None
-    if int(canonical_exposure.sellable_executable_lot_count) > 0:
-        return None
-
-    exit_block_reason = str(canonical_exposure.exit_block_reason or "").strip()
-    if exit_block_reason not in {"dust_only_remainder", "no_executable_exit_lot"}:
-        return None
-
-    requested_qty = max(0.0, float(canonical_exposure.raw_total_asset_qty))
-    if requested_qty <= 1e-12:
-        return None
-
-    return {
-        "requested_qty": requested_qty,
-        "normalized_qty": max(0.0, float(canonical_exposure.sellable_executable_qty)),
-        "raw_total_asset_qty": requested_qty,
-        "open_exposure_qty": max(0.0, float(canonical_exposure.open_exposure_qty)),
-        "dust_tracking_qty": max(0.0, float(canonical_exposure.dust_tracking_qty)),
-        "submit_qty_source": _CANONICAL_SELL_SUBMIT_LOT_SOURCE,
-    }
 
 
 @dataclass(frozen=True)
@@ -2126,6 +2099,14 @@ def run_loop(short_n: int, long_n: int) -> None:
     last_open_order_reconcile_at: float | None = None
     last_market_runtime_check_at: float | None = None
 
+    execution_service = build_signal_execution_service(
+        mode=settings.MODE,
+        broker=broker,
+        paper_executor=paper_execute,
+        live_executor=live_execute_signal,
+        harmless_dust_recorder=record_harmless_dust_exit_suppression,
+    )
+
     try:
         while True:
             tick_now = time.time()
@@ -2603,68 +2584,20 @@ def run_loop(short_n: int, long_n: int) -> None:
                 continue
 
             trade = None
-            if settings.MODE == "paper":
+            if execution_service is not None:
                 try:
-                    trade = paper_execute(
-                        r["signal"],
-                        r["ts"],
-                        r["last_close"],
-                        strategy_name=decision_strategy_name_for_trade,
-                        decision_id=decision_id,
-                        decision_reason=decision_reason_for_trade,
-                        exit_rule_name=decision_exit_rule_name,
-                    )
-                except TypeError as exc:
-                    compat_err = str(exc)
-                    if "unexpected keyword argument" not in compat_err:
-                        raise
-                    trade = paper_execute(r["signal"], r["ts"], r["last_close"])
-            elif settings.MODE == "live" and broker is not None:
-                harmless_dust_preview = None
-                if r["signal"] == "SELL":
-                    harmless_dust_preview = _canonical_harmless_dust_sell_preview(decision_context_for_trade)
-                if harmless_dust_preview is not None:
-                    suppression_conn = ensure_db()
-                    try:
-                        if record_harmless_dust_exit_suppression(
-                            conn=suppression_conn,
-                            state=runtime_state.snapshot(),
+                    trade = execution_service.execute(
+                        SignalExecutionRequest(
                             signal=r["signal"],
-                            side="SELL",
-                            requested_qty=float(harmless_dust_preview["requested_qty"]),
+                            ts=r["ts"],
                             market_price=float(r["last_close"]),
-                            normalized_qty=float(harmless_dust_preview["normalized_qty"]),
                             strategy_name=decision_strategy_name_for_trade,
                             decision_id=decision_id,
                             decision_reason=decision_reason_for_trade,
                             exit_rule_name=decision_exit_rule_name,
-                            submit_qty_source=str(harmless_dust_preview["submit_qty_source"]),
-                            position_state_source=str(harmless_dust_preview["submit_qty_source"]),
-                            raw_total_asset_qty=float(harmless_dust_preview["raw_total_asset_qty"]),
-                            open_exposure_qty=float(harmless_dust_preview["open_exposure_qty"]),
-                            dust_tracking_qty=float(harmless_dust_preview["dust_tracking_qty"]),
-                        ):
-                            suppression_conn.commit()
-                            continue
-                    finally:
-                        suppression_conn.close()
-                try:
-                    try:
-                        trade = live_execute_signal(
-                            broker,
-                            r["signal"],
-                            r["ts"],
-                            r["last_close"],
-                            strategy_name=decision_strategy_name_for_trade,
-                            decision_id=decision_id,
-                            decision_reason=decision_reason_for_trade,
-                            exit_rule_name=decision_exit_rule_name,
+                            decision_context=decision_context_for_trade,
                         )
-                    except TypeError as exc:
-                        compat_err = str(exc)
-                        if "unexpected keyword argument" not in compat_err:
-                            raise
-                        trade = live_execute_signal(broker, r["signal"], r["ts"], r["last_close"])
+                    )
                 except BrokerError as e:
                     _halt_trading(
                         _halt_reason(
