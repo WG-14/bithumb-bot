@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,33 @@ def _metadata_int(metadata: dict[str, object], key: str) -> int:
         return 0
 
 
+def _row_int(row: Any, key: str, default: int = 0) -> int:
+    if row is None:
+        return default
+    try:
+        keys = row.keys()
+    except AttributeError:
+        keys = ()
+    if key not in keys:
+        return default
+    try:
+        return int(row[key] or 0)
+    except (TypeError, ValueError, KeyError):
+        return default
+
+
+def _safe_broker_fill_observation_summary(conn: Any) -> dict[str, object]:
+    try:
+        return get_broker_fill_observation_summary(conn)
+    except (AssertionError, sqlite3.OperationalError):
+        return {
+            "observation_count": 0,
+            "fee_pending_count": 0,
+            "accounting_complete_count": 0,
+            "last_event_ts": None,
+        }
+
+
 def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
     """Build the canonical recovery/readiness interpretation for one DB snapshot.
 
@@ -97,8 +125,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                              'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
-        open_order_count = int(open_row["open_order_count"] if open_row else 0)
-        recovery_required_count = int(open_row["recovery_required_count"] if open_row else 0)
+        open_order_count = _row_int(open_row, "open_order_count")
+        recovery_required_count = _row_int(open_row, "recovery_required_count")
 
         portfolio_row = conn.execute(
             "SELECT asset_qty, asset_available, asset_locked FROM portfolio WHERE id=1"
@@ -130,7 +158,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
             reserved_exit_qty=reserved_exit_qty,
         )
-        observation_summary = get_broker_fill_observation_summary(conn)
+        observation_summary = _safe_broker_fill_observation_summary(conn)
         fee_pending_count = int(observation_summary.get("fee_pending_count") or 0)
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
         fee_gap_adjustment_count = _metadata_int(metadata, "fee_gap_adjustment_count")

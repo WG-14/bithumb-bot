@@ -343,7 +343,7 @@ def cmd_status():
     dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
     dust = position_state.raw_holdings
     dust_view = position_state.operator_diagnostics
-    if dust_view.resume_allowed and dust_view.treat_as_flat:
+    if dust_context.classification.present and dust_view.resume_allowed and dust_view.treat_as_flat:
         balance_diag["flat_start_allowed"] = True
         balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
             balance_diag.get("flat_start_reason") or "flat_start_safe",
@@ -817,7 +817,7 @@ def cmd_health() -> None:
             balance_diag.update(raw_diag)
     except Exception as exc:
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
-    if dust_view.resume_allowed and dust_view.treat_as_flat:
+    if dust_context.classification.present and dust_view.resume_allowed and dust_view.treat_as_flat:
         balance_diag["flat_start_allowed"] = True
         balance_diag["flat_start_reason"] = format_flat_start_reason_with_dust(
             balance_diag.get("flat_start_reason") or "flat_start_safe",
