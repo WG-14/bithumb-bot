@@ -9,7 +9,6 @@ import os
 import re
 import time
 import uuid
-import threading
 from decimal import Decimal, ROUND_DOWN
 import math
 from urllib.parse import urlencode
@@ -83,6 +82,12 @@ from .order_submit import (
     resolve_submit_price_tick_policy as _resolve_submit_price_tick_policy,
     run_place_order_submission_flow,
 )
+from .bithumb_throttle import (
+    OFFICIAL_ORDER_RPS_LIMIT as _OFFICIAL_ORDER_RPS_LIMIT,
+    OFFICIAL_PRIVATE_RPS_LIMIT as _OFFICIAL_PRIVATE_RPS_LIMIT,
+    RequestThrottleCoordinator,
+    request_bucket_for_endpoint as _request_bucket_for_endpoint,
+)
 
 _jwt = importlib.import_module("jwt") if importlib.util.find_spec("jwt") else importlib.import_module("bithumb_bot.broker.jwt_compat")
 
@@ -150,44 +155,7 @@ class PrivateApiFailureClassification:
     needs_reconcile: bool = False
 
 
-@dataclass
-class _BucketThrottleState:
-    next_allowed_at: float = 0.0
-    penalty_until: float = 0.0
-
-
-class _RequestThrottleCoordinator:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._state_by_bucket: dict[str, _BucketThrottleState] = {}
-
-    def acquire(self, *, bucket: str, limit_per_sec: float) -> float:
-        limit = float(limit_per_sec)
-        if not math.isfinite(limit) or limit <= 0:
-            return 0.0
-
-        interval = 1.0 / limit
-        now = time.monotonic()
-        with self._lock:
-            state = self._state_by_bucket.setdefault(bucket, _BucketThrottleState())
-            gate_until = max(state.next_allowed_at, state.penalty_until)
-            wait = max(0.0, gate_until - now)
-            state.next_allowed_at = max(now, gate_until) + interval
-        if wait > 0:
-            time.sleep(wait)
-        return wait
-
-    def penalize(self, *, bucket: str, delay_sec: float) -> None:
-        normalized_delay = max(0.0, float(delay_sec))
-        if normalized_delay <= 0.0:
-            return
-        now = time.monotonic()
-        with self._lock:
-            state = self._state_by_bucket.setdefault(bucket, _BucketThrottleState())
-            state.penalty_until = max(state.penalty_until, now + normalized_delay)
-
-
-_REQUEST_THROTTLER = _RequestThrottleCoordinator()
+_REQUEST_THROTTLER = RequestThrottleCoordinator()
 _OFFICIAL_PRIVATE_RPS_LIMIT = 140.0
 _OFFICIAL_ORDER_RPS_LIMIT = 10.0
 
@@ -225,18 +193,6 @@ _FALLBACK_PRIVATE_ERROR_CODES: dict[str, tuple[str, str, str, bool, bool, bool]]
     "id_conflict": ("DUPLICATE_CLIENT_ORDER_ID", "duplicate client order id or identifier conflict", "DUPLICATE_CLIENT_ORDER_ID", False, False, False),
     "cancel_not_allowed": ("CANCEL_NOT_ALLOWED", "cancel not allowed in current state", "CANCEL_NOT_ALLOWED", False, False, False),
 }
-
-
-def _request_bucket_for_endpoint(*, method: str, endpoint: str) -> str:
-    normalized_endpoint = str(endpoint or "").split("?", 1)[0]
-    if normalized_endpoint in _ORDER_RATE_LIMIT_ENDPOINTS:
-        return _ORDER_REQUEST_RATE_LIMIT_BUCKET
-    normalized_method = str(method or "").strip().upper()
-    if normalized_method in {"POST", "DELETE"} and normalized_endpoint.startswith("/v2/"):
-        return _ORDER_REQUEST_RATE_LIMIT_BUCKET
-    return _PRIVATE_REQUEST_RATE_LIMIT_BUCKET
-
-
 def _private_error_name(detail: str) -> str:
     match = _ERROR_NAME_RE.search(str(detail or ""))
     return str(match.group(1) if match else "").strip().lower()

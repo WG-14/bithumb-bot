@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
 import time
 from dataclasses import dataclass
 
@@ -136,6 +137,12 @@ class _StandardSubmitAttemptContext:
 
 def _encode_submit_evidence(*, payload: dict) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _emit_notification(message: str) -> None:
+    from . import live as live_module
+
+    live_module.notify(message)
 
 
 def _classify_temporary_submit_error(exc: Exception) -> tuple[str, bool]:
@@ -460,7 +467,7 @@ def _record_submit_attempt_signed(
 def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str, ts: int) -> None:
     record_status_transition(client_order_id, from_status="PENDING_SUBMIT", to_status="SUBMIT_UNKNOWN", reason=reason, conn=conn)
     set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=reason, conn=conn)
-    notify(
+    _emit_notification(
         safety_event(
             "order_submit_unknown",
             client_order_id=client_order_id,
@@ -482,7 +489,7 @@ def _mark_submit_unknown(*, conn, client_order_id: str, submit_attempt_id: str, 
 def _mark_submit_failed(*, conn, client_order_id: str, submit_attempt_id: str, side: str, reason: str, ts: int) -> None:
     record_status_transition(client_order_id, from_status="PENDING_SUBMIT", to_status="FAILED", reason=reason, conn=conn)
     set_status(client_order_id, "FAILED", last_error=reason, conn=conn)
-    notify(
+    _emit_notification(
         safety_event(
             "order_submit_failed",
             client_order_id=client_order_id,
@@ -912,7 +919,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
         final_submitted_qty=request.final_submitted_qty,
         decision_reason_code=request.decision_reason_code,
     )
-    notify(
+    _emit_notification(
         safety_event(
             "order_submit_started",
             client_order_id=request.client_order_id,
@@ -933,6 +940,12 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
 def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: Broker) -> tuple[BrokerOrder, int, int] | None:
     request = context.request
     dispatch_kwargs = _dispatch_kwargs_from_submit_plan(submit_plan=context.submit_plan)
+    try:
+        place_order_parameters = inspect.signature(broker.place_order).parameters
+    except (TypeError, ValueError):
+        place_order_parameters = {}
+    if "submit_plan" not in place_order_parameters:
+        dispatch_kwargs.pop("submit_plan", None)
     try:
         request_ts = int(time.time() * 1000)
         RUN_LOG.info(
@@ -1202,7 +1215,7 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
     planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     if order.exchange_order_id:
         set_exchange_order_id(request.client_order_id, order.exchange_order_id, conn=request.conn)
-        notify(
+        _emit_notification(
             safety_event(
                 "exchange_order_id_attached",
                 client_order_id=request.client_order_id,

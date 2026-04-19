@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 
@@ -14,6 +15,7 @@ from ..oms import (
     claim_order_intent_dedup,
     evaluate_unresolved_order_gate,
     payload_fingerprint,
+    record_submit_attempt,
     record_submit_blocked,
     set_status,
     update_order_intent_dedup,
@@ -36,6 +38,7 @@ from .live_submit_orchestrator import (
 @dataclass(frozen=True)
 class ConfirmedLiveSubmission:
     conn: object
+    request: StandardSubmitPipelineRequest
     order: object
     client_order_id: str
     exchange_order_id: str
@@ -46,6 +49,12 @@ class ConfirmedLiveSubmission:
     decision_id: int | None
     decision_reason: str | None
     exit_rule_name: str | None
+
+
+def _emit_notification(message: str) -> None:
+    from . import live as live_module
+
+    live_module.notify(message)
 
 
 def submit_live_order_and_confirm(
@@ -63,6 +72,7 @@ def submit_live_order_and_confirm(
         return None
     return ConfirmedLiveSubmission(
         conn=request.conn,
+        request=request,
         order=order,
         client_order_id=request.client_order_id,
         exchange_order_id=str(order.exchange_order_id),
@@ -76,6 +86,95 @@ def submit_live_order_and_confirm(
     )
 
 
+def _record_application_phase(
+    *,
+    submission: ConfirmedLiveSubmission,
+    order_status: str,
+    execution_state: str,
+    submission_reason_code: str,
+    broker_response_summary: str,
+    error: Exception | None = None,
+) -> None:
+    request = submission.request
+    client_order_id = submission.client_order_id
+    submit_evidence = json.dumps(
+        {
+            "symbol": settings.PAIR,
+            "side": request.side,
+            "order_qty": request.order_qty,
+            "intended_qty": request.qty,
+            "normalized_qty": request.qty,
+            **request.submit_observability_fields,
+            **request.submit_truth_source_fields,
+            "reference_price": request.reference_price,
+            "top_of_book": request.top_of_book_summary,
+            "request_ts": None,
+            "response_ts": None,
+            "submit_path": "live_standard_market",
+            "contract_profile": request.contract_profile,
+            "submit_phase": "application",
+            "execution_state": execution_state,
+            "submit_mode": settings.MODE,
+            "execution_trace_id": client_order_id,
+            "submit_plan_id": f"{client_order_id}:plan",
+            "signed_request_id": f"{client_order_id}:signed_request",
+            "submission_id": f"{client_order_id}:submission",
+            "confirmation_id": f"{client_order_id}:confirmation",
+            "application_id": f"{client_order_id}:application",
+            "exchange_order_id": submission.exchange_order_id,
+            "error_class": type(error).__name__ if error is not None else None,
+            "error_summary": str(error) if error is not None else None,
+            "order_type": request.order_type,
+            "internal_lot_size": request.internal_lot_size,
+            "effective_min_trade_qty": request.effective_min_trade_qty,
+            "qty_step": request.qty_step,
+            "min_notional_krw": request.min_notional_krw,
+            "intended_lot_count": request.intended_lot_count,
+            "executable_lot_count": request.executable_lot_count,
+            "final_intended_qty": request.final_intended_qty,
+            "final_submitted_qty": request.final_submitted_qty,
+            "decision_reason_code": request.decision_reason_code,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    record_submit_attempt(
+        conn=submission.conn,
+        client_order_id=client_order_id,
+        submit_attempt_id=request.submit_attempt_id,
+        symbol=settings.PAIR,
+        side=request.side,
+        qty=request.qty,
+        price=request.reference_price,
+        submit_ts=request.ts,
+        payload_fingerprint=request.payload_hash,
+        broker_response_summary=broker_response_summary,
+        submission_reason_code=submission_reason_code,
+        exception_class=(type(error).__name__ if error is not None else None),
+        timeout_flag=False,
+        submit_phase="application",
+        submit_plan_id=f"{client_order_id}:plan",
+        signed_request_id=f"{client_order_id}:signed_request",
+        submission_id=f"{client_order_id}:submission",
+        confirmation_id=f"{client_order_id}:confirmation",
+        submit_evidence=submit_evidence,
+        exchange_order_id_obtained=bool(submission.exchange_order_id),
+        order_status=order_status,
+        event_type="submit_attempt_application",
+        order_type=request.order_type,
+        internal_lot_size=request.internal_lot_size,
+        effective_min_trade_qty=request.effective_min_trade_qty,
+        qty_step=request.qty_step,
+        min_notional_krw=request.min_notional_krw,
+        intended_lot_count=request.intended_lot_count,
+        executable_lot_count=request.executable_lot_count,
+        final_intended_qty=request.final_intended_qty,
+        final_submitted_qty=request.final_submitted_qty,
+        decision_reason_code=request.decision_reason_code,
+    )
+
+
 def reconcile_apply_fills_and_refresh(
     live_module,
     *,
@@ -83,6 +182,7 @@ def reconcile_apply_fills_and_refresh(
     submission: ConfirmedLiveSubmission,
 ):
     conn = submission.conn
+    request = submission.request
     order = submission.order
     client_order_id = submission.client_order_id
     exchange_order_id = submission.exchange_order_id
@@ -112,6 +212,16 @@ def reconcile_apply_fills_and_refresh(
             client_order_id=client_order_id,
             order_status="RECOVERY_REQUIRED",
         )
+        _record_application_phase(
+            submission=submission,
+            order_status="RECOVERY_REQUIRED",
+            execution_state="application_failed",
+            submission_reason_code="application_failed",
+            broker_response_summary=(
+                f"application_exception={type(exc).__name__};error={exc}"
+            ),
+            error=exc,
+        )
         conn.commit()
         live_module.RUN_LOG.error(
             format_log_kv(
@@ -125,36 +235,58 @@ def reconcile_apply_fills_and_refresh(
         )
         return None
 
-    trade = None
-    for fill in fills_to_apply:
-        trade = apply_fill_and_trade(
-            conn,
-            client_order_id=client_order_id,
-            side=side,
-            fill_id=fill.fill_id,
-            fill_ts=fill.fill_ts,
-            price=fill.price,
-            qty=fill.qty,
-            fee=fill.fee,
-            strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
-            entry_decision_id=(submission.decision_id if side == "BUY" else None),
-            exit_decision_id=(submission.decision_id if side == "SELL" else None),
-            exit_reason=(submission.decision_reason if side == "SELL" else None),
-            exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
-            note=f"live exchange_order_id={exchange_order_id}",
-            signal_ts=int(submission.ts),
-        ) or trade
+    try:
+        trade = None
+        for fill in fills_to_apply:
+            trade = apply_fill_and_trade(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=fill.fee,
+                strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
+                entry_decision_id=(submission.decision_id if side == "BUY" else None),
+                exit_decision_id=(submission.decision_id if side == "SELL" else None),
+                exit_reason=(submission.decision_reason if side == "SELL" else None),
+                exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
+                note=f"live exchange_order_id={exchange_order_id}",
+                signal_ts=int(submission.ts),
+            ) or trade
 
-    refreshed = broker.get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
-    set_status(client_order_id, refreshed.status, conn=conn)
-    update_order_intent_dedup(
-        conn,
-        intent_key=submission.intent_key,
-        client_order_id=client_order_id,
-        order_status=refreshed.status,
-    )
-    conn.commit()
-    return trade
+        refreshed = broker.get_order(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+        )
+        set_status(client_order_id, refreshed.status, conn=conn)
+        update_order_intent_dedup(
+            conn,
+            intent_key=submission.intent_key,
+            client_order_id=client_order_id,
+            order_status=refreshed.status,
+        )
+        _record_application_phase(
+            submission=submission,
+            order_status=str(refreshed.status),
+            execution_state="application_completed",
+            submission_reason_code="application_completed",
+            broker_response_summary=f"application_status={refreshed.status}",
+        )
+        conn.commit()
+        return trade
+    except Exception as exc:
+        _record_application_phase(
+            submission=submission,
+            order_status=str(order.status or "NEW"),
+            execution_state="application_failed",
+            submission_reason_code="application_failed",
+            broker_response_summary=f"application_exception={type(exc).__name__};error={exc}",
+            error=exc,
+        )
+        conn.commit()
+        raise
 
 
 def execute_live_submission_and_application(
@@ -303,7 +435,9 @@ def execute_live_submission_and_application(
                 entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
             )
         )
-        notify(f"live order placement blocked ({feasibility.side}): category=submission_halt;reason={reason}")
+        _emit_notification(
+            f"live order placement blocked ({feasibility.side}): category=submission_halt;reason={reason}"
+        )
         return None
 
     existing = conn.execute(
@@ -337,7 +471,7 @@ def execute_live_submission_and_application(
                 )
             )
             record_submit_blocked(client_order_id, status=existing_status, reason=reason, conn=conn)
-            notify(
+            _emit_notification(
                 safety_event(
                     "order_submit_blocked",
                     client_order_id=client_order_id,
@@ -403,7 +537,7 @@ def execute_live_submission_and_application(
                 entry_allowed_truth_source=decision_observability["entry_allowed_truth_source"],
             )
         )
-        notify(
+        _emit_notification(
             format_event(
                 "order_intent_dedup_skip",
                 symbol=settings.PAIR,

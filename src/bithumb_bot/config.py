@@ -30,6 +30,8 @@ LIVE_DB_PATH_REQUIRED_MSG = (
     "DB_PATH must be explicitly set when MODE=live; live env 파일에 DB_PATH를 명시하라"
 )
 LIVE_SUBMIT_CONTRACT_PROFILE_V1 = "live_explicit_submit_plan_v1"
+LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED = "persisted_snapshot_required"
+LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK = "allow_local_fallback"
 PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
@@ -527,7 +529,14 @@ class Settings:
     )
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
-    LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
+    LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_deprecated_ignored_bool_env(
+        "LIVE_ALLOW_ORDER_RULE_FALLBACK",
+        fixed_value=False,
+    )
+    LIVE_ORDER_RULE_FALLBACK_PROFILE: str = os.getenv(
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED,
+    )
     LIVE_SUBMIT_CONTRACT_PROFILE: str = os.getenv(
         "LIVE_SUBMIT_CONTRACT_PROFILE",
         LIVE_SUBMIT_CONTRACT_PROFILE_V1,
@@ -879,18 +888,36 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append("BITHUMB_PRIVATE_RPS_LIMIT must be a finite value > 0 when MODE=live")
     if not math.isfinite(float(cfg.BITHUMB_ORDER_RPS_LIMIT)) or cfg.BITHUMB_ORDER_RPS_LIMIT <= 0:
         issues.append("BITHUMB_ORDER_RPS_LIMIT must be a finite value > 0 when MODE=live")
-    if bool(cfg.LIVE_ALLOW_ORDER_RULE_FALLBACK):
-        if not cfg.LIVE_DRY_RUN and bool(cfg.LIVE_REAL_ORDER_ARMED):
-            issues.append(
-                "LIVE_ALLOW_ORDER_RULE_FALLBACK=true is not allowed when MODE=live, "
-                "LIVE_DRY_RUN=false, and LIVE_REAL_ORDER_ARMED=true "
-                "(armed live execution must fail closed on order-rule fallback)"
-            )
-        elif not cfg.LIVE_DRY_RUN:
-            LOG.warning(
-                "live preflight warning: LIVE_ALLOW_ORDER_RULE_FALLBACK=true permits emergency fallback "
-                "when /v1/orders/chance is unavailable"
-            )
+    fallback_profile = str(cfg.LIVE_ORDER_RULE_FALLBACK_PROFILE or "").strip()
+    if fallback_profile not in {
+        LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED,
+        LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    }:
+        issues.append(
+            "LIVE_ORDER_RULE_FALLBACK_PROFILE must be "
+            f"{LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED!r} "
+            f"or {LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK!r} "
+            f"(got {cfg.LIVE_ORDER_RULE_FALLBACK_PROFILE!r})"
+        )
+    elif (
+        not cfg.LIVE_DRY_RUN
+        and bool(cfg.LIVE_REAL_ORDER_ARMED)
+        and fallback_profile != LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED
+    ):
+        issues.append(
+            "LIVE_ORDER_RULE_FALLBACK_PROFILE must be "
+            f"{LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED!r} "
+            "when MODE=live, LIVE_DRY_RUN=false, and LIVE_REAL_ORDER_ARMED=true "
+            "(armed live execution must fail closed on order-rule fallback)"
+        )
+    elif (
+        fallback_profile == LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK
+        and not cfg.LIVE_DRY_RUN
+    ):
+        LOG.warning(
+            "live preflight warning: LIVE_ORDER_RULE_FALLBACK_PROFILE=allow_local_fallback permits emergency fallback "
+            "when /v1/orders/chance is unavailable"
+        )
     if str(cfg.LIVE_SUBMIT_CONTRACT_PROFILE).strip() != LIVE_SUBMIT_CONTRACT_PROFILE_V1:
         issues.append(
             "LIVE_SUBMIT_CONTRACT_PROFILE must be "

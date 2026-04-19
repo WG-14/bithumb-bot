@@ -68,6 +68,7 @@ class SignedOrderRequest:
     trace_id: str | None = None
     plan_id: str | None = None
     request_id: str | None = None
+    dispatch_authority: str | None = None
     phase_identity: str = "signed_request"
     phase_result: str = "signed"
 

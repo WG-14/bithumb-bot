@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from ..config import settings
 from ..execution_planner import build_submit_plan, resolve_submit_price_tick_policy
@@ -139,7 +140,10 @@ def build_place_order_submission_flow(
     *,
     plan: SubmitPlan,
 ) -> PlaceOrderSubmissionFlow:
-    signed_request = build_place_order_payload(broker, plan=plan)
+    signed_request = replace(
+        build_place_order_payload(broker, plan=plan),
+        dispatch_authority="validated_place_order_flow",
+    )
     return PlaceOrderSubmissionFlow(
         intent=plan.intent,
         plan=plan,

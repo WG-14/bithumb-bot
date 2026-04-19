@@ -3,6 +3,10 @@ from __future__ import annotations
 import time
 
 from ..config import settings
+from ..config import (
+    LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED,
+)
 from ..markets import ExchangeMarketCodeError, canonical_market_with_raw, parse_documented_market_code
 from .base import BrokerRejectError
 from .order_chance_source import (
@@ -40,6 +44,7 @@ def get_effective_order_rules(pair: str):
     normalized_pair, _raw_pair = canonical_market_with_raw(pair)
     now = time.time()
     fallback = rules_module._local_fallback_rules()
+    fallback_profile = str(settings.LIVE_ORDER_RULE_FALLBACK_PROFILE or "").strip()
 
     cached = rules_module._cached_rules.get(normalized_pair)
     if cached and now - cached[0] < rules_module._CACHE_TTL_SEC and cached[2] == fallback:
@@ -47,7 +52,11 @@ def get_effective_order_rules(pair: str):
     try:
         exchange = rules_module.fetch_exchange_order_rules(normalized_pair)
     except Exception as exc:
-        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
+        if (
+            settings.MODE == "live"
+            and not bool(settings.LIVE_DRY_RUN)
+            and fallback_profile == LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED
+        ):
             persisted_resolution = rules_module._resolution_from_persisted_snapshot(pair=normalized_pair)
             if persisted_resolution is not None:
                 rules_module._cached_rules[normalized_pair] = (now, persisted_resolution, fallback)
@@ -63,6 +72,12 @@ def get_effective_order_rules(pair: str):
                 f"live order rule snapshot unavailable for {pair}; persisted snapshot required "
                 f"(reason_code={code}; reason={summary}; detail={detail})"
             ) from exc
+        if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN):
+            if fallback_profile != LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK:
+                raise BrokerRejectError(
+                    "live order rule fallback profile invalid: "
+                    f"{fallback_profile!r}"
+                ) from exc
         code, summary = rules_module.classify_private_api_error(exc)
         detail = f"{type(exc).__name__}: {exc}"
         fallback_risk = (

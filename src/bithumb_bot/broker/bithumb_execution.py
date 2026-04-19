@@ -14,6 +14,13 @@ def execute_signed_order_request(
     now: int,
     retry_safe: bool = False,
 ) -> OrderConfirmation:
+    if (
+        getattr(broker, "dry_run", False) is False
+        and str(getattr(signed_request, "dispatch_authority", "")).strip() != "validated_place_order_flow"
+    ):
+        raise BrokerRejectError(
+            "armed live signed-request submission requires validated place_order flow authority"
+        )
     submission_record = SubmissionRecord(
         intent=plan.intent,
         plan=plan,

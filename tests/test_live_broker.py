@@ -213,6 +213,21 @@ def _stub_live_effective_order_rules(monkeypatch) -> None:
     )
 
 
+def _stub_submit_plan_quote(monkeypatch, *, price: float = 100000000.0) -> None:
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_submit.fetch_orderbook_top",
+        lambda _market: BestQuote(
+            market="KRW-BTC",
+            bid_price=float(price) - 1000.0,
+            ask_price=float(price),
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_submit.validated_best_quote_ask_price",
+        lambda _quote, requested_market: float(price),
+    )
+
+
 def _standard_submit_request(
     *,
     conn,
@@ -2508,6 +2523,31 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
 
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "buy_chance_order_type_reject.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    _stub_submit_plan_quote(monkeypatch)
+    monkeypatch.setattr(
+        live_module,
+        "_effective_order_rules",
+        lambda _pair: SimpleNamespace(
+            rules=order_rules.DerivedOrderConstraints(
+                bid_min_total_krw=5000.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+                order_types=("limit", "market"),
+                order_sides=("bid", "ask"),
+                bid_types=("market",),
+                ask_types=("limit", "market"),
+                bid_fee=0.0,
+                ask_fee=0.0,
+                maker_bid_fee=0.0,
+                maker_ask_fee=0.0,
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=0.0,
+                max_qty_decimals=8,
+            )
+        ),
+    )
     monkeypatch.setattr(
         "bithumb_bot.order_sizing.get_effective_order_rules",
         lambda _pair: SimpleNamespace(
@@ -2563,10 +2603,8 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
 
     assert row["status"] == "FAILED"
     submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
-    preflight_evidence = json.loads(str(preflight["submit_evidence"]))
-    assert submit_evidence["exchange_order_type"] == "price"
-    assert submit_evidence["exchange_submit_field"] == "price"
-    assert submit_evidence["submit_contract_kind"] == "market_buy_notional"
+    assert preflight is None
+    assert submit_evidence["submit_phase"] == "planning"
     assert submit_evidence["buy_price_none_allowed"] is False
     assert submit_evidence["buy_price_none_decision_outcome"] == "block"
     assert submit_evidence["buy_price_none_decision_basis"] == "raw"
@@ -2575,14 +2613,8 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
     assert submit_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
     assert submit_evidence["buy_price_none_support_source"] == "bid_types"
     assert submit_evidence["buy_price_none_raw_supported_types"] == ["market"]
-    assert submit_evidence["buy_price_none_resolved_order_type"] == "price"
-    assert submit_evidence["submit_failure_category"] == "chance_order_type_mismatch"
-    assert submit_evidence["submit_failure_detail"] == "chance_order_type_mismatch"
+    assert submit_evidence["submit_failure_category"] == "broker_reject"
     assert "qty_step_mismatch" not in json.dumps(submit_evidence, sort_keys=True)
-    assert preflight_evidence["exchange_order_type"] == "price"
-    assert preflight_evidence["exchange_submit_field"] == "price"
-    assert preflight_evidence["submit_contract_kind"] == "market_buy_notional"
-    assert preflight_evidence["buy_price_none_allowed"] is False
     assert preflight_evidence["buy_price_none_decision_outcome"] == "block"
     assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
     assert preflight_evidence["buy_price_none_alias_used"] is False
@@ -2980,7 +3012,8 @@ def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
               'submit_attempt_preflight',
               'submit_attempt_signed',
               'submit_started',
-              'submit_attempt_recorded'
+              'submit_attempt_recorded',
+              'submit_attempt_application'
           )
         ORDER BY id ASC
         """,
@@ -2993,10 +3026,12 @@ def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
         "submit_attempt_preflight",
         "submit_attempt_signed",
         "submit_attempt_recorded",
+        "submit_attempt_application",
     ]
     assert phases[1]["submit_phase"] == "planning"
     assert phases[2]["submit_phase"] == "signed_request"
     assert phases[3]["submit_phase"] == "confirmation"
+    assert phases[4]["submit_phase"] == "application"
     assert phases[1]["submit_plan_id"] == f"{row['client_order_id']}:plan"
     assert phases[1]["signed_request_id"] == f"{row['client_order_id']}:signed_request"
     assert phases[1]["submission_id"] == f"{row['client_order_id']}:submission"
@@ -3004,9 +3039,12 @@ def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
     preflight_evidence = json.loads(str(phases[1]["submit_evidence"]))
     signed_evidence = json.loads(str(phases[2]["submit_evidence"]))
     confirmation_evidence = json.loads(str(phases[3]["submit_evidence"]))
+    application_evidence = json.loads(str(phases[4]["submit_evidence"]))
     assert preflight_evidence["submit_phase"] == "planning"
     assert signed_evidence["submit_phase"] == "signed_request"
     assert confirmation_evidence["submit_phase"] == "confirmation"
+    assert application_evidence["submit_phase"] == "application"
+    assert application_evidence["execution_state"] == "application_completed"
 
 
 def test_run_standard_submit_pipeline_uses_submit_plan_order_type_over_request_copy(monkeypatch, tmp_path):
@@ -3333,11 +3371,28 @@ def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks
     row = conn.execute(
         "SELECT client_order_id, status, last_error FROM orders WHERE client_order_id LIKE 'live_1700000000000_buy_%' ORDER BY id DESC LIMIT 1"
     ).fetchone()
+    application_event = conn.execute(
+        """
+        SELECT submit_phase, order_status, submission_reason_code, submit_evidence
+        FROM order_events
+        WHERE client_order_id=? AND event_type='submit_attempt_application'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     conn.close()
 
     assert row is not None
     assert row["status"] == "RECOVERY_REQUIRED"
     assert "material fee validation blocked fill aggregation" in str(row["last_error"])
+    assert application_event is not None
+    assert application_event["submit_phase"] == "application"
+    assert application_event["order_status"] == "RECOVERY_REQUIRED"
+    assert application_event["submission_reason_code"] == "application_failed"
+    application_evidence = json.loads(str(application_event["submit_evidence"]))
+    assert application_evidence["submit_phase"] == "application"
+    assert application_evidence["execution_state"] == "application_failed"
     assert any("event=recovery_required_transition" in msg for msg in notifications)
 
 
@@ -3347,6 +3402,7 @@ def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_pa
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    _stub_submit_plan_quote(monkeypatch)
 
     def _raise_orderbook(_symbol: str) -> tuple[float, float]:
         raise RuntimeError("orderbook offline")
@@ -9421,7 +9477,7 @@ def test_bithumb_broker_defensively_rejects_sell_qty_below_executable_threshold(
             lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("broker should reject before HTTP")),
         )
 
-        with pytest.raises(BrokerRejectError, match="qty suppressed by quantity rule"):
+        with pytest.raises(BrokerRejectError, match="explicit SubmitPlan"):
             broker.place_order(client_order_id="cid-defensive", side="SELL", qty=0.00005, price=None)
     finally:
         for key, value in original.items():
@@ -9849,6 +9905,8 @@ def test_validate_pretrade_applies_side_specific_min_total():
             "reference_source": "test",
         },
     )
+    _stub_submit_plan_quote(monkeypatch, price=100.1)
+    _stub_live_effective_order_rules(monkeypatch)
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
@@ -9923,6 +9981,8 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path, monkey
             "reference_source": "test",
         },
     )
+    _stub_submit_plan_quote(monkeypatch, price=100.1)
+    _stub_live_effective_order_rules(monkeypatch)
 
     scenarios = [
         ("success", _FakeBroker(), 1100, "confirmed_success"),

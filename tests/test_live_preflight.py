@@ -25,6 +25,7 @@ def _restore_settings():
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
         "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
         "LIVE_ALLOW_ORDER_RULE_FALLBACK": settings.LIVE_ALLOW_ORDER_RULE_FALLBACK,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE": settings.LIVE_ORDER_RULE_FALLBACK_PROFILE,
         "LIVE_SUBMIT_CONTRACT_PROFILE": settings.LIVE_SUBMIT_CONTRACT_PROFILE,
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
@@ -109,6 +110,11 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
     object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", False)
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config.LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED,
+    )
     object.__setattr__(settings, "LIVE_SUBMIT_CONTRACT_PROFILE", config.LIVE_SUBMIT_CONTRACT_PROFILE_V1)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
@@ -274,31 +280,51 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     config.validate_live_mode_preflight(settings)
 
 
-def test_live_preflight_rejects_order_rule_fallback_in_armed_live_mode(
+def test_live_preflight_rejects_local_fallback_profile_in_armed_live_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
-    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config.LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    )
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
 
     with pytest.raises(config.LiveModeValidationError) as exc:
         config.validate_live_mode_preflight(settings)
 
-    assert "LIVE_ALLOW_ORDER_RULE_FALLBACK=true is not allowed" in str(exc.value)
+    assert "LIVE_ORDER_RULE_FALLBACK_PROFILE must be 'persisted_snapshot_required'" in str(exc.value)
 
 
-def test_live_preflight_allows_order_rule_fallback_in_live_dry_run(
+def test_live_preflight_allows_local_fallback_profile_in_live_dry_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
-    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config.LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    )
 
     config.validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_rejects_invalid_order_rule_fallback_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_ORDER_RULE_FALLBACK_PROFILE", "legacy_bool_combo")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "LIVE_ORDER_RULE_FALLBACK_PROFILE must be" in str(exc.value)
 
 
 def test_live_preflight_rejects_invalid_submit_contract_profile(

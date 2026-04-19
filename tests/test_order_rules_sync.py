@@ -16,6 +16,8 @@ def _reset_settings():
         "DB_PATH": settings.DB_PATH,
         "MODE": settings.MODE,
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
+        "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE": settings.LIVE_ORDER_RULE_FALLBACK_PROFILE,
         "LIVE_MIN_ORDER_QTY": settings.LIVE_MIN_ORDER_QTY,
         "LIVE_ORDER_QTY_STEP": settings.LIVE_ORDER_QTY_STEP,
         "MIN_ORDER_NOTIONAL_KRW": settings.MIN_ORDER_NOTIONAL_KRW,
@@ -328,50 +330,16 @@ def test_live_order_rule_resolution_uses_persisted_snapshot_deterministically(mo
     ).contract_id
 
 
-def test_live_order_rule_resolution_ignores_fallback_boolean_when_using_persisted_snapshot(monkeypatch, tmp_path):
+def test_live_order_rule_resolution_uses_fallback_profile_for_non_armed_live(monkeypatch, tmp_path):
     order_rules._cached_rules.clear()
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_rules_snapshot_boolean.sqlite"))
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "LIVE_DRY_RUN", False)
-
-    conn = ensure_db(str(tmp_path / "order_rules_snapshot_boolean.sqlite"))
-    try:
-        record_order_rule_snapshot(
-            conn,
-            market="KRW-BTC",
-            fetched_ts=1000,
-            source_mode="merged",
-            fallback_used=False,
-            fallback_reason_code="",
-            fallback_reason_summary="",
-            rules_payload={
-                "market_id": "KRW-BTC",
-                "bid_min_total_krw": 5000.0,
-                "ask_min_total_krw": 5000.0,
-                "bid_price_unit": 1.0,
-                "ask_price_unit": 1.0,
-                "order_types": ["limit", "price", "market"],
-                "bid_types": ["price"],
-                "ask_types": ["limit", "market"],
-                "order_sides": ["ask", "bid"],
-                "bid_fee": 0.0025,
-                "ask_fee": 0.0025,
-                "maker_bid_fee": 0.0025,
-                "maker_ask_fee": 0.0025,
-                "min_qty": 0.0001,
-                "qty_step": 0.0001,
-                "min_notional_krw": 5000.0,
-                "max_qty_decimals": 8,
-            },
-            source_payload={
-                "ruleset": "merged",
-                "exchange_source_json": "{}",
-                "local_fallback_source_json": "{}",
-            },
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 5000.0)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
     monkeypatch.setattr(
         order_rules,
@@ -379,17 +347,26 @@ def test_live_order_rule_resolution_ignores_fallback_boolean_when_using_persiste
         lambda _market: (_ for _ in ()).throw(BrokerRejectError("exchange unavailable")),
     )
 
-    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", False)
-    resolved_with_flag_off = order_rules.get_effective_order_rules("KRW-BTC")
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config_module.LIVE_ORDER_RULE_FALLBACK_PROFILE_PERSISTED_SNAPSHOT_REQUIRED,
+    )
+    with pytest.raises(BrokerRejectError, match="persisted snapshot required"):
+        order_rules.get_effective_order_rules("KRW-BTC")
     order_rules._cached_rules.clear()
-    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
-    resolved_with_flag_on = order_rules.get_effective_order_rules("KRW-BTC")
+    object.__setattr__(
+        settings,
+        "LIVE_ORDER_RULE_FALLBACK_PROFILE",
+        config_module.LIVE_ORDER_RULE_FALLBACK_PROFILE_ALLOW_LOCAL_FALLBACK,
+    )
+    resolved_with_profile = order_rules.get_effective_order_rules("KRW-BTC")
 
-    assert resolved_with_flag_off.rules == resolved_with_flag_on.rules
-    assert resolved_with_flag_off.source_mode == resolved_with_flag_on.source_mode
+    assert resolved_with_profile.source_mode == "local_fallback"
+    assert resolved_with_profile.fallback_used is True
     assert order_rules.build_buy_price_none_submit_contract(
-        rules=resolved_with_flag_off.rules
-    ).contract_id == order_rules.build_buy_price_none_submit_contract(rules=resolved_with_flag_on.rules).contract_id
+        rules=resolved_with_profile.rules
+    ).contract_id
 
 
 def test_get_effective_order_rules_rejects_invalid_live_fallback_config(monkeypatch):
