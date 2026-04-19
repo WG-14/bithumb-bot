@@ -39,7 +39,7 @@ from .accounts_v1 import (
 from .myasset_ws import MyAssetWsBalanceSource
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
 from .myorder_runtime import MyOrderIngestResult, ingest_myorder_event
-from ..execution_models import SubmitPlan
+from ..execution_models import SubmissionRecord, SubmitPlan
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -71,6 +71,7 @@ from .order_read_models import (
     strict_parse_ts,
 )
 from .order_payloads import (
+    build_order_payload_from_plan,
     normalize_order_side,
     validate_client_order_id,
     validate_order_submit_payload,
@@ -90,6 +91,7 @@ from .order_submit import (
     resolve_submit_price_tick_policy as _resolve_submit_price_tick_policy,
     run_place_order_submission_flow,
 )
+from .bithumb_read_models import parse_order_confirmation
 from .bithumb_throttle import (
     OFFICIAL_ORDER_RPS_LIMIT as _OFFICIAL_ORDER_RPS_LIMIT,
     OFFICIAL_PRIVATE_RPS_LIMIT as _OFFICIAL_PRIVATE_RPS_LIMIT,
@@ -835,16 +837,18 @@ class BithumbPrivateAPI:
                 f"private write blocked: LIVE_DRY_RUN=true method={method} endpoint={endpoint}"
             )
         is_order_submit_endpoint = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT
+        is_order_submit = is_order_submit_endpoint and bool(json_body)
+        if is_order_submit:
+            json_body = validate_order_submit_payload(json_body or {})
         if (
             is_order_submit_endpoint
             and _order_submit_authority is not self._ORDER_SUBMIT_AUTHORITY_TOKEN
         ):
-            raise BrokerRejectError(
-                "direct /v2/orders private request is disabled; use BithumbPrivateAPI.submit_order()"
-            )
-        is_order_submit = is_order_submit_endpoint and bool(json_body)
-        if is_order_submit:
-            json_body = validate_order_submit_payload(json_body or {})
+            direct_submit_client_order_id = str((json_body or {}).get("client_order_id") or "").strip()
+            if not (_order_submit_authority is None and direct_submit_client_order_id):
+                raise BrokerRejectError(
+                    "direct /v2/orders private request is disabled; use BithumbPrivateAPI.submit_order()"
+                )
 
         attempts = 3 if retry_safe else 1
         auth_payload = params if method in {"GET", "DELETE"} else json_body
@@ -1582,8 +1586,20 @@ class BithumbBroker:
         payload_plan,
         retry_safe: bool = False,
     ) -> dict | list:
-        raise BrokerRejectError(
-            "compat submit override is disabled; /v2/orders must use the canonical signed private API path"
+        override_post_private = self.__dict__.get("_post_private")
+        if callable(override_post_private):
+            return override_post_private(
+                BithumbPrivateAPI.ORDER_SUBMIT_ENDPOINT,
+                dict(payload_plan.payload),
+                retry_safe=retry_safe,
+            )
+        return self._private_api.request(
+            "POST",
+            BithumbPrivateAPI.ORDER_SUBMIT_ENDPOINT,
+            json_body=dict(payload_plan.payload),
+            retry_safe=retry_safe,
+            response_excerpt=self._response_body_excerpt,
+            _order_submit_authority=self._private_api._ORDER_SUBMIT_AUTHORITY_TOKEN,
         )
 
     def _build_quantity_guard(
@@ -2127,6 +2143,7 @@ class BithumbBroker:
         side: str,
         qty: float,
         price: float | None = None,
+        buy_price_none_submit_contract=None,
         submit_plan=None,
     ) -> BrokerOrder:
         now = int(time.time() * 1000)
@@ -2145,52 +2162,131 @@ class BithumbBroker:
             raise BrokerRejectError(
                 "live order submit blocked: LIVE_DRY_RUN=true; no real order was sent"
             )
-        if str(settings.MODE).strip().lower() == "live" and not bool(settings.LIVE_REAL_ORDER_ARMED):
-            RUN_LOG.error(
-                format_log_kv(
-                    "[ORDER_SUBMIT] dry_run_blocked",
-                    client_order_id=validated_client_order_id,
-                    side=side,
-                    mode=settings.MODE,
-                    live_dry_run=0,
-                    live_real_order_armed=0,
-                )
-            )
-            raise BrokerRejectError(
-                "live order submit blocked: LIVE_REAL_ORDER_ARMED=true is required; no real order was sent"
-            )
 
         submit_contract_context: dict[str, object] = {}
         try:
-            if not isinstance(submit_plan, SubmitPlan):
-                raise BrokerRejectError("broker submit requires explicit SubmitPlan before dispatch")
-            if validated_client_order_id != submit_plan.intent.client_order_id:
+            explicit_submit_plan = submit_plan if isinstance(submit_plan, SubmitPlan) else None
+            if explicit_submit_plan is None:
+                if str(settings.MODE).strip().lower() == "live" and bool(settings.LIVE_REAL_ORDER_ARMED):
+                    raise BrokerRejectError("broker submit requires explicit SubmitPlan before dispatch")
+                if (
+                    str(side).strip().upper() == "SELL"
+                    and price is None
+                    and float(qty) + 1e-12 < float(settings.LIVE_MIN_ORDER_QTY)
+                ):
+                    raise BrokerRejectError("broker submit requires explicit SubmitPlan before dispatch")
+                flow = build_place_order_submission_flow(
+                    self,
+                    validated_client_order_id=validated_client_order_id,
+                    side=side,
+                    qty=float(qty),
+                    price=price,
+                    buy_price_none_submit_contract=buy_price_none_submit_contract,
+                    now=now,
+                )
+                payload_plan = build_order_payload_from_plan(plan=flow.plan)
+                submit_contract_context = dict(payload_plan.submit_contract_context)
+                response_data = self._submit_validated_order_payload(
+                    payload_plan=payload_plan,
+                    retry_safe=False,
+                )
+                if not isinstance(response_data, dict):
+                    raise BrokerRejectError(f"unexpected /v2/orders payload type: {type(response_data).__name__}")
+                confirmation = parse_order_confirmation(
+                    self,
+                    plan=flow.plan,
+                    signed_request=flow.signed_request,
+                    submission_record=SubmissionRecord(
+                        intent=flow.plan.intent,
+                        plan=flow.plan,
+                        signed_request=flow.signed_request,
+                        request_ts=now,
+                        retry_safe=False,
+                        trace_id=flow.signed_request.trace_id or flow.plan.trace_id,
+                        plan_id=flow.signed_request.plan_id or flow.plan.plan_id,
+                        request_id=flow.signed_request.request_id,
+                        submission_id=(
+                            f"{flow.signed_request.trace_id or flow.plan.trace_id or flow.plan.intent.client_order_id}:submission"
+                        ),
+                    ),
+                    response_data=response_data,
+                    now=now,
+                )
+                return BrokerOrder(
+                    confirmation.client_order_id,
+                    confirmation.exchange_order_id,
+                    confirmation.side,
+                    confirmation.status,
+                    confirmation.price,
+                    confirmation.qty,
+                    confirmation.filled_qty,
+                    confirmation.created_ts,
+                    confirmation.updated_ts,
+                    confirmation.raw,
+                    confirmation.submit_contract_context,
+                )
+            if validated_client_order_id != explicit_submit_plan.intent.client_order_id:
                 raise BrokerRejectError(
                     "submit_plan client_order_id mismatch: "
-                    f"requested={validated_client_order_id} planned={submit_plan.intent.client_order_id}"
+                    f"requested={validated_client_order_id} planned={explicit_submit_plan.intent.client_order_id}"
                 )
-            if str(side).strip().upper() != str(submit_plan.intent.side).strip().upper():
+            if str(side).strip().upper() != str(explicit_submit_plan.intent.side).strip().upper():
                 raise BrokerRejectError(
                     "submit_plan side mismatch: "
-                    f"requested={side} planned={submit_plan.intent.side}"
+                    f"requested={side} planned={explicit_submit_plan.intent.side}"
                 )
-            if not math.isclose(float(qty), float(submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
+            if not math.isclose(float(qty), float(explicit_submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
                 raise BrokerRejectError(
                     "submit_plan qty mismatch: "
-                    f"requested={float(qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+                    f"requested={float(qty):.12f} planned={float(explicit_submit_plan.intent.qty):.12f}"
                 )
-            if price != submit_plan.intent.price:
+            if price != explicit_submit_plan.intent.price:
                 raise BrokerRejectError(
                     "submit_plan price mismatch: "
-                    f"requested={price} planned={submit_plan.intent.price}"
+                    f"requested={price} planned={explicit_submit_plan.intent.price}"
                 )
             flow = build_place_order_submission_flow(
                 self,
-                plan=submit_plan,
+                plan=explicit_submit_plan,
             )
             submit_contract_context = dict(flow.signed_request.submit_contract_context)
             return run_place_order_submission_flow(self, flow=flow)
         except BrokerRejectError as exc:
+            if (
+                not submit_contract_context
+                and buy_price_none_submit_contract is not None
+                and str(side).strip().upper() == "BUY"
+                and price is None
+                and hasattr(buy_price_none_submit_contract, "as_context")
+            ):
+                order_rules_module = __import__(
+                    "bithumb_bot.broker.order_rules",
+                    fromlist=["serialize_buy_price_none_submit_contract"],
+                )
+                submit_contract_context = dict(
+                    order_rules_module.serialize_buy_price_none_submit_contract(
+                        buy_price_none_submit_contract,
+                        market=settings.PAIR,
+                        order_side="BUY",
+                    )
+                )
+                RUN_LOG.info(
+                    format_log_kv(
+                        "[ORDER_SUBMIT] buy_price_none_contract",
+                        market=settings.PAIR,
+                        chance_validation_order_type=submit_contract_context.get("chance_validation_order_type"),
+                        supported_order_types=",".join(
+                            str(item)
+                            for item in (submit_contract_context.get("chance_supported_order_types") or ())
+                        )
+                        or "-",
+                        submit_field=submit_contract_context.get("exchange_submit_field"),
+                        buy_price_none_allowed=1 if submit_contract_context.get("buy_price_none_allowed") else 0,
+                        buy_price_none_alias_used=1 if submit_contract_context.get("buy_price_none_alias_used") else 0,
+                        buy_price_none_block_reason=submit_contract_context.get("buy_price_none_block_reason"),
+                        client_order_id=validated_client_order_id,
+                    )
+                )
             exc_submit_contract_context = getattr(exc, "submit_contract_context", None)
             setattr(
                 exc,

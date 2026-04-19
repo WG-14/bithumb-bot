@@ -83,6 +83,7 @@ class Broker(Protocol):
         side: str,
         qty: float,
         price: float | None = None,
+        buy_price_none_submit_contract: object | None = None,
         submit_plan: "SubmitPlan | None" = None,
     ) -> BrokerOrder:
         ...

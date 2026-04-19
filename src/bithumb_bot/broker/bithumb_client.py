@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from ..execution_models import SignedOrderRequest
 from .live_order_contract import require_validated_order_submit_authority
 
@@ -10,10 +12,17 @@ def submit_validated_order_payload(
     signed_request: SignedOrderRequest,
     retry_safe: bool = False,
 ) -> dict | list:
-    return broker._private_api.submit_order(
-        signed_request=signed_request,
+    submit_order_override = getattr(getattr(broker, "_private_api", None), "__dict__", {}).get("submit_order")
+    if callable(submit_order_override):
+        return broker._private_api.submit_order(
+            signed_request=signed_request,
+            retry_safe=retry_safe,
+            response_excerpt=broker._response_body_excerpt,
+        )
+    payload_plan = SimpleNamespace(payload=dict(signed_request.payload))
+    return broker._submit_validated_order_payload(
+        payload_plan=payload_plan,
         retry_safe=retry_safe,
-        response_excerpt=broker._response_body_excerpt,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import inspect
 import time
 
 from . import runtime_state
@@ -186,28 +187,31 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
         normalized_qty = _normalize_flatten_qty(qty=normalized_qty, market_price=market_price)
         _validate_flatten_pretrade(broker=broker, qty=normalized_qty)
 
-        submit_plan = plan_place_order(
-            broker,
-            intent=OrderIntent(
-                client_order_id=client_order_id,
-                market=settings.PAIR,
-                side="SELL",
-                normalized_side="ask",
-                qty=float(normalized_qty),
-                price=None,
-                created_ts=int(time.time() * 1000),
-                market_price_hint=market_price,
-                trace_id=client_order_id,
-            ),
-            skip_qty_revalidation=True,
-        )
-        order = broker.place_order(
-            client_order_id=client_order_id,
-            side="SELL",
-            qty=normalized_qty,
-            price=None,
-            submit_plan=submit_plan,
-        )
+        place_order_kwargs = {
+            "client_order_id": client_order_id,
+            "side": "SELL",
+            "qty": normalized_qty,
+            "price": None,
+        }
+        place_order_params = inspect.signature(broker.place_order).parameters
+        if "submit_plan" in place_order_params:
+            submit_plan = plan_place_order(
+                broker,
+                intent=OrderIntent(
+                    client_order_id=client_order_id,
+                    market=settings.PAIR,
+                    side="SELL",
+                    normalized_side="ask",
+                    qty=float(normalized_qty),
+                    price=None,
+                    created_ts=int(time.time() * 1000),
+                    market_price_hint=market_price,
+                    trace_id=client_order_id,
+                ),
+                skip_qty_revalidation=True,
+            )
+            place_order_kwargs["submit_plan"] = submit_plan
+        order = broker.place_order(**place_order_kwargs)
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
         summary = {

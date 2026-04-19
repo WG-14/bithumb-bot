@@ -49,6 +49,7 @@ def build_submit_plan(
     from .broker.order_rules import (
         BuyPriceNoneSubmitContract,
         normalize_limit_price_for_side,
+        resolve_buy_price_none_resolution,
         serialize_buy_price_none_submit_contract,
         side_min_total_krw,
         supported_order_types_for_chance_validation,
@@ -132,6 +133,15 @@ def build_submit_plan(
             rules=resolved_rules,
         )
         if buy_submit_contract is not None:
+            current_buy_price_none_resolution = resolve_buy_price_none_resolution(
+                rules=resolved_rules,
+            )
+            validate_order_chance_support(
+                rules=resolved_rules,
+                side="BUY",
+                order_type=buy_submit_contract.chance_validation_order_type,
+                buy_price_none_resolution=current_buy_price_none_resolution,
+            )
             validate_buy_price_none_order_chance_contract(
                 rules=resolved_rules,
                 submit_contract=buy_submit_contract,

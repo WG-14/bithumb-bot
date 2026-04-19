@@ -12,9 +12,9 @@ from .config import (
     DEFAULT_RUNTIME_STRATEGY,
     MarketPreflightValidationError,
     settings,
+    validate_live_mode_preflight,
     validate_market_preflight,
     validate_market_runtime,
-    validate_live_run_startup_contract,
 )
 from .marketdata import cmd_sync
 from .strategy import create_strategy
@@ -1976,7 +1976,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                 reason=f"market preflight failed: {exc}",
             )
             raise
-    validate_live_run_startup_contract(settings)
+    validate_live_mode_preflight(settings)
 
     maybe_clear_stale_initial_reconcile_halt()
     maybe_clear_stale_live_execution_broker_halt()
@@ -2616,17 +2616,18 @@ def run_loop(short_n: int, long_n: int) -> None:
                         unresolved=True,
                     )
                     continue
-                try:
-                    reconcile_with_broker(broker)
-                except Exception as e:
-                    _halt_trading(
-                        _halt_reason(
-                            "POST_TRADE_RECONCILE_FAILED",
-                            f"reconcile failed ({type(e).__name__}): {e}",
-                        ),
-                        unresolved=True,
-                    )
-                    continue
+                if settings.MODE == "live" and broker is not None:
+                    try:
+                        reconcile_with_broker(broker)
+                    except Exception as e:
+                        _halt_trading(
+                            _halt_reason(
+                                "POST_TRADE_RECONCILE_FAILED",
+                                f"reconcile failed ({type(e).__name__}): {e}",
+                            ),
+                            unresolved=True,
+                        )
+                        continue
 
             if trade:
                 _log_loop_event(
