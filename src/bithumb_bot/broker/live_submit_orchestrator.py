@@ -569,6 +569,8 @@ def _planning_failure(
             "side": request.side,
             "intended_qty": request.qty,
             "normalized_qty": request.qty,
+            **request.submit_observability_fields,
+            **request.submit_truth_source_fields,
             "reference_price": request.reference_price,
             "top_of_book": request.top_of_book_summary,
             "request_ts": None,

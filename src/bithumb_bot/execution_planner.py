@@ -260,20 +260,27 @@ def build_submit_plan(
                     f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
                     f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
                 )
-            internal_lot_qty = (
-                lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
-                if has_explicit_qty_controls
-                else float(requested_qty)
-            )
+            if skip_qty_revalidation:
+                internal_lot_qty = float(requested_qty)
+            else:
+                internal_lot_qty = (
+                    lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+                    if has_explicit_qty_controls
+                    else float(requested_qty)
+                )
             exchange_constrained_qty = float(requested_qty)
             exchange_submit_qty = float(internal_lot_qty)
 
         submitted_qty = float(exchange_submit_qty)
         rejected_qty_remainder = max(0.0, float(requested_qty) - float(submitted_qty))
-        lifecycle_executable_qty = float(qty_split.executable_qty if qty_split.executable else 0.0)
+        lifecycle_executable_qty = (
+            float(submitted_qty)
+            if skip_qty_revalidation and intent.normalized_side == "ask"
+            else float(qty_split.executable_qty if qty_split.executable else 0.0)
+        )
         lifecycle_non_executable_reason = (
             None
-            if qty_split.executable
+            if qty_split.executable or (skip_qty_revalidation and intent.normalized_side == "ask")
             else str(qty_split.non_executable_reason or "none")
         )
         submit_qty_authority = (
