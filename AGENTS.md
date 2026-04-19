@@ -512,3 +512,37 @@ Default preference order:
 6. improve profitability
 
 If a requested change appears to conflict with `docs/storage-layout.md` or `docs/runtime-data-policy.md`, follow the docs and keep the storage contract intact unless those docs are explicitly updated as part of the same task.
+
+
+
+
+
+
+
+# Codex instructions for this repository
+
+Use `docs/refactor_target.md` as the source of truth for refactor completion.
+
+## Required workflow
+1. First inspect the current repository and compare it against `docs/refactor_target.md`.
+2. Decide whether the repository already satisfies the criteria.
+3. If it does not, apply only the currently necessary patch.
+4. After each patch, reassess whether the criteria are now satisfied.
+5. If the criteria are satisfied, stop patching and report completion.
+
+## Rules
+- Do not keep patching once the target criteria are satisfied.
+- Prefer small, reviewable patches over broad rewrites.
+- Preserve existing behavior unless the target document requires a change.
+- Do not invent a different architecture from the target document.
+- Report which criteria are satisfied, which are not, and why.
+
+## Reporting format
+Always report:
+- files inspected
+- files changed
+- criteria satisfied now
+- criteria still unsatisfied
+- why patching stopped
+
+After each meaningful patch, reassess whether the target criteria are satisfied and stop immediately if they are.
