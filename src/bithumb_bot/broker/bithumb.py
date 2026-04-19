@@ -79,6 +79,7 @@ from .live_order_contract import (
     ORDER_SUBMIT_CONTENT_TYPE as LIVE_ORDER_SUBMIT_CONTENT_TYPE,
     ORDER_SUBMIT_DISPATCH_AUTHORITY as LIVE_ORDER_SUBMIT_DISPATCH_AUTHORITY,
     ORDER_SUBMIT_ENDPOINT as LIVE_ORDER_SUBMIT_ENDPOINT,
+    reject_forbidden_order_submit_route,
     require_validated_order_submit_authority,
 )
 from .order_serialization import decimal_from_value, format_krw_amount, format_volume, truncate_volume
@@ -812,6 +813,11 @@ class BithumbPrivateAPI:
     ) -> dict | list:
         method = method.upper()
         request_endpoint = endpoint
+        reject_forbidden_order_submit_route(
+            method,
+            endpoint,
+            context="private API request",
+        )
         if self.dry_run and not self._is_read_only_private_request(method):
             RUN_LOG.error(
                 format_log_kv(
@@ -1550,6 +1556,11 @@ class BithumbBroker:
         json_body: dict[str, object] | None = None,
         retry_safe: bool = False,
     ) -> dict | list:
+        reject_forbidden_order_submit_route(
+            method,
+            endpoint,
+            context="broker private request",
+        )
         if str(method).upper() == "POST" and endpoint == BithumbPrivateAPI.ORDER_SUBMIT_ENDPOINT:
             raise BrokerRejectError(
                 "raw /v2/orders submit bypass is disabled; use place_order() validated submit flow"

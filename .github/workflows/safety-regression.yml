@@ -1,0 +1,33 @@
+name: safety-regression
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  order-submit-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --dev
+      - name: Run focused safety regressions
+        run: >
+          uv run pytest -q
+          tests/test_bithumb_private_api.py::test_order_submit_auth_context_matches_official_claim_contract
+          tests/test_bithumb_private_api.py::test_order_submit_uses_json_body_with_query_hash_from_canonical_payload
+          tests/test_bithumb_private_api.py::test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp
+          tests/test_bithumb_private_api.py::test_order_http_debug_request_logs_query_hash_and_json_body
+          tests/test_bithumb_private_api.py::test_order_submit_live_failure_regression_uses_json_body_and_matching_query_hash
+          tests/test_order_submit_hardening.py
+          tests/test_live_preflight.py
+          tests/test_env_loading.py
+          tests/test_deploy_systemd_units.py

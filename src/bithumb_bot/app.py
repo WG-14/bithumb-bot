@@ -524,7 +524,11 @@ def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
     from .run_lock import RunLockError, acquire_run_lock
 
-    log_live_execution_contract(settings, caller="cmd_run")
+    log_live_execution_contract(
+        settings,
+        caller="cmd_run",
+        env_summary=get_last_explicit_env_load_summary().as_dict(),
+    )
     try:
         validate_live_run_startup_contract(settings)
     except LiveModeValidationError as e:

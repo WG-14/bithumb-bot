@@ -1035,7 +1035,11 @@ def validate_live_run_startup_contract(cfg: Settings) -> None:
     validate_live_real_order_execution_preflight(cfg)
 
 
-def live_execution_contract_summary(cfg: Settings) -> dict[str, object]:
+def live_execution_contract_summary(
+    cfg: Settings,
+    *,
+    env_summary: dict[str, object] | None = None,
+) -> dict[str, object]:
     managed_roots = {
         key: str(Path(os.getenv(key, "")).expanduser()) if os.getenv(key) else ""
         for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT")
@@ -1044,6 +1048,7 @@ def live_execution_contract_summary(cfg: Settings) -> dict[str, object]:
         "DB_PATH": str(os.getenv("DB_PATH") or cfg.DB_PATH or ""),
         "RUN_LOCK_PATH": str(os.getenv("RUN_LOCK_PATH") or cfg.RUN_LOCK_PATH or ""),
     }
+    explicit_env = dict(env_summary or {})
     return {
         "mode": cfg.MODE,
         "pair": cfg.PAIR,
@@ -1058,6 +1063,7 @@ def live_execution_contract_summary(cfg: Settings) -> dict[str, object]:
         "api_key_length": len(str(cfg.BITHUMB_API_KEY or "")),
         "api_secret_present": bool(str(cfg.BITHUMB_API_SECRET or "").strip()),
         "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
+        "explicit_env": explicit_env,
         "managed_roots": managed_roots,
         "runtime_paths": runtime_paths,
     }
@@ -1068,14 +1074,20 @@ def live_execution_contract_fingerprint(summary: dict[str, object]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def log_live_execution_contract(cfg: Settings, *, caller: str) -> dict[str, object]:
+def log_live_execution_contract(
+    cfg: Settings,
+    *,
+    caller: str,
+    env_summary: dict[str, object] | None = None,
+) -> dict[str, object]:
     from .observability import format_log_kv
 
-    summary = live_execution_contract_summary(cfg)
+    summary = live_execution_contract_summary(cfg, env_summary=env_summary)
     if cfg.MODE != "live":
         return summary
     roots = summary.get("managed_roots") if isinstance(summary.get("managed_roots"), dict) else {}
     paths = summary.get("runtime_paths") if isinstance(summary.get("runtime_paths"), dict) else {}
+    explicit_env = summary.get("explicit_env") if isinstance(summary.get("explicit_env"), dict) else {}
     logging.getLogger("bithumb_bot.run").info(
         format_log_kv(
             "[LIVE_EXECUTION_CONTRACT]",
@@ -1092,6 +1104,11 @@ def log_live_execution_contract(cfg: Settings, *, caller: str) -> dict[str, obje
             api_key_length=summary.get("api_key_length"),
             api_secret_present=1 if bool(summary.get("api_secret_present")) else 0,
             api_secret_length=summary.get("api_secret_length"),
+            env_source_key=explicit_env.get("source_key"),
+            env_file=explicit_env.get("env_file"),
+            env_loaded=explicit_env.get("loaded"),
+            env_exists=explicit_env.get("exists"),
+            env_override=explicit_env.get("override"),
             env_root=roots.get("ENV_ROOT"),
             run_root=roots.get("RUN_ROOT"),
             data_root=roots.get("DATA_ROOT"),
