@@ -940,6 +940,11 @@ def test_broker_auth_runtime_diagnostics_redact_secret_values(monkeypatch) -> No
     assert diag["chance_auth"]["query_hash_included"] is True
     assert diag["accounts_auth"]["endpoint"] == "/v1/accounts"
     assert diag["accounts_auth"]["query_hash_included"] is False
+    assert diag["order_submit_auth"]["endpoint"] == "/v2/orders"
+    assert diag["order_submit_auth"]["auth_branch"] == "order_submit_json_query_hash"
+    assert diag["order_submit_auth"]["submit_path"] == "canonical_v2_orders_json_content"
+    assert diag["order_submit_auth"]["submit_dispatch_authority"] == "validated_place_order_flow"
+    assert diag["order_submit_auth"]["query_hash_included"] is True
 
 
 def test_build_broker_with_auth_diagnostics_reuses_same_private_auth_preview_for_health_and_run(monkeypatch) -> None:
@@ -970,6 +975,8 @@ def test_build_broker_with_auth_diagnostics_reuses_same_private_auth_preview_for
     assert run_diag["chance_auth"]["query_hash_included"] is True
     assert health_diag["accounts_auth"]["endpoint"] == "/v1/accounts"
     assert run_diag["accounts_auth"]["endpoint"] == "/v1/accounts"
+    assert health_diag["order_submit_auth"]["submit_path"] == "canonical_v2_orders_json_content"
+    assert run_diag["order_submit_auth"]["submit_dispatch_authority"] == "validated_place_order_flow"
 
 
 def test_validate_pretrade_price_protection_buy_within_threshold() -> None:

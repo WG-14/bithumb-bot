@@ -13,6 +13,7 @@ from ..execution_models import (
 )
 from ..observability import format_log_kv
 from .base import BrokerOrder, BrokerRejectError
+from .live_order_contract import ORDER_SUBMIT_DISPATCH_AUTHORITY
 from .order_payloads import build_order_payload_from_plan, normalize_order_side, validate_client_order_id
 from .order_serialization import truncate_volume
 from .bithumb_execution import execute_signed_order_request
@@ -170,7 +171,7 @@ def build_place_order_submission_flow(
         )
     signed_request = replace(
         build_place_order_payload(broker, plan=plan),
-        dispatch_authority="validated_place_order_flow",
+        dispatch_authority=ORDER_SUBMIT_DISPATCH_AUTHORITY,
     )
     return PlaceOrderSubmissionFlow(
         intent=plan.intent,

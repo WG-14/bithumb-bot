@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import logging
@@ -935,6 +937,12 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
                 "LIVE_REAL_ORDER_ARMED=true is required to place real live orders "
                 "(MODE=live and LIVE_DRY_RUN=false)"
             )
+    elif bool(cfg.LIVE_REAL_ORDER_ARMED):
+        issues.append(
+            "LIVE_DRY_RUN=true and LIVE_REAL_ORDER_ARMED=true is ambiguous; "
+            "use LIVE_DRY_RUN=true with LIVE_REAL_ORDER_ARMED=false for diagnostics, "
+            "or LIVE_DRY_RUN=false with LIVE_REAL_ORDER_ARMED=true for real-order execution"
+        )
 
     if not notifier_is_configured():
         issues.append(
@@ -1019,3 +1027,79 @@ def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live real-order execution preflight failed: " + "; ".join(issues)
         )
+
+
+def validate_live_run_startup_contract(cfg: Settings) -> None:
+    """Single startup gate for live run-loop execution."""
+    validate_live_mode_preflight(cfg)
+    validate_live_real_order_execution_preflight(cfg)
+
+
+def live_execution_contract_summary(cfg: Settings) -> dict[str, object]:
+    managed_roots = {
+        key: str(Path(os.getenv(key, "")).expanduser()) if os.getenv(key) else ""
+        for key in ("ENV_ROOT", "RUN_ROOT", "DATA_ROOT", "LOG_ROOT", "BACKUP_ROOT", "ARCHIVE_ROOT")
+    }
+    runtime_paths = {
+        "DB_PATH": str(os.getenv("DB_PATH") or cfg.DB_PATH or ""),
+        "RUN_LOCK_PATH": str(os.getenv("RUN_LOCK_PATH") or cfg.RUN_LOCK_PATH or ""),
+    }
+    return {
+        "mode": cfg.MODE,
+        "pair": cfg.PAIR,
+        "live_dry_run": bool(cfg.LIVE_DRY_RUN),
+        "live_real_order_armed": bool(cfg.LIVE_REAL_ORDER_ARMED),
+        "live_submit_contract_profile": str(cfg.LIVE_SUBMIT_CONTRACT_PROFILE),
+        "live_order_rule_fallback_profile": str(cfg.LIVE_ORDER_RULE_FALLBACK_PROFILE),
+        "private_rps_limit": float(cfg.BITHUMB_PRIVATE_RPS_LIMIT),
+        "order_rps_limit": float(cfg.BITHUMB_ORDER_RPS_LIMIT),
+        "api_base": str(cfg.BITHUMB_API_BASE),
+        "api_key_present": bool(str(cfg.BITHUMB_API_KEY or "").strip()),
+        "api_key_length": len(str(cfg.BITHUMB_API_KEY or "")),
+        "api_secret_present": bool(str(cfg.BITHUMB_API_SECRET or "").strip()),
+        "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
+        "managed_roots": managed_roots,
+        "runtime_paths": runtime_paths,
+    }
+
+
+def live_execution_contract_fingerprint(summary: dict[str, object]) -> str:
+    encoded = json.dumps(summary, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def log_live_execution_contract(cfg: Settings, *, caller: str) -> dict[str, object]:
+    from .observability import format_log_kv
+
+    summary = live_execution_contract_summary(cfg)
+    if cfg.MODE != "live":
+        return summary
+    roots = summary.get("managed_roots") if isinstance(summary.get("managed_roots"), dict) else {}
+    paths = summary.get("runtime_paths") if isinstance(summary.get("runtime_paths"), dict) else {}
+    logging.getLogger("bithumb_bot.run").info(
+        format_log_kv(
+            "[LIVE_EXECUTION_CONTRACT]",
+            caller=caller,
+            fingerprint=live_execution_contract_fingerprint(summary),
+            mode=summary.get("mode"),
+            pair=summary.get("pair"),
+            live_dry_run=1 if bool(summary.get("live_dry_run")) else 0,
+            live_real_order_armed=1 if bool(summary.get("live_real_order_armed")) else 0,
+            live_submit_contract_profile=summary.get("live_submit_contract_profile"),
+            live_order_rule_fallback_profile=summary.get("live_order_rule_fallback_profile"),
+            api_base=summary.get("api_base"),
+            api_key_present=1 if bool(summary.get("api_key_present")) else 0,
+            api_key_length=summary.get("api_key_length"),
+            api_secret_present=1 if bool(summary.get("api_secret_present")) else 0,
+            api_secret_length=summary.get("api_secret_length"),
+            env_root=roots.get("ENV_ROOT"),
+            run_root=roots.get("RUN_ROOT"),
+            data_root=roots.get("DATA_ROOT"),
+            log_root=roots.get("LOG_ROOT"),
+            backup_root=roots.get("BACKUP_ROOT"),
+            archive_root=roots.get("ARCHIVE_ROOT"),
+            db_path=paths.get("DB_PATH"),
+            run_lock_path=paths.get("RUN_LOCK_PATH"),
+        )
+    )
+    return summary

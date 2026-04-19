@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.bithumb_adapter import build_signed_order_request, build_submission_flow
 from bithumb_bot.broker.base import BrokerRejectError
 from bithumb_bot.broker.bithumb_client import submit_signed_order_request
+from bithumb_bot.broker import bithumb_client
 from bithumb_bot.broker.bithumb_execution import execute_signed_order_request
 from bithumb_bot.broker.bithumb_read_models import parse_order_confirmation
 from bithumb_bot.broker import order_rules
@@ -107,21 +109,19 @@ def test_client_submits_signed_order_request(monkeypatch) -> None:
     broker = BithumbBroker()
     calls: list[dict[str, object]] = []
 
-    def _fake_request(method, endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None):
+    def _fake_submit_order(*, signed_request, retry_safe=False, response_excerpt=None):
         calls.append(
             {
-                "method": method,
-                "endpoint": endpoint,
-                "json_body": dict(json_body or {}),
+                "payload": dict(signed_request.payload),
                 "retry_safe": retry_safe,
             }
         )
         return {
             "status": "0000",
-            "data": {"order_id": "ex-client", "client_order_id": json_body["client_order_id"]},
+            "data": {"order_id": "ex-client", "client_order_id": signed_request.payload["client_order_id"]},
         }
 
-    monkeypatch.setattr(broker._private_api, "request", _fake_request)
+    monkeypatch.setattr(broker._private_api, "submit_order", _fake_submit_order)
     plan = plan_place_order(
         broker,
         intent=OrderIntent(
@@ -152,9 +152,7 @@ def test_client_submits_signed_order_request(monkeypatch) -> None:
     assert data["data"]["order_id"] == "ex-client"
     assert calls == [
         {
-            "method": "POST",
-            "endpoint": "/v2/orders",
-            "json_body": flow.signed_request.payload,
+            "payload": flow.signed_request.payload,
             "retry_safe": False,
         }
     ]
@@ -234,8 +232,8 @@ def test_execution_and_read_models_confirm_response(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         broker._private_api,
-        "request",
-        lambda _method, _endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None: response,
+        "submit_order",
+        lambda *, signed_request, retry_safe=False, response_excerpt=None: response,
     )
     executed = execute_signed_order_request(
         broker,
@@ -265,10 +263,10 @@ def test_submit_ignores_broker_post_private_override(monkeypatch) -> None:
     monkeypatch.setattr(broker, "_post_private", _post_override)
     monkeypatch.setattr(
         broker._private_api,
-        "request",
-        lambda _method, _endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None: {
+        "submit_order",
+        lambda *, signed_request, retry_safe=False, response_excerpt=None: {
             "status": "0000",
-            "data": {"order_id": "canonical", "client_order_id": json_body["client_order_id"]},
+            "data": {"order_id": "canonical", "client_order_id": signed_request.payload["client_order_id"]},
         },
     )
     plan = plan_place_order(
@@ -297,3 +295,11 @@ def test_submit_ignores_broker_post_private_override(monkeypatch) -> None:
 
     assert data["data"]["order_id"] == "canonical"
     assert post_override_called is False
+
+
+def test_submit_client_cannot_reintroduce_raw_private_request_bypass() -> None:
+    source = inspect.getsource(bithumb_client.submit_validated_order_payload)
+
+    assert "._private_api.submit_order" in source
+    assert "._private_api.request" not in source
+    assert "\"/v2/orders\"" not in source

@@ -75,6 +75,12 @@ from .order_payloads import (
     validate_client_order_id,
     validate_order_submit_payload,
 )
+from .live_order_contract import (
+    ORDER_SUBMIT_CONTENT_TYPE as LIVE_ORDER_SUBMIT_CONTENT_TYPE,
+    ORDER_SUBMIT_DISPATCH_AUTHORITY as LIVE_ORDER_SUBMIT_DISPATCH_AUTHORITY,
+    ORDER_SUBMIT_ENDPOINT as LIVE_ORDER_SUBMIT_ENDPOINT,
+    require_validated_order_submit_authority,
+)
 from .order_serialization import decimal_from_value, format_krw_amount, format_volume, truncate_volume
 from .order_submit import (
     PlaceOrderSubmissionFlow,
@@ -465,8 +471,10 @@ class _OrderSubmitAuthContext(TypedDict):
 
 
 class BithumbPrivateAPI:
-    ORDER_SUBMIT_ENDPOINT = "/v2/orders"
-    ORDER_SUBMIT_CONTENT_TYPE = "application/json; charset=utf-8"
+    ORDER_SUBMIT_ENDPOINT = LIVE_ORDER_SUBMIT_ENDPOINT
+    ORDER_SUBMIT_CONTENT_TYPE = LIVE_ORDER_SUBMIT_CONTENT_TYPE
+    ORDER_SUBMIT_DISPATCH_AUTHORITY = LIVE_ORDER_SUBMIT_DISPATCH_AUTHORITY
+    _ORDER_SUBMIT_AUTHORITY_TOKEN = object()
 
     def __init__(self, *, api_key: str, api_secret: str, base_url: str, dry_run: bool) -> None:
         self.api_key = api_key
@@ -632,12 +640,72 @@ class BithumbPrivateAPI:
         nonce: str | None = None,
         timestamp: int | None = None,
     ) -> tuple[dict[str, str], dict[str, object], str]:
-        context = self._order_submit_auth_context(payload, nonce=nonce, timestamp=timestamp)
+        context = self._validated_order_submit_auth_context(payload, nonce=nonce, timestamp=timestamp)
         return context["headers"], context["request_kwargs"], context["canonical_payload"]
 
     @staticmethod
     def _json_body_text(payload: dict[str, object]) -> str:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _validated_order_submit_auth_context(
+        self,
+        payload: dict[str, object],
+        *,
+        expected_canonical_payload: str | None = None,
+        nonce: str | None = None,
+        timestamp: int | None = None,
+    ) -> _OrderSubmitAuthContext:
+        validated_payload = validate_order_submit_payload(payload)
+        context = self._order_submit_auth_context(
+            validated_payload,
+            nonce=nonce,
+            timestamp=timestamp,
+        )
+        canonical_payload = str(context["canonical_payload"])
+        if expected_canonical_payload is not None and canonical_payload != str(expected_canonical_payload):
+            raise BrokerRejectError(
+                "/v2/orders signed request canonical payload mismatch: "
+                f"planned={expected_canonical_payload!r} dispatch={canonical_payload!r}"
+            )
+        expected_hash = self._query_hash_from_canonical_payload(canonical_payload)
+        if context["query_hash_claims"] != expected_hash:
+            raise BrokerRejectError("/v2/orders query_hash claims do not match canonical payload")
+        request_body_text = str(context["request_body_text"])
+        if context["request_content"] != request_body_text.encode("utf-8"):
+            raise BrokerRejectError("/v2/orders transmitted content does not match JSON body text")
+        if context["request_kwargs"] != {"content": context["request_content"]}:
+            raise BrokerRejectError("/v2/orders must transmit exact JSON bytes via content=, not json=")
+        if str(context["headers"].get("Content-Type") or "") != self.ORDER_SUBMIT_CONTENT_TYPE:
+            raise BrokerRejectError("/v2/orders Content-Type contract drifted")
+        return context
+
+    def submit_order(
+        self,
+        *,
+        signed_request,
+        retry_safe: bool = False,
+        response_excerpt: callable | None = None,
+    ) -> dict | list:
+        require_validated_order_submit_authority(
+            signed_request,
+            context="direct /v2/orders submit is disabled; signed request",
+        )
+        payload = validate_order_submit_payload(dict(getattr(signed_request, "payload", {}) or {}))
+        canonical_payload = self._query_string(payload)
+        expected_canonical_payload = str(getattr(signed_request, "canonical_payload", "") or "")
+        if canonical_payload != expected_canonical_payload:
+            raise BrokerRejectError(
+                "/v2/orders signed request canonical payload mismatch: "
+                f"planned={expected_canonical_payload!r} dispatch={canonical_payload!r}"
+            )
+        return self.request(
+            "POST",
+            self.ORDER_SUBMIT_ENDPOINT,
+            json_body=payload,
+            retry_safe=retry_safe,
+            response_excerpt=response_excerpt,
+            _order_submit_authority=self._ORDER_SUBMIT_AUTHORITY_TOKEN,
+        )
 
     @classmethod
     def _form_body_bytes(cls, payload: dict[str, object]) -> bytes:
@@ -674,6 +742,16 @@ class BithumbPrivateAPI:
             "auth_mode": "jwt_hs256",
             "request_kind": "private_read" if is_read_only else "private_write",
             "auth_branch": auth_branch,
+            "submit_path": (
+                "canonical_v2_orders_json_content"
+                if normalized_method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and json_body
+                else None
+            ),
+            "submit_dispatch_authority": (
+                self.ORDER_SUBMIT_DISPATCH_AUTHORITY
+                if normalized_method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and json_body
+                else None
+            ),
             "query_hash_included": bool(query_hash_claims.get("query_hash")),
             "query_hash_alg": query_hash_claims.get("query_hash_alg"),
             "query_hash_preview": self._mask_query_hash(str(query_hash_claims.get("query_hash") or "")),
@@ -730,6 +808,7 @@ class BithumbPrivateAPI:
         json_body: dict[str, object] | None = None,
         retry_safe: bool = False,
         response_excerpt: callable | None = None,
+        _order_submit_authority: object | None = None,
     ) -> dict | list:
         method = method.upper()
         request_endpoint = endpoint
@@ -747,7 +826,15 @@ class BithumbPrivateAPI:
             raise BrokerRejectError(
                 f"private write blocked: LIVE_DRY_RUN=true method={method} endpoint={endpoint}"
             )
-        is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
+        is_order_submit_endpoint = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT
+        if (
+            is_order_submit_endpoint
+            and _order_submit_authority is not self._ORDER_SUBMIT_AUTHORITY_TOKEN
+        ):
+            raise BrokerRejectError(
+                "direct /v2/orders private request is disabled; use BithumbPrivateAPI.submit_order()"
+            )
+        is_order_submit = is_order_submit_endpoint and bool(json_body)
         if is_order_submit:
             json_body = validate_order_submit_payload(json_body or {})
 
@@ -790,7 +877,7 @@ class BithumbPrivateAPI:
             attempt_nonce = str(uuid.uuid4())
             attempt_timestamp = round(time.time() * 1000)
             if is_order_submit:
-                order_context = self._order_submit_auth_context(
+                order_context = self._validated_order_submit_auth_context(
                     json_body or {},
                     nonce=attempt_nonce,
                     timestamp=attempt_timestamp,
@@ -1296,6 +1383,11 @@ class BithumbBroker:
             "/v1/orders/chance",
             params={"market": self._market()},
         )
+        order_submit_preview = self._private_api.describe_request_auth(
+            "POST",
+            self._private_api.ORDER_SUBMIT_ENDPOINT,
+            json_body={"market": self._market(), "side": "bid", "order_type": "price", "price": "10000"},
+        )
         return {
             "caller": caller,
             "mode": settings.MODE,
@@ -1312,6 +1404,7 @@ class BithumbBroker:
             "env": dict(env_summary or {}),
             "accounts_auth": accounts_preview,
             "chance_auth": chance_preview,
+            "order_submit_auth": order_submit_preview,
         }
 
     def log_auth_runtime_diagnostics(
@@ -1325,6 +1418,11 @@ class BithumbBroker:
         env = diagnostics.get("env") if isinstance(diagnostics.get("env"), dict) else {}
         accounts_auth = diagnostics.get("accounts_auth") if isinstance(diagnostics.get("accounts_auth"), dict) else {}
         chance_auth = diagnostics.get("chance_auth") if isinstance(diagnostics.get("chance_auth"), dict) else {}
+        order_submit_auth = (
+            diagnostics.get("order_submit_auth")
+            if isinstance(diagnostics.get("order_submit_auth"), dict)
+            else {}
+        )
         RUN_LOG.log(
             level,
             format_log_kv(
@@ -1353,6 +1451,13 @@ class BithumbBroker:
                 chance_throttle_bucket=chance_auth.get("throttle_bucket"),
                 chance_throttle_limit_per_sec=chance_auth.get("throttle_limit_per_sec"),
                 chance_payload_keys=chance_auth.get("payload_keys"),
+                order_submit_endpoint=order_submit_auth.get("endpoint"),
+                order_submit_auth_branch=order_submit_auth.get("auth_branch"),
+                order_submit_path=order_submit_auth.get("submit_path"),
+                order_submit_dispatch_authority=order_submit_auth.get("submit_dispatch_authority"),
+                order_submit_content_type=order_submit_auth.get("content_type"),
+                order_submit_query_hash_included=order_submit_auth.get("query_hash_included"),
+                order_submit_payload_keys=order_submit_auth.get("payload_keys"),
                 fallback_branch_used=chance_auth.get("fallback_branch_used"),
             ),
         )

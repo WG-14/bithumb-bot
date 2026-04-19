@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from ..execution_models import OrderConfirmation, SignedOrderRequest, SubmissionRecord, SubmitPlan
-from .base import BrokerRejectError
 from .bithumb_client import submit_signed_order_request
 from .bithumb_read_models import parse_order_confirmation
+from .live_order_contract import require_validated_order_submit_authority
 
 
 def execute_signed_order_request(
@@ -14,12 +14,10 @@ def execute_signed_order_request(
     now: int,
     retry_safe: bool = False,
 ) -> OrderConfirmation:
-    if (
-        getattr(broker, "dry_run", False) is False
-        and str(getattr(signed_request, "dispatch_authority", "")).strip() != "validated_place_order_flow"
-    ):
-        raise BrokerRejectError(
-            "armed live signed-request submission requires validated place_order flow authority"
+    if getattr(broker, "dry_run", False) is False:
+        require_validated_order_submit_authority(
+            signed_request,
+            context="armed live signed-request submission",
         )
     submission_record = SubmissionRecord(
         intent=plan.intent,

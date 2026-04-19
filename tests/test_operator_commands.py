@@ -5733,7 +5733,7 @@ def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
     def _fail_lock(*_args, **_kwargs):
         raise AssertionError("run lock must not be acquired when live preflight fails")
 
-    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", _raise_preflight)
+    monkeypatch.setattr("bithumb_bot.app.validate_live_run_startup_contract", _raise_preflight)
     monkeypatch.setattr("bithumb_bot.run_lock.acquire_run_lock", _fail_lock)
 
     with pytest.raises(SystemExit) as exc:

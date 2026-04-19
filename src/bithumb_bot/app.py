@@ -3,8 +3,9 @@ from .config import (
     ModeValidationError,
     PATH_MANAGER,
     settings,
+    log_live_execution_contract,
     validate_live_mode_preflight,
-    validate_live_real_order_execution_preflight,
+    validate_live_run_startup_contract,
     validate_mode_or_raise,
 )
 from .risk import evaluate_buy_guardrails
@@ -523,9 +524,9 @@ def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
     from .run_lock import RunLockError, acquire_run_lock
 
+    log_live_execution_contract(settings, caller="cmd_run")
     try:
-        validate_live_mode_preflight(settings)
-        validate_live_real_order_execution_preflight(settings)
+        validate_live_run_startup_contract(settings)
     except LiveModeValidationError as e:
         notify(
             safety_event(

@@ -79,6 +79,14 @@ def _decode_jwt(token: str) -> dict[str, object]:
     return json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
 
 
+def _signed_order_request(payload: dict[str, object], *, authority: str = "validated_place_order_flow"):
+    return SimpleNamespace(
+        payload=dict(payload),
+        canonical_payload=BithumbPrivateAPI._query_string(payload),
+        dispatch_authority=authority,
+    )
+
+
 
 def _configure_live():
     object.__setattr__(settings, "MODE", "live")
@@ -940,7 +948,8 @@ def test_private_jwt_headers_include_query_hash_for_post_and_json_body(monkeypat
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}, retry_safe=False)
+    payload = {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}
+    api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -1047,7 +1056,68 @@ def test_private_api_dry_run_blocks_private_write_requests(monkeypatch):
         dry_run=True,
     )
     with pytest.raises(BrokerRejectError, match="LIVE_DRY_RUN=true"):
-        api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC"}, retry_safe=False)
+        payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"}
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
+
+    assert _SequencedClient.calls == 0
+
+
+def test_private_api_rejects_direct_v2_orders_request_bypass(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+
+    with pytest.raises(BrokerRejectError, match="direct /v2/orders private request is disabled"):
+        api.request(
+            "POST",
+            "/v2/orders",
+            json_body={"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
+            retry_safe=False,
+        )
+
+    assert _SequencedClient.calls == 0
+
+
+def test_private_api_rejects_forged_v2_orders_authority_token(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+
+    with pytest.raises(BrokerRejectError, match="direct /v2/orders private request is disabled"):
+        api.request(
+            "POST",
+            "/v2/orders",
+            json_body={"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
+            retry_safe=False,
+            _order_submit_authority="validated_place_order_flow",
+        )
+
+    assert _SequencedClient.calls == 0
+
+
+def test_submit_order_rejects_signed_request_payload_drift(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"}
+    signed_request = _signed_order_request(payload)
+    signed_request.payload["price"] = "10000"
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+
+    with pytest.raises(BrokerRejectError, match="canonical payload mismatch"):
+        api.submit_order(signed_request=signed_request, retry_safe=False)
 
     assert _SequencedClient.calls == 0
 
@@ -4600,7 +4670,7 @@ def test_order_submit_uses_dedicated_auth_builder(monkeypatch):
     monkeypatch.setattr(api, "_order_submit_auth_context", _spy)
 
     payload = {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}
-    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+    api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     assert len(calls) == 1
     assert calls[0]["payload"] == payload
@@ -4689,7 +4759,7 @@ def test_order_submit_uses_json_body_with_query_hash_from_canonical_payload(monk
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+    api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -4715,7 +4785,7 @@ def test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp(monkey
 
     payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "10002"}
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+    api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     call = _SequencedClient.requests[0]
     auth = str(call["headers"]["Authorization"])
@@ -4739,13 +4809,9 @@ def test_order_http_debug_request_logs_query_hash_and_json_body(monkeypatch, cap
     monkeypatch.setattr("httpx.Client", _SequencedClient)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"}
     with caplog.at_level("INFO", logger="bithumb_bot.run"):
-        api.request(
-            "POST",
-            "/v2/orders",
-            json_body={"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"},
-            retry_safe=False,
-        )
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     order_logs = [record.message for record in caplog.records if "[ORDER_HTTP_DEBUG] request" in record.message]
     assert order_logs
@@ -4794,7 +4860,7 @@ def test_order_submit_live_failure_regression_uses_json_body_and_matching_query_
     payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9998"}
 
     with pytest.raises(BrokerRejectError) as excinfo:
-        api.request("POST", "/v2/orders", json_body=payload, retry_safe=False)
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
 
     assert "status=401" in str(excinfo.value)
     call = _SequencedClient.requests[0]

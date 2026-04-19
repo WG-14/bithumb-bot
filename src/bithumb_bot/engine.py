@@ -12,10 +12,9 @@ from .config import (
     DEFAULT_RUNTIME_STRATEGY,
     MarketPreflightValidationError,
     settings,
-    validate_live_mode_preflight,
-    validate_live_real_order_execution_preflight,
     validate_market_preflight,
     validate_market_runtime,
+    validate_live_run_startup_contract,
 )
 from .marketdata import cmd_sync
 from .strategy import create_strategy
@@ -1977,8 +1976,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                 reason=f"market preflight failed: {exc}",
             )
             raise
-    validate_live_mode_preflight(settings)
-    validate_live_real_order_execution_preflight(settings)
+    validate_live_run_startup_contract(settings)
 
     maybe_clear_stale_initial_reconcile_halt()
     maybe_clear_stale_live_execution_broker_halt()

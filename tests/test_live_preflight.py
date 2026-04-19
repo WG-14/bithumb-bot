@@ -202,6 +202,39 @@ def test_live_real_order_execution_preflight_accepts_armed_live(monkeypatch: pyt
     config.validate_live_real_order_execution_preflight(settings)
 
 
+def test_live_preflight_rejects_dry_run_when_real_order_armed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "LIVE_DRY_RUN=true and LIVE_REAL_ORDER_ARMED=true is ambiguous" in str(exc.value)
+
+
+def test_live_execution_contract_log_emits_redacted_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "visible-key-length")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret-value-must-not-log")
+
+    with caplog.at_level("INFO", logger="bithumb_bot.run"):
+        summary = config.log_live_execution_contract(settings, caller="test")
+
+    assert summary["live_dry_run"] is False
+    assert "[LIVE_EXECUTION_CONTRACT]" in caplog.text
+    assert "fingerprint=" in caplog.text
+    assert "live_dry_run=0" in caplog.text
+    assert "live_real_order_armed=1" in caplog.text
+    assert "api_secret_present=1" in caplog.text
+    assert "secret-value-must-not-log" not in caplog.text
+
+
 def test_live_preflight_requires_live_risk_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_valid_live_defaults(monkeypatch)
     object.__setattr__(settings, "MAX_ORDER_KRW", 0.0)
