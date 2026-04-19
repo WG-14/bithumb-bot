@@ -27,6 +27,7 @@ from .db_core import (
     get_fee_gap_accounting_repair_summary,
     get_fee_pending_accounting_repair_summary,
     get_manual_flat_accounting_repair_summary,
+    get_position_authority_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
     normalize_cash_amount,
@@ -74,6 +75,11 @@ from .fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
 )
+from .position_authority_repair import (
+    apply_position_authority_rebuild,
+    build_position_authority_rebuild_preview,
+)
+from .runtime_readiness import compute_runtime_readiness_snapshot
 from .lifecycle import summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .markets import canonical_market_with_raw
@@ -668,7 +674,6 @@ def cmd_health() -> None:
     open_order_count = 0
     remote_open_order_count: int | None = None
     position_summary = "flat"
-    reserved_exit_qty = 0.0
     portfolio_conn = ensure_db()
     try:
         open_order_row = portfolio_conn.execute(
@@ -680,10 +685,7 @@ def cmd_health() -> None:
         ).fetchone()
         if open_order_row is not None:
             open_order_count = int(open_order_row["open_order_count"] or 0)
-        portfolio_row = portfolio_conn.execute(
-            "SELECT asset_qty FROM portfolio WHERE id=1"
-        ).fetchone()
-        reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
+        readiness_snapshot = compute_runtime_readiness_snapshot(portfolio_conn)
     finally:
         portfolio_conn.close()
 
@@ -706,19 +708,8 @@ def cmd_health() -> None:
     elif not bool(health["trading_enabled"]):
         state_label = "paused"
 
-    position_qty = float(portfolio_row["asset_qty"]) if portfolio_row is not None else 0.0
-    dust_context = build_dust_display_context(health.get("last_reconcile_metadata"))
-    position_state = build_position_state_model(
-        raw_qty_open=position_qty,
-        metadata_raw=health.get("last_reconcile_metadata"),
-        raw_total_asset_qty=max(position_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=(
-            float(dust_context.raw_holdings.local_qty)
-            if bool(dust_context.classification.present)
-            else 0.0
-        ),
-        reserved_exit_qty=reserved_exit_qty,
-    )
+    dust_context = build_dust_display_context(readiness_snapshot.reconcile_metadata)
+    position_state = readiness_snapshot.position_state
     normalized_exposure = position_state.normalized_exposure
     if normalized_exposure.terminal_state == "flat":
         position_summary = "flat"
@@ -879,6 +870,12 @@ def cmd_health() -> None:
     print(f"    can_resume={can_resume_label}")
     print(f"    blockers={blockers_label}")
     print(f"    blocker_reason_codes={blocker_reason_codes_label}")
+    print(f"    recovery_stage={readiness_snapshot.recovery_stage}")
+    print(
+        "    recovery_blocker_categories="
+        f"{', '.join(readiness_snapshot.blocker_categories) if readiness_snapshot.blocker_categories else 'none'}"
+    )
+    print(f"    canonical_next_action={readiness_snapshot.operator_next_action}")
     print(f"    resume_safety={resume_safety}")
     print(
         "    "
@@ -2332,6 +2329,29 @@ def _load_recovery_report(
         "last_repair_basis": None,
         "last_note": None,
     }
+    position_authority_repair_summary = {
+        "repair_count": 0,
+        "last_event_ts": None,
+        "last_repair_key": None,
+        "last_source": None,
+        "last_reason": None,
+        "last_repair_basis": None,
+        "last_note": None,
+    }
+    position_authority_rebuild_preview = {
+        "needs_rebuild": False,
+        "safe_to_apply": False,
+        "eligibility_reason": "not_checked",
+        "recommended_command": "uv run python bot.py recovery-report",
+    }
+    runtime_readiness_snapshot = {
+        "recovery_stage": "UNKNOWN",
+        "resume_ready": False,
+        "resume_blockers": ["NOT_CHECKED"],
+        "blocker_categories": ["unknown"],
+        "operator_next_action": "review_recovery_report",
+        "recommended_command": "uv run python bot.py recovery-report",
+    }
     fee_gap_repair_preview = {
         "needs_repair": False,
         "safe_to_apply": False,
@@ -2377,6 +2397,9 @@ def _load_recovery_report(
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
         fee_pending_repair_summary = get_fee_pending_accounting_repair_summary(conn)
+        position_authority_repair_summary = get_position_authority_repair_summary(conn)
+        position_authority_rebuild_preview = build_position_authority_rebuild_preview(conn)
+        runtime_readiness_snapshot = compute_runtime_readiness_snapshot(conn).as_dict()
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
     finally:
         conn.close()
@@ -2478,6 +2501,11 @@ def _load_recovery_report(
         "fee_gap_accounting_repair_preview": fee_gap_repair_preview,
         "fee_gap_accounting_repair_summary": fee_gap_repair_summary,
         "fee_pending_accounting_repair_summary": fee_pending_repair_summary,
+        "position_authority_rebuild_preview": position_authority_rebuild_preview,
+        "position_authority_repair_summary": position_authority_repair_summary,
+        "runtime_readiness": runtime_readiness_snapshot,
+        "recovery_stage": runtime_readiness_snapshot.get("recovery_stage"),
+        "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
@@ -2578,6 +2606,13 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     run_lock = report.get("run_lock") or {}
     print(f"    {run_lock.get('human_text') or '-'}")
     print("  [P2] resume_eligibility")
+    runtime_readiness = report.get("runtime_readiness") or {}
+    print(f"    recovery_stage={runtime_readiness.get('recovery_stage') or 'UNKNOWN'}")
+    print(
+        "    recovery_blocker_categories="
+        f"{', '.join(str(x) for x in runtime_readiness.get('blocker_categories') or []) or 'none'}"
+    )
+    print(f"    canonical_next_action={runtime_readiness.get('operator_next_action') or 'review_recovery_report'}")
     print(f"    resume_allowed={1 if bool(report['resume_allowed']) else 0}")
     print(f"    can_resume={'true' if bool(report['can_resume']) else 'false'}")
     resume_blockers = report.get("resume_blockers") or []
@@ -2708,6 +2743,18 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"last_fee={fee_pending_repair_summary.get('last_fee') if fee_pending_repair_summary.get('last_fee') is not None else 'none'} "
         f"last_reason={fee_pending_repair_summary.get('last_reason') or 'none'}"
     )
+    position_rebuild_preview = report.get("position_authority_rebuild_preview") or {}
+    position_repair_summary = report.get("position_authority_repair_summary") or {}
+    print("  [P3.0d3] position_authority_rebuild")
+    print(
+        "    "
+        f"needed={1 if bool(position_rebuild_preview.get('needs_rebuild')) else 0} "
+        f"safe_to_apply={1 if bool(position_rebuild_preview.get('safe_to_apply')) else 0} "
+        f"repair_count={int(position_repair_summary.get('repair_count') or 0)} "
+        f"stage={position_rebuild_preview.get('recovery_stage') or 'none'} "
+        f"reason={position_rebuild_preview.get('eligibility_reason') or 'none'}"
+    )
+    print(f"    command={position_rebuild_preview.get('recommended_command') or 'none'}")
     broker_fill_observation_summary = report.get("broker_fill_observation_summary") or {}
     print("  [P3.0e] broker_fill_observations")
     print(
@@ -3172,6 +3219,74 @@ def cmd_fee_pending_accounting_repair(
         f"open_lot_count={int(post_lot_snapshot.get('open_lot_count') or 0)} "
         f"dust_tracking_lot_count={int(post_lot_snapshot.get('dust_tracking_lot_count') or 0)} "
         f"executable_exposure_qty={float(post_lot_snapshot.get('executable_exposure_qty') or 0.0):.12f}"
+    )
+
+
+def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False, note: str | None = None) -> None:
+    conn = ensure_db()
+    try:
+        preview = build_position_authority_rebuild_preview(conn)
+        repair_summary = get_position_authority_repair_summary(conn)
+        print("[REBUILD-POSITION-AUTHORITY] preview")
+        print(
+            "  "
+            f"needs_rebuild={1 if bool(preview['needs_rebuild']) else 0} "
+            f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
+            f"stage={preview['recovery_stage']} "
+            f"eligibility_reason={preview['eligibility_reason']}"
+        )
+        print(
+            "  "
+            f"portfolio_qty={float(preview['portfolio_qty']):.12f} "
+            f"accounted_buy_qty={float(preview['accounted_buy_qty']):.12f} "
+            f"accounted_buy_fill_count={int(preview['accounted_buy_fill_count'])} "
+            f"sell_trade_count={int(preview['sell_trade_count'])}"
+        )
+        print(
+            "  "
+            f"open_lot_count={int(preview['open_lot_count'])} "
+            f"dust_tracking_lot_count={int(preview['dust_tracking_lot_count'])} "
+            f"existing_lot_rows={int(preview['existing_lot_rows'])} "
+            f"existing_position_authority_repairs={int(repair_summary.get('repair_count') or 0)}"
+        )
+        print(f"  next_required_action={preview['next_required_action']}")
+        print(f"  recommended_command={preview['recommended_command']}")
+
+        if not apply:
+            print("[REBUILD-POSITION-AUTHORITY] dry-run: no changes applied")
+            return
+        if not bool(preview["safe_to_apply"]):
+            print("[REBUILD-POSITION-AUTHORITY] refused: unsafe rebuild request")
+            raise SystemExit(1)
+        if not confirm:
+            print("[REBUILD-POSITION-AUTHORITY] confirmation required: re-run with --apply --yes")
+            raise SystemExit(1)
+
+        result = apply_position_authority_rebuild(conn, note=note)
+        repair = result["repair"]
+        after = result["lot_snapshot_after"]
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="position authority rebuild completed; explicit resume required",
+        reason_code="POSITION_AUTHORITY_REBUILD_COMPLETED",
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.refresh_open_order_health()
+    runtime_state.set_startup_gate_reason(None)
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    print("[REBUILD-POSITION-AUTHORITY] applied")
+    print(
+        "  "
+        f"created={1 if bool(repair.get('created')) else 0} "
+        f"repair_key={repair['repair_key']} "
+        f"event_ts={kst_str(int(repair['event_ts']))} "
+        f"open_lot_count={int(after.get('open_lot_count') or 0)} "
+        f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)}"
     )
 
 
@@ -4015,6 +4130,18 @@ def main(argv: list[str] | None = None) -> int:
     fee_pending_accounting_repair.add_argument("--yes", action="store_true")
     fee_pending_accounting_repair.add_argument("--note")
 
+    rebuild_position_authority = sub.add_parser(
+        "rebuild-position-authority",
+        help="preview or rebuild canonical lot authority from accounted BUY fill evidence",
+        description=(
+            "Rebuild missing lot-native position authority only from already-accounted BUY fills "
+            "when no open orders, no existing lots, no SELL history, and portfolio quantity match."
+        ),
+    )
+    rebuild_position_authority.add_argument("--apply", action="store_true")
+    rebuild_position_authority.add_argument("--yes", action="store_true")
+    rebuild_position_authority.add_argument("--note")
+
     external_cash_adjustment = sub.add_parser(
         "record-external-cash-adjustment",
         help="record an external cash adjustment event",
@@ -4153,6 +4280,12 @@ def main(argv: list[str] | None = None) -> int:
             exchange_order_id=str(args.exchange_order_id) if args.exchange_order_id is not None else None,
             fee=float(args.fee) if args.fee is not None else None,
             fee_provenance=str(args.fee_provenance) if args.fee_provenance is not None else None,
+            apply=bool(args.apply),
+            confirm=bool(args.yes),
+            note=str(args.note) if args.note is not None else None,
+        )
+    elif args.cmd == "rebuild-position-authority":
+        cmd_rebuild_position_authority(
             apply=bool(args.apply),
             confirm=bool(args.yes),
             note=str(args.note) if args.note is not None else None,

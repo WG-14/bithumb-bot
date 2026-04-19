@@ -47,9 +47,14 @@ from bithumb_bot.engine import (
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import add_fill, set_exchange_order_id, set_status
+from bithumb_bot.position_authority_repair import (
+    apply_position_authority_rebuild,
+    build_position_authority_rebuild_preview,
+)
 from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.recovery import reconcile_with_broker
+from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
 from bithumb_bot.utils_time import kst_str
 
 
@@ -4379,7 +4384,12 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_gap_accounting_repair_preview",
         "fee_gap_accounting_repair_summary",
         "fee_pending_accounting_repair_summary",
+        "position_authority_rebuild_preview",
+        "position_authority_repair_summary",
         "broker_fill_observation_summary",
+        "runtime_readiness",
+        "recovery_stage",
+        "recovery_blocker_categories",
         "active_blocker_summary",
         "blocker_summary",
         "blocker_summary_view",
@@ -4919,6 +4929,136 @@ def test_recovery_report_surfaces_position_authority_gap_as_distinct_blocker(tmp
     assert report["primary_blocker_reason_code"] == "POSITION_AUTHORITY_RECOVERY_REQUIRED"
     assert report["operator_next_action"] == "manual_position_authority_recovery_required"
     assert report["resume_blocked_reason"] == "resume blocked by missing lot authority"
+    assert report["runtime_readiness"]["recovery_stage"] == "AUTHORITY_REBUILD_PENDING"
+    assert report["position_authority_rebuild_preview"]["needs_rebuild"] is True
+
+
+def test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp_path):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 2_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(client_order_id, exchange_order_id, status, side, price,
+                               qty_req, qty_filled, created_ts, updated_ts)
+            VALUES ('authority_gap_buy','ex-authority-gap','FILLED','BUY',NULL,0.01,0.0,1000,1000)
+            """
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="authority_gap_buy",
+            side="BUY",
+            fill_id="authority-gap-fill",
+            fill_ts=1100,
+            price=100000000.0,
+            qty=0.01,
+            fee=500.0,
+            allow_entry_decision_fallback=False,
+        )
+        conn.execute("DELETE FROM open_position_lots")
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "material_zero_fee_fill_count": 1,
+            "material_zero_fee_fill_latest_ts": 1100,
+            "fee_gap_adjustment_count": 1,
+            "fee_gap_adjustment_total_krw": 500.0,
+            "fee_gap_adjustment_latest_event_ts": 1200,
+            "fee_gap_recovery_required": 1,
+            "external_cash_adjustment_reason": "reconcile_fee_gap_cash_drift",
+        },
+    )
+
+    conn = ensure_db()
+    try:
+        snapshot = compute_runtime_readiness_snapshot(conn)
+        authority_preview = build_position_authority_rebuild_preview(conn)
+        fee_gap_preview = app_module.build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+
+    assert snapshot.recovery_stage == "AUTHORITY_REBUILD_PENDING"
+    assert snapshot.blocker_categories == ("executable_authority",)
+    assert authority_preview["safe_to_apply"] is True
+    assert fee_gap_preview["needs_repair"] is True
+    assert fee_gap_preview["safe_to_apply"] is False
+    assert fee_gap_preview["blocked_by_authority_rebuild"] is True
+    assert fee_gap_preview["next_required_action"] == "rebuild_position_authority"
+
+    conn = ensure_db()
+    try:
+        result = apply_position_authority_rebuild(conn, note="test staged rebuild")
+        conn.commit()
+        post_snapshot = compute_runtime_readiness_snapshot(conn)
+        post_fee_gap_preview = app_module.build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+
+    assert result["repair"]["created"] is True
+    assert int(result["lot_snapshot_after"]["open_lot_count"]) > 0
+    assert post_snapshot.recovery_stage == "HISTORICAL_FEE_GAP_PENDING"
+    assert post_snapshot.blocker_categories == ("historical_accounting_debt",)
+    assert post_fee_gap_preview["blocked_by_authority_rebuild"] is False
+    assert post_fee_gap_preview["next_required_action"] == "resolve_open_exposure_before_fee_gap_repair"
+
+
+def test_runtime_readiness_is_consistent_across_reports_for_authority_gap(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        conn.execute(
+            """
+            UPDATE portfolio
+            SET asset_qty=0.0008, asset_available=0.0008, asset_locked=0.0
+            WHERE id=1
+            """
+        )
+        conn.commit()
+        snapshot = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "dust_residual_present": 0,
+            "dust_policy_reason": "no_dust_residual",
+        },
+    )
+
+    report = _load_recovery_report()
+    cmd_health()
+    health_out = capsys.readouterr().out
+    app_module.cmd_ops_report(limit=1)
+    ops_out = capsys.readouterr().out
+    checklist = evaluate_restart_readiness()
+
+    assert snapshot.recovery_stage == "AUTHORITY_REBUILD_PENDING"
+    assert report["runtime_readiness"]["recovery_stage"] == "AUTHORITY_REBUILD_PENDING"
+    assert "recovery_stage=AUTHORITY_REBUILD_PENDING" in health_out
+    assert "recovery_stage=AUTHORITY_REBUILD_PENDING" in ops_out
+    normalized_position_item = next(item for item in checklist if item[0] == "normalized position state")
+    assert normalized_position_item[1] is False
+    assert "terminal_state=open_exposure" in normalized_position_item[2]
 
 
 def test_recovery_report_blocks_resume_now_when_dust_requires_operator_review(tmp_path):

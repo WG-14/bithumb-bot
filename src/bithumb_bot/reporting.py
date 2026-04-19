@@ -49,6 +49,7 @@ from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
 from .run_lock import read_run_lock_status
 from .broker.bithumb import BithumbBroker
+from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
 @dataclass
@@ -3416,10 +3417,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             WHERE id=1
             """
         ).fetchone()
-        portfolio_row = conn.execute(
-            "SELECT asset_qty FROM portfolio WHERE id=1"
-        ).fetchone()
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
     finally:
         conn.close()
 
@@ -3599,20 +3597,12 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
             "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
         }
-    portfolio_asset_qty = float(portfolio_row["asset_qty"]) if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0
-    position_state = build_position_state_model(
-        raw_qty_open=portfolio_asset_qty,
-        metadata_raw=position_metadata_raw,
-        raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=(
-            float(dust_context.raw_holdings.local_qty)
-            if bool(dust_context.classification.present)
-            else 0.0
-        ),
-        reserved_exit_qty=reserved_exit_qty,
-    )
+    position_state = readiness_snapshot.position_state
     dust_view = position_state.operator_diagnostics
     payload["operator_recovery_summary"] = {
+        "recovery_stage": readiness_snapshot.recovery_stage,
+        "recovery_blocker_categories": list(readiness_snapshot.blocker_categories),
+        "canonical_next_action": readiness_snapshot.operator_next_action,
         "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
         "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
         "position_authority_summary": position_state.normalized_exposure.position_authority_summary,
@@ -3682,6 +3672,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
     operator_recovery = payload["operator_recovery_summary"]
     print(
         "  "
+        f"recovery_stage={operator_recovery['recovery_stage']} "
+        "recovery_blocker_categories="
+        f"{','.join(str(x) for x in operator_recovery['recovery_blocker_categories']) or 'none'} "
+        f"canonical_next_action={operator_recovery['canonical_next_action']} "
         f"unresolved_open_order_count={operator_recovery['unresolved_open_order_count']} "
         f"recovery_required_count={operator_recovery['recovery_required_count']} "
         f"dust_state={operator_recovery['dust_state']} "

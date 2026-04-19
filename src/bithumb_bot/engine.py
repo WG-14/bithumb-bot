@@ -25,6 +25,7 @@ from .db_core import record_strategy_decision
 from .fee_gap_repair import build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
+from .runtime_readiness import compute_runtime_readiness_snapshot
 from .dust import (
     DustClassification,
     DustState,
@@ -523,11 +524,8 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
     open_count, _ = _get_open_order_snapshot(now_ms)
     conn = ensure_db()
     try:
-        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-        state = runtime_state.snapshot()
         try:
-            reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
-            lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+            snapshot = compute_runtime_readiness_snapshot(conn)
         except Exception as exc:
             # Halt-clearing checks must fail closed when lot-native exposure
             # cannot be reconstructed from local state.
@@ -541,24 +539,7 @@ def _get_exposure_snapshot(now_ms: int) -> tuple[bool, bool]:
             return open_count > 0, True
     finally:
         conn.close()
-
-    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
-    dust_context = build_dust_display_context(state.last_reconcile_metadata)
-    position_state = build_position_state_model(
-        raw_qty_open=asset_qty,
-        metadata_raw=state.last_reconcile_metadata,
-        raw_total_asset_qty=max(
-            asset_qty,
-            float(lot_snapshot.raw_total_asset_qty),
-            float(dust_context.raw_holdings.broker_qty),
-        ),
-        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
-        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
-        open_lot_count=int(lot_snapshot.open_lot_count),
-        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
-        reserved_exit_qty=reserved_exit_qty,
-    )
-    return open_count > 0, position_state.normalized_exposure.has_any_position_residue
+    return open_count > 0, snapshot.position_state.normalized_exposure.has_any_position_residue
 
 
 def _mark_open_orders_recovery_required(reason: str, now_ms: int) -> int:
@@ -792,28 +773,11 @@ def evaluate_startup_safety_gate() -> str | None:
 
     portfolio_conn = ensure_db()
     try:
-        portfolio_row = portfolio_conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-        reserved_exit_qty = summarize_reserved_exit_qty(portfolio_conn, pair=settings.PAIR)
-        lot_snapshot = summarize_position_lots(portfolio_conn, pair=settings.PAIR)
+        readiness_snapshot = compute_runtime_readiness_snapshot(portfolio_conn)
     finally:
         portfolio_conn.close()
 
-    portfolio_asset_qty = float(portfolio_row["asset_qty"] if portfolio_row and portfolio_row["asset_qty"] is not None else 0.0)
-    dust_context = build_dust_display_context(state.last_reconcile_metadata)
-    normalized_position = build_position_state_model(
-        raw_qty_open=portfolio_asset_qty,
-        metadata_raw=state.last_reconcile_metadata,
-        raw_total_asset_qty=max(
-            portfolio_asset_qty,
-            float(lot_snapshot.raw_total_asset_qty),
-            float(dust_context.raw_holdings.broker_qty),
-        ),
-        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
-        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
-        open_lot_count=int(lot_snapshot.open_lot_count),
-        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
-        reserved_exit_qty=reserved_exit_qty,
-    ).normalized_exposure
+    normalized_position = readiness_snapshot.position_state.normalized_exposure
     if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
         reasons.append(
             "position_authority_gap="
@@ -1325,7 +1289,6 @@ def build_resume_guidance(
 def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
     resume_allowed, blockers = evaluate_resume_eligibility()
     state = runtime_state.snapshot()
-    dust_context = build_dust_display_context(state.last_reconcile_metadata)
 
     conn = ensure_db()
     try:
@@ -1339,33 +1302,19 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
         recovery_row = conn.execute(
             "SELECT COUNT(*) AS recovery_required_count FROM orders WHERE status='RECOVERY_REQUIRED'"
         ).fetchone()
-        portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
     finally:
         conn.close()
 
     open_order_count = int(open_row["open_count"] if open_row else 0)
     recovery_required_count = int(recovery_row["recovery_required_count"] if recovery_row else 0)
     unresolved_count = max(0, open_order_count + recovery_required_count)
-    asset_qty = float(portfolio_row["asset_qty"] if portfolio_row else 0.0)
-    position_state = build_position_state_model(
-        raw_qty_open=asset_qty,
-        metadata_raw=state.last_reconcile_metadata,
-        raw_total_asset_qty=max(
-            asset_qty,
-            float(lot_snapshot.raw_total_asset_qty),
-            float(dust_context.raw_holdings.broker_qty),
-        ),
-        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
-        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
-        open_lot_count=int(lot_snapshot.open_lot_count),
-        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
-        reserved_exit_qty=reserved_exit_qty,
-    )
+    position_state = readiness_snapshot.position_state
     normalized_exposure = position_state.normalized_exposure
+    dust_context = build_dust_display_context(readiness_snapshot.reconcile_metadata)
     dust_present = bool(dust_context.classification.present)
     dust_resume_safe = bool(dust_present and dust_context.operator_view.resume_allowed)
+    asset_qty = float(normalized_exposure.raw_qty_open)
     raw_qty_without_dust_evidence = bool(asset_qty > 1e-12 and not dust_present)
     raw_qty_residue_without_resume_safe_dust = bool(
         raw_qty_without_dust_evidence

@@ -26,6 +26,7 @@ EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
 MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE = "manual_flat_accounting_repair"
 FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_gap_accounting_repair"
 FEE_PENDING_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_pending_accounting_repair"
+POSITION_AUTHORITY_REPAIR_EVENT_TYPE = "position_authority_repair"
 BROKER_FILL_OBSERVATION_EVENT_TYPE = "broker_fill_observation"
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
@@ -470,6 +471,22 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS position_authority_repairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'position_authority_repair'
+                CHECK (event_type = 'position_authority_repair'),
+            event_ts INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            repair_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS broker_fill_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL DEFAULT 'broker_fill_observation'
@@ -589,6 +606,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "repair_basis TEXT NOT NULL DEFAULT '{}'",
     )
     _ensure_column(conn, "fee_pending_accounting_repairs", "note", "note TEXT")
+    _ensure_column(conn, "position_authority_repairs", "repair_key", "repair_key TEXT")
+    _ensure_column(
+        conn,
+        "position_authority_repairs",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'position_authority_repair'",
+    )
+    _ensure_column(conn, "position_authority_repairs", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "position_authority_repairs", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "position_authority_repairs", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "position_authority_repairs",
+        "repair_basis",
+        "repair_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "position_authority_repairs", "note", "note TEXT")
     _ensure_column(
         conn,
         "broker_fill_observations",
@@ -679,6 +713,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_fee_pending_accounting_repairs_fill
         ON fee_pending_accounting_repairs(client_order_id, fill_id, fill_ts)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_position_authority_repairs_event_ts
+        ON position_authority_repairs(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_position_authority_repairs_key
+        ON position_authority_repairs(repair_key)
         """
     )
 
@@ -1771,6 +1817,24 @@ def _fee_pending_accounting_repair_key(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _position_authority_repair_key(
+    *,
+    source: str,
+    reason: str,
+    repair_basis: str,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": POSITION_AUTHORITY_REPAIR_EVENT_TYPE,
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "repair_basis": str(repair_basis).strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int]:
     init_portfolio(conn)
     total_fee = 0.0
@@ -2409,6 +2473,114 @@ def get_fee_gap_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str,
         """
         SELECT repair_key, event_ts, source, reason, repair_basis, note
         FROM fee_gap_accounting_repairs
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "repair_count": int(row["repair_count"] if row else 0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_position_authority_repair(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    source: str,
+    reason: str,
+    repair_basis: dict[str, Any] | str,
+    note: str | None = None,
+    repair_key: str | None = None,
+) -> dict[str, Any]:
+    basis_text = (
+        json.dumps(repair_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(repair_basis, dict)
+        else str(repair_basis)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    if not source_text:
+        raise RuntimeError("position authority repair source is required")
+    if not reason_text:
+        raise RuntimeError("position authority repair reason is required")
+    if not basis_text.strip():
+        raise RuntimeError("position authority repair basis is required")
+
+    key = repair_key or _position_authority_repair_key(
+        source=source_text,
+        reason=reason_text,
+        repair_basis=basis_text,
+        note=note,
+    )
+    existing = conn.execute(
+        """
+        SELECT id, repair_key, event_ts, source, reason, repair_basis, note
+        FROM position_authority_repairs
+        WHERE repair_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "repair_key": str(existing["repair_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "repair_basis": str(existing["repair_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO position_authority_repairs(
+            repair_key, event_type, event_ts, source, reason, repair_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            POSITION_AUTHORITY_REPAIR_EVENT_TYPE,
+            int(event_ts),
+            source_text,
+            reason_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "repair_key": key,
+        "event_ts": int(event_ts),
+        "source": source_text,
+        "reason": reason_text,
+        "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_position_authority_repair_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS repair_count
+        FROM position_authority_repairs
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT repair_key, event_ts, source, reason, repair_basis, note
+        FROM position_authority_repairs
         ORDER BY event_ts DESC, id DESC
         LIMIT 1
         """

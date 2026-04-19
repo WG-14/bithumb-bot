@@ -14,6 +14,7 @@ from .db_core import (
 )
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
+from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
 def _metadata_int(metadata: dict[str, object], key: str) -> int:
@@ -64,6 +65,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         metadata = {}
 
     repair_summary = get_fee_gap_accounting_repair_summary(conn)
+    readiness = compute_runtime_readiness_snapshot(conn)
     manual_flat_preview = build_manual_flat_accounting_repair_preview(conn)
     lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
@@ -149,6 +151,18 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     if abs(float(reserved_exit_qty)) > 1e-12:
         reasons.append(f"reserved_exit_qty={float(reserved_exit_qty):.12f}")
 
+    blocked_by_authority_rebuild = bool(
+        readiness.recovery_stage == "AUTHORITY_REBUILD_PENDING"
+        or str(readiness.position_state.normalized_exposure.authority_gap_reason or "")
+        == "authority_missing_recovery_required"
+    )
+    blocked_by_open_exposure = bool(
+        int(lot_snapshot.open_lot_count) > 0
+        or abs(float(asset_available)) > 1e-12
+        or abs(float(asset_locked)) > 1e-12
+    )
+    blocked_by_dust_residue = bool(int(lot_snapshot.dust_tracking_lot_count) > 0)
+
     if already_repaired and not needs_repair:
         eligibility_reason = "matching fee-gap accounting repair already recorded"
     elif not needs_repair and not reasons:
@@ -187,10 +201,28 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "reserved_exit_qty": float(reserved_exit_qty),
         "fee_gap_accounting_repair_count": int(repair_summary.get("repair_count") or 0),
         "fee_gap_accounting_repair_last_event_ts": repair_summary.get("last_event_ts"),
+        "recovery_stage": readiness.recovery_stage,
+        "blocker_categories": list(readiness.blocker_categories),
+        "blocked_by_authority_rebuild": blocked_by_authority_rebuild,
+        "blocked_by_open_exposure": blocked_by_open_exposure,
+        "blocked_by_dust_residue": blocked_by_dust_residue,
+        "next_required_action": (
+            "rebuild_position_authority"
+            if blocked_by_authority_rebuild
+            else (
+                "resolve_open_exposure_before_fee_gap_repair"
+                if blocked_by_open_exposure or blocked_by_dust_residue
+                else ("apply_fee_gap_accounting_repair" if safe_to_apply else "review_recovery_report")
+            )
+        ),
         "recommended_command": (
             "uv run python bot.py fee-gap-accounting-repair --apply --yes"
             if safe_to_apply
-            else ("uv run python bot.py recovery-report" if needs_repair or reasons else "none")
+            else (
+                "uv run python bot.py rebuild-position-authority"
+                if blocked_by_authority_rebuild
+                else ("uv run python bot.py recovery-report" if needs_repair or reasons else "none")
+            )
         ),
     }
 
