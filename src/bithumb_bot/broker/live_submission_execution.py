@@ -453,7 +453,7 @@ def execute_live_submission_and_application(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
-        order_type=("price" if feasibility.side == "BUY" else "market"),
+        order_type="-",
         contract_profile=LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
         payload_hash=payload_hash,
         internal_lot_size=float(lot_sizing.internal_lot_size),
@@ -484,7 +484,11 @@ def execute_live_submission_and_application(
         return None
     order = run_standard_submit_pipeline(
         broker=broker,
-        request=replace(request, submit_plan=submit_plan),
+        request=replace(
+            request,
+            submit_plan=submit_plan,
+            order_type=str(submit_plan.exchange_order_type),
+        ),
     )
     if order is None:
         return None

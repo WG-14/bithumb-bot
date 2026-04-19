@@ -107,8 +107,14 @@ def build_submit_plan(
                 market=intent.market,
                 order_side=order_side,
             )
+            submit_contract_context["submit_contract_kind"] = "market_buy_notional"
         else:
             submit_contract_context = {
+                "submit_contract_kind": (
+                    "market_qty"
+                    if chance_validation_order_type == "market"
+                    else "limit_qty_price"
+                ),
                 "chance_validation_order_type": chance_validation_order_type,
                 "chance_supported_order_types": list(chance_supported_order_types),
                 "exchange_submit_field": exchange_submit_field,

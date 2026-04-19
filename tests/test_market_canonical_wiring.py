@@ -5,7 +5,9 @@ import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker import order_rules
+from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.config import settings
+from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.marketdata import (
     fetch_orderbook_top,
     validated_best_quote_ask_price,
@@ -121,13 +123,29 @@ def test_broker_order_chance_and_payload_use_same_canonical_market(monkeypatch):
     monkeypatch.setattr(broker, "_get_private", _fake_get)
     monkeypatch.setattr(broker, "_post_private", _fake_post)
     try:
+        submit_plan = plan_place_order(
+            broker,
+            intent=OrderIntent(
+                client_order_id="cid-1",
+                market="KRW-BTC",
+                side="BUY",
+                normalized_side="bid",
+                qty=1.0,
+                price=None,
+                created_ts=1_700_000_000_000,
+                submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+                trace_id="cid-1",
+            ),
+            rules=rules,
+            skip_qty_revalidation=True,
+        )
         broker.get_order_chance()
         broker.place_order(
             client_order_id="cid-1",
             side="BUY",
             qty=1.0,
             price=None,
-            buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            submit_plan=submit_plan,
         )
 
         assert chance_call == {"endpoint": "/v1/orders/chance", "params": {"market": "KRW-BTC"}}

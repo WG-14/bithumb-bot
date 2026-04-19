@@ -133,8 +133,15 @@ def _submit_contract_fields(
     )
     normalized_side = str(side or "").strip().upper()
     normalized_order_type = str(order_type or "").strip().lower()
-    is_buy_market_notional = normalized_side == "BUY" and normalized_order_type == "price"
-    exchange_submit_field = str(context.get("exchange_submit_field") or ("price" if is_buy_market_notional else "volume"))
+    submit_contract_kind = str(context.get("submit_contract_kind") or "").strip()
+    if submit_contract_kind == "":
+        if normalized_order_type == "market":
+            submit_contract_kind = "market_qty"
+        elif normalized_order_type == "limit":
+            submit_contract_kind = "limit_qty_price"
+        else:
+            submit_contract_kind = "-"
+    exchange_submit_field = str(context.get("exchange_submit_field") or "volume")
     exchange_submit_qty = context.get("exchange_submit_qty")
     if exchange_submit_qty is None and exchange_submit_field == "volume":
         exchange_submit_qty = float(normalized_qty)
@@ -149,11 +156,7 @@ def _submit_contract_fields(
     elif buy_price_none_raw_supported_types is not None:
         buy_price_none_raw_supported_types = [str(buy_price_none_raw_supported_types)]
     return {
-        "submit_contract_kind": (
-            "market_buy_notional"
-            if is_buy_market_notional
-            else ("market_qty" if normalized_order_type == "market" else "limit_qty_price")
-        ),
+        "submit_contract_kind": submit_contract_kind,
         "market": context.get("market"),
         "order_side": context.get("order_side"),
         "exchange_order_type": str(context.get("exchange_order_type") or normalized_order_type or "-"),

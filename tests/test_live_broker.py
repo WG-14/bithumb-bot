@@ -71,7 +71,6 @@ class _FakeBroker:
         side: str,
         qty: float,
         price: float | None = None,
-        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
         submit_plan=None,
     ) -> BrokerOrder:
         self.place_order_calls += 1
@@ -317,7 +316,6 @@ class _CommitCheckingBroker(_FakeBroker):
             side=side,
             qty=qty,
             price=price,
-            buy_price_none_submit_contract=buy_price_none_submit_contract,
             submit_plan=submit_plan,
         )
 
@@ -326,7 +324,6 @@ class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
     def __init__(self) -> None:
         super().__init__()
         self.captured_live_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
-        self.captured_broker_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None
 
     def place_order(
         self,
@@ -335,19 +332,16 @@ class _BuyPriceNoneContractCapturingBroker(_FakeBroker):
         side: str,
         qty: float,
         price: float | None = None,
-        buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
         submit_plan=None,
     ) -> BrokerOrder:
         assert submit_plan is not None
         assert isinstance(submit_plan.buy_price_none_submit_contract, order_rules.BuyPriceNoneSubmitContract)
         self.captured_live_submit_contract = submit_plan.buy_price_none_submit_contract
-        self.captured_broker_submit_contract = submit_plan.buy_price_none_submit_contract
         return super().place_order(
             client_order_id=client_order_id,
             side=side,
             qty=qty,
             price=price,
-            buy_price_none_submit_contract=submit_plan.buy_price_none_submit_contract,
             submit_plan=submit_plan,
         )
 
@@ -897,7 +891,6 @@ def test_bithumb_broker_dry_run(monkeypatch):
         side="BUY",
         qty=0.1,
         price=None,
-        buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(rules=resolved_rules),
     )
 
     assert order.exchange_order_id.startswith("dry_")
@@ -1931,8 +1924,6 @@ def test_live_execute_signal_buy_price_none_preflight_and_submit_use_same_contra
     expected_contract = {key: preflight_evidence[key] for key in contract_keys}
     assert expected_contract == {key: submit_evidence[key] for key in contract_keys}
     assert broker.captured_live_submit_contract is not None
-    assert broker.captured_broker_submit_contract is not None
-    assert broker.captured_live_submit_contract is broker.captured_broker_submit_contract
     assert expected_contract == {
         key: order_rules.serialize_buy_price_none_submit_contract(
             broker.captured_live_submit_contract,
@@ -1993,12 +1984,29 @@ def test_bithumb_broker_buy_price_none_accepts_matching_live_submit_contract(mon
         rules=resolved_rules,
         resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
     )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-match",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1000,
+            submit_contract=expected_contract,
+            market_price_hint=100_000_000.0,
+            trace_id="cid-match",
+        ),
+        rules=resolved_rules,
+        skip_qty_revalidation=True,
+    )
     order = broker.place_order(
         client_order_id="cid-match",
         side="BUY",
         qty=0.0008,
         price=None,
-        buy_price_none_submit_contract=expected_contract,
+        submit_plan=submit_plan,
     )
 
     assert order.exchange_order_id == "ex-live-contract"
@@ -2049,16 +2057,27 @@ def test_bithumb_broker_buy_price_none_blocks_market_alias_without_explicit_supp
         return {"status": "0000", "data": {"order_id": "should-not-dispatch", "client_order_id": payload["client_order_id"]}}
 
     monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
+    submit_contract = order_rules.build_buy_price_none_submit_contract(
+        rules=resolved_rules,
+        resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
+    )
     with pytest.raises(BrokerRejectError, match="BUY price=None before submit") as excinfo:
-        broker.place_order(
-            client_order_id="cid-market-alias-blocked",
-            side="BUY",
-            qty=0.001,
-            price=None,
-            buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(
-                rules=resolved_rules,
-                resolution=order_rules.resolve_buy_price_none_resolution(rules=resolved_rules),
+        plan_place_order(
+            broker,
+            intent=OrderIntent(
+                client_order_id="cid-market-alias-blocked",
+                market="KRW-BTC",
+                side="BUY",
+                normalized_side="bid",
+                qty=0.001,
+                price=None,
+                created_ts=1000,
+                submit_contract=submit_contract,
+                market_price_hint=100_000_000.0,
+                trace_id="cid-market-alias-blocked",
             ),
+            rules=resolved_rules,
+            skip_qty_revalidation=True,
         )
 
     assert "reason=buy_price_none_requires_explicit_price_support" in str(excinfo.value)
@@ -2152,12 +2171,29 @@ def test_bithumb_broker_buy_price_none_uses_same_contract_object_for_validation_
         "bithumb_bot.broker.order_rules.validate_buy_price_none_order_chance_contract",
         _capture_validate_contract,
     )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-reused-contract",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1000,
+            submit_contract=submit_contract,
+            market_price_hint=100_000_000.0,
+            trace_id="cid-reused-contract",
+        ),
+        rules=resolved_rules,
+        skip_qty_revalidation=True,
+    )
     order = broker.place_order(
         client_order_id="cid-reused-contract",
         side="BUY",
         qty=0.0008,
         price=None,
-        buy_price_none_submit_contract=submit_contract,
+        submit_plan=submit_plan,
     )
     diagnostic_fields = order_rules.build_buy_price_none_diagnostic_fields(
         rules=resolved_rules,
@@ -2213,7 +2249,7 @@ def test_bithumb_broker_rejects_missing_live_submit_plan_before_dispatch(monkeyp
 
     monkeypatch.setattr(broker, "_post_private", _unexpected_post_private)
 
-    with pytest.raises(BrokerRejectError, match="explicit submit_plan"):
+    with pytest.raises(BrokerRejectError, match="explicit SubmitPlan"):
         broker.place_order(client_order_id="cid-missing", side="BUY", qty=0.001, price=None)
 
     assert dispatch_attempted is False
@@ -2316,6 +2352,19 @@ def test_submit_evidence_exposes_generic_buy_price_none_contract_fields() -> Non
     assert fields["buy_price_none_alias_used"] == fields["alias_used"]
     assert fields["buy_price_none_alias_policy"] == fields["alias_policy"]
     assert fields["buy_price_none_resolved_order_type"] == fields["resolved_order_type"]
+
+
+def test_submit_contract_fields_do_not_infer_market_buy_policy_without_planned_context() -> None:
+    fields = _submit_contract_fields(
+        side="BUY",
+        order_type="price",
+        normalized_qty=0.0012,
+        contract_context=None,
+    )
+
+    assert fields["submit_contract_kind"] == "-"
+    assert fields["exchange_submit_field"] == "volume"
+    assert fields["buy_price_none_alias_policy"] is None
 
 
 @pytest.mark.fast_regression

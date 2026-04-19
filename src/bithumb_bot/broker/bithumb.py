@@ -40,7 +40,7 @@ from .accounts_v1 import (
 from .myasset_ws import MyAssetWsBalanceSource
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
 from .myorder_runtime import MyOrderIngestResult, ingest_myorder_event
-from ..execution_models import OrderIntent
+from ..execution_models import SubmitPlan
 from .order_lookup_v1 import (
     V1NormalizedOrder,
     build_lookup_params as build_v1_order_lookup_params,
@@ -80,7 +80,6 @@ from .order_serialization import decimal_from_value, format_krw_amount, format_v
 from .order_submit import (
     PlaceOrderSubmissionFlow,
     build_place_order_submission_flow,
-    plan_place_order,
     resolve_submit_price_tick_policy as _resolve_submit_price_tick_policy,
     run_place_order_submission_flow,
 )
@@ -1996,7 +1995,6 @@ class BithumbBroker:
         side: str,
         qty: float,
         price: float | None = None,
-        buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None" = None,
         submit_plan=None,
     ) -> BrokerOrder:
         now = int(time.time() * 1000)
@@ -2006,17 +2004,8 @@ class BithumbBroker:
 
         submit_contract_context: dict[str, object] = {}
         try:
-            if submit_plan is None:
-                if settings.MODE == "live":
-                    raise BrokerRejectError("live broker submit requires explicit submit_plan before dispatch")
-                submit_plan = self._plan_place_order_for_compat_dispatch(
-                    client_order_id=validated_client_order_id,
-                    side=side,
-                    qty=float(qty),
-                    price=price,
-                    now=now,
-                    buy_price_none_submit_contract=buy_price_none_submit_contract,
-                )
+            if not isinstance(submit_plan, SubmitPlan):
+                raise BrokerRejectError("broker submit requires explicit SubmitPlan before dispatch")
             if validated_client_order_id != submit_plan.intent.client_order_id:
                 raise BrokerRejectError(
                     "submit_plan client_order_id mismatch: "
@@ -2053,65 +2042,6 @@ class BithumbBroker:
                 else dict(submit_contract_context),
             )
             raise
-
-    def _plan_place_order_for_compat_dispatch(
-        self,
-        *,
-        client_order_id: str,
-        side: str,
-        qty: float,
-        price: float | None,
-        now: int,
-        buy_price_none_submit_contract: "BuyPriceNoneSubmitContract | None",
-    ):
-        normalized_side = normalize_order_side(side)
-        if (
-            price is None
-            and normalized_side == "bid"
-            and buy_price_none_submit_contract is not None
-        ):
-            from . import order_rules as order_rules_module
-
-            resolved_rules = order_rules_module.get_effective_order_rules(self._market()).rules
-            buy_price_none_resolution = order_rules_module.resolve_buy_price_none_resolution(
-                rules=resolved_rules,
-            )
-            contract_context = buy_price_none_submit_contract.as_context()
-            supported_order_types = ",".join(
-                str(item)
-                for item in buy_price_none_submit_contract.chance_supported_order_types
-            ) or "-"
-            RUN_LOG.info(
-                format_log_kv(
-                    "[ORDER_SUBMIT] buy submit contract preflight",
-                    chance_validation_order_type=buy_price_none_submit_contract.chance_validation_order_type,
-                    supported_order_types=supported_order_types,
-                    buy_price_none_allowed=1 if bool(contract_context.get("buy_price_none_allowed")) else 0,
-                    buy_price_none_alias_used=1 if bool(contract_context.get("buy_price_none_alias_used")) else 0,
-                    buy_price_none_block_reason=str(contract_context.get("buy_price_none_block_reason") or "-"),
-                    submit_field=str(contract_context.get("exchange_submit_field") or "-"),
-                )
-            )
-            order_rules_module.validate_order_chance_support(
-                rules=resolved_rules,
-                side="BUY",
-                order_type=buy_price_none_submit_contract.chance_validation_order_type,
-                buy_price_none_resolution=buy_price_none_resolution,
-            )
-        return plan_place_order(
-            self,
-            intent=OrderIntent(
-                client_order_id=client_order_id,
-                market=self._market(),
-                side=side,
-                normalized_side=normalized_side,
-                qty=float(qty),
-                price=price,
-                created_ts=now,
-                submit_contract=buy_price_none_submit_contract,
-                trace_id=client_order_id,
-            ),
-        )
 
     def request_cancel_order(
         self,

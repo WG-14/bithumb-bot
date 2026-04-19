@@ -214,10 +214,12 @@ def build_order_payload_from_plan(
             market=plan.intent.market,
             order_side=plan.intent.order_side,
         )
+        submit_contract_context["submit_contract_kind"] = "market_buy_notional"
     else:
         submit_contract_context = dict(plan.submit_contract_context)
         submit_contract_context.update(
             {
+                "submit_contract_kind": str(plan.submit_contract_context.get("submit_contract_kind") or "limit_qty_price"),
                 "exchange_submit_field": exchange_submit_field,
                 "exchange_order_type": str(plan.exchange_order_type),
                 "exchange_submit_notional_krw": plan.exchange_submit_notional_krw,

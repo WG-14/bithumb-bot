@@ -10,8 +10,9 @@ from bithumb_bot.broker.bithumb_client import submit_signed_order_request
 from bithumb_bot.broker.bithumb_execution import execute_signed_order_request
 from bithumb_bot.broker.bithumb_read_models import parse_order_confirmation
 from bithumb_bot.broker import order_rules
+from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.config import settings
-from bithumb_bot.execution_models import OrderConfirmation, SignedOrderRequest
+from bithumb_bot.execution_models import OrderConfirmation, OrderIntent, SignedOrderRequest
 from bithumb_bot.public_api_orderbook import BestQuote
 
 
@@ -66,18 +67,30 @@ def test_adapter_builds_plan_and_signed_request(monkeypatch) -> None:
     rules = _resolved_rules()
     _patch_planning(monkeypatch, rules)
     broker = BithumbBroker()
+    plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-module-flow",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1_700_000_000_000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(
+                rules=rules,
+                resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+            ),
+            market_price_hint=100_000_000.0,
+            trace_id="cid-module-flow",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
 
     flow = build_submission_flow(
         broker,
-        validated_client_order_id="cid-module-flow",
-        side="BUY",
-        qty=0.0008,
-        price=None,
-        buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(
-            rules=rules,
-            resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
-        ),
-        now=1_700_000_000_000,
+        plan=plan,
     )
     signed_request = build_signed_order_request(broker, plan=flow.plan)
 
@@ -96,17 +109,29 @@ def test_client_submits_signed_order_request(monkeypatch) -> None:
         "_post_private",
         lambda _endpoint, payload, *, retry_safe=False: {"status": "0000", "data": {"order_id": "ex-client", "client_order_id": payload["client_order_id"]}},
     )
+    plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-module-client",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1_700_000_000_000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(
+                rules=rules,
+                resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+            ),
+            market_price_hint=100_000_000.0,
+            trace_id="cid-module-client",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
     flow = build_submission_flow(
         broker,
-        validated_client_order_id="cid-module-client",
-        side="BUY",
-        qty=0.0008,
-        price=None,
-        buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(
-            rules=rules,
-            resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
-        ),
-        now=1_700_000_000_000,
+        plan=plan,
     )
 
     data = submit_signed_order_request(broker, signed_request=flow.signed_request)
@@ -119,17 +144,29 @@ def test_execution_and_read_models_confirm_response(monkeypatch) -> None:
     rules = _resolved_rules()
     _patch_planning(monkeypatch, rules)
     broker = BithumbBroker()
+    plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-module-confirm",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1_700_000_000_000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(
+                rules=rules,
+                resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+            ),
+            market_price_hint=100_000_000.0,
+            trace_id="cid-module-confirm",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
     flow = build_submission_flow(
         broker,
-        validated_client_order_id="cid-module-confirm",
-        side="BUY",
-        qty=0.0008,
-        price=None,
-        buy_price_none_submit_contract=order_rules.build_buy_price_none_submit_contract(
-            rules=rules,
-            resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
-        ),
-        now=1_700_000_000_000,
+        plan=plan,
     )
     response = {
         "status": "0000",
