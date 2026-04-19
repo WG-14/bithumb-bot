@@ -998,3 +998,24 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         raise LiveModeValidationError(
             "live mode preflight validation failed: " + "; ".join(issues)
         )
+
+
+def validate_live_real_order_execution_preflight(cfg: Settings) -> None:
+    """Validate that the live run loop is configured for real submission."""
+    if cfg.MODE != "live":
+        return
+    issues: list[str] = []
+    if bool(cfg.LIVE_DRY_RUN):
+        issues.append(
+            "LIVE_DRY_RUN=false is required for MODE=live run; "
+            "live dry-run is diagnostic-only and cannot start the trading loop"
+        )
+    if not bool(cfg.LIVE_REAL_ORDER_ARMED):
+        issues.append(
+            "LIVE_REAL_ORDER_ARMED=true is required for MODE=live run; "
+            "unarmed live execution cannot start the trading loop"
+        )
+    if issues:
+        raise LiveModeValidationError(
+            "live real-order execution preflight failed: " + "; ".join(issues)
+        )

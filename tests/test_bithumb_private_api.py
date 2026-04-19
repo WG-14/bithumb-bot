@@ -1046,9 +1046,9 @@ def test_private_api_dry_run_blocks_private_write_requests(monkeypatch):
         base_url="https://api.bithumb.com",
         dry_run=True,
     )
-    data = api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC"}, retry_safe=False)
+    with pytest.raises(BrokerRejectError, match="LIVE_DRY_RUN=true"):
+        api.request("POST", "/v2/orders", json_body={"market": "KRW-BTC"}, retry_safe=False)
 
-    assert data == {}
     assert _SequencedClient.calls == 0
 
 

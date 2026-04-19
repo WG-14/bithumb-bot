@@ -180,6 +180,26 @@ def test_live_preflight_skips_paper_mode() -> None:
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 0)
 
     config.validate_live_mode_preflight(settings)
+    config.validate_live_real_order_execution_preflight(settings)
+
+
+def test_live_real_order_execution_preflight_rejects_live_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_real_order_execution_preflight(settings)
+
+    msg = str(exc.value)
+    assert "LIVE_DRY_RUN=false is required for MODE=live run" in msg
+    assert "LIVE_REAL_ORDER_ARMED=true is required for MODE=live run" in msg
+
+
+def test_live_real_order_execution_preflight_accepts_armed_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+
+    config.validate_live_real_order_execution_preflight(settings)
 
 
 def test_live_preflight_requires_live_risk_limits(monkeypatch: pytest.MonkeyPatch) -> None:

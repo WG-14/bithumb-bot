@@ -13,6 +13,7 @@ from .config import (
     MarketPreflightValidationError,
     settings,
     validate_live_mode_preflight,
+    validate_live_real_order_execution_preflight,
     validate_market_preflight,
     validate_market_runtime,
 )
@@ -1977,6 +1978,7 @@ def run_loop(short_n: int, long_n: int) -> None:
             )
             raise
     validate_live_mode_preflight(settings)
+    validate_live_real_order_execution_preflight(settings)
 
     maybe_clear_stale_initial_reconcile_halt()
     maybe_clear_stale_live_execution_broker_halt()

@@ -4,6 +4,7 @@ from .config import (
     PATH_MANAGER,
     settings,
     validate_live_mode_preflight,
+    validate_live_real_order_execution_preflight,
     validate_mode_or_raise,
 )
 from .risk import evaluate_buy_guardrails
@@ -524,6 +525,7 @@ def cmd_run(short_n: int, long_n: int):
 
     try:
         validate_live_mode_preflight(settings)
+        validate_live_real_order_execution_preflight(settings)
     except LiveModeValidationError as e:
         notify(
             safety_event(

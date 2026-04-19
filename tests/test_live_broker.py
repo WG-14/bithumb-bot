@@ -906,14 +906,13 @@ def test_bithumb_broker_dry_run(monkeypatch):
     )
 
     broker = BithumbBroker()
-    order = broker.place_order(
-        client_order_id="a",
-        side="BUY",
-        qty=0.1,
-        price=None,
-    )
-
-    assert order.exchange_order_id.startswith("dry_")
+    with pytest.raises(BrokerRejectError, match="LIVE_DRY_RUN=true"):
+        broker.place_order(
+            client_order_id="a",
+            side="BUY",
+            qty=0.1,
+            price=None,
+        )
 
 
 def test_broker_auth_runtime_diagnostics_redact_secret_values(monkeypatch) -> None:

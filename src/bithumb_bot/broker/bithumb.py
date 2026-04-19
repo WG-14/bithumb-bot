@@ -734,10 +734,19 @@ class BithumbPrivateAPI:
         method = method.upper()
         request_endpoint = endpoint
         if self.dry_run and not self._is_read_only_private_request(method):
-            # LIVE_DRY_RUN safety contract:
-            # - allow read-only private diagnostics (GET) to reach exchange
-            # - block private state-changing requests (POST/DELETE/...) from reaching exchange
-            return {}
+            RUN_LOG.error(
+                format_log_kv(
+                    "[ORDER_SUBMIT] dry_run_blocked",
+                    method=method,
+                    endpoint=endpoint,
+                    mode=getattr(settings, "MODE", ""),
+                    live_dry_run=1,
+                    live_real_order_armed=1 if bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False)) else 0,
+                )
+            )
+            raise BrokerRejectError(
+                f"private write blocked: LIVE_DRY_RUN=true method={method} endpoint={endpoint}"
+            )
         is_order_submit = method == "POST" and endpoint == self.ORDER_SUBMIT_ENDPOINT and bool(json_body)
         if is_order_submit:
             json_body = validate_order_submit_payload(json_body or {})
@@ -826,6 +835,20 @@ class BithumbPrivateAPI:
             try:
                 with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
                     res = client.request(method, request_endpoint, headers=headers, **request_kwargs)
+
+                if is_order_submit:
+                    RUN_LOG.info(
+                        format_log_kv(
+                            "[ORDER_SUBMIT] real_order_sent",
+                            endpoint=endpoint,
+                            status_code=res.status_code,
+                            market=(json_body or {}).get("market"),
+                            side=(json_body or {}).get("side"),
+                            order_type=(json_body or {}).get("order_type"),
+                            client_order_id=(json_body or {}).get("client_order_id"),
+                            payload_fields=",".join((json_body or {}).keys()),
+                        )
+                    )
 
                 if debug_order_submit:
                     RUN_LOG.info(
@@ -931,11 +954,48 @@ class BithumbPrivateAPI:
                     detail_parts.append(f"error_message={error_message}")
                 if body:
                     detail_parts.append(f"body={body}")
+                if is_order_submit:
+                    auth_rejected = (
+                        exc.response.status_code in {401, 403}
+                        or error_name in _AUTH_ERROR_NAMES
+                        or "jwt" in (error_message or "").lower()
+                        or "signature" in (error_message or "").lower()
+                    )
+                    RUN_LOG.error(
+                        format_log_kv(
+                            (
+                                "[ORDER_SUBMIT] auth_signature_rejected"
+                                if auth_rejected
+                                else "[ORDER_SUBMIT] exchange_rejected"
+                            ),
+                            endpoint=endpoint,
+                            status_code=exc.response.status_code,
+                            error_name=error_name or "-",
+                            error_message=error_message or "-",
+                            market=(json_body or {}).get("market"),
+                            side=(json_body or {}).get("side"),
+                            order_type=(json_body or {}).get("order_type"),
+                            client_order_id=(json_body or {}).get("client_order_id"),
+                        )
+                    )
                 raise BrokerRejectError(
                     " ".join(detail_parts)
                 ) from exc
 
             if isinstance(data, dict) and data.get("status") not in (None, "0000"):
+                if is_order_submit:
+                    RUN_LOG.error(
+                        format_log_kv(
+                            "[ORDER_SUBMIT] exchange_rejected",
+                            endpoint=endpoint,
+                            status_code="application",
+                            error_name=str(data.get("name") or data.get("status") or "-"),
+                            market=(json_body or {}).get("market"),
+                            side=(json_body or {}).get("side"),
+                            order_type=(json_body or {}).get("order_type"),
+                            client_order_id=(json_body or {}).get("client_order_id"),
+                        )
+                    )
                 raise BrokerRejectError(f"bithumb private call rejected: {data}")
             return data
 
@@ -1404,12 +1464,8 @@ class BithumbBroker:
         payload_plan,
         retry_safe: bool = False,
     ) -> dict | list:
-        from .bithumb_client import submit_validated_order_payload
-
-        return submit_validated_order_payload(
-            self,
-            signed_request=payload_plan,
-            retry_safe=retry_safe,
+        raise BrokerRejectError(
+            "compat submit override is disabled; /v2/orders must use the canonical signed private API path"
         )
 
     def _build_quantity_guard(
@@ -1538,7 +1594,19 @@ class BithumbBroker:
 
     def _post_private(self, endpoint: str, payload: dict[str, object], *, retry_safe: bool = False) -> dict | list:
         if self.dry_run:
-            return {"status": "0000", "data": {"uuid": f"dry_{payload.get('uuid', payload.get('market', 'order'))}"}}
+            RUN_LOG.error(
+                format_log_kv(
+                    "[ORDER_SUBMIT] dry_run_blocked",
+                    method="POST",
+                    endpoint=endpoint,
+                    mode=settings.MODE,
+                    live_dry_run=1,
+                    live_real_order_armed=1 if bool(settings.LIVE_REAL_ORDER_ARMED) else 0,
+                )
+            )
+            raise BrokerRejectError(
+                f"private write blocked: LIVE_DRY_RUN=true method=POST endpoint={endpoint}"
+            )
         return self._request_private("POST", endpoint, json_body=payload, retry_safe=retry_safe)
 
     def _delete_private(self, endpoint: str, params: dict[str, object], *, retry_safe: bool = False) -> dict | list:
@@ -1946,7 +2014,33 @@ class BithumbBroker:
         now = int(time.time() * 1000)
         validated_client_order_id = validate_client_order_id(client_order_id)
         if self.dry_run:
-            return BrokerOrder(validated_client_order_id, f"dry_{validated_client_order_id}", side, "NEW", price, qty, 0.0, now, now)
+            RUN_LOG.error(
+                format_log_kv(
+                    "[ORDER_SUBMIT] dry_run_blocked",
+                    client_order_id=validated_client_order_id,
+                    side=side,
+                    mode=settings.MODE,
+                    live_dry_run=1,
+                    live_real_order_armed=1 if bool(settings.LIVE_REAL_ORDER_ARMED) else 0,
+                )
+            )
+            raise BrokerRejectError(
+                "live order submit blocked: LIVE_DRY_RUN=true; no real order was sent"
+            )
+        if str(settings.MODE).strip().lower() == "live" and not bool(settings.LIVE_REAL_ORDER_ARMED):
+            RUN_LOG.error(
+                format_log_kv(
+                    "[ORDER_SUBMIT] dry_run_blocked",
+                    client_order_id=validated_client_order_id,
+                    side=side,
+                    mode=settings.MODE,
+                    live_dry_run=0,
+                    live_real_order_armed=0,
+                )
+            )
+            raise BrokerRejectError(
+                "live order submit blocked: LIVE_REAL_ORDER_ARMED=true is required; no real order was sent"
+            )
 
         submit_contract_context: dict[str, object] = {}
         try:

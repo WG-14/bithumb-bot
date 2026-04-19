@@ -105,11 +105,23 @@ def test_client_submits_signed_order_request(monkeypatch) -> None:
     rules = _resolved_rules()
     _patch_planning(monkeypatch, rules)
     broker = BithumbBroker()
-    monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda _endpoint, payload, *, retry_safe=False: {"status": "0000", "data": {"order_id": "ex-client", "client_order_id": payload["client_order_id"]}},
-    )
+    calls: list[dict[str, object]] = []
+
+    def _fake_request(method, endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None):
+        calls.append(
+            {
+                "method": method,
+                "endpoint": endpoint,
+                "json_body": dict(json_body or {}),
+                "retry_safe": retry_safe,
+            }
+        )
+        return {
+            "status": "0000",
+            "data": {"order_id": "ex-client", "client_order_id": json_body["client_order_id"]},
+        }
+
+    monkeypatch.setattr(broker._private_api, "request", _fake_request)
     plan = plan_place_order(
         broker,
         intent=OrderIntent(
@@ -138,6 +150,14 @@ def test_client_submits_signed_order_request(monkeypatch) -> None:
     data = submit_signed_order_request(broker, signed_request=flow.signed_request)
 
     assert data["data"]["order_id"] == "ex-client"
+    assert calls == [
+        {
+            "method": "POST",
+            "endpoint": "/v2/orders",
+            "json_body": flow.signed_request.payload,
+            "retry_safe": False,
+        }
+    ]
 
 
 def test_direct_signed_request_submit_is_rejected_for_armed_live(monkeypatch) -> None:
@@ -213,9 +233,9 @@ def test_execution_and_read_models_confirm_response(monkeypatch) -> None:
         now=1_700_000_000_000,
     )
     monkeypatch.setattr(
-        broker,
-        "_post_private",
-        lambda _endpoint, payload, *, retry_safe=False: response,
+        broker._private_api,
+        "request",
+        lambda _method, _endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None: response,
     )
     executed = execute_signed_order_request(
         broker,
@@ -228,3 +248,52 @@ def test_execution_and_read_models_confirm_response(monkeypatch) -> None:
     assert confirmation.exchange_order_id == "ex-confirm"
     assert isinstance(executed, OrderConfirmation)
     assert executed.exchange_order_id == "ex-confirm"
+
+
+def test_submit_ignores_broker_post_private_override(monkeypatch) -> None:
+    _configure_live()
+    rules = _resolved_rules()
+    _patch_planning(monkeypatch, rules)
+    broker = BithumbBroker()
+    post_override_called = False
+
+    def _post_override(_endpoint, _payload, *, retry_safe=False):
+        nonlocal post_override_called
+        post_override_called = True
+        return {"status": "0000", "data": {"order_id": "override"}}
+
+    monkeypatch.setattr(broker, "_post_private", _post_override)
+    monkeypatch.setattr(
+        broker._private_api,
+        "request",
+        lambda _method, _endpoint, *, params=None, json_body=None, retry_safe=False, response_excerpt=None: {
+            "status": "0000",
+            "data": {"order_id": "canonical", "client_order_id": json_body["client_order_id"]},
+        },
+    )
+    plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-module-single-path",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.0008,
+            price=None,
+            created_ts=1_700_000_000_000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(
+                rules=rules,
+                resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+            ),
+            market_price_hint=100_000_000.0,
+            trace_id="cid-module-single-path",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    flow = build_submission_flow(broker, plan=plan)
+
+    data = submit_signed_order_request(broker, signed_request=flow.signed_request)
+
+    assert data["data"]["order_id"] == "canonical"
+    assert post_override_called is False
