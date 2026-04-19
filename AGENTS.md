@@ -546,3 +546,6 @@ Always report:
 - why patching stopped
 
 After each meaningful patch, reassess whether the target criteria are satisfied and stop immediately if they are.
+
+For this refactor task, use `docs/refactor_target.md` as the completion gate.
+If repository-wide guidance conflicts with task-local refactor direction, preserve safety rules but follow `docs/refactor_target.md` for scope, stop condition, and completion judgment.
