@@ -166,10 +166,15 @@ def get_fills(
     *,
     client_order_id: str | None = None,
     exchange_order_id: str | None = None,
+    parse_mode: str = "strict",
     classify_private_api_error,
 ) -> list[BrokerFill]:
     if broker.dry_run:
         return []
+    normalized_parse_mode = str(parse_mode or "strict").strip().lower()
+    if normalized_parse_mode not in {"strict", "salvage"}:
+        raise BrokerRejectError(f"unsupported fill parse_mode={parse_mode!r}")
+    strict_fee_parse = normalized_parse_mode == "strict"
 
     requested = resolve_v1_requested_identifiers(
         client_order_id=client_order_id,
@@ -237,12 +242,12 @@ def get_fills(
                     continue
                 if price is None:
                     raise BrokerRejectError("/v1/order.trades schema mismatch: missing required numeric field 'price'")
-                fee = broker._extract_fill_fee(
+                fee_observation = broker._extract_fill_fee_observation(
                     trade,
                     context="trade",
                     qty=qty,
                     price=price,
-                    strict=True,
+                    strict=strict_fee_parse,
                 )
                 ts_raw = trade.get("created_at")
                 ts = broker._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
@@ -257,8 +262,11 @@ def get_fills(
                         fill_ts=ts,
                         price=float(price),
                         qty=float(qty),
-                        fee=fee,
+                        fee=fee_observation.fee,
                         exchange_order_id=str(row.get("uuid") or ""),
+                        fee_status=fee_observation.status,
+                        parse_warnings=((fee_observation.warning,) if fee_observation.warning else ()),
+                        raw=broker._sanitize_debug_value(trade),
                     )
                 )
             continue
@@ -283,7 +291,7 @@ def get_fills(
         except BrokerRejectError:
             requires_removed_legacy_scan = True
             continue
-        fee = broker._extract_fill_fee(
+        fee_observation = broker._extract_fill_fee_observation(
             row,
             context="aggregate",
             qty=qty_filled,
@@ -302,8 +310,11 @@ def get_fills(
                 fill_ts=ts,
                 price=float(price),
                 qty=qty_filled,
-                fee=fee,
+                fee=fee_observation.fee,
                 exchange_order_id=aggregate_exchange_order_id,
+                fee_status=fee_observation.status,
+                parse_warnings=((fee_observation.warning,) if fee_observation.warning else ()),
+                raw=broker._sanitize_debug_value(row),
             )
         )
     if not fills and requires_removed_legacy_scan:

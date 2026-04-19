@@ -53,8 +53,11 @@ class BrokerFill:
     fill_ts: int
     price: float
     qty: float
-    fee: float
+    fee: float | None
     exchange_order_id: str | None = None
+    fee_status: str = "complete"
+    parse_warnings: tuple[str, ...] = ()
+    raw: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,13 @@ class Broker(Protocol):
     ) -> list[BrokerOrder]:
         ...
 
-    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
         ...
 
     def get_recent_orders(

@@ -22,6 +22,7 @@ from .broker.order_rules import get_effective_order_rules
 from .config import settings
 from .db_core import (
     ensure_db,
+    record_broker_fill_observation,
     get_portfolio_breakdown,
     init_portfolio,
     portfolio_cash_total,
@@ -51,6 +52,7 @@ REASON_RECONCILE_FAILED = "RECONCILE_FAILED"
 REASON_RECENT_FILL_INVALID_PRICE = "RECENT_FILL_INVALID_PRICE"
 REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVERY"
 REASON_FEE_GAP_RECOVERY_REQUIRED = "FEE_GAP_RECOVERY_REQUIRED"
+REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED = "FILL_FEE_PENDING_RECOVERY_REQUIRED"
 
 OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED"}
 UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
@@ -61,6 +63,7 @@ NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_SUBMIT_UNKNOWN_UNRESOLVED,
     REASON_RECENT_FILL_INVALID_PRICE,
     REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY,
+    REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
 }
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
 
@@ -111,6 +114,13 @@ def classify_recovery_outcome(
             disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
             progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
             reason="startup gate remains blocked",
+        )
+
+    if int(metadata.get("fee_pending_recovery_required", 0)) > 0:
+        return RecoveryClassification(
+            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
+            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
+            reason="broker fill observed but fee is pending; accounting remains incomplete",
         )
 
     if int(metadata.get("fee_gap_recovery_required", 0)) > 0:
@@ -1483,6 +1493,74 @@ def _fee_gap_adjustment_history_summary(conn) -> dict[str, int | float]:
     }
 
 
+def _fill_fee_is_accounting_complete(fill: BrokerFill) -> bool:
+    return bool(getattr(fill, "fee_status", "complete") == "complete" and fill.fee is not None)
+
+
+def _get_salvage_fills(
+    broker: Broker,
+    *,
+    client_order_id: str,
+    exchange_order_id: str | None,
+) -> list[BrokerFill]:
+    return broker.get_fills(
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        parse_mode="salvage",
+    )
+
+
+def _record_fee_pending_observations(
+    conn,
+    *,
+    client_order_id: str,
+    side: str,
+    exchange_order_id: str | None,
+    fills: list[BrokerFill],
+    source: str,
+    strict_error: Exception | None = None,
+) -> dict[str, int | str]:
+    observed_count = 0
+    fee_pending_count = 0
+    latest_fill_ts = 0
+    latest_fee_status = "none"
+    latest_fill_id = "none"
+    event_ts = int(time.time() * 1000)
+    for fill in fills:
+        observed_count += 1
+        latest_fill_ts = max(latest_fill_ts, int(fill.fill_ts))
+        latest_fee_status = str(getattr(fill, "fee_status", "unknown") or "unknown")
+        latest_fill_id = str(fill.fill_id or "none")
+        accounting_complete = _fill_fee_is_accounting_complete(fill)
+        if not accounting_complete:
+            fee_pending_count += 1
+        record_broker_fill_observation(
+            conn,
+            event_ts=event_ts,
+            client_order_id=client_order_id,
+            exchange_order_id=fill.exchange_order_id or exchange_order_id,
+            fill_id=fill.fill_id,
+            fill_ts=fill.fill_ts,
+            side=side,
+            price=fill.price,
+            qty=fill.qty,
+            fee=fill.fee,
+            fee_status=str(getattr(fill, "fee_status", "unknown") or "unknown"),
+            accounting_status=("accounting_complete" if accounting_complete else "fee_pending"),
+            source=source,
+            parse_warnings=getattr(fill, "parse_warnings", ()) or (),
+            raw_payload=getattr(fill, "raw", None),
+        )
+    return {
+        "observed_fill_count": observed_count,
+        "fee_pending_fill_count": fee_pending_count,
+        "fee_pending_latest_fill_ts": latest_fill_ts,
+        "fee_pending_latest_fee_status": latest_fee_status,
+        "fee_pending_latest_fill_id": latest_fill_id,
+        "fee_pending_strict_error": f"{type(strict_error).__name__}: {strict_error}" if strict_error is not None else "none",
+    }
+
+
 def reconcile_with_broker(broker: Broker) -> None:
     conn = ensure_db()
     reason_code = REASON_RECONCILE_OK
@@ -1510,6 +1588,13 @@ def reconcile_with_broker(broker: Broker) -> None:
         "material_zero_fee_fill_count": 0,
         "material_zero_fee_fill_latest_ts": 0,
         "fee_gap_recovery_required": 0,
+        "observed_fill_count": 0,
+        "fee_pending_fill_count": 0,
+        "fee_pending_recovery_required": 0,
+        "fee_pending_latest_fill_ts": 0,
+        "fee_pending_latest_fee_status": "none",
+        "fee_pending_latest_fill_id": "none",
+        "fee_pending_operator_next_action": "none",
         "fee_gap_adjustment_count": 0,
         "fee_gap_adjustment_latest_event_ts": 0,
     }
@@ -1671,21 +1756,46 @@ def reconcile_with_broker(broker: Broker) -> None:
             except BrokerRejectError as exc:
                 if "fee" not in str(exc).lower():
                     raise
+                salvage_fills = _get_salvage_fills(
+                    broker,
+                    client_order_id=str(oid),
+                    exchange_order_id=remote.exchange_order_id,
+                )
+                observation_summary = _record_fee_pending_observations(
+                    conn,
+                    client_order_id=str(oid),
+                    side=str(row["side"]),
+                    exchange_order_id=remote.exchange_order_id,
+                    fills=salvage_fills,
+                    source="reconcile_salvage",
+                    strict_error=exc,
+                )
                 _mark_recovery_required_with_reason(
                     conn,
                     client_order_id=oid,
                     side=str(row["side"]),
                     from_status=remote.status,
-                    reason_code=REASON_FEE_GAP_RECOVERY_REQUIRED,
+                    reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
                     reason=(
-                        "reconcile blocked: fill fee validation failed; "
+                        "reconcile observed broker fill but accounting is fee-pending; "
                         f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                        f"observed_fill_count={int(observation_summary['observed_fill_count'])}; "
+                        f"fee_pending_fill_count={int(observation_summary['fee_pending_fill_count'])}; "
+                        f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
                         f"manual recovery required ({type(exc).__name__}: {exc})"
                     ),
                 )
-                metadata["fee_gap_recovery_required"] = 1
+                metadata["observed_fill_count"] = int(metadata["observed_fill_count"]) + int(observation_summary["observed_fill_count"])
+                metadata["fee_pending_fill_count"] = int(metadata["fee_pending_fill_count"]) + int(observation_summary["fee_pending_fill_count"])
+                metadata["fee_pending_recovery_required"] = 1
+                metadata["fee_pending_latest_fill_ts"] = int(observation_summary["fee_pending_latest_fill_ts"])
+                metadata["fee_pending_latest_fee_status"] = str(observation_summary["fee_pending_latest_fee_status"])
+                metadata["fee_pending_latest_fill_id"] = str(observation_summary["fee_pending_latest_fill_id"])
+                metadata["fee_pending_operator_next_action"] = (
+                    "inspect broker_fill_observations and resolve fee before ledger apply or manual accounting repair"
+                )
                 if reason_code == REASON_RECONCILE_OK:
-                    reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
+                    reason_code = REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED
                 continue
             invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
             if invalid_fill is not None:
@@ -1705,6 +1815,42 @@ def reconcile_with_broker(broker: Broker) -> None:
                 metadata["invalid_fill_price_blocked"] += 1
                 if reason_code == REASON_RECONCILE_OK:
                     reason_code = REASON_RECENT_FILL_INVALID_PRICE
+                continue
+            fee_pending_fill = next((fill for fill in fills if not _fill_fee_is_accounting_complete(fill)), None)
+            if fee_pending_fill is not None:
+                observation_summary = _record_fee_pending_observations(
+                    conn,
+                    client_order_id=str(oid),
+                    side=str(row["side"]),
+                    exchange_order_id=remote.exchange_order_id,
+                    fills=fills,
+                    source="reconcile_fee_pending",
+                )
+                _mark_recovery_required_with_reason(
+                    conn,
+                    client_order_id=oid,
+                    side=str(row["side"]),
+                    from_status=remote.status,
+                    reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
+                    reason=(
+                        "reconcile blocked: broker fill observed but fee is pending; "
+                        f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
+                        f"fill_id={fee_pending_fill.fill_id}; "
+                        f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
+                        "manual fee resolution required before ledger apply"
+                    ),
+                )
+                metadata["observed_fill_count"] = int(metadata["observed_fill_count"]) + int(observation_summary["observed_fill_count"])
+                metadata["fee_pending_fill_count"] = int(metadata["fee_pending_fill_count"]) + int(observation_summary["fee_pending_fill_count"])
+                metadata["fee_pending_recovery_required"] = 1
+                metadata["fee_pending_latest_fill_ts"] = int(observation_summary["fee_pending_latest_fill_ts"])
+                metadata["fee_pending_latest_fee_status"] = str(observation_summary["fee_pending_latest_fee_status"])
+                metadata["fee_pending_latest_fill_id"] = str(observation_summary["fee_pending_latest_fill_id"])
+                metadata["fee_pending_operator_next_action"] = (
+                    "inspect broker_fill_observations and resolve fee before ledger apply or manual accounting repair"
+                )
+                if reason_code == REASON_RECONCILE_OK:
+                    reason_code = REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED
                 continue
             fill_apply_blocked = False
             for fill in fills:
@@ -2100,16 +2246,83 @@ def recover_order_with_exchange_id(
         if resolved_exchange_order_id:
             set_exchange_order_id(client_order_id, resolved_exchange_order_id, conn=conn)
 
-        fills = broker.get_fills(
-            client_order_id=client_order_id,
-            exchange_order_id=resolved_exchange_order_id,
-        )
+        try:
+            fills = broker.get_fills(
+                client_order_id=client_order_id,
+                exchange_order_id=resolved_exchange_order_id,
+            )
+        except BrokerRejectError as exc:
+            if "fee" not in str(exc).lower():
+                raise
+            salvage_fills = _get_salvage_fills(
+                broker,
+                client_order_id=client_order_id,
+                exchange_order_id=resolved_exchange_order_id,
+            )
+            observation_summary = _record_fee_pending_observations(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                exchange_order_id=resolved_exchange_order_id,
+                fills=salvage_fills,
+                source="manual_recover_order_salvage",
+                strict_error=exc,
+            )
+            reason = (
+                "manual recovery observed broker fill but accounting is fee-pending; "
+                f"exchange_order_id={resolved_exchange_order_id}; "
+                f"observed_fill_count={int(observation_summary['observed_fill_count'])}; "
+                f"fee_pending_fill_count={int(observation_summary['fee_pending_fill_count'])}; "
+                f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
+                "resolve fee before ledger apply"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(
+                client_order_id,
+                "RECOVERY_REQUIRED",
+                last_error=reason,
+                conn=conn,
+            )
+            conn.commit()
+            return
         invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
         if invalid_fill is not None:
             raise RuntimeError(
                 "manual recovery blocked: fill has missing/invalid execution price; "
                 f"exchange_order_id={resolved_exchange_order_id}; fill_id={invalid_fill.fill_id}"
             )
+        fee_pending_fill = next((fill for fill in fills if not _fill_fee_is_accounting_complete(fill)), None)
+        if fee_pending_fill is not None:
+            observation_summary = _record_fee_pending_observations(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                exchange_order_id=resolved_exchange_order_id,
+                fills=fills,
+                source="manual_recover_order_fee_pending",
+            )
+            reason = (
+                "manual recovery blocked: fill fee is pending; "
+                f"exchange_order_id={resolved_exchange_order_id}; "
+                f"fill_id={fee_pending_fill.fill_id}; "
+                f"fee_status={observation_summary['fee_pending_latest_fee_status']}"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return
         for fill in fills:
             apply_fill_and_trade(
                 conn,

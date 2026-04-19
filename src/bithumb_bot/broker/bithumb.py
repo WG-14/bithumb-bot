@@ -165,6 +165,13 @@ class PrivateApiFailureClassification:
     needs_reconcile: bool = False
 
 
+@dataclass(frozen=True)
+class FillFeeObservation:
+    fee: float | None
+    status: str
+    warning: str | None = None
+
+
 _REQUEST_THROTTLER = RequestThrottleCoordinator()
 _OFFICIAL_PRIVATE_RPS_LIMIT = 140.0
 _OFFICIAL_ORDER_RPS_LIMIT = 10.0
@@ -1905,6 +1912,24 @@ class BithumbBroker:
         price: float | None,
         strict: bool = False,
     ) -> float:
+        observed = self._extract_fill_fee_observation(
+            row,
+            context=context,
+            qty=qty,
+            price=price,
+            strict=strict,
+        )
+        return float(observed.fee or 0.0)
+
+    def _extract_fill_fee_observation(
+        self,
+        row: dict[str, object],
+        *,
+        context: str,
+        qty: float | None,
+        price: float | None,
+        strict: bool = False,
+    ) -> FillFeeObservation:
         material_notional_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
         fill_notional = 0.0
         if qty is not None and price is not None:
@@ -1928,7 +1953,11 @@ class BithumbBroker:
                     f"/v1/order.{context} schema mismatch: missing fee field for materially sized fill"
                 )
             RUN_LOG.warning(format_log_kv("[FILL_FEE] missing fee key", payload=log_payload))
-            return 0.0
+            return FillFeeObservation(
+                fee=None if material_fee_validation_required else 0.0,
+                status="missing" if material_fee_validation_required else "assumed_zero_non_material",
+                warning="missing_fee_field",
+            )
 
         for key in present_keys:
             raw = row.get(key)
@@ -1940,11 +1969,15 @@ class BithumbBroker:
                             f"/v1/order.{context} schema mismatch: empty fee field '{key}' for materially sized fill"
                         )
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] empty fee value", payload=log_payload, fee_key=key))
+                    if material_fee_validation_required:
+                        return FillFeeObservation(fee=None, status="empty", warning=f"empty_fee_field:{key}")
                     continue
                 if strict:
                     raise BrokerRejectError(f"/v1/order.{context} schema mismatch: invalid fee field '{key}'={raw}")
                 else:
                     RUN_LOG.warning(format_log_kv("[FILL_FEE] invalid fee value", payload=log_payload, fee_key=key))
+                if material_fee_validation_required:
+                    return FillFeeObservation(fee=None, status="invalid", warning=f"invalid_fee_field:{key}")
                 continue
             fee = float(parsed)
             if fee < 0:
@@ -1955,7 +1988,9 @@ class BithumbBroker:
                         f"/v1/order.{context} schema mismatch: zero fee field '{key}' for materially sized fill"
                     )
                 RUN_LOG.warning(format_log_kv("[FILL_FEE] resolved zero fee", payload=log_payload, fee_key=key))
-            return fee
+                if material_fee_validation_required:
+                    return FillFeeObservation(fee=None, status="zero_reported", warning=f"zero_fee_field:{key}")
+            return FillFeeObservation(fee=fee, status="complete")
 
         if strict:
             has_non_empty_fee = any(
@@ -1965,7 +2000,11 @@ class BithumbBroker:
             if has_non_empty_fee or material_fee_validation_required:
                 raise BrokerRejectError(f"/v1/order.{context} schema mismatch: unable to parse fee field")
         RUN_LOG.warning(format_log_kv("[FILL_FEE] unable to parse any fee value", payload=log_payload))
-        return 0.0
+        return FillFeeObservation(
+            fee=None if material_fee_validation_required else 0.0,
+            status="unparseable" if material_fee_validation_required else "assumed_zero_non_material",
+            warning="unable_to_parse_fee",
+        )
 
     def _resolve_fill_price(
         self,
@@ -2561,11 +2600,18 @@ class BithumbBroker:
             client_order_ids=client_order_ids,
         )
 
-    def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
         return load_bithumb_fills(
             self,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
+            parse_mode=parse_mode,
             classify_private_api_error=classify_private_api_error,
         )
 

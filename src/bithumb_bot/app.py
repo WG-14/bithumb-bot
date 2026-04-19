@@ -22,6 +22,7 @@ from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import (
     compute_accounting_replay,
     ensure_db,
+    get_broker_fill_observation_summary,
     get_external_cash_adjustment_summary,
     get_fee_gap_accounting_repair_summary,
     get_manual_flat_accounting_repair_summary,
@@ -2318,6 +2319,18 @@ def _load_recovery_report(
         "eligibility_reason": "not_checked",
         "recommended_command": "uv run python bot.py recovery-report",
     }
+    broker_fill_observation_summary = {
+        "observation_count": 0,
+        "fee_pending_count": 0,
+        "accounting_complete_count": 0,
+        "last_event_ts": None,
+        "last_client_order_id": None,
+        "last_exchange_order_id": None,
+        "last_fill_id": None,
+        "last_fee_status": None,
+        "last_accounting_status": None,
+        "last_source": None,
+    }
     conn = ensure_db()
     try:
         recent_dust_unsellable_event = conn.execute(
@@ -2344,6 +2357,7 @@ def _load_recovery_report(
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
+        broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
     finally:
         conn.close()
     candidate_report: list[dict[str, object]] = []
@@ -2443,6 +2457,7 @@ def _load_recovery_report(
         "manual_flat_accounting_repair_summary": manual_flat_repair_summary,
         "fee_gap_accounting_repair_preview": fee_gap_repair_preview,
         "fee_gap_accounting_repair_summary": fee_gap_repair_summary,
+        "broker_fill_observation_summary": broker_fill_observation_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
@@ -2662,6 +2677,23 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"reason={fee_gap_repair_preview.get('eligibility_reason') or 'none'}"
     )
     print(f"    command={fee_gap_repair_preview.get('recommended_command') or 'none'}")
+    broker_fill_observation_summary = report.get("broker_fill_observation_summary") or {}
+    print("  [P3.0e] broker_fill_observations")
+    print(
+        "    "
+        f"observation_count={int(broker_fill_observation_summary.get('observation_count') or 0)} "
+        f"fee_pending_count={int(broker_fill_observation_summary.get('fee_pending_count') or 0)} "
+        f"accounting_complete_count={int(broker_fill_observation_summary.get('accounting_complete_count') or 0)}"
+    )
+    print(
+        "    "
+        f"last_client_order_id={broker_fill_observation_summary.get('last_client_order_id') or 'none'} "
+        f"last_exchange_order_id={broker_fill_observation_summary.get('last_exchange_order_id') or 'none'} "
+        f"last_fill_id={broker_fill_observation_summary.get('last_fill_id') or 'none'} "
+        f"last_fee_status={broker_fill_observation_summary.get('last_fee_status') or 'none'} "
+        f"last_accounting_status={broker_fill_observation_summary.get('last_accounting_status') or 'none'} "
+        f"last_source={broker_fill_observation_summary.get('last_source') or 'none'}"
+    )
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")

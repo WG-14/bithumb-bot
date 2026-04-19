@@ -25,6 +25,7 @@ _OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
 EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
 MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE = "manual_flat_accounting_repair"
 FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_gap_accounting_repair"
+BROKER_FILL_OBSERVATION_EVENT_TYPE = "broker_fill_observation"
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
 
@@ -443,6 +444,30 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS broker_fill_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL DEFAULT 'broker_fill_observation'
+                CHECK (event_type = 'broker_fill_observation'),
+            event_ts INTEGER NOT NULL,
+            client_order_id TEXT NOT NULL,
+            exchange_order_id TEXT,
+            fill_id TEXT,
+            fill_ts INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            price REAL NOT NULL,
+            qty REAL NOT NULL,
+            fee REAL,
+            fee_status TEXT NOT NULL,
+            accounting_status TEXT NOT NULL,
+            source TEXT NOT NULL,
+            parse_warnings TEXT,
+            raw_payload TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
     _ensure_column(conn, "trades", "client_order_id", "client_order_id TEXT")
     _ensure_column(conn, "trades", "strategy_name", "strategy_name TEXT")
     _ensure_column(conn, "trades", "entry_decision_id", "entry_decision_id INTEGER")
@@ -516,6 +541,31 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "repair_basis TEXT NOT NULL DEFAULT '{}'",
     )
     _ensure_column(conn, "fee_gap_accounting_repairs", "note", "note TEXT")
+    _ensure_column(
+        conn,
+        "broker_fill_observations",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'broker_fill_observation'",
+    )
+    _ensure_column(conn, "broker_fill_observations", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "broker_fill_observations", "client_order_id", "client_order_id TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "broker_fill_observations", "exchange_order_id", "exchange_order_id TEXT")
+    _ensure_column(conn, "broker_fill_observations", "fill_id", "fill_id TEXT")
+    _ensure_column(conn, "broker_fill_observations", "fill_ts", "fill_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "broker_fill_observations", "side", "side TEXT NOT NULL DEFAULT 'UNKNOWN'")
+    _ensure_column(conn, "broker_fill_observations", "price", "price REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "broker_fill_observations", "qty", "qty REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "broker_fill_observations", "fee", "fee REAL")
+    _ensure_column(conn, "broker_fill_observations", "fee_status", "fee_status TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "broker_fill_observations",
+        "accounting_status",
+        "accounting_status TEXT NOT NULL DEFAULT 'observed'",
+    )
+    _ensure_column(conn, "broker_fill_observations", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "broker_fill_observations", "parse_warnings", "parse_warnings TEXT")
+    _ensure_column(conn, "broker_fill_observations", "raw_payload", "raw_payload TEXT")
 
     conn.execute(
         """
@@ -551,6 +601,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_fee_gap_accounting_repairs_event_ts
         ON fee_gap_accounting_repairs(event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_broker_fill_observations_client_ts
+        ON broker_fill_observations(client_order_id, event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_broker_fill_observations_accounting_status
+        ON broker_fill_observations(accounting_status, event_ts, id)
         """
     )
     conn.execute(
@@ -2040,6 +2102,127 @@ def get_manual_flat_accounting_repair_summary(conn: sqlite3.Connection) -> dict[
         "last_reason": str(last["reason"]) if last is not None else None,
         "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
         "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_broker_fill_observation(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    client_order_id: str,
+    exchange_order_id: str | None,
+    fill_id: str | None,
+    fill_ts: int,
+    side: str,
+    price: float,
+    qty: float,
+    fee: float | None,
+    fee_status: str,
+    accounting_status: str,
+    source: str,
+    parse_warnings: Iterable[str] | str | None = None,
+    raw_payload: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
+    client_order_id_text = str(client_order_id or "").strip()
+    if not client_order_id_text:
+        raise RuntimeError("broker fill observation client_order_id is required")
+    side_text = str(side or "").strip().upper()
+    if side_text not in {"BUY", "SELL"}:
+        raise RuntimeError(f"broker fill observation side is invalid: {side}")
+    fee_status_text = str(fee_status or "").strip() or "unknown"
+    accounting_status_text = str(accounting_status or "").strip() or "observed"
+    source_text = str(source or "").strip() or "unknown"
+    warnings_text: str | None
+    if parse_warnings is None:
+        warnings_text = None
+    elif isinstance(parse_warnings, str):
+        warnings_text = parse_warnings
+    else:
+        warnings_text = json.dumps([str(item) for item in parse_warnings], ensure_ascii=False, sort_keys=True)
+    raw_payload_text: str | None
+    if raw_payload is None:
+        raw_payload_text = None
+    elif isinstance(raw_payload, str):
+        raw_payload_text = raw_payload
+    else:
+        raw_payload_text = json.dumps(raw_payload, ensure_ascii=False, sort_keys=True)
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO broker_fill_observations(
+            event_type, event_ts, client_order_id, exchange_order_id, fill_id,
+            fill_ts, side, price, qty, fee, fee_status, accounting_status,
+            source, parse_warnings, raw_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            BROKER_FILL_OBSERVATION_EVENT_TYPE,
+            int(event_ts),
+            client_order_id_text,
+            str(exchange_order_id or "").strip() or None,
+            str(fill_id or "").strip() or None,
+            int(fill_ts),
+            side_text,
+            float(price),
+            float(qty),
+            (float(fee) if fee is not None else None),
+            fee_status_text,
+            accounting_status_text,
+            source_text,
+            warnings_text,
+            raw_payload_text,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+    return {
+        "id": int(cursor.lastrowid),
+        "event_ts": int(event_ts),
+        "client_order_id": client_order_id_text,
+        "exchange_order_id": str(exchange_order_id or "").strip() or None,
+        "fill_id": str(fill_id or "").strip() or None,
+        "fee_status": fee_status_text,
+        "accounting_status": accounting_status_text,
+        "source": source_text,
+    }
+
+
+def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS observation_count,
+            COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
+            COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count
+        FROM broker_fill_observations
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT event_ts, client_order_id, exchange_order_id, fill_id, side, price, qty,
+               fee, fee_status, accounting_status, source, parse_warnings
+        FROM broker_fill_observations
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "observation_count": int(row["observation_count"] if row else 0),
+        "fee_pending_count": int(row["fee_pending_count"] if row else 0),
+        "accounting_complete_count": int(row["accounting_complete_count"] if row else 0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_client_order_id": str(last["client_order_id"]) if last is not None else None,
+        "last_exchange_order_id": str(last["exchange_order_id"]) if last is not None and last["exchange_order_id"] is not None else None,
+        "last_fill_id": str(last["fill_id"]) if last is not None and last["fill_id"] is not None else None,
+        "last_side": str(last["side"]) if last is not None else None,
+        "last_price": float(last["price"]) if last is not None else None,
+        "last_qty": float(last["qty"]) if last is not None else None,
+        "last_fee": float(last["fee"]) if last is not None and last["fee"] is not None else None,
+        "last_fee_status": str(last["fee_status"]) if last is not None else None,
+        "last_accounting_status": str(last["accounting_status"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_parse_warnings": str(last["parse_warnings"]) if last is not None and last["parse_warnings"] is not None else None,
     }
 
 
