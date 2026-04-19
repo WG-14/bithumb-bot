@@ -25,6 +25,7 @@ _OPEN_POSITION_LOT_STATES = tuple(lot_state_quantity_contract().keys())
 EXTERNAL_CASH_ADJUSTMENT_EVENT_TYPE = "external_cash_adjustment"
 MANUAL_FLAT_ACCOUNTING_REPAIR_EVENT_TYPE = "manual_flat_accounting_repair"
 FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_gap_accounting_repair"
+FEE_PENDING_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_pending_accounting_repair"
 BROKER_FILL_OBSERVATION_EVENT_TYPE = "broker_fill_observation"
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
@@ -446,6 +447,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS fee_pending_accounting_repairs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repair_key TEXT NOT NULL UNIQUE,
+            event_type TEXT NOT NULL DEFAULT 'fee_pending_accounting_repair'
+                CHECK (event_type = 'fee_pending_accounting_repair'),
+            event_ts INTEGER NOT NULL,
+            client_order_id TEXT NOT NULL,
+            exchange_order_id TEXT,
+            fill_id TEXT,
+            fill_ts INTEGER NOT NULL,
+            price REAL NOT NULL,
+            qty REAL NOT NULL,
+            fee REAL NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            repair_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS broker_fill_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL DEFAULT 'broker_fill_observation'
@@ -541,6 +565,30 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "repair_basis TEXT NOT NULL DEFAULT '{}'",
     )
     _ensure_column(conn, "fee_gap_accounting_repairs", "note", "note TEXT")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "repair_key", "repair_key TEXT")
+    _ensure_column(
+        conn,
+        "fee_pending_accounting_repairs",
+        "event_type",
+        "event_type TEXT NOT NULL DEFAULT 'fee_pending_accounting_repair'",
+    )
+    _ensure_column(conn, "fee_pending_accounting_repairs", "event_ts", "event_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "client_order_id", "client_order_id TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "exchange_order_id", "exchange_order_id TEXT")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "fill_id", "fill_id TEXT")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "fill_ts", "fill_ts INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "price", "price REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "qty", "qty REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "fee", "fee REAL NOT NULL DEFAULT 0")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "fee_pending_accounting_repairs", "reason", "reason TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(
+        conn,
+        "fee_pending_accounting_repairs",
+        "repair_basis",
+        "repair_basis TEXT NOT NULL DEFAULT '{}'",
+    )
+    _ensure_column(conn, "fee_pending_accounting_repairs", "note", "note TEXT")
     _ensure_column(
         conn,
         "broker_fill_observations",
@@ -619,6 +667,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_gap_accounting_repairs_key
         ON fee_gap_accounting_repairs(repair_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_fee_pending_accounting_repairs_key
+        ON fee_pending_accounting_repairs(repair_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_fee_pending_accounting_repairs_fill
+        ON fee_pending_accounting_repairs(client_order_id, fill_id, fill_ts)
         """
     )
 
@@ -1681,6 +1741,36 @@ def _fee_gap_accounting_repair_key(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _fee_pending_accounting_repair_key(
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+    fee: float,
+    source: str,
+    reason: str,
+    repair_basis: str,
+    note: str | None,
+) -> str:
+    payload = {
+        "event_type": FEE_PENDING_ACCOUNTING_REPAIR_EVENT_TYPE,
+        "client_order_id": str(client_order_id).strip(),
+        "fill_id": str(fill_id or "").strip(),
+        "fill_ts": int(fill_ts),
+        "price": f"{normalize_cash_amount(price):.8f}",
+        "qty": f"{normalize_asset_qty(qty):.12f}",
+        "fee": f"{normalize_cash_amount(fee):.8f}",
+        "source": str(source).strip(),
+        "reason": str(reason).strip(),
+        "repair_basis": str(repair_basis).strip(),
+        "note": str(note or "").strip(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int]:
     init_portfolio(conn)
     total_fee = 0.0
@@ -2327,6 +2417,164 @@ def get_fee_gap_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str,
         "repair_count": int(row["repair_count"] if row else 0),
         "last_event_ts": int(last["event_ts"]) if last is not None else None,
         "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_source": str(last["source"]) if last is not None else None,
+        "last_reason": str(last["reason"]) if last is not None else None,
+        "last_repair_basis": str(last["repair_basis"]) if last is not None else None,
+        "last_note": str(last["note"]) if last is not None and last["note"] is not None else None,
+    }
+
+
+def record_fee_pending_accounting_repair(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    client_order_id: str,
+    exchange_order_id: str | None,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+    fee: float,
+    source: str,
+    reason: str,
+    repair_basis: dict[str, Any] | str,
+    note: str | None = None,
+    repair_key: str | None = None,
+) -> dict[str, Any]:
+    client_order_id_text = str(client_order_id or "").strip()
+    if not client_order_id_text:
+        raise RuntimeError("fee-pending accounting repair client_order_id is required")
+    basis_text = (
+        json.dumps(repair_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(repair_basis, dict)
+        else str(repair_basis)
+    )
+    source_text = str(source).strip()
+    reason_text = str(reason).strip()
+    if not source_text:
+        raise RuntimeError("fee-pending accounting repair source is required")
+    if not reason_text:
+        raise RuntimeError("fee-pending accounting repair reason is required")
+    if not basis_text.strip():
+        raise RuntimeError("fee-pending accounting repair basis is required")
+
+    fee_value = normalize_cash_amount(fee)
+    if fee_value < 0:
+        raise RuntimeError("fee-pending accounting repair fee must be non-negative")
+    key = repair_key or _fee_pending_accounting_repair_key(
+        client_order_id=client_order_id_text,
+        fill_id=fill_id,
+        fill_ts=int(fill_ts),
+        price=float(price),
+        qty=float(qty),
+        fee=fee_value,
+        source=source_text,
+        reason=reason_text,
+        repair_basis=basis_text,
+        note=note,
+    )
+    existing = conn.execute(
+        """
+        SELECT id, repair_key, event_ts, client_order_id, exchange_order_id, fill_id,
+               fill_ts, price, qty, fee, source, reason, repair_basis, note
+        FROM fee_pending_accounting_repairs
+        WHERE repair_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "repair_key": str(existing["repair_key"]),
+            "event_ts": int(existing["event_ts"]),
+            "client_order_id": str(existing["client_order_id"]),
+            "exchange_order_id": str(existing["exchange_order_id"]) if existing["exchange_order_id"] is not None else None,
+            "fill_id": str(existing["fill_id"]) if existing["fill_id"] is not None else None,
+            "fill_ts": int(existing["fill_ts"]),
+            "price": float(existing["price"]),
+            "qty": float(existing["qty"]),
+            "fee": float(existing["fee"]),
+            "source": str(existing["source"]),
+            "reason": str(existing["reason"]),
+            "repair_basis": str(existing["repair_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO fee_pending_accounting_repairs(
+            repair_key, event_type, event_ts, client_order_id, exchange_order_id,
+            fill_id, fill_ts, price, qty, fee, source, reason, repair_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            FEE_PENDING_ACCOUNTING_REPAIR_EVENT_TYPE,
+            int(event_ts),
+            client_order_id_text,
+            str(exchange_order_id or "").strip() or None,
+            str(fill_id or "").strip() or None,
+            int(fill_ts),
+            float(price),
+            float(qty),
+            fee_value,
+            source_text,
+            reason_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "repair_key": key,
+        "event_ts": int(event_ts),
+        "client_order_id": client_order_id_text,
+        "exchange_order_id": str(exchange_order_id or "").strip() or None,
+        "fill_id": str(fill_id or "").strip() or None,
+        "fill_ts": int(fill_ts),
+        "price": float(price),
+        "qty": float(qty),
+        "fee": fee_value,
+        "source": source_text,
+        "reason": reason_text,
+        "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def get_fee_pending_accounting_repair_summary(conn: sqlite3.Connection) -> dict[str, float | int | str | None]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS repair_count
+        FROM fee_pending_accounting_repairs
+        """
+    ).fetchone()
+    last = conn.execute(
+        """
+        SELECT repair_key, event_ts, client_order_id, exchange_order_id, fill_id,
+               fill_ts, fee, source, reason, repair_basis, note
+        FROM fee_pending_accounting_repairs
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "repair_count": int(row["repair_count"] if row else 0),
+        "last_event_ts": int(last["event_ts"]) if last is not None else None,
+        "last_repair_key": str(last["repair_key"]) if last is not None else None,
+        "last_client_order_id": str(last["client_order_id"]) if last is not None else None,
+        "last_exchange_order_id": (
+            str(last["exchange_order_id"]) if last is not None and last["exchange_order_id"] is not None else None
+        ),
+        "last_fill_id": str(last["fill_id"]) if last is not None and last["fill_id"] is not None else None,
+        "last_fill_ts": int(last["fill_ts"]) if last is not None else None,
+        "last_fee": float(last["fee"]) if last is not None else None,
         "last_source": str(last["source"]) if last is not None else None,
         "last_reason": str(last["reason"]) if last is not None else None,
         "last_repair_basis": str(last["repair_basis"]) if last is not None else None,

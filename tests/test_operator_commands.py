@@ -32,6 +32,7 @@ from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ensure_db,
     get_fee_gap_accounting_repair_summary,
+    get_fee_pending_accounting_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
     record_external_cash_adjustment,
@@ -59,6 +60,10 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
     original_start_cash = settings.START_CASH_KRW
     original_db_path = settings.DB_PATH
     original_live_fill_fee_alert_min_notional_krw = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+    original_live_min_order_qty = settings.LIVE_MIN_ORDER_QTY
+    original_live_order_qty_step = settings.LIVE_ORDER_QTY_STEP
+    original_live_order_max_qty_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+    original_min_order_notional_krw = settings.MIN_ORDER_NOTIONAL_KRW
 
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "MODE", "paper")
@@ -75,6 +80,10 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
             "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW",
             original_live_fill_fee_alert_min_notional_krw,
         )
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", original_live_min_order_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_live_order_qty_step)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_live_order_max_qty_decimals)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", original_min_order_notional_krw)
 
 
 def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
@@ -483,6 +492,76 @@ def test_manual_flat_accounting_repair_converges_recovery_surfaces(tmp_path, mon
     checklist_out = capsys.readouterr().out
     assert "PASS    manual-flat accounting repair:" in checklist_out
     assert "safe_to_resume=1" in checklist_out
+
+
+def test_fee_pending_accounting_repair_cli_applies_observed_fill(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 2_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+            VALUES ('fee_pending_cli','ex_fee_pending_cli','RECOVERY_REQUIRED','BUY',NULL,0.01,0,1000,1000,'fee pending')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, accounting_status, source, parse_warnings, raw_payload
+            ) VALUES (1001, 'fee_pending_cli', 'ex_fee_pending_cli', 'fill_fee_pending_cli', 1001,
+                'BUY', 100000000.0, 0.01, NULL, 'missing', 'fee_pending',
+                'test_fixture', 'missing_fee_field', '{"uuid":"fill_fee_pending_cli"}')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    runtime_state.refresh_open_order_health(now_epoch_sec=2.0)
+
+    app_main(
+        [
+            "fee-pending-accounting-repair",
+            "--client-order-id",
+            "fee_pending_cli",
+            "--fill-id",
+            "fill_fee_pending_cli",
+            "--fee",
+            "500",
+            "--fee-provenance",
+            "operator_checked_bithumb_trade_history",
+            "--apply",
+            "--yes",
+        ]
+    )
+    out = capsys.readouterr().out
+
+    conn = ensure_db()
+    try:
+        order = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='fee_pending_cli'"
+        ).fetchone()
+        repair_summary = get_fee_pending_accounting_repair_summary(conn)
+        lot_count = conn.execute(
+            "SELECT COALESCE(SUM(executable_lot_count), 0) FROM open_position_lots WHERE pair=?",
+            (settings.PAIR,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert "[FEE-PENDING-ACCOUNTING-REPAIR] applied" in out
+    assert order["status"] == "FILLED"
+    assert float(order["qty_filled"]) == pytest.approx(0.01)
+    assert order["last_error"] is None
+    assert repair_summary["repair_count"] == 1
+    assert lot_count > 0
 
 
 def test_fee_gap_accounting_repair_preview_is_non_mutating(tmp_path, monkeypatch, capsys):
@@ -4299,6 +4378,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "manual_flat_accounting_repair_summary",
         "fee_gap_accounting_repair_preview",
         "fee_gap_accounting_repair_summary",
+        "fee_pending_accounting_repair_summary",
         "broker_fill_observation_summary",
         "active_blocker_summary",
         "blocker_summary",

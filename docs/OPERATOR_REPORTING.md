@@ -142,6 +142,26 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
   - `resume allowed` / `new orders allowed`: policy flags that must be true before fresh BUYs are allowed.
 - `effective_flat_due_to_harmless_dust` does not prove a literal zero balance.
 - `dust_state`, `dust_action` / `operator_action`, `dust_resume_allowed`, `dust_new_orders_allowed`, and `dust_treat_as_flat` should be read together, but they are not the primary SELL/exit authority layer.
+
+### Fee-Pending Fill Recovery
+
+If `recovery-report` shows broker fill observations with `fee_status=missing`
+or `accounting_status=fee_pending`, the exchange-side fill is observed but the
+local ledger has not accepted it as accounted. Do not use `resume --force` for
+this state.
+
+Use the fee-pending repair command only after checking broker evidence for the
+exact fill fee:
+
+```bash
+uv run bithumb-bot fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <evidence> --apply --yes
+```
+
+The command records an audited fee-pending accounting repair, applies the fill
+through normal accounting/lifecycle code, records an accounting-complete broker
+fill observation, and leaves trading disabled until an explicit `resume`.
+Material live fills still require a positive fee; a zero-fee repair for a
+material live fill is refused.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.
 - `dust_min_qty` and `dust_min_notional_krw` are separate sellability gates.
 - For exit authority, check the lot-native fields first:

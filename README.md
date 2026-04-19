@@ -92,6 +92,7 @@ uv run bithumb-bot decision-telemetry --limit 200
 uv run bithumb-bot strategy-report
 uv run bithumb-bot cash-drift-report --recent-limit 5
 uv run bithumb-bot experiment-report --sample-threshold 30 --top-n 3
+uv run bithumb-bot fee-pending-accounting-repair --client-order-id <id> --fill-id <fill_id> --fee <fee> --fee-provenance <evidence>
 uv run bithumb-bot run --short 7 --long 30
 ```
 

@@ -35,6 +35,10 @@ from bithumb_bot.broker.live_submit_orchestrator import (
 )
 from bithumb_bot.broker.order_submit import plan_place_order
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.fee_pending_repair import (
+    apply_fee_pending_accounting_repair,
+    build_fee_pending_accounting_repair_preview,
+)
 from bithumb_bot.execution_models import OrderIntent
 from bithumb_bot.dust import build_position_state_model
 from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
@@ -3615,6 +3619,146 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert report["can_resume"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
+
+
+def test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_authority(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "missing_fee_repair.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 2_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 4)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    runtime_state.enable_trading()
+    runtime_state.set_startup_gate_reason(None)
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    conn = ensure_db(str(tmp_path / "missing_fee_repair.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_missing_fee','ex_missing_fee','NEW','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_StrictMissingFeeRecoveryBroker())
+
+    conn = ensure_db(str(tmp_path / "missing_fee_repair.sqlite"))
+    try:
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id="live_missing_fee",
+            fill_id="trade_missing_fee_1",
+            fee=500.0,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        result = apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="live_missing_fee",
+            fill_id="trade_missing_fee_1",
+            fee=500.0,
+            fee_provenance="operator_checked_bithumb_trade_history",
+            note="incident repair test",
+        )
+        conn.commit()
+        runtime_state.disable_trading_until(
+            float("inf"),
+            reason="fee-pending accounting repair completed; explicit resume required",
+            reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+            halt_new_orders_blocked=False,
+            unresolved=False,
+        )
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+            metadata={
+                "fee_pending_recovery_required": 0,
+                "fee_pending_fill_count": 0,
+                "balance_split_mismatch_count": 0,
+            },
+        )
+        runtime_state.refresh_open_order_health(now_epoch_sec=2.0)
+        order = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_missing_fee'"
+        ).fetchone()
+        fill_count = conn.execute("SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='live_missing_fee'").fetchone()
+        trade_count = conn.execute("SELECT COUNT(*) AS cnt FROM trades WHERE client_order_id='live_missing_fee'").fetchone()
+        complete_observation = conn.execute(
+            """
+            SELECT fee, fee_status, accounting_status, source, parse_warnings
+            FROM broker_fill_observations
+            WHERE client_order_id='live_missing_fee' AND accounting_status='accounting_complete'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM fee_pending_accounting_repairs").fetchone()
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+    report = _load_recovery_report()
+
+    assert preview["safe_to_apply"] is True
+    assert result["repair"]["created"] is True
+    assert order is not None
+    assert order["status"] == "FILLED"
+    assert float(order["qty_filled"]) == pytest.approx(0.01)
+    assert order["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert trade_count["cnt"] == 1
+    assert complete_observation is not None
+    assert complete_observation["fee_status"] == "operator_confirmed"
+    assert complete_observation["accounting_status"] == "accounting_complete"
+    assert complete_observation["source"] == "fee_pending_accounting_repair"
+    assert "operator_fee_provenance" in str(complete_observation["parse_warnings"])
+    assert repair_count["cnt"] == 1
+    assert lot_snapshot.open_lot_count > 0
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.01)
+    assert report["recovery_required_count"] == 0
+    assert report["broker_fill_observation_summary"]["accounting_complete_count"] == 1
+    assert report["fee_pending_accounting_repair_summary"]["repair_count"] == 1
+    assert report["recommended_command"] == "uv run python bot.py resume"
+
+
+def test_fee_pending_accounting_repair_refuses_material_live_zero_fee(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "missing_fee_zero_refused.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 2_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    conn = ensure_db(str(tmp_path / "missing_fee_zero_refused.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_missing_fee','ex_missing_fee','RECOVERY_REQUIRED','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO broker_fill_observations(
+            event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+            price, qty, fee, fee_status, accounting_status, source, parse_warnings, raw_payload
+        ) VALUES (1001, 'live_missing_fee', 'ex_missing_fee', 'trade_missing_fee_1', 1001,
+            'BUY', 100000000.0, 0.01, NULL, 'missing', 'fee_pending',
+            'test_fixture', 'missing_fee_field', '{"uuid":"trade_missing_fee_1"}')
+        """
+    )
+    conn.commit()
+
+    try:
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id="live_missing_fee",
+            fill_id="trade_missing_fee_1",
+            fee=0.0,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "material_live_fill_requires_positive_fee" in preview["eligibility_reason"]
 
 
 def test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_blocked(tmp_path):

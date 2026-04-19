@@ -334,6 +334,20 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
     )
 
 
+def _last_reconcile_fee_pending_recovery_required() -> bool:
+    state = runtime_state.snapshot()
+    if int(state.recovery_required_count or 0) <= 0:
+        return False
+    try:
+        metadata = json.loads(str(state.last_reconcile_metadata or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    try:
+        return int(metadata.get("fee_pending_recovery_required", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _reconcile_balance_split_mismatch_count(metadata_raw: str | None) -> int:
     if not metadata_raw:
         return 0
@@ -1127,6 +1141,13 @@ def build_resume_guidance(
         recommended_command = "uv run python bot.py resume --force"
         recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
         resume_blocked_reason = "resume blocked by overridable blockers"
+    elif _last_reconcile_fee_pending_recovery_required():
+        operator_next_action = "fee_pending_accounting_repair_required"
+        recommended_command = "uv run python bot.py fee-pending-accounting-repair --help"
+        recommended_next_action = (
+            "Finalize the observed fee-pending fill with explicit fee provenance, then rerun recovery-report before resume."
+        )
+        resume_blocked_reason = "resume blocked by fee-pending fill accounting"
     elif recovery_required_count > 0:
         operator_next_action = "manual_recovery_required"
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
@@ -1208,6 +1229,8 @@ def build_resume_guidance(
 
     def _next_action_for_blocker(code: str) -> str:
         if code == "STARTUP_SAFETY_GATE_BLOCKED":
+            if _last_reconcile_fee_pending_recovery_required():
+                return "uv run python bot.py fee-pending-accounting-repair --help"
             if recovery_required_count > 0:
                 return "uv run python bot.py recover-order --client-order-id <id>"
             if submit_unknown_count > 0:

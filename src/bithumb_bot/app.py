@@ -25,6 +25,7 @@ from .db_core import (
     get_broker_fill_observation_summary,
     get_external_cash_adjustment_summary,
     get_fee_gap_accounting_repair_summary,
+    get_fee_pending_accounting_repair_summary,
     get_manual_flat_accounting_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
@@ -69,6 +70,10 @@ from . import runtime_state
 from .oms import OPEN_ORDER_STATUSES
 from .flatten import flatten_btc_position
 from .fee_gap_repair import apply_fee_gap_accounting_repair, build_fee_gap_accounting_repair_preview
+from .fee_pending_repair import (
+    apply_fee_pending_accounting_repair,
+    build_fee_pending_accounting_repair_preview,
+)
 from .lifecycle import summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .markets import canonical_market_with_raw
@@ -2313,6 +2318,20 @@ def _load_recovery_report(
         "last_repair_basis": None,
         "last_note": None,
     }
+    fee_pending_repair_summary = {
+        "repair_count": 0,
+        "last_event_ts": None,
+        "last_repair_key": None,
+        "last_client_order_id": None,
+        "last_exchange_order_id": None,
+        "last_fill_id": None,
+        "last_fill_ts": None,
+        "last_fee": None,
+        "last_source": None,
+        "last_reason": None,
+        "last_repair_basis": None,
+        "last_note": None,
+    }
     fee_gap_repair_preview = {
         "needs_repair": False,
         "safe_to_apply": False,
@@ -2357,6 +2376,7 @@ def _load_recovery_report(
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
+        fee_pending_repair_summary = get_fee_pending_accounting_repair_summary(conn)
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
     finally:
         conn.close()
@@ -2457,6 +2477,7 @@ def _load_recovery_report(
         "manual_flat_accounting_repair_summary": manual_flat_repair_summary,
         "fee_gap_accounting_repair_preview": fee_gap_repair_preview,
         "fee_gap_accounting_repair_summary": fee_gap_repair_summary,
+        "fee_pending_accounting_repair_summary": fee_pending_repair_summary,
         "broker_fill_observation_summary": broker_fill_observation_summary,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
@@ -2677,6 +2698,16 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"reason={fee_gap_repair_preview.get('eligibility_reason') or 'none'}"
     )
     print(f"    command={fee_gap_repair_preview.get('recommended_command') or 'none'}")
+    fee_pending_repair_summary = report.get("fee_pending_accounting_repair_summary") or {}
+    print("  [P3.0d2] fee_pending_accounting_repair")
+    print(
+        "    "
+        f"repair_count={int(fee_pending_repair_summary.get('repair_count') or 0)} "
+        f"last_client_order_id={fee_pending_repair_summary.get('last_client_order_id') or 'none'} "
+        f"last_fill_id={fee_pending_repair_summary.get('last_fill_id') or 'none'} "
+        f"last_fee={fee_pending_repair_summary.get('last_fee') if fee_pending_repair_summary.get('last_fee') is not None else 'none'} "
+        f"last_reason={fee_pending_repair_summary.get('last_reason') or 'none'}"
+    )
     broker_fill_observation_summary = report.get("broker_fill_observation_summary") or {}
     print("  [P3.0e] broker_fill_observations")
     print(
@@ -3023,6 +3054,124 @@ def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False,
         f"remaining_needs_repair={1 if bool(post_preview['needs_repair']) else 0} "
         f"safe_to_apply={1 if bool(post_preview['safe_to_apply']) else 0} "
         f"eligibility_reason={post_preview['eligibility_reason']}"
+    )
+
+
+def cmd_fee_pending_accounting_repair(
+    *,
+    client_order_id: str,
+    fill_id: str | None = None,
+    exchange_order_id: str | None = None,
+    fee: float | None = None,
+    fee_provenance: str | None = None,
+    apply: bool = False,
+    confirm: bool = False,
+    note: str | None = None,
+) -> None:
+    conn = ensure_db()
+    try:
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            exchange_order_id=exchange_order_id,
+            fee=fee,
+            fee_provenance=fee_provenance,
+        )
+        repair_summary = get_fee_pending_accounting_repair_summary(conn)
+        print("[FEE-PENDING-ACCOUNTING-REPAIR] preview")
+        print(
+            "  "
+            f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
+            f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
+            f"eligibility_reason={preview['eligibility_reason']}"
+        )
+        print(
+            "  "
+            f"client_order_id={preview['client_order_id']} "
+            f"exchange_order_id={preview.get('exchange_order_id') or 'none'} "
+            f"fill_id={preview.get('fill_id') or 'none'} "
+            f"side={preview['side']} "
+            f"fee_status={preview.get('observation_fee_status') or 'none'}"
+        )
+        print(
+            "  "
+            f"price={float(preview['price']):.8f} "
+            f"qty={float(preview['qty']):.12f} "
+            f"notional={float(preview['notional']):,.3f} "
+            f"fee={preview.get('fee') if preview.get('fee') is not None else 'none'} "
+            f"fee_provenance={preview.get('fee_provenance') or 'none'}"
+        )
+        print(
+            "  "
+            f"order_status={preview.get('order_status') or 'none'} "
+            f"projected_status={preview.get('projected_status') or 'none'} "
+            f"pending_observation_count={int(preview['pending_observation_count'])} "
+            f"existing_fee_pending_accounting_repairs={int(repair_summary.get('repair_count') or 0)}"
+        )
+        print(f"  recommended_command={preview['recommended_command']}")
+
+        if not apply:
+            print("[FEE-PENDING-ACCOUNTING-REPAIR] dry-run: no changes applied")
+            return
+
+        if not bool(preview["safe_to_apply"]):
+            print("[FEE-PENDING-ACCOUNTING-REPAIR] refused: unsafe repair request")
+            raise SystemExit(1)
+        if not confirm:
+            print("[FEE-PENDING-ACCOUNTING-REPAIR] confirmation required: re-run with --apply --yes")
+            raise SystemExit(1)
+
+        result = apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            exchange_order_id=exchange_order_id,
+            fee=float(fee if fee is not None else 0.0),
+            fee_provenance=str(fee_provenance or ""),
+            note=note,
+        )
+        repair = result["repair"]
+        post_lot_snapshot = result["lot_snapshot_after"]
+        conn.commit()
+    finally:
+        conn.close()
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="fee-pending accounting repair completed; explicit resume required",
+        reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+        metadata={
+            "fee_pending_recovery_required": 0,
+            "fee_pending_fill_count": 0,
+            "balance_split_mismatch_count": 0,
+            "fee_pending_accounting_repair_count": 1,
+        },
+    )
+    runtime_state.refresh_open_order_health()
+    runtime_state.set_startup_gate_reason(None)
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+
+    print("[FEE-PENDING-ACCOUNTING-REPAIR] applied")
+    print(
+        "  "
+        f"created={1 if bool(repair.get('created')) else 0} "
+        f"repair_key={repair['repair_key']} "
+        f"event_ts={kst_str(int(repair['event_ts']))} "
+        f"client_order_id={repair['client_order_id']} "
+        f"fill_id={repair.get('fill_id') or 'none'}"
+    )
+    print(
+        "  "
+        f"fee={float(repair['fee']):.8f} "
+        f"open_lot_count={int(post_lot_snapshot.get('open_lot_count') or 0)} "
+        f"dust_tracking_lot_count={int(post_lot_snapshot.get('dust_tracking_lot_count') or 0)} "
+        f"executable_exposure_qty={float(post_lot_snapshot.get('executable_exposure_qty') or 0.0):.12f}"
     )
 
 
@@ -3849,6 +3998,23 @@ def main(argv: list[str] | None = None) -> int:
     fee_gap_accounting_repair.add_argument("--yes", action="store_true")
     fee_gap_accounting_repair.add_argument("--note")
 
+    fee_pending_accounting_repair = sub.add_parser(
+        "fee-pending-accounting-repair",
+        help="finalize a fee-pending observed fill with explicit operator fee evidence",
+        description=(
+            "Apply a broker_fill_observations fee-pending fill through normal accounting after "
+            "the operator supplies explicit fee provenance."
+        ),
+    )
+    fee_pending_accounting_repair.add_argument("--client-order-id", required=True)
+    fee_pending_accounting_repair.add_argument("--fill-id")
+    fee_pending_accounting_repair.add_argument("--exchange-order-id")
+    fee_pending_accounting_repair.add_argument("--fee", type=float)
+    fee_pending_accounting_repair.add_argument("--fee-provenance")
+    fee_pending_accounting_repair.add_argument("--apply", action="store_true")
+    fee_pending_accounting_repair.add_argument("--yes", action="store_true")
+    fee_pending_accounting_repair.add_argument("--note")
+
     external_cash_adjustment = sub.add_parser(
         "record-external-cash-adjustment",
         help="record an external cash adjustment event",
@@ -3976,6 +4142,17 @@ def main(argv: list[str] | None = None) -> int:
         cmd_cash_drift_report(recent_limit=max(1, int(args.recent_limit)), as_json=bool(args.json))
     elif args.cmd == "fee-gap-accounting-repair":
         cmd_fee_gap_accounting_repair(
+            apply=bool(args.apply),
+            confirm=bool(args.yes),
+            note=str(args.note) if args.note is not None else None,
+        )
+    elif args.cmd == "fee-pending-accounting-repair":
+        cmd_fee_pending_accounting_repair(
+            client_order_id=str(args.client_order_id),
+            fill_id=str(args.fill_id) if args.fill_id is not None else None,
+            exchange_order_id=str(args.exchange_order_id) if args.exchange_order_id is not None else None,
+            fee=float(args.fee) if args.fee is not None else None,
+            fee_provenance=str(args.fee_provenance) if args.fee_provenance is not None else None,
             apply=bool(args.apply),
             confirm=bool(args.yes),
             note=str(args.note) if args.note is not None else None,
