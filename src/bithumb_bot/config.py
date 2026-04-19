@@ -29,6 +29,7 @@ except PathPolicyError as exc:
 LIVE_DB_PATH_REQUIRED_MSG = (
     "DB_PATH must be explicitly set when MODE=live; live env 파일에 DB_PATH를 명시하라"
 )
+LIVE_SUBMIT_CONTRACT_PROFILE_V1 = "live_explicit_submit_plan_v1"
 PAPER_ONLY_ENV_KEYS = (
     "START_CASH_KRW",
     "BUY_FRACTION",
@@ -527,6 +528,10 @@ class Settings:
     LIVE_FILL_FEE_RATIO_MIN: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MIN", "0.000001"))
     LIVE_FILL_FEE_RATIO_MAX: float = float(os.getenv("LIVE_FILL_FEE_RATIO_MAX", "0.02"))
     LIVE_ALLOW_ORDER_RULE_FALLBACK: bool = parse_bool_env("LIVE_ALLOW_ORDER_RULE_FALLBACK", "false")
+    LIVE_SUBMIT_CONTRACT_PROFILE: str = os.getenv(
+        "LIVE_SUBMIT_CONTRACT_PROFILE",
+        LIVE_SUBMIT_CONTRACT_PROFILE_V1,
+    )
     BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED: bool = parse_deprecated_ignored_bool_env(
         "BUY_PRICE_NONE_MARKET_TO_PRICE_ALIAS_ENABLED",
         fixed_value=False,
@@ -874,10 +879,23 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
         issues.append("BITHUMB_PRIVATE_RPS_LIMIT must be a finite value > 0 when MODE=live")
     if not math.isfinite(float(cfg.BITHUMB_ORDER_RPS_LIMIT)) or cfg.BITHUMB_ORDER_RPS_LIMIT <= 0:
         issues.append("BITHUMB_ORDER_RPS_LIMIT must be a finite value > 0 when MODE=live")
-    if bool(cfg.LIVE_ALLOW_ORDER_RULE_FALLBACK) and not cfg.LIVE_DRY_RUN:
-        LOG.warning(
-            "live preflight warning: LIVE_ALLOW_ORDER_RULE_FALLBACK=true permits emergency fallback "
-            "when /v1/orders/chance is unavailable"
+    if bool(cfg.LIVE_ALLOW_ORDER_RULE_FALLBACK):
+        if not cfg.LIVE_DRY_RUN and bool(cfg.LIVE_REAL_ORDER_ARMED):
+            issues.append(
+                "LIVE_ALLOW_ORDER_RULE_FALLBACK=true is not allowed when MODE=live, "
+                "LIVE_DRY_RUN=false, and LIVE_REAL_ORDER_ARMED=true "
+                "(armed live execution must fail closed on order-rule fallback)"
+            )
+        elif not cfg.LIVE_DRY_RUN:
+            LOG.warning(
+                "live preflight warning: LIVE_ALLOW_ORDER_RULE_FALLBACK=true permits emergency fallback "
+                "when /v1/orders/chance is unavailable"
+            )
+    if str(cfg.LIVE_SUBMIT_CONTRACT_PROFILE).strip() != LIVE_SUBMIT_CONTRACT_PROFILE_V1:
+        issues.append(
+            "LIVE_SUBMIT_CONTRACT_PROFILE must be "
+            f"{LIVE_SUBMIT_CONTRACT_PROFILE_V1!r} when MODE=live "
+            f"(got {cfg.LIVE_SUBMIT_CONTRACT_PROFILE!r})"
         )
     if cfg.BITHUMB_CANCEL_RETRY_ATTEMPTS <= 0:
         issues.append("BITHUMB_CANCEL_RETRY_ATTEMPTS must be > 0 when MODE=live")

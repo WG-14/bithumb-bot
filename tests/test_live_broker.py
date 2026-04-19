@@ -11,6 +11,10 @@ import pytest
 from bithumb_bot.broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder, BrokerRejectError, BrokerTemporaryError
 from bithumb_bot.broker import live as live_module
+from bithumb_bot.broker.live_submission_execution import (
+    reconcile_apply_fills_and_refresh,
+    submit_live_order_and_confirm,
+)
 from bithumb_bot.broker import order_rules
 from bithumb_bot.broker.balance_source import BalanceSnapshot
 from bithumb_bot.broker.live import (
@@ -2255,6 +2259,63 @@ def test_bithumb_broker_rejects_missing_live_submit_plan_before_dispatch(monkeyp
     assert dispatch_attempted is False
 
 
+def test_bithumb_broker_rejects_mismatched_submit_plan_inputs_before_dispatch(monkeypatch) -> None:
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "PAIR", "KRW-BTC")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "test-key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "test-secret")
+
+    resolved_rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_min_total_krw=0.0,
+        ask_min_total_krw=0.0,
+        min_notional_krw=0.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        max_qty_decimals=8,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.order_rules.get_effective_order_rules",
+        lambda _market: SimpleNamespace(rules=resolved_rules),
+    )
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.canonical_market_id", lambda _market: "KRW-BTC")
+
+    broker = BithumbBroker()
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="cid-planned",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.001,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=resolved_rules),
+            market_price_hint=100000000.0,
+            trace_id="cid-planned",
+        ),
+        rules=resolved_rules,
+        skip_qty_revalidation=True,
+    )
+
+    with pytest.raises(BrokerRejectError, match="submit_plan client_order_id mismatch"):
+        broker.place_order(
+            client_order_id="cid-requested",
+            side="BUY",
+            qty=0.001,
+            price=None,
+            submit_plan=submit_plan,
+        )
+
+
 def test_buy_price_none_diagnostics_reuse_submit_contract_fields() -> None:
     resolved_rules = order_rules.DerivedOrderConstraints(
         order_types=("limit", "price"),
@@ -2609,6 +2670,14 @@ def test_live_planning_failure_is_recorded_before_broker_dispatch(monkeypatch, t
     _stub_live_reference_quote(monkeypatch)
     _stub_live_effective_order_rules(monkeypatch)
 
+    def _unexpected_request_construction(**_kwargs):
+        raise AssertionError("live submit request must not be constructed before planning succeeds")
+
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live_submission_execution.StandardSubmitPipelineRequest",
+        _unexpected_request_construction,
+    )
+
     monkeypatch.setattr(
         "bithumb_bot.broker.live_submission_execution.build_live_submit_plan",
         lambda **kwargs: (_ for _ in ()).throw(BrokerRejectError("planner contract mismatch")),
@@ -2896,7 +2965,15 @@ def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
     ).fetchone()
     phases = conn.execute(
         """
-        SELECT event_type, broker_response_summary, submit_evidence
+        SELECT
+            event_type,
+            submit_phase,
+            submit_plan_id,
+            signed_request_id,
+            submission_id,
+            confirmation_id,
+            broker_response_summary,
+            submit_evidence
         FROM order_events
         WHERE client_order_id=?
           AND event_type IN (
@@ -2917,12 +2994,249 @@ def test_live_submit_phase_progression_is_queryable(monkeypatch, tmp_path):
         "submit_attempt_signed",
         "submit_attempt_recorded",
     ]
+    assert phases[1]["submit_phase"] == "planning"
+    assert phases[2]["submit_phase"] == "signed_request"
+    assert phases[3]["submit_phase"] == "confirmation"
+    assert phases[1]["submit_plan_id"] == f"{row['client_order_id']}:plan"
+    assert phases[1]["signed_request_id"] == f"{row['client_order_id']}:signed_request"
+    assert phases[1]["submission_id"] == f"{row['client_order_id']}:submission"
+    assert phases[1]["confirmation_id"] == f"{row['client_order_id']}:confirmation"
     preflight_evidence = json.loads(str(phases[1]["submit_evidence"]))
     signed_evidence = json.loads(str(phases[2]["submit_evidence"]))
     confirmation_evidence = json.loads(str(phases[3]["submit_evidence"]))
     assert preflight_evidence["submit_phase"] == "planning"
     assert signed_evidence["submit_phase"] == "signed_request"
     assert confirmation_evidence["submit_phase"] == "confirmation"
+
+
+def test_run_standard_submit_pipeline_uses_submit_plan_order_type_over_request_copy(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    db_path = tmp_path / "submit_plan_order_type_authority.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _CommitCheckingBroker(db_path=str(db_path))
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_submit_plan_order_type_authority",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_submit_plan_order_type_authority",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = replace(
+        _standard_submit_request(
+            conn=conn,
+            submit_plan=submit_plan,
+            effective_rules=rules,
+            client_order_id="live_submit_plan_order_type_authority",
+        ),
+        order_type="limit",
+    )
+
+    try:
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is not None
+        row = conn.execute(
+            "SELECT order_type FROM orders WHERE client_order_id=?",
+            (request.client_order_id,),
+        ).fetchone()
+        preflight = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()
+        recorded = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id=? AND event_type='submit_attempt_recorded'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["order_type"] == "price"
+        preflight_evidence = json.loads(str(preflight["submit_evidence"]))
+        recorded_evidence = json.loads(str(recorded["submit_evidence"]))
+        assert preflight_evidence["order_type"] == "price"
+        assert preflight_evidence["exchange_order_type"] == "price"
+        assert recorded_evidence["order_type"] == "price"
+        assert recorded_evidence["exchange_order_type"] == "price"
+    finally:
+        conn.close()
+
+
+def test_submit_live_order_and_confirm_does_not_run_reconcile_application(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    db_path = tmp_path / "submit_stage_only.sqlite"
+    conn = ensure_db(str(db_path))
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+
+    class _NoReconcileBroker(_FakeBroker):
+        def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None):
+            raise AssertionError("submit-and-confirm stage must not fetch fills")
+
+    broker = _NoReconcileBroker()
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_submit_stage_only",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_submit_stage_only",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = _standard_submit_request(
+        conn=conn,
+        submit_plan=submit_plan,
+        effective_rules=rules,
+        client_order_id="live_submit_stage_only",
+    )
+
+    try:
+        submission = submit_live_order_and_confirm(
+            broker=broker,
+            request=request,
+            intent_key=request.intent_key,
+            strategy_name=request.strategy_name,
+            decision_id=request.decision_id,
+            decision_reason=request.decision_reason,
+            exit_rule_name=request.exit_rule_name,
+        )
+
+        assert submission is not None
+        assert submission.client_order_id == request.client_order_id
+        assert submission.exchange_order_id == "ex1"
+        assert broker.place_order_calls == 1
+    finally:
+        conn.close()
+
+
+def test_reconcile_apply_fills_and_refresh_runs_against_confirmed_submission(monkeypatch, tmp_path):
+    _stub_live_reference_quote(monkeypatch)
+    object.__setattr__(settings, "START_CASH_KRW", 2000000.0)
+    db_path = tmp_path / "reconcile_stage.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _FakeBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_reconcile_stage",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_reconcile_stage",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = _standard_submit_request(
+        conn=conn,
+        submit_plan=submit_plan,
+        effective_rules=rules,
+        client_order_id="live_reconcile_stage",
+    )
+
+    try:
+        submission = submit_live_order_and_confirm(
+            broker=broker,
+            request=request,
+            intent_key=request.intent_key,
+            strategy_name=request.strategy_name,
+            decision_id=request.decision_id,
+            decision_reason=request.decision_reason,
+            exit_rule_name=request.exit_rule_name,
+        )
+        assert submission is not None
+
+        trade = reconcile_apply_fills_and_refresh(
+            live_module,
+            broker=broker,
+            submission=submission,
+        )
+
+        assert trade is not None
+        row = conn.execute(
+            "SELECT status FROM orders WHERE client_order_id=?",
+            (request.client_order_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "FILLED"
+    finally:
+        conn.close()
 
 
 def test_each_submit_attempt_records_exactly_one_classification(tmp_path):

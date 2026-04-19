@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from ..config import settings
+from ..config import LIVE_SUBMIT_CONTRACT_PROFILE_V1, settings
 from ..execution import record_order_if_missing
 from ..execution_models import OrderIntent, SubmitPlan
 from ..notifier import notify
@@ -34,13 +34,13 @@ SUBMISSION_REASON_SENT_BUT_RESPONSE_TIMEOUT = "sent_but_response_timeout"
 SUBMISSION_REASON_SENT_BUT_TRANSPORT_ERROR = "sent_but_transport_error"
 SUBMISSION_REASON_AMBIGUOUS_RESPONSE = "ambiguous_response"
 SUBMISSION_REASON_CONFIRMED_SUCCESS = "confirmed_success"
-LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE = "live_explicit_submit_plan_v1"
+LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE = LIVE_SUBMIT_CONTRACT_PROFILE_V1
 
 
 @dataclass(frozen=True)
 class StandardSubmitPipelineRequest:
     conn: object
-    submit_plan: SubmitPlan | None
+    submit_plan: SubmitPlan
     signal: str
     client_order_id: str
     submit_attempt_id: str
@@ -78,6 +78,47 @@ class StandardSubmitPipelineRequest:
     submit_truth_source_fields: dict[str, object]
     submit_observability_fields: dict[str, object]
     sell_observability: dict[str, object]
+
+
+@dataclass(frozen=True)
+class StandardSubmitPlanningFailureRequest:
+    conn: object
+    signal: str
+    client_order_id: str
+    submit_attempt_id: str
+    side: str
+    order_qty: float
+    position_qty: float
+    qty: float
+    ts: int
+    intent_key: str
+    market_price: float
+    raw_total_asset_qty: float
+    open_exposure_qty: float
+    dust_tracking_qty: float
+    submit_qty_source: str
+    position_state_source: str
+    reference_price: float | None
+    top_of_book_summary: dict[str, float | str] | None
+    strategy_name: str | None
+    decision_id: int | None
+    decision_reason: str | None
+    exit_rule_name: str | None
+    contract_profile: str
+    payload_hash: str
+    internal_lot_size: float | None
+    effective_min_trade_qty: float | None
+    qty_step: float | None
+    min_notional_krw: float | None
+    intended_lot_count: int | None
+    executable_lot_count: int | None
+    final_intended_qty: float
+    final_submitted_qty: float
+    decision_reason_code: str | None
+    submit_truth_source_fields: dict[str, object]
+    submit_observability_fields: dict[str, object]
+    sell_observability: dict[str, object]
+    order_type: str = "-"
 
 
 @dataclass(frozen=True)
@@ -249,6 +290,8 @@ def _record_submit_attempt_result(
     timeout_flag: bool,
     submit_evidence: str | None,
     exchange_order_id_obtained: bool,
+    submit_phase: str,
+    phase_trace_fields: dict[str, str],
     order_type: str | None = None,
     internal_lot_size: float | None = None,
     effective_min_trade_qty: float | None = None,
@@ -274,6 +317,11 @@ def _record_submit_attempt_result(
         submission_reason_code=submission_reason_code,
         exception_class=exception_class,
         timeout_flag=timeout_flag,
+        submit_phase=submit_phase,
+        submit_plan_id=phase_trace_fields["submit_plan_id"],
+        signed_request_id=phase_trace_fields["signed_request_id"],
+        submission_id=phase_trace_fields["submission_id"],
+        confirmation_id=phase_trace_fields["confirmation_id"],
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=exchange_order_id_obtained,
         order_status=order_status,
@@ -302,6 +350,7 @@ def _record_submit_attempt_preflight(
     payload_hash: str,
     reference_price: float | None,
     submit_evidence: str | None,
+    phase_trace_fields: dict[str, str],
     order_type: str | None = None,
     internal_lot_size: float | None = None,
     effective_min_trade_qty: float | None = None,
@@ -327,6 +376,11 @@ def _record_submit_attempt_preflight(
         submission_reason_code="submit_dispatched_preflight",
         exception_class=None,
         timeout_flag=False,
+        submit_phase="planning",
+        submit_plan_id=phase_trace_fields["submit_plan_id"],
+        signed_request_id=phase_trace_fields["signed_request_id"],
+        submission_id=phase_trace_fields["submission_id"],
+        confirmation_id=phase_trace_fields["confirmation_id"],
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
         order_status="PENDING_SUBMIT",
@@ -355,6 +409,7 @@ def _record_submit_attempt_signed(
     ts: int,
     payload_hash: str,
     submit_evidence: str | None,
+    phase_trace_fields: dict[str, str],
     order_type: str | None = None,
     internal_lot_size: float | None = None,
     effective_min_trade_qty: float | None = None,
@@ -380,6 +435,11 @@ def _record_submit_attempt_signed(
         submission_reason_code="signed_request_prepared",
         exception_class=None,
         timeout_flag=False,
+        submit_phase="signed_request",
+        submit_plan_id=phase_trace_fields["submit_plan_id"],
+        signed_request_id=phase_trace_fields["signed_request_id"],
+        submission_id=phase_trace_fields["submission_id"],
+        confirmation_id=phase_trace_fields["confirmation_id"],
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
         order_status="PENDING_SUBMIT",
@@ -508,7 +568,7 @@ def _planning_failure(
             "request_ts": None,
             "response_ts": None,
             "submit_path": "live_standard_market",
-            "contract_profile": LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
+            "contract_profile": request.contract_profile,
             "submit_phase": "planning",
             "execution_state": "planning_failed",
             "submit_mode": settings.MODE,
@@ -575,6 +635,8 @@ def _planning_failure(
         submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
         exception_class=type(error).__name__,
         timeout_flag=False,
+        submit_phase="planning",
+        phase_trace_fields=phase_trace_fields,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
         order_type=request.order_type,
@@ -601,7 +663,7 @@ def _planning_failure(
 
 def record_standard_submit_planning_failure(
     *,
-    request: StandardSubmitPipelineRequest,
+    request: StandardSubmitPlanningFailureRequest | StandardSubmitPipelineRequest,
     error: Exception,
 ) -> None:
     _planning_failure(
@@ -613,7 +675,7 @@ def record_standard_submit_planning_failure(
 
 def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) -> SubmitPlan:
     submit_plan = request.submit_plan
-    if submit_plan is None:
+    if not isinstance(submit_plan, SubmitPlan):
         raise BrokerRejectError("live submit requires explicit submit_plan before dispatch")
     if request.contract_profile != LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE:
         raise BrokerRejectError(
@@ -670,8 +732,13 @@ def _dispatch_kwargs_from_submit_plan(*, submit_plan: SubmitPlan) -> dict[str, o
     }
 
 
+def _planned_order_type(*, submit_plan: SubmitPlan) -> str:
+    return str(submit_plan.exchange_order_type)
+
+
 def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: SubmitPlan) -> _StandardSubmitAttemptContext:
     phase_trace_fields = _submit_phase_trace_fields(client_order_id=request.client_order_id)
+    planned_order_type = _planned_order_type(submit_plan=submit_plan)
     return _StandardSubmitAttemptContext(
         request=request,
         submit_plan=submit_plan,
@@ -680,7 +747,7 @@ def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: Submi
         submit_path="live_standard_market",
         phase_trace_fields=phase_trace_fields,
         lot_evidence_fields={
-            "order_type": request.order_type,
+            "order_type": planned_order_type,
             "internal_lot_size": None if request.internal_lot_size is None else float(request.internal_lot_size),
             "effective_min_trade_qty": None if request.effective_min_trade_qty is None else float(request.effective_min_trade_qty),
             "qty_step": None if request.qty_step is None else float(request.qty_step),
@@ -693,13 +760,13 @@ def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: Submi
         },
         base_submit_contract_fields=_submit_contract_fields(
             side=request.side,
-            order_type=request.order_type,
+            order_type=planned_order_type,
             normalized_qty=request.qty,
             contract_context=submit_plan.submit_contract_context,
         ),
         base_submit_failure_fields=_submit_failure_fields(
             side=request.side,
-            order_type=request.order_type,
+            order_type=planned_order_type,
             error_class=None,
             error_summary=None,
         ),
@@ -708,6 +775,7 @@ def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: Submi
 
 def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     preflight_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -746,7 +814,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
         exit_decision_id=(request.decision_id if request.side == "SELL" else None),
         decision_reason=request.decision_reason,
         exit_rule_name=request.exit_rule_name,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -780,7 +848,8 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
         payload_hash=request.payload_hash,
         reference_price=request.reference_price,
         submit_evidence=preflight_evidence,
-        order_type=request.order_type,
+        phase_trace_fields=context.phase_trace_fields,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -831,7 +900,8 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
         ts=request.ts,
         payload_hash=request.payload_hash,
         submit_evidence=signed_evidence,
-        order_type=request.order_type,
+        phase_trace_fields=context.phase_trace_fields,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -910,15 +980,16 @@ def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: 
 
 def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, error: BrokerTemporaryError, request_ts: int, response_ts: int) -> None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     err = BrokerSubmissionUnknownError(f"submit unknown: {type(error).__name__}: {error}")
     submission_reason_code, timeout_flag = _classify_temporary_submit_error(error)
     failure_submit_contract_fields = _submit_contract_fields(
         side=request.side,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         normalized_qty=request.qty,
         contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
     )
-    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=request.order_type, error_class=type(error).__name__, error_summary=str(error))
+    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=planned_order_type, error_class=type(error).__name__, error_summary=str(error))
     submit_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -960,9 +1031,11 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
         submission_reason_code=submission_reason_code,
         exception_class=type(error).__name__,
         timeout_flag=timeout_flag,
+        submit_phase="submission",
+        phase_trace_fields=context.phase_trace_fields,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -980,15 +1053,16 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
 
 def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error: BrokerRejectError, request_ts: int, response_ts: int) -> None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = f"submit rejected: {type(error).__name__}: {error}"
     is_sell_qty_step_reject = request.side == "SELL" and "qty does not match qty_step" in str(error)
     failure_submit_contract_fields = _submit_contract_fields(
         side=request.side,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         normalized_qty=request.qty,
         contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
     )
-    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=request.order_type, error_class=type(error).__name__, error_summary=str(error))
+    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=planned_order_type, error_class=type(error).__name__, error_summary=str(error))
     submit_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -1031,9 +1105,11 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
             submission_reason_code=SUBMIT_FAILED,
             exception_class=type(error).__name__,
             timeout_flag=False,
+            submit_phase="submission",
+            phase_trace_fields=context.phase_trace_fields,
             submit_evidence=submit_evidence,
             exchange_order_id_obtained=False,
-            order_type=request.order_type,
+            order_type=planned_order_type,
             internal_lot_size=request.internal_lot_size,
             effective_min_trade_qty=request.effective_min_trade_qty,
             qty_step=request.qty_step,
@@ -1051,14 +1127,15 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
 
 def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, error: Exception, request_ts: int, response_ts: int) -> None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = f"submit failed: {type(error).__name__}: {error}"
     failure_submit_contract_fields = _submit_contract_fields(
         side=request.side,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         normalized_qty=request.qty,
         contract_context=(getattr(error, "submit_contract_context", None) or context.submit_contract_context),
     )
-    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=request.order_type, error_class=type(error).__name__, error_summary=str(error))
+    failure_submit_fields = _submit_failure_fields(side=request.side, order_type=planned_order_type, error_class=type(error).__name__, error_summary=str(error))
     submit_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -1100,9 +1177,11 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
         submission_reason_code=SUBMISSION_REASON_FAILED_BEFORE_SEND,
         exception_class=type(error).__name__,
         timeout_flag=False,
+        submit_phase="submission",
+        phase_trace_fields=context.phase_trace_fields,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -1120,6 +1199,7 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
 
 def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: BrokerOrder, request_ts: int, response_ts: int) -> BrokerOrder | None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     if order.exchange_order_id:
         set_exchange_order_id(request.client_order_id, order.exchange_order_id, conn=request.conn)
         notify(
@@ -1141,11 +1221,11 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
     set_status(request.client_order_id, order.status, conn=request.conn)
     success_submit_contract_fields = _submit_contract_fields(
         side=request.side,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         normalized_qty=request.qty,
         contract_context=(getattr(order, "submit_contract_context", None) or context.submit_contract_context),
     )
-    success_submit_failure_fields = _submit_failure_fields(side=request.side, order_type=request.order_type, error_class=None, error_summary=None)
+    success_submit_failure_fields = _submit_failure_fields(side=request.side, order_type=planned_order_type, error_class=None, error_summary=None)
     submit_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -1187,9 +1267,11 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
         submission_reason_code=SUBMISSION_REASON_CONFIRMED_SUCCESS,
         exception_class=None,
         timeout_flag=False,
+        submit_phase="confirmation",
+        phase_trace_fields=context.phase_trace_fields,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=True,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,
@@ -1207,14 +1289,20 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
 
 def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContext, order: BrokerOrder, request_ts: int, response_ts: int) -> None:
     request = context.request
+    planned_order_type = _planned_order_type(submit_plan=context.submit_plan)
     reason = "submit acknowledged without exchange_order_id; classification=SUBMIT_UNKNOWN"
     missing_id_submit_contract_fields = _submit_contract_fields(
         side=request.side,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         normalized_qty=request.qty,
         contract_context=(getattr(order, "submit_contract_context", None) or context.submit_contract_context),
     )
-    missing_id_submit_failure_fields = _submit_failure_fields(side=request.side, order_type=request.order_type, error_class=None, error_summary="missing exchange_order_id")
+    missing_id_submit_failure_fields = _submit_failure_fields(
+        side=request.side,
+        order_type=planned_order_type,
+        error_class=None,
+        error_summary="missing exchange_order_id",
+    )
     submit_evidence = _encode_submit_evidence(
         payload={
             "symbol": context.symbol,
@@ -1261,9 +1349,11 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
         submission_reason_code=SUBMISSION_REASON_AMBIGUOUS_RESPONSE,
         exception_class=None,
         timeout_flag=False,
+        submit_phase="confirmation",
+        phase_trace_fields=context.phase_trace_fields,
         submit_evidence=submit_evidence,
         exchange_order_id_obtained=False,
-        order_type=request.order_type,
+        order_type=planned_order_type,
         internal_lot_size=request.internal_lot_size,
         effective_min_trade_qty=request.effective_min_trade_qty,
         qty_step=request.qty_step,

@@ -1031,6 +1031,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             submission_reason_code TEXT,
             exception_class TEXT,
             timeout_flag INTEGER,
+            submit_phase TEXT,
+            submit_plan_id TEXT,
+            signed_request_id TEXT,
+            submission_id TEXT,
+            confirmation_id TEXT,
             submit_evidence TEXT,
             exchange_order_id_obtained INTEGER,
             internal_lot_size REAL,
@@ -1059,6 +1064,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "order_events", "submission_reason_code", "submission_reason_code TEXT")
     _ensure_column(conn, "order_events", "exception_class", "exception_class TEXT")
     _ensure_column(conn, "order_events", "timeout_flag", "timeout_flag INTEGER")
+    _ensure_column(conn, "order_events", "submit_phase", "submit_phase TEXT")
+    _ensure_column(conn, "order_events", "submit_plan_id", "submit_plan_id TEXT")
+    _ensure_column(conn, "order_events", "signed_request_id", "signed_request_id TEXT")
+    _ensure_column(conn, "order_events", "submission_id", "submission_id TEXT")
+    _ensure_column(conn, "order_events", "confirmation_id", "confirmation_id TEXT")
     _ensure_column(conn, "order_events", "submit_evidence", "submit_evidence TEXT")
     _ensure_column(conn, "order_events", "exchange_order_id_obtained", "exchange_order_id_obtained INTEGER")
     _ensure_column(conn, "order_events", "internal_lot_size", "internal_lot_size REAL")

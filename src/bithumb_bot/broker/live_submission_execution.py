@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import replace
+from dataclasses import dataclass
 
 from ..config import settings
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
@@ -26,11 +26,135 @@ from ..reason_codes import (
 from ..risk import evaluate_order_submission_halt
 from .live_submit_planning import build_live_submit_plan
 from .live_submit_orchestrator import (
-    LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
+    StandardSubmitPlanningFailureRequest,
     StandardSubmitPipelineRequest,
     record_standard_submit_planning_failure,
     run_standard_submit_pipeline,
 )
+
+
+@dataclass(frozen=True)
+class ConfirmedLiveSubmission:
+    conn: object
+    order: object
+    client_order_id: str
+    exchange_order_id: str
+    side: str
+    intent_key: str
+    ts: int
+    strategy_name: str | None
+    decision_id: int | None
+    decision_reason: str | None
+    exit_rule_name: str | None
+
+
+def submit_live_order_and_confirm(
+    *,
+    broker,
+    request: StandardSubmitPipelineRequest,
+    intent_key: str,
+    strategy_name: str | None,
+    decision_id: int | None,
+    decision_reason: str | None,
+    exit_rule_name: str | None,
+) -> ConfirmedLiveSubmission | None:
+    order = run_standard_submit_pipeline(broker=broker, request=request)
+    if order is None:
+        return None
+    return ConfirmedLiveSubmission(
+        conn=request.conn,
+        order=order,
+        client_order_id=request.client_order_id,
+        exchange_order_id=str(order.exchange_order_id),
+        side=request.side,
+        intent_key=intent_key,
+        ts=request.ts,
+        strategy_name=strategy_name,
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
+    )
+
+
+def reconcile_apply_fills_and_refresh(
+    live_module,
+    *,
+    broker,
+    submission: ConfirmedLiveSubmission,
+):
+    conn = submission.conn
+    order = submission.order
+    client_order_id = submission.client_order_id
+    exchange_order_id = submission.exchange_order_id
+    side = submission.side
+
+    fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+    try:
+        fills_to_apply = live_module._aggregate_fills_for_apply(
+            fills=fills,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side=side,
+            context="_submit_via_standard_path",
+        )
+    except (live_module.FillFeeStrictModeError, LiveFillFeeValidationError) as exc:
+        from_status = str(order.status or "NEW")
+        live_module._mark_recovery_required(
+            conn=conn,
+            client_order_id=client_order_id,
+            side=side,
+            from_status=from_status,
+            reason=str(exc),
+        )
+        update_order_intent_dedup(
+            conn,
+            intent_key=submission.intent_key,
+            client_order_id=client_order_id,
+            order_status="RECOVERY_REQUIRED",
+        )
+        conn.commit()
+        live_module.RUN_LOG.error(
+            format_log_kv(
+                "[FILL_AGG] strict mode blocked aggregate; transitioned to recovery required",
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id or live_module.UNSET_EVENT_FIELD,
+                side=side,
+                from_status=from_status,
+                reason=str(exc),
+            )
+        )
+        return None
+
+    trade = None
+    for fill in fills_to_apply:
+        trade = apply_fill_and_trade(
+            conn,
+            client_order_id=client_order_id,
+            side=side,
+            fill_id=fill.fill_id,
+            fill_ts=fill.fill_ts,
+            price=fill.price,
+            qty=fill.qty,
+            fee=fill.fee,
+            strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
+            entry_decision_id=(submission.decision_id if side == "BUY" else None),
+            exit_decision_id=(submission.decision_id if side == "SELL" else None),
+            exit_reason=(submission.decision_reason if side == "SELL" else None),
+            exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
+            note=f"live exchange_order_id={exchange_order_id}",
+            signal_ts=int(submission.ts),
+        ) or trade
+
+    refreshed = broker.get_order(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+    set_status(client_order_id, refreshed.status, conn=conn)
+    update_order_intent_dedup(
+        conn,
+        intent_key=submission.intent_key,
+        client_order_id=client_order_id,
+        order_status=refreshed.status,
+    )
+    conn.commit()
+    return trade
 
 
 def execute_live_submission_and_application(
@@ -428,9 +552,8 @@ def execute_live_submission_and_application(
             "submit_ts": int(ts),
         }
     )
-    request = StandardSubmitPipelineRequest(
+    request_fields = dict(
         conn=conn,
-        submit_plan=None,
         signal=signal,
         client_order_id=client_order_id,
         submit_attempt_id=submit_attempt_id,
@@ -444,7 +567,6 @@ def execute_live_submission_and_application(
         raw_total_asset_qty=float(position_state.raw_total_asset_qty),
         open_exposure_qty=float(position_state.open_exposure_qty),
         dust_tracking_qty=float(position_state.dust_tracking_qty),
-        effective_rules=position_state.effective_rules,
         submit_qty_source=feasibility.submit_qty_source,
         position_state_source=str(decision_observability["position_state_source"]),
         reference_price=reference_price,
@@ -453,8 +575,7 @@ def execute_live_submission_and_application(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
-        order_type="-",
-        contract_profile=LIVE_STANDARD_SUBMIT_CONTRACT_PROFILE,
+        contract_profile=str(settings.LIVE_SUBMIT_CONTRACT_PROFILE),
         payload_hash=payload_hash,
         internal_lot_size=float(lot_sizing.internal_lot_size),
         effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
@@ -480,83 +601,29 @@ def execute_live_submission_and_application(
             reference_price=reference_price,
         )
     except Exception as error:
-        record_standard_submit_planning_failure(request=request, error=error)
+        record_standard_submit_planning_failure(
+            request=StandardSubmitPlanningFailureRequest(order_type="-", **request_fields),
+            error=error,
+        )
         return None
-    order = run_standard_submit_pipeline(
+    submission = submit_live_order_and_confirm(
         broker=broker,
-        request=replace(
-            request,
+        request=StandardSubmitPipelineRequest(
             submit_plan=submit_plan,
+            effective_rules=position_state.effective_rules,
             order_type=str(submit_plan.exchange_order_type),
+            **request_fields,
         ),
-    )
-    if order is None:
-        return None
-
-    fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
-    try:
-        fills_to_apply = live_module._aggregate_fills_for_apply(
-            fills=fills,
-            client_order_id=client_order_id,
-            exchange_order_id=order.exchange_order_id,
-            side=feasibility.side,
-            context="_submit_via_standard_path",
-        )
-    except (live_module.FillFeeStrictModeError, LiveFillFeeValidationError) as exc:
-        from_status = str(order.status or "NEW")
-        live_module._mark_recovery_required(
-            conn=conn,
-            client_order_id=client_order_id,
-            side=feasibility.side,
-            from_status=from_status,
-            reason=str(exc),
-        )
-        update_order_intent_dedup(
-            conn,
-            intent_key=intent_key,
-            client_order_id=client_order_id,
-            order_status="RECOVERY_REQUIRED",
-        )
-        conn.commit()
-        live_module.RUN_LOG.error(
-            format_log_kv(
-                "[FILL_AGG] strict mode blocked aggregate; transitioned to recovery required",
-                client_order_id=client_order_id,
-                exchange_order_id=order.exchange_order_id or live_module.UNSET_EVENT_FIELD,
-                side=feasibility.side,
-                from_status=from_status,
-                reason=str(exc),
-            )
-        )
-        return None
-
-    trade = None
-    for fill in fills_to_apply:
-        trade = apply_fill_and_trade(
-            conn,
-            client_order_id=client_order_id,
-            side=feasibility.side,
-            fill_id=fill.fill_id,
-            fill_ts=fill.fill_ts,
-            price=fill.price,
-            qty=fill.qty,
-            fee=fill.fee,
-            strategy_name=(strategy_name or settings.STRATEGY_NAME),
-            entry_decision_id=(decision_id if feasibility.side == "BUY" else None),
-            exit_decision_id=(decision_id if feasibility.side == "SELL" else None),
-            exit_reason=(decision_reason if feasibility.side == "SELL" else None),
-            exit_rule_name=(exit_rule_name if feasibility.side == "SELL" else None),
-            note=f"live exchange_order_id={order.exchange_order_id}",
-            signal_ts=int(ts),
-        ) or trade
-
-    refreshed = broker.get_order(client_order_id=client_order_id, exchange_order_id=order.exchange_order_id)
-    set_status(client_order_id, refreshed.status, conn=conn)
-    update_order_intent_dedup(
-        conn,
         intent_key=intent_key,
-        client_order_id=client_order_id,
-        order_status=refreshed.status,
+        strategy_name=(strategy_name or settings.STRATEGY_NAME),
+        decision_id=decision_id,
+        decision_reason=decision_reason,
+        exit_rule_name=exit_rule_name,
     )
-    conn.commit()
-    return trade
+    if submission is None:
+        return None
+    return reconcile_apply_fills_and_refresh(
+        live_module,
+        broker=broker,
+        submission=submission,
+    )

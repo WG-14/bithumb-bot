@@ -24,6 +24,8 @@ def _restore_settings():
         "MAX_DAILY_ORDER_COUNT": settings.MAX_DAILY_ORDER_COUNT,
         "LIVE_DRY_RUN": settings.LIVE_DRY_RUN,
         "LIVE_REAL_ORDER_ARMED": settings.LIVE_REAL_ORDER_ARMED,
+        "LIVE_ALLOW_ORDER_RULE_FALLBACK": settings.LIVE_ALLOW_ORDER_RULE_FALLBACK,
+        "LIVE_SUBMIT_CONTRACT_PROFILE": settings.LIVE_SUBMIT_CONTRACT_PROFILE,
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
@@ -106,6 +108,8 @@ def _set_valid_live_defaults(
     object.__setattr__(settings, "MAX_DAILY_ORDER_COUNT", 10)
     object.__setattr__(settings, "LIVE_DRY_RUN", True)
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", False)
+    object.__setattr__(settings, "LIVE_SUBMIT_CONTRACT_PROFILE", config.LIVE_SUBMIT_CONTRACT_PROFILE_V1)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
     object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
@@ -266,6 +270,54 @@ def test_live_preflight_accepts_real_live_orders_when_explicitly_armed(
     object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
     object.__setattr__(settings, "BITHUMB_API_KEY", "key")
     object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    config.validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_rejects_order_rule_fallback_in_armed_live_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
+    object.__setattr__(settings, "BITHUMB_API_KEY", "key")
+    object.__setattr__(settings, "BITHUMB_API_SECRET", "secret")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "LIVE_ALLOW_ORDER_RULE_FALLBACK=true is not allowed" in str(exc.value)
+
+
+def test_live_preflight_allows_order_rule_fallback_in_live_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_DRY_RUN", True)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", False)
+    object.__setattr__(settings, "LIVE_ALLOW_ORDER_RULE_FALLBACK", True)
+
+    config.validate_live_mode_preflight(settings)
+
+
+def test_live_preflight_rejects_invalid_submit_contract_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_SUBMIT_CONTRACT_PROFILE", "legacy_bool_combo")
+
+    with pytest.raises(config.LiveModeValidationError) as exc:
+        config.validate_live_mode_preflight(settings)
+
+    assert "LIVE_SUBMIT_CONTRACT_PROFILE must be" in str(exc.value)
+
+
+def test_live_preflight_accepts_expected_submit_contract_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_valid_live_defaults(monkeypatch)
+    object.__setattr__(settings, "LIVE_SUBMIT_CONTRACT_PROFILE", config.LIVE_SUBMIT_CONTRACT_PROFILE_V1)
 
     config.validate_live_mode_preflight(settings)
 
@@ -1259,5 +1311,3 @@ def test_accounts_preflight_unclassified_private_error_is_transport_failure(monk
     assert "transport ?ㅽ뙣" in msg
     assert "ACCOUNTS_TRANSPORT_FAILED" in msg
     assert "class=UNRECOVERABLE" in msg
-
-
