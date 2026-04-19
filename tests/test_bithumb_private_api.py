@@ -1122,6 +1122,78 @@ def test_submit_order_rejects_signed_request_payload_drift(monkeypatch):
     assert _SequencedClient.calls == 0
 
 
+def test_order_submit_rejects_transmitted_body_byte_drift(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    original = api._order_submit_auth_context
+
+    def _drifted_context(payload, *, nonce=None, timestamp=None):
+        context = original(payload, nonce=nonce, timestamp=timestamp)
+        context["request_content"] = b'{"market":"KRW-BTC"}'
+        return context
+
+    monkeypatch.setattr(api, "_order_submit_auth_context", _drifted_context)
+
+    payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"}
+    with pytest.raises(BrokerRejectError, match="transmitted content does not match JSON body text"):
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
+
+    assert _SequencedClient.calls == 0
+
+
+def test_order_submit_rejects_json_kwarg_contract_drift(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    original = api._order_submit_auth_context
+
+    def _drifted_context(payload, *, nonce=None, timestamp=None):
+        context = original(payload, nonce=nonce, timestamp=timestamp)
+        context["request_kwargs"] = {"json": dict(payload)}
+        return context
+
+    monkeypatch.setattr(api, "_order_submit_auth_context", _drifted_context)
+
+    payload = {"market": "KRW-BTC", "side": "ask", "order_type": "market", "volume": "0.1"}
+    with pytest.raises(BrokerRejectError, match="exact JSON bytes via content="):
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
+
+    assert _SequencedClient.calls == 0
+
+
+def test_order_submit_rejects_content_type_contract_drift(monkeypatch):
+    _configure_live()
+    _SequencedClient.actions = [_mk_response(200, {"uuid": "should-not-send"})]
+    _SequencedClient.calls = 0
+    _SequencedClient.requests = []
+    monkeypatch.setattr("httpx.Client", _SequencedClient)
+
+    api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
+    original = api._order_submit_auth_context
+
+    def _drifted_context(payload, *, nonce=None, timestamp=None):
+        context = original(payload, nonce=nonce, timestamp=timestamp)
+        context["headers"] = {**context["headers"], "Content-Type": "application/json"}
+        return context
+
+    monkeypatch.setattr(api, "_order_submit_auth_context", _drifted_context)
+
+    payload = {"market": "KRW-BTC", "side": "bid", "order_type": "price", "price": "9999"}
+    with pytest.raises(BrokerRejectError, match="Content-Type contract drifted"):
+        api.submit_order(signed_request=_signed_order_request(payload), retry_safe=False)
+
+    assert _SequencedClient.calls == 0
+
+
 def test_accounts_rest_balance_parses_available_and_locked(monkeypatch):
     _configure_live()
     broker = BithumbBroker()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ..execution_models import OrderConfirmation, SignedOrderRequest, SubmissionRecord, SubmitPlan
+from .base import BrokerRejectError
 from .bithumb_client import submit_signed_order_request
 from .bithumb_read_models import parse_order_confirmation
 from .live_order_contract import require_validated_order_submit_authority

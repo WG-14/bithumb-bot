@@ -27,7 +27,14 @@ jobs:
           tests/test_bithumb_private_api.py::test_order_submit_jwt_uses_same_canonical_payload_nonce_and_timestamp
           tests/test_bithumb_private_api.py::test_order_http_debug_request_logs_query_hash_and_json_body
           tests/test_bithumb_private_api.py::test_order_submit_live_failure_regression_uses_json_body_and_matching_query_hash
+          tests/test_bithumb_private_api.py::test_order_submit_rejects_transmitted_body_byte_drift
+          tests/test_bithumb_private_api.py::test_order_submit_rejects_json_kwarg_contract_drift
+          tests/test_bithumb_private_api.py::test_order_submit_rejects_content_type_contract_drift
           tests/test_order_submit_hardening.py
+          tests/test_bithumb_execution_modules.py
           tests/test_live_preflight.py
           tests/test_env_loading.py
+          tests/test_operator_commands.py::test_main_pre_dispatch_blocks_live_run_without_startup_contract
+          tests/test_operator_commands.py::test_main_pre_dispatch_blocks_live_write_command_without_preflight
+          tests/test_operator_commands.py::test_cmd_run_blocks_before_lock_when_live_preflight_fails
           tests/test_deploy_systemd_units.py

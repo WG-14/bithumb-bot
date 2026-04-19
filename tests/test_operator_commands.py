@@ -5744,6 +5744,51 @@ def test_cmd_run_blocks_before_lock_when_live_preflight_fails(monkeypatch):
     assert any("reason_code=LIVE_STARTUP_GUARD" in n for n in notifications)
 
 
+def test_main_pre_dispatch_blocks_live_run_without_startup_contract(monkeypatch, capsys):
+    object.__setattr__(settings, "MODE", "live")
+    notifications: list[str] = []
+    calls = {"startup": 0}
+
+    def _raise_startup(_cfg):
+        calls["startup"] += 1
+        raise app_module.LiveModeValidationError("central startup guard failed")
+
+    monkeypatch.setattr(app_module, "validate_live_run_startup_contract", _raise_startup)
+    monkeypatch.setattr(app_module, "log_live_execution_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(app_module, "notify", lambda msg: notifications.append(msg))
+    monkeypatch.setattr(app_module, "cmd_run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cmd_run bypassed guard")))
+
+    with pytest.raises(SystemExit) as exc:
+        app_module.main(["run"])
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert calls == {"startup": 1}
+    assert "[LIVE-COMMAND-GUARD]" in out
+    assert any("reason_code=LIVE_STARTUP_GUARD" in n for n in notifications)
+
+
+def test_main_pre_dispatch_blocks_live_write_command_without_preflight(monkeypatch, capsys):
+    object.__setattr__(settings, "MODE", "live")
+    calls = {"preflight": 0}
+
+    def _raise_preflight(_cfg):
+        calls["preflight"] += 1
+        raise app_module.LiveModeValidationError("central preflight failed")
+
+    monkeypatch.setattr(app_module, "validate_live_mode_preflight", _raise_preflight)
+    monkeypatch.setattr(app_module, "log_live_execution_contract", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(app_module, "cmd_panic_stop", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("panic-stop bypassed guard")))
+
+    with pytest.raises(SystemExit) as exc:
+        app_module.main(["panic-stop"])
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert calls == {"preflight": 1}
+    assert "[LIVE-COMMAND-GUARD]" in out
+
+
 def test_restart_checklist_blocks_when_restart_risks_exist(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     now_ms = int(time.time() * 1000)

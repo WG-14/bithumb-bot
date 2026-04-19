@@ -111,6 +111,13 @@ MAX_OPEN_POSITIONS = settings.MAX_OPEN_POSITIONS
 KILL_SWITCH = settings.KILL_SWITCH
 KILL_SWITCH_LIQUIDATE = settings.KILL_SWITCH_LIQUIDATE
 DEFAULT_BITHUMB_BROKER_CLASS = bithumb_broker_module.BithumbBroker
+LIVE_COMMAND_GUARDS = {
+    "run": "startup",
+    "cancel-open-orders": "preflight",
+    "flatten-position": "preflight",
+    "panic-stop": "preflight",
+    "recover-order": "preflight",
+}
 
 
 def _format_rule_value_with_source(*, field: str, value: object, source: dict[str, str] | None) -> str:
@@ -153,6 +160,38 @@ def _clarify_dust_observational_summary(summary: object | None) -> str:
         .replace("broker_notional_krw=", "observed_broker_notional_krw=")
         .replace("local_notional_krw=", "observed_local_notional_krw=")
     )
+
+
+def _enforce_live_command_guard(command: str | None) -> None:
+    """Central live-command guard so new dispatch paths have one policy surface."""
+    if settings.MODE != "live":
+        return
+    guard = LIVE_COMMAND_GUARDS.get(str(command or "ticker"))
+    if guard is None:
+        return
+    try:
+        if guard == "startup":
+            validate_live_run_startup_contract(settings)
+        elif guard == "preflight":
+            validate_live_mode_preflight(settings)
+        else:
+            raise LiveModeValidationError(f"unknown live command guard policy: {guard}")
+    except LiveModeValidationError as exc:
+        if guard == "startup":
+            notify(
+                safety_event(
+                    "startup_gate_blocked",
+                    client_order_id="-",
+                    submit_attempt_id="-",
+                    exchange_order_id="-",
+                    reason_code="LIVE_STARTUP_GUARD",
+                    alert_kind="startup_gate",
+                    reason=str(exc),
+                    state_to="HALTED",
+                )
+            )
+        print(f"[LIVE-COMMAND-GUARD] {exc}")
+        raise SystemExit(1) from exc
 
 
 def _closed_candle_cutoff_ts_ms(*, interval: str, now_ms: int | None = None) -> int | None:
@@ -3814,6 +3853,13 @@ def main(argv: list[str] | None = None) -> int:
     except ModeValidationError as e:
         print(f"[MODE] {e}")
         raise SystemExit(1) from e
+    if settings.MODE == "live":
+        log_live_execution_contract(
+            settings,
+            caller=f"app.main:{args.cmd or 'ticker'}",
+            env_summary=get_last_explicit_env_load_summary().as_dict(),
+        )
+    _enforce_live_command_guard(args.cmd)
 
     if args.cmd in (None, "ticker"):
         cmd_ticker()

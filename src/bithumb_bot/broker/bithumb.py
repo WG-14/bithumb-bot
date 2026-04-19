@@ -80,6 +80,7 @@ from .live_order_contract import (
     ORDER_SUBMIT_DISPATCH_AUTHORITY as LIVE_ORDER_SUBMIT_DISPATCH_AUTHORITY,
     ORDER_SUBMIT_ENDPOINT as LIVE_ORDER_SUBMIT_ENDPOINT,
     reject_forbidden_order_submit_route,
+    require_order_submit_transmission_contract,
     require_validated_order_submit_authority,
 )
 from .order_serialization import decimal_from_value, format_krw_amount, format_volume, truncate_volume
@@ -669,15 +670,16 @@ class BithumbPrivateAPI:
                 f"planned={expected_canonical_payload!r} dispatch={canonical_payload!r}"
             )
         expected_hash = self._query_hash_from_canonical_payload(canonical_payload)
-        if context["query_hash_claims"] != expected_hash:
-            raise BrokerRejectError("/v2/orders query_hash claims do not match canonical payload")
-        request_body_text = str(context["request_body_text"])
-        if context["request_content"] != request_body_text.encode("utf-8"):
-            raise BrokerRejectError("/v2/orders transmitted content does not match JSON body text")
-        if context["request_kwargs"] != {"content": context["request_content"]}:
-            raise BrokerRejectError("/v2/orders must transmit exact JSON bytes via content=, not json=")
-        if str(context["headers"].get("Content-Type") or "") != self.ORDER_SUBMIT_CONTENT_TYPE:
-            raise BrokerRejectError("/v2/orders Content-Type contract drifted")
+        require_order_submit_transmission_contract(
+            canonical_payload=canonical_payload,
+            query_hash_claims=context["query_hash_claims"],
+            expected_query_hash_claims=expected_hash,
+            request_body_text=str(context["request_body_text"]),
+            request_content=context["request_content"],
+            request_kwargs=context["request_kwargs"],
+            headers=context["headers"],
+            expected_content_type=self.ORDER_SUBMIT_CONTENT_TYPE,
+        )
         return context
 
     def submit_order(
