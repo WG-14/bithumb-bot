@@ -13,7 +13,7 @@ from ..execution_models import (
 )
 from ..observability import format_log_kv
 from .base import BrokerOrder, BrokerRejectError
-from .order_payloads import build_order_payload_from_plan, normalize_order_side
+from .order_payloads import build_order_payload_from_plan, normalize_order_side, validate_client_order_id
 from .order_serialization import truncate_volume
 from .bithumb_execution import execute_signed_order_request
 
@@ -138,8 +138,36 @@ def execute_place_order(
 def build_place_order_submission_flow(
     broker,
     *,
-    plan: SubmitPlan,
+    plan: SubmitPlan | None = None,
+    validated_client_order_id: str | None = None,
+    side: str | None = None,
+    qty: float | None = None,
+    price: float | None = None,
+    buy_price_none_submit_contract=None,
+    now: int | None = None,
 ) -> PlaceOrderSubmissionFlow:
+    if plan is None:
+        if validated_client_order_id is None or side is None or qty is None or now is None:
+            raise BrokerRejectError(
+                "place order submission flow requires either explicit SubmitPlan or validated order fields"
+            )
+        normalized_client_order_id = validate_client_order_id(validated_client_order_id)
+        normalized_side = normalize_order_side(side)
+        order_side = "BUY" if normalized_side == "bid" else "SELL"
+        plan = plan_place_order(
+            broker,
+            intent=OrderIntent(
+                client_order_id=normalized_client_order_id,
+                market=settings.PAIR,
+                side=order_side,
+                normalized_side=normalized_side,
+                qty=float(qty),
+                price=price,
+                created_ts=int(now),
+                submit_contract=buy_price_none_submit_contract,
+                trace_id=normalized_client_order_id,
+            ),
+        )
     signed_request = replace(
         build_place_order_payload(broker, plan=plan),
         dispatch_authority="validated_place_order_flow",

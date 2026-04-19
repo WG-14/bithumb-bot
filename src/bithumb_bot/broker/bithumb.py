@@ -1404,22 +1404,12 @@ class BithumbBroker:
         payload_plan,
         retry_safe: bool = False,
     ) -> dict | list:
-        compat_post_private = getattr(self, "_post_private")
-        default_post_private = getattr(type(self), "_post_private")
-        compat_func = getattr(compat_post_private, "__func__", compat_post_private)
-        default_func = getattr(default_post_private, "__func__", default_post_private)
-        if compat_func is not default_func:
-            return compat_post_private(
-                BithumbPrivateAPI.ORDER_SUBMIT_ENDPOINT,
-                payload_plan.payload,
-                retry_safe=retry_safe,
-            )
-        return self._private_api.request(
-            "POST",
-            BithumbPrivateAPI.ORDER_SUBMIT_ENDPOINT,
-            json_body=payload_plan.payload,
+        from .bithumb_client import submit_validated_order_payload
+
+        return submit_validated_order_payload(
+            self,
+            signed_request=payload_plan,
             retry_safe=retry_safe,
-            response_excerpt=self._response_body_excerpt,
         )
 
     def _build_quantity_guard(
