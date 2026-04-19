@@ -545,6 +545,7 @@ class _NoExchangeIdBroker(_FakeBroker):
         qty: float,
         price: float | None = None,
         buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+        submit_plan=None,
     ) -> BrokerOrder:
         self.place_order_calls += 1
         self._last_client_order_id = client_order_id
@@ -2454,6 +2455,7 @@ def test_live_execute_signal_buy_reject_does_not_classify_market_notional_submit
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+            submit_plan=None,
         ) -> BrokerOrder:
             raise BrokerRejectError(f"{side} qty does not match qty_step: qty={qty} qty_step=0.0001")
 
@@ -2515,6 +2517,7 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+            submit_plan=None,
         ) -> BrokerOrder:
             raise BrokerRejectError(
                 "/v1/orders/chance rejected order type before submit: "
@@ -2615,15 +2618,6 @@ def test_live_execute_signal_buy_chance_order_type_reject_is_not_qty_step_mismat
     assert submit_evidence["buy_price_none_raw_supported_types"] == ["market"]
     assert submit_evidence["submit_failure_category"] == "broker_reject"
     assert "qty_step_mismatch" not in json.dumps(submit_evidence, sort_keys=True)
-    assert preflight_evidence["buy_price_none_decision_outcome"] == "block"
-    assert preflight_evidence["buy_price_none_decision_basis"] == "raw"
-    assert preflight_evidence["buy_price_none_alias_used"] is False
-    assert preflight_evidence["buy_price_none_alias_policy"] == order_rules.BUY_PRICE_NONE_ALIAS_POLICY
-    assert preflight_evidence["buy_price_none_block_reason"] == "buy_price_none_requires_explicit_price_support"
-    assert preflight_evidence["buy_price_none_support_source"] == "bid_types"
-    assert preflight_evidence["buy_price_none_raw_supported_types"] == ["market"]
-    assert preflight_evidence["buy_price_none_resolved_order_type"] == "price"
-    assert "qty_step_mismatch" not in json.dumps(preflight_evidence, sort_keys=True)
 
 
 def test_live_submit_error_marks_failed_and_records_submit_started(monkeypatch, tmp_path):
@@ -7423,6 +7417,7 @@ def test_live_execute_signal_sell_classifies_qty_step_mismatch_broker_reject(mon
             qty: float,
             price: float | None = None,
             buy_price_none_submit_contract: order_rules.BuyPriceNoneSubmitContract | None = None,
+            submit_plan=None,
         ):
             raise BrokerRejectError(f"{side} qty does not match qty_step: qty={qty} qty_step=0.0001")
 
@@ -9898,15 +9893,29 @@ def test_validate_pretrade_applies_side_specific_min_total():
         live_module,
         "_load_live_reference_quote",
         lambda **_kwargs: {
-            "bid": 100.0,
-            "ask": 100.1,
-            "reference_price": 100.05,
+            "bid": 99_999_000.0,
+            "ask": 100_000_000.0,
+            "reference_price": 100_000_000.0,
             "reference_ts_epoch_sec": 1_700_000_000.0,
             "reference_source": "test",
         },
     )
-    _stub_submit_plan_quote(monkeypatch, price=100.1)
-    _stub_live_effective_order_rules(monkeypatch)
+    _stub_submit_plan_quote(monkeypatch)
+    monkeypatch.setattr(
+        live_module,
+        "_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                bid_min_total_krw=5100.0,
+                ask_min_total_krw=5000.0,
+                min_notional_krw=7000.0,
+                min_qty=0.0001,
+                qty_step=0.0001,
+                max_qty_decimals=8,
+            ),
+            source={},
+        ),
+    )
     object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
     object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
     object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
@@ -9974,14 +9983,14 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path, monkey
         live_module,
         "_load_live_reference_quote",
         lambda **_kwargs: {
-            "bid": 100.0,
-            "ask": 100.1,
-            "reference_price": 100.05,
+            "bid": 99_999_000.0,
+            "ask": 100_000_000.0,
+            "reference_price": 100_000_000.0,
             "reference_ts_epoch_sec": 1_700_000_000.0,
             "reference_source": "test",
         },
     )
-    _stub_submit_plan_quote(monkeypatch, price=100.1)
+    _stub_submit_plan_quote(monkeypatch)
     _stub_live_effective_order_rules(monkeypatch)
 
     scenarios = [

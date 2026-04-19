@@ -736,7 +736,10 @@ def execute_live_submission_and_application(
         )
     except Exception as error:
         record_standard_submit_planning_failure(
-            request=StandardSubmitPlanningFailureRequest(order_type="-", **request_fields),
+            request=StandardSubmitPlanningFailureRequest(
+                order_type=("price" if feasibility.side == "BUY" else "market"),
+                **request_fields,
+            ),
             error=error,
         )
         return None

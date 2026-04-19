@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import inspect
 import time
 from dataclasses import dataclass
 
@@ -940,12 +939,6 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
 def _dispatch_submit_attempt(*, context: _StandardSubmitAttemptContext, broker: Broker) -> tuple[BrokerOrder, int, int] | None:
     request = context.request
     dispatch_kwargs = _dispatch_kwargs_from_submit_plan(submit_plan=context.submit_plan)
-    try:
-        place_order_parameters = inspect.signature(broker.place_order).parameters
-    except (TypeError, ValueError):
-        place_order_parameters = {}
-    if "submit_plan" not in place_order_parameters:
-        dispatch_kwargs.pop("submit_plan", None)
     try:
         request_ts = int(time.time() * 1000)
         RUN_LOG.info(
