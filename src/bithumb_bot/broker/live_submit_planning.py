@@ -37,5 +37,4 @@ def build_live_submit_plan(
             trace_id=client_order_id,
         ),
         rules=effective_rules,
-        skip_qty_revalidation=True,
     )

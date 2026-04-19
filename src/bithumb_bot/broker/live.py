@@ -1134,27 +1134,15 @@ def normalize_order_qty(*, qty: float, market_price: float) -> float:
 
 
 def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> float:
-    snapshot = _build_non_authoritative_qty_normalization_snapshot(qty=qty)
-    input_qty = float(snapshot["input_qty"])
-    normalized_qty = float(snapshot["normalized_qty"])
-    min_qty = float(snapshot["min_qty"])
-    qty_step = float(snapshot["qty_step"])
-    max_qty_decimals = int(snapshot["max_qty_decimals"])
-
-    if normalized_qty <= 0:
+    input_qty = max(0.0, float(qty))
+    if input_qty <= 0:
         raise ValueError(
             "dust-safe entry qty unavailable: "
-            f"input_qty={input_qty:.12f} normalized_qty={normalized_qty:.12f} "
-            f"min_qty={min_qty:.12f} qty_step={qty_step:.12f} max_qty_decimals={max_qty_decimals}"
-        )
-    if min_qty > 0 and normalized_qty < min_qty:
-        raise ValueError(
-            "dust-safe entry qty below minimum: "
-            f"normalized_qty={normalized_qty:.12f} < min_qty={min_qty:.12f}"
+            f"input_qty={input_qty:.12f}"
         )
     rules = _effective_order_rules(settings.PAIR).rules
     executable_lot = build_executable_lot(
-        qty=normalized_qty,
+        qty=input_qty,
         market_price=float(market_price),
         min_qty=float(rules.min_qty),
         qty_step=float(rules.qty_step),
@@ -1167,16 +1155,11 @@ def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> 
     if executable_lot.executable_qty <= POSITION_EPSILON:
         raise ValueError(
             "dust-safe entry qty would not leave an executable exit lot: "
-            f"normalized_qty={normalized_qty:.12f} "
+            f"normalized_qty={input_qty:.12f} "
             f"effective_min_trade_qty={float(executable_lot.effective_min_trade_qty):.12f} "
             f"reason={executable_lot.exit_non_executable_reason}"
         )
-
-    remainder = max(0.0, input_qty - normalized_qty)
-    if remainder <= POSITION_EPSILON:
-        return input_qty
-
-    return normalized_qty
+    return input_qty
 
 
 def _floor_qty_to_places(*, qty: float, places: int) -> float:

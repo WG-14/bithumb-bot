@@ -52,7 +52,11 @@ class ExecutionSizingPlan:
     decision_reason_code: str
     budget_krw: float
     requested_qty: float
+    exchange_constrained_qty: float
+    lifecycle_executable_qty: float
     executable_qty: float
+    rejected_qty_remainder: float
+    unused_budget_krw: float
     internal_lot_size: float
     intended_lot_count: int
     executable_lot_count: int
@@ -255,7 +259,11 @@ def build_buy_execution_sizing(
             decision_reason_code=BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET,
             budget_krw=float(gross_budget),
             requested_qty=0.0,
+            exchange_constrained_qty=0.0,
+            lifecycle_executable_qty=0.0,
             executable_qty=0.0,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
             internal_lot_size=0.0,
             intended_lot_count=0,
             executable_lot_count=0,
@@ -275,7 +283,11 @@ def build_buy_execution_sizing(
             decision_reason_code="invalid_market_price",
             budget_krw=float(gross_budget),
             requested_qty=0.0,
+            exchange_constrained_qty=0.0,
+            lifecycle_executable_qty=0.0,
             executable_qty=0.0,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
             internal_lot_size=0.0,
             intended_lot_count=0,
             executable_lot_count=0,
@@ -319,6 +331,9 @@ def build_buy_execution_sizing(
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
     effective_min_trade_qty = float(executable_lot.effective_min_trade_qty)
+    lifecycle_executable_qty = float(executable_lot.executable_qty)
+    rejected_qty_remainder = max(0.0, float(requested_qty) - float(executable_qty))
+    unused_budget_krw = float(rejected_qty_remainder) * float(market_price)
     intended_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(requested_qty), rounding=ROUND_FLOOR)))
     executable_lot_count = max(0, int(lot_rules.quantize_to_lot_count(qty=float(executable_qty), rounding=ROUND_FLOOR)))
     internal_lot_is_exchange_inflated = bool(float(lot_rules.lot_size) > float(effective_min_trade_qty) + DUST_POSITION_EPS)
@@ -349,7 +364,11 @@ def build_buy_execution_sizing(
         decision_reason_code="none" if allowed else entry_reason,
         budget_krw=float(gross_budget),
         requested_qty=float(requested_qty),
+        exchange_constrained_qty=float(executable_qty),
+        lifecycle_executable_qty=float(lifecycle_executable_qty),
         executable_qty=float(executable_qty if allowed else 0.0),
+        rejected_qty_remainder=float(rejected_qty_remainder),
+        unused_budget_krw=float(unused_budget_krw),
         internal_lot_size=float(lot_rules.lot_size),
         intended_lot_count=int(intended_lot_count),
         executable_lot_count=int(executable_lot_count if allowed else 0),
@@ -410,7 +429,11 @@ def build_sell_execution_sizing(
         decision_reason_code="none" if allowed else _sell_decision_reason_code(exit_block_reason=block_reason),
         budget_krw=0.0,
         requested_qty=float(requested_qty),
+        exchange_constrained_qty=float(requested_qty),
+        lifecycle_executable_qty=float(executable_qty if allowed else 0.0),
         executable_qty=float(executable_qty if allowed else 0.0),
+        rejected_qty_remainder=0.0,
+        unused_budget_krw=0.0,
         internal_lot_size=float(internal_lot_size),
         intended_lot_count=int(intended_lot_count),
         executable_lot_count=int(intended_lot_count if allowed else 0),

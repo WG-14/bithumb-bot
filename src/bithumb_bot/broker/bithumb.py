@@ -2235,10 +2235,10 @@ class BithumbBroker:
                     "submit_plan side mismatch: "
                     f"requested={side} planned={explicit_submit_plan.intent.side}"
                 )
-            if not math.isclose(float(qty), float(explicit_submit_plan.intent.qty), rel_tol=0.0, abs_tol=1e-12):
+            if not math.isclose(float(qty), float(explicit_submit_plan.submitted_qty), rel_tol=0.0, abs_tol=1e-12):
                 raise BrokerRejectError(
                     "submit_plan qty mismatch: "
-                    f"requested={float(qty):.12f} planned={float(explicit_submit_plan.intent.qty):.12f}"
+                    f"requested={float(qty):.12f} planned={float(explicit_submit_plan.submitted_qty):.12f}"
                 )
             if price != explicit_submit_plan.intent.price:
                 raise BrokerRejectError(

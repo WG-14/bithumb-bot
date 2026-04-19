@@ -4146,7 +4146,7 @@ def test_adjust_buy_order_qty_for_dust_safety_rejects_when_no_sellable_qty_remai
     object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
     object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
 
-    with pytest.raises(ValueError, match="dust-safe entry qty unavailable"):
+    with pytest.raises(ValueError, match="would not leave an executable exit lot"):
         adjust_buy_order_qty_for_dust_safety(qty=0.00009193, market_price=100_000_000.0)
 
 
@@ -5266,6 +5266,160 @@ def test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing(tmp_path, 
 
 
 @pytest.mark.fast_regression
+def test_live_execute_signal_buy_persists_submit_plan_quantity_authority(tmp_path, monkeypatch):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_submit_qty_authority.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+    _stub_live_reference_quote(monkeypatch, price=20_000_000.0)
+    _stub_live_effective_order_rules(monkeypatch)
+
+    monkeypatch.setattr(
+        live_module,
+        "build_buy_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=13_000.0,
+            requested_qty=0.00065,
+            exchange_constrained_qty=0.00065,
+            lifecycle_executable_qty=0.0004,
+            executable_qty=0.00065,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
+            internal_lot_size=0.0004,
+            intended_lot_count=1,
+            executable_lot_count=1,
+            qty_source="entry.intent_budget_exchange_constraints",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+            internal_lot_is_exchange_inflated=True,
+            internal_lot_would_block_buy=False,
+        ),
+    )
+    monkeypatch.setattr(live_module, "adjust_buy_order_qty_for_dust_safety", lambda *, qty, market_price: float(qty))
+
+    class _PlanAuthorityBroker(_FakeBroker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submit_plan = None
+
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(
+                cash_available=float(settings.START_CASH_KRW),
+                cash_locked=0.0,
+                asset_available=0.0,
+                asset_locked=0.0,
+            )
+
+        def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None, submit_plan=None):
+            self.submit_plan = submit_plan
+            planned_qty = float(submit_plan.submitted_qty) if submit_plan is not None else float(qty)
+            self.place_order_calls += 1
+            self._last_client_order_id = client_order_id
+            self._last_side = side
+            self._last_qty = planned_qty
+            self._last_price = price
+            return BrokerOrder(client_order_id, "ex1", side, "NEW", price, planned_qty, 0.0, 1, 1)
+
+    conn = ensure_db(str(tmp_path / "market_buy_submit_qty_authority.sqlite"))
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        decision_id = record_strategy_decision(
+            conn,
+            decision_ts=1000,
+            strategy_name="sma_with_filter",
+            signal="BUY",
+            reason="sma golden cross",
+            candle_ts=1000,
+            market_price=20_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "base_reason": "sma golden cross",
+                "entry_reason": "sma golden cross",
+                "entry_allowed": True,
+                "effective_flat": True,
+                "normalized_exposure_active": False,
+                "normalized_exposure_qty": 0.0,
+                "raw_qty_open": 0.0,
+                "raw_total_asset_qty": 0.0,
+                "open_exposure_qty": 0.0,
+                "dust_tracking_qty": 0.0,
+                "has_executable_exposure": False,
+                "has_any_position_residue": False,
+                "has_non_executable_residue": False,
+                "has_dust_only_remainder": False,
+            },
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _PlanAuthorityBroker()
+    trade = live_execute_signal(
+        broker,
+        "BUY",
+        1000,
+        20_000_000.0,
+        decision_id=decision_id,
+        decision_reason="sma golden cross",
+    )
+
+    assert trade is not None
+    assert broker.place_order_calls == 1
+    assert broker.submit_plan is not None
+    assert broker.submit_plan.submitted_qty == pytest.approx(0.0006)
+    assert broker.submit_plan.requested_qty == pytest.approx(0.00065)
+
+    conn = ensure_db(str(tmp_path / "market_buy_submit_qty_authority.sqlite"))
+    row = conn.execute(
+        """
+        SELECT qty_req, final_submitted_qty
+        FROM orders
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row["qty_req"] == pytest.approx(0.0006)
+    assert row["final_submitted_qty"] == pytest.approx(0.0006)
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["requested_qty"] == pytest.approx(0.00065)
+    assert submit_evidence["submitted_qty"] == pytest.approx(0.0006)
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0006)
+    assert submit_evidence["submit_qty_source"] == "submit_plan.exchange_constraints"
+    assert submit_evidence["final_submitted_qty"] == pytest.approx(0.0006)
+
+
+@pytest.mark.fast_regression
 def test_live_execute_signal_buy_logs_structured_entry_sizing_diagnostics(tmp_path, monkeypatch, caplog):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_log.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
@@ -5520,6 +5674,90 @@ def test_live_execute_signal_buy_fallback_dust_guard_logs_unexpected_invariant_m
     assert broker.place_order_calls == 0
     assert "[ORDER_SKIP] buy dust guard fallback blocked" in caplog.text
     assert "fallback_invariant_mismatch=1" in caplog.text
+
+
+@pytest.mark.fast_regression
+def test_live_execute_signal_buy_planning_failure_stays_pre_submit_not_submit_ready(tmp_path, monkeypatch):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "market_buy_plan_failure_stage.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 20_000.0)
+    object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", 0.0001)
+    object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", 8)
+    object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", 0.0)
+    object.__setattr__(settings, "MAX_ORDERBOOK_SPREAD_BPS", 0.0)
+    object.__setattr__(settings, "MAX_MARKET_SLIPPAGE_BPS", 0.0)
+    object.__setattr__(settings, "LIVE_PRICE_PROTECTION_MAX_SLIPPAGE_BPS", 0.0)
+
+    monkeypatch.setattr(
+        live_module,
+        "build_buy_execution_sizing",
+        lambda **_kwargs: SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code="none",
+            budget_krw=13_000.0,
+            requested_qty=0.00065,
+            exchange_constrained_qty=0.00065,
+            lifecycle_executable_qty=0.0004,
+            executable_qty=0.00065,
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
+            internal_lot_size=0.0004,
+            intended_lot_count=1,
+            executable_lot_count=1,
+            qty_source="entry.intent_budget_exchange_constraints",
+            effective_min_trade_qty=0.0001,
+            min_qty=0.0001,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            non_executable_reason="executable",
+            internal_lot_is_exchange_inflated=True,
+            internal_lot_would_block_buy=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.broker.live_submission_execution.build_live_submit_plan",
+        lambda **_kwargs: (_ for _ in ()).throw(BrokerRejectError("planner canonical buy reject")),
+    )
+
+    broker = _FakeBroker()
+    trade = live_execute_signal(broker, "BUY", 1000, 20_000_000.0)
+
+    assert trade is None
+    assert broker.place_order_calls == 0
+
+    conn = ensure_db(str(tmp_path / "market_buy_plan_failure_stage.sqlite"))
+    submit_attempt = conn.execute(
+        """
+        SELECT submit_evidence
+        FROM order_events
+        WHERE event_type='submit_attempt_recorded'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    started_event = conn.execute(
+        """
+        SELECT 1
+        FROM order_events
+        WHERE event_type='submit_started'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+
+    submit_evidence = json.loads(str(submit_attempt["submit_evidence"]))
+    assert submit_evidence["submit_phase"] == "planning"
+    assert submit_evidence["execution_state"] == "planning_failed"
+    assert submit_evidence["requested_qty"] == pytest.approx(0.00065)
+    assert submit_evidence["submitted_qty"] is None
+    assert submit_evidence["submit_payload_qty"] == pytest.approx(0.0)
+    assert submit_evidence["submit_qty_source"] == "submit_plan.pending"
+    assert submit_evidence["final_submitted_qty"] == pytest.approx(0.0)
+    assert started_event is None
 
 
 @pytest.mark.fast_regression

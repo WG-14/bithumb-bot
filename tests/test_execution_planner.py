@@ -157,3 +157,103 @@ def test_planner_reports_buy_market_policy_block_reason() -> None:
             resolve_best_ask=lambda _quote, _market: 100_000_000.0,
             truncate_volume=lambda qty: qty,
         )
+
+
+def test_planner_canonicalizes_buy_qty_from_exchange_constraints_without_lifecycle_reject() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_min_total_krw=0.0,
+        ask_min_total_krw=0.0,
+        min_notional_krw=5_000.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        max_qty_decimals=8,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+    )
+    intent = OrderIntent(
+        client_order_id="cid-planner-buy-lot-gap",
+        market="KRW-BTC",
+        side="BUY",
+        normalized_side="bid",
+        qty=0.0006,
+        price=None,
+        created_ts=1_700_000_000_000,
+        submit_contract=order_rules.build_buy_price_none_submit_contract(
+            rules=rules,
+            resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+        ),
+    )
+
+    plan = build_submit_plan(
+        intent=intent,
+        rules=rules,
+        fetch_order_rules=lambda _market: SimpleNamespace(rules=rules),
+        fetch_top_of_book=lambda _market: BestQuote(
+            market="KRW-BTC",
+            bid_price=19_990_000.0,
+            ask_price=20_000_000.0,
+        ),
+        resolve_best_ask=lambda _quote, _market: 20_000_000.0,
+        truncate_volume=lambda qty: qty,
+    )
+
+    assert plan.requested_qty == pytest.approx(0.0006)
+    assert plan.exchange_constrained_qty == pytest.approx(0.0006)
+    assert plan.lifecycle_executable_qty == pytest.approx(0.0004)
+    assert plan.submitted_qty == pytest.approx(0.0006)
+    assert plan.exchange_submit_qty == pytest.approx(0.0006)
+    assert plan.rejected_qty_remainder == pytest.approx(0.0)
+    assert plan.submit_qty_authority == "submit_plan.exchange_constraints"
+
+
+def test_planner_floors_buy_qty_once_and_tracks_unused_budget() -> None:
+    rules = order_rules.DerivedOrderConstraints(
+        order_types=("limit", "price"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        bid_min_total_krw=0.0,
+        ask_min_total_krw=0.0,
+        min_notional_krw=0.0,
+        min_qty=0.0001,
+        qty_step=0.0001,
+        max_qty_decimals=8,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+    )
+    intent = OrderIntent(
+        client_order_id="cid-planner-buy-floor",
+        market="KRW-BTC",
+        side="BUY",
+        normalized_side="bid",
+        qty=0.00065,
+        price=None,
+        created_ts=1_700_000_000_000,
+        submit_contract=order_rules.build_buy_price_none_submit_contract(
+            rules=rules,
+            resolution=order_rules.resolve_buy_price_none_resolution(rules=rules),
+        ),
+    )
+
+    plan = build_submit_plan(
+        intent=intent,
+        rules=rules,
+        fetch_order_rules=lambda _market: SimpleNamespace(rules=rules),
+        fetch_top_of_book=lambda _market: BestQuote(
+            market="KRW-BTC",
+            bid_price=19_990_000.0,
+            ask_price=20_000_000.0,
+        ),
+        resolve_best_ask=lambda _quote, _market: 20_000_000.0,
+        truncate_volume=lambda qty: qty,
+    )
+
+    assert plan.requested_qty == pytest.approx(0.00065)
+    assert plan.exchange_constrained_qty == pytest.approx(0.0006)
+    assert plan.submitted_qty == pytest.approx(0.0006)
+    assert plan.rejected_qty_remainder == pytest.approx(0.00005)
+    assert plan.unused_budget_krw == pytest.approx(1_000.0)

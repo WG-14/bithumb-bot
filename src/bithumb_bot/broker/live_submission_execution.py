@@ -556,7 +556,7 @@ def execute_live_submission_and_application(
 
     live_module.RUN_LOG.info(
         format_log_kv(
-            "[ORDER_DECISION] submit order intent",
+            "[ORDER_DECISION] prepare submit planning",
             mode=settings.MODE,
             symbol=settings.PAIR,
             base_signal=decision_observability["base_signal"],
@@ -567,7 +567,7 @@ def execute_live_submission_and_application(
             position_qty=float(intent.order_qty),
             order_qty=feasibility.order_qty,
             normalized_qty=feasibility.normalized_qty,
-            submit_payload_qty=float(feasibility.normalized_qty),
+            submit_payload_qty_preview=float(feasibility.normalized_qty),
             reference_price=reference_price,
             client_order_id=client_order_id,
             intent_ts=int(ts),
@@ -585,6 +585,10 @@ def execute_live_submission_and_application(
             decision_reason_code=str(lot_sizing.decision_reason_code),
             budget_krw=float(getattr(lot_sizing, "budget_krw", 0.0)),
             requested_qty=float(lot_sizing.requested_qty),
+            exchange_constrained_qty=float(getattr(lot_sizing, "exchange_constrained_qty", lot_sizing.executable_qty)),
+            lifecycle_executable_qty=float(getattr(lot_sizing, "lifecycle_executable_qty", lot_sizing.executable_qty)),
+            rejected_qty_remainder=float(getattr(lot_sizing, "rejected_qty_remainder", 0.0)),
+            unused_budget_krw=float(getattr(lot_sizing, "unused_budget_krw", 0.0)),
             internal_lot_size=float(lot_sizing.internal_lot_size),
             effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
             min_qty=float(lot_sizing.min_qty),
@@ -666,8 +670,14 @@ def execute_live_submission_and_application(
         }
         submit_observability_fields = {
             "observed_position_qty": float(intent.order_qty),
-            "submit_payload_qty": float(feasibility.normalized_qty),
-            "submit_qty_source": feasibility.submit_qty_source,
+            "requested_qty": float(getattr(lot_sizing, "requested_qty", feasibility.order_qty)),
+            "exchange_constrained_qty": float(getattr(lot_sizing, "exchange_constrained_qty", feasibility.normalized_qty)),
+            "lifecycle_executable_qty": float(getattr(lot_sizing, "lifecycle_executable_qty", feasibility.normalized_qty)),
+            "submitted_qty": None,
+            "rejected_qty_remainder": float(getattr(lot_sizing, "rejected_qty_remainder", 0.0)),
+            "unused_budget_krw": float(getattr(lot_sizing, "unused_budget_krw", 0.0)),
+            "submit_payload_qty": 0.0,
+            "submit_qty_source": "submit_plan.pending",
             "position_state_source": str(decision_observability["position_state_source"]),
             "raw_total_asset_qty": float(position_state.raw_total_asset_qty),
             "open_exposure_qty": float(position_state.open_exposure_qty),
@@ -675,7 +685,7 @@ def execute_live_submission_and_application(
         }
         sell_observability = {}
 
-    payload_hash = payload_fingerprint(
+    planning_payload_hash = payload_fingerprint(
         {
             "client_order_id": client_order_id,
             "submit_attempt_id": submit_attempt_id,
@@ -686,7 +696,7 @@ def execute_live_submission_and_application(
             "submit_ts": int(ts),
         }
     )
-    request_fields = dict(
+    planning_failure_fields = dict(
         conn=conn,
         signal=signal,
         client_order_id=client_order_id,
@@ -710,7 +720,7 @@ def execute_live_submission_and_application(
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
         contract_profile=str(settings.LIVE_SUBMIT_CONTRACT_PROFILE),
-        payload_hash=payload_hash,
+        payload_hash=planning_payload_hash,
         internal_lot_size=float(lot_sizing.internal_lot_size),
         effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
         qty_step=float(lot_sizing.qty_step),
@@ -718,7 +728,7 @@ def execute_live_submission_and_application(
         intended_lot_count=int(lot_sizing.intended_lot_count),
         executable_lot_count=int(lot_sizing.executable_lot_count),
         final_intended_qty=float(feasibility.order_qty),
-        final_submitted_qty=float(feasibility.normalized_qty),
+        final_submitted_qty=0.0,
         decision_reason_code=str(lot_sizing.decision_reason_code),
         submit_truth_source_fields=submit_truth_source_fields,
         submit_observability_fields=submit_observability_fields,
@@ -738,18 +748,104 @@ def execute_live_submission_and_application(
         record_standard_submit_planning_failure(
             request=StandardSubmitPlanningFailureRequest(
                 order_type=("price" if feasibility.side == "BUY" else "market"),
-                **request_fields,
+                **planning_failure_fields,
             ),
             error=error,
         )
         return None
+    if feasibility.side == "BUY":
+        submit_truth_source_fields["submit_qty_source_truth_source"] = "submit_plan.submit_qty_authority"
+        submit_observability_fields = dict(submit_observability_fields)
+        submit_observability_fields.update(
+            {
+                "exchange_constrained_qty": float(submit_plan.exchange_constrained_qty),
+                "lifecycle_executable_qty": float(submit_plan.lifecycle_executable_qty),
+                "submitted_qty": float(submit_plan.submitted_qty),
+                "submit_payload_qty": float(submit_plan.submitted_qty),
+                "submit_qty_source": str(submit_plan.submit_qty_authority),
+                "rejected_qty_remainder": float(submit_plan.rejected_qty_remainder),
+                "unused_budget_krw": float(submit_plan.unused_budget_krw),
+                "lifecycle_non_executable_reason": str(submit_plan.lifecycle_non_executable_reason or "none"),
+            }
+        )
+    request_payload_hash = payload_fingerprint(
+        {
+            "client_order_id": client_order_id,
+            "submit_attempt_id": submit_attempt_id,
+            "symbol": settings.PAIR,
+            "side": feasibility.side,
+            "qty": float(submit_plan.submitted_qty),
+            "price": reference_price,
+            "submit_ts": int(ts),
+        }
+    )
+    live_module.RUN_LOG.info(
+        format_log_kv(
+            "[ORDER_DECISION] submit plan ready",
+            mode=settings.MODE,
+            symbol=settings.PAIR,
+            signal=signal,
+            side=feasibility.side,
+            client_order_id=client_order_id,
+            requested_qty=float(submit_plan.requested_qty),
+            exchange_constrained_qty=float(submit_plan.exchange_constrained_qty),
+            lifecycle_executable_qty=float(submit_plan.lifecycle_executable_qty),
+            submitted_qty=float(submit_plan.submitted_qty),
+            submit_payload_qty=float(submit_plan.submitted_qty),
+            rejected_qty_remainder=float(submit_plan.rejected_qty_remainder),
+            unused_budget_krw=float(submit_plan.unused_budget_krw),
+            submit_qty_authority=str(submit_plan.submit_qty_authority),
+            lifecycle_non_executable_reason=str(submit_plan.lifecycle_non_executable_reason or "none"),
+            exchange_order_type=str(submit_plan.exchange_order_type),
+            exchange_submit_field=str(submit_plan.exchange_submit_field),
+        )
+    )
     submission = submit_live_order_and_confirm(
         broker=broker,
         request=StandardSubmitPipelineRequest(
             submit_plan=submit_plan,
             effective_rules=position_state.effective_rules,
             order_type=str(submit_plan.exchange_order_type),
-            **request_fields,
+            conn=conn,
+            signal=signal,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            side=feasibility.side,
+            order_qty=float(feasibility.order_qty),
+            position_qty=float(intent.order_qty),
+            qty=float(submit_plan.submitted_qty),
+            ts=int(ts),
+            intent_key=intent_key,
+            market_price=float(market_price),
+            raw_total_asset_qty=float(position_state.raw_total_asset_qty),
+            open_exposure_qty=float(position_state.open_exposure_qty),
+            dust_tracking_qty=float(position_state.dust_tracking_qty),
+            submit_qty_source=(
+                str(submit_plan.submit_qty_authority)
+                if feasibility.side == "BUY"
+                else feasibility.submit_qty_source
+            ),
+            position_state_source=str(decision_observability["position_state_source"]),
+            reference_price=reference_price,
+            top_of_book_summary=top_of_book_summary,
+            strategy_name=(strategy_name or settings.STRATEGY_NAME),
+            decision_id=decision_id,
+            decision_reason=decision_reason,
+            exit_rule_name=exit_rule_name,
+            contract_profile=str(settings.LIVE_SUBMIT_CONTRACT_PROFILE),
+            payload_hash=request_payload_hash,
+            internal_lot_size=float(lot_sizing.internal_lot_size),
+            effective_min_trade_qty=float(lot_sizing.effective_min_trade_qty),
+            qty_step=float(lot_sizing.qty_step),
+            min_notional_krw=float(lot_sizing.min_notional_krw),
+            intended_lot_count=int(lot_sizing.intended_lot_count),
+            executable_lot_count=int(lot_sizing.executable_lot_count),
+            final_intended_qty=float(feasibility.order_qty),
+            final_submitted_qty=float(submit_plan.submitted_qty),
+            decision_reason_code=str(lot_sizing.decision_reason_code),
+            submit_truth_source_fields=submit_truth_source_fields,
+            submit_observability_fields=submit_observability_fields,
+            sell_observability=sell_observability,
         ),
         intent_key=intent_key,
         strategy_name=(strategy_name or settings.STRATEGY_NAME),

@@ -33,6 +33,14 @@ class OrderIntent:
 class SubmitPlan:
     intent: OrderIntent
     rules: Any
+    requested_qty: float
+    exchange_constrained_qty: float
+    lifecycle_executable_qty: float
+    submitted_qty: float
+    rejected_qty_remainder: float
+    unused_budget_krw: float
+    submit_qty_authority: str
+    lifecycle_non_executable_reason: str | None
     chance_validation_order_type: str
     chance_supported_order_types: tuple[str, ...]
     exchange_submit_field: str

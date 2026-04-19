@@ -2,11 +2,46 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from decimal import Decimal, ROUND_FLOOR
 
 from .config import settings
 from .execution_models import OrderIntent, SubmitPlan, SubmitPriceTickPolicy
 from .lot_model import DUST_POSITION_EPS, build_market_lot_rules, lot_count_to_qty
 from .broker.base import BrokerRejectError, BrokerTemporaryError
+
+_DECIMAL_ZERO = Decimal("0")
+
+
+def _decimal_from_number(value: object) -> Decimal:
+    text = str(value)
+    parsed = Decimal(text)
+    if not parsed.is_finite():
+        raise ValueError(f"invalid non-finite numeric value: {value}")
+    return parsed
+
+
+def _exchange_qty_step(*, qty_step: float, min_qty: float, max_qty_decimals: int) -> float:
+    normalized_step = max(0.0, float(qty_step))
+    if normalized_step > DUST_POSITION_EPS:
+        return normalized_step
+    normalized_min_qty = max(0.0, float(min_qty))
+    if normalized_min_qty > DUST_POSITION_EPS:
+        return normalized_min_qty
+    normalized_decimals = max(0, int(max_qty_decimals))
+    if normalized_decimals > 0:
+        return 1.0 / (10**normalized_decimals)
+    return 0.0
+
+
+def _floor_qty_to_exchange_constraints(*, qty: float, qty_step: float, max_qty_decimals: int) -> float:
+    normalized_qty = max(_DECIMAL_ZERO, _decimal_from_number(qty))
+    normalized_step = max(_DECIMAL_ZERO, _decimal_from_number(qty_step))
+    if normalized_step > _DECIMAL_ZERO:
+        normalized_qty = (normalized_qty / normalized_step).to_integral_value(rounding=ROUND_FLOOR) * normalized_step
+    quantizer = Decimal("1").scaleb(-max(0, int(max_qty_decimals))) if int(max_qty_decimals) > 0 else None
+    if quantizer is not None:
+        normalized_qty = normalized_qty.quantize(quantizer, rounding=ROUND_FLOOR)
+    return max(0.0, float(normalized_qty))
 
 
 def resolve_submit_price_tick_policy(
@@ -191,27 +226,75 @@ def build_submit_plan(
             hasattr(resolved_rules, field_name)
             for field_name in ("min_qty", "qty_step", "max_qty_decimals")
         )
-        qty_split = lot_rules.split_qty(float(intent.qty))
-        if not skip_qty_revalidation and has_explicit_qty_controls and qty_split.executable is False:
-            raise BrokerRejectError(
-                f"{intent.normalized_side.lower()} qty suppressed by quantity rule: "
-                f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
-                f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
-                f"lot_count={qty_split.lot_count} client_order_id={intent.client_order_id}"
-            )
-        if not skip_qty_revalidation and has_explicit_qty_controls and qty_split.dust_qty > DUST_POSITION_EPS:
-            raise BrokerRejectError(
-                f"qty requires explicit lot normalization before submit: "
-                f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
-                f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
-            )
-
-        internal_lot_qty = (
-            lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
-            if has_explicit_qty_controls
-            else float(intent.qty)
+        requested_qty = max(0.0, float(intent.qty))
+        exchange_qty_step = _exchange_qty_step(
+            qty_step=float(getattr(resolved_rules, "qty_step", 0.0) or 0.0),
+            min_qty=float(getattr(resolved_rules, "min_qty", 0.0) or 0.0),
+            max_qty_decimals=int(getattr(resolved_rules, "max_qty_decimals", 0) or 0),
         )
-        exchange_submit_qty = float(internal_lot_qty)
+        if intent.normalized_side == "bid":
+            exchange_constrained_qty = (
+                _floor_qty_to_exchange_constraints(
+                    qty=requested_qty,
+                    qty_step=float(exchange_qty_step),
+                    max_qty_decimals=int(getattr(resolved_rules, "max_qty_decimals", 0) or 0),
+                )
+                if has_explicit_qty_controls
+                else float(requested_qty)
+            )
+            qty_split = lot_rules.split_qty(float(exchange_constrained_qty))
+            internal_lot_qty = float(exchange_constrained_qty)
+            exchange_submit_qty = float(exchange_constrained_qty)
+        else:
+            qty_split = lot_rules.split_qty(float(requested_qty))
+            if not skip_qty_revalidation and has_explicit_qty_controls and qty_split.executable is False:
+                raise BrokerRejectError(
+                    f"{intent.normalized_side.lower()} qty suppressed by quantity rule: "
+                    f"reason={qty_split.non_executable_reason} raw_qty={format(qty_split.requested_qty, 'f')} "
+                    f"lot_size={format(lot_rules.lot_size, 'f')} dust_qty={format(qty_split.dust_qty, 'f')} "
+                    f"lot_count={qty_split.lot_count} client_order_id={intent.client_order_id}"
+                )
+            if not skip_qty_revalidation and has_explicit_qty_controls and qty_split.dust_qty > DUST_POSITION_EPS:
+                raise BrokerRejectError(
+                    f"qty requires explicit lot normalization before submit: "
+                    f"raw_qty={format(qty_split.requested_qty, 'f')} lot_size={format(lot_rules.lot_size, 'f')} "
+                    f"lot_count={qty_split.lot_count} dust_qty={format(qty_split.dust_qty, 'f')}"
+                )
+            internal_lot_qty = (
+                lot_count_to_qty(lot_count=qty_split.lot_count, lot_size=lot_rules.lot_size)
+                if has_explicit_qty_controls
+                else float(requested_qty)
+            )
+            exchange_constrained_qty = float(requested_qty)
+            exchange_submit_qty = float(internal_lot_qty)
+
+        submitted_qty = float(exchange_submit_qty)
+        rejected_qty_remainder = max(0.0, float(requested_qty) - float(submitted_qty))
+        lifecycle_executable_qty = float(qty_split.executable_qty if qty_split.executable else 0.0)
+        lifecycle_non_executable_reason = (
+            None
+            if qty_split.executable
+            else str(qty_split.non_executable_reason or "none")
+        )
+        submit_qty_authority = (
+            "submit_plan.exchange_constraints"
+            if intent.normalized_side == "bid"
+            else "submit_plan.internal_lot_normalization"
+        )
+        if intent.normalized_side == "bid" and submitted_qty <= DUST_POSITION_EPS:
+            raise BrokerRejectError(
+                "buy qty rounded to zero after exchange constraints: "
+                f"raw_qty={format(requested_qty, 'f')} qty_step={format(exchange_qty_step, 'f')}"
+            )
+        if (
+            intent.normalized_side == "bid"
+            and float(getattr(resolved_rules, "min_qty", 0.0) or 0.0) > 0.0
+            and submitted_qty + DUST_POSITION_EPS < float(getattr(resolved_rules, "min_qty", 0.0) or 0.0)
+        ):
+            raise BrokerRejectError(
+                "buy qty below exchange minimum after canonical planning: "
+                f"qty={format(submitted_qty, 'f')} min_qty={format(float(getattr(resolved_rules, 'min_qty', 0.0) or 0.0), 'f')}"
+            )
         exchange_submit_price: float | None = None
         exchange_submit_volume: float | None = None
         exchange_submit_notional_krw: float | None = None
@@ -223,7 +306,10 @@ def build_submit_plan(
             price_unit = float(submit_price_tick_policy.price_unit)
             if price_unit > 0:
                 exchange_submit_notional_krw = math.floor(exchange_submit_notional_krw / price_unit) * price_unit
-            min_total = side_min_total_krw(rules=resolved_rules, side=order_side)
+            min_total = max(
+                float(side_min_total_krw(rules=resolved_rules, side=order_side)),
+                float(getattr(resolved_rules, "min_notional_krw", 0.0) or 0.0),
+            )
             if min_total > 0 and exchange_submit_notional_krw < float(min_total):
                 raise BrokerRejectError(
                     "order notional below side minimum for market BUY: "
@@ -247,7 +333,10 @@ def build_submit_plan(
                     f"price_unit={submit_price_tick_policy.price_unit:.8f} normalized={normalized_limit_price:.8f}"
                 )
             exchange_submit_notional_krw = normalized_limit_price * float(internal_lot_qty)
-            min_total = side_min_total_krw(rules=resolved_rules, side=order_side)
+            min_total = max(
+                float(side_min_total_krw(rules=resolved_rules, side=order_side)),
+                float(getattr(resolved_rules, "min_notional_krw", 0.0) or 0.0),
+            )
             if min_total > 0 and exchange_submit_notional_krw < float(min_total):
                 raise BrokerRejectError(
                     "order notional below side minimum for limit order: "
@@ -259,6 +348,18 @@ def build_submit_plan(
         return SubmitPlan(
             intent=intent,
             rules=resolved_rules,
+            requested_qty=float(requested_qty),
+            exchange_constrained_qty=float(exchange_constrained_qty),
+            lifecycle_executable_qty=float(lifecycle_executable_qty),
+            submitted_qty=float(submitted_qty),
+            rejected_qty_remainder=float(rejected_qty_remainder),
+            unused_budget_krw=(
+                float(rejected_qty_remainder) * float(effective_market_price)
+                if intent.normalized_side == "bid" and effective_market_price is not None
+                else 0.0
+            ),
+            submit_qty_authority=submit_qty_authority,
+            lifecycle_non_executable_reason=lifecycle_non_executable_reason,
             chance_validation_order_type=chance_validation_order_type,
             chance_supported_order_types=chance_supported_order_types,
             exchange_submit_field=exchange_submit_field,

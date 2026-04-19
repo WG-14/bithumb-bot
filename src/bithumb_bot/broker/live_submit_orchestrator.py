@@ -715,10 +715,10 @@ def _validate_explicit_submit_plan(*, request: StandardSubmitPipelineRequest) ->
             "live submit_plan side mismatch before dispatch: "
             f"request={request.side} planned={submit_plan.intent.side}"
         )
-    if abs(float(request.qty) - float(submit_plan.intent.qty)) > 1e-12:
+    if abs(float(request.qty) - float(submit_plan.submitted_qty)) > 1e-12:
         raise BrokerRejectError(
             "live submit_plan qty mismatch before dispatch: "
-            f"request={float(request.qty):.12f} planned={float(submit_plan.intent.qty):.12f}"
+            f"request={float(request.qty):.12f} planned={float(submit_plan.submitted_qty):.12f}"
         )
     if submit_plan.intent.price is not None:
         raise BrokerRejectError(
@@ -732,7 +732,7 @@ def _dispatch_kwargs_from_submit_plan(*, submit_plan: SubmitPlan) -> dict[str, o
     return {
         "client_order_id": submit_plan.intent.client_order_id,
         "side": submit_plan.intent.side,
-        "qty": float(submit_plan.intent.qty),
+        "qty": float(submit_plan.submitted_qty),
         "price": submit_plan.intent.price,
         "submit_plan": submit_plan,
     }
