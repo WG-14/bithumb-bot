@@ -876,6 +876,19 @@ def cmd_health() -> None:
         f"{', '.join(readiness_snapshot.blocker_categories) if readiness_snapshot.blocker_categories else 'none'}"
     )
     print(f"    canonical_next_action={readiness_snapshot.operator_next_action}")
+    print(
+        "    "
+        f"canonical_state={readiness_snapshot.canonical_state} "
+        f"residual_class={readiness_snapshot.residual_class} "
+        f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+        f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
+        f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
+        f"execution_flat={1 if readiness_snapshot.execution_flat else 0} "
+        f"accounting_flat={1 if readiness_snapshot.accounting_flat else 0} "
+        f"effective_flat={1 if readiness_snapshot.effective_flat else 0} "
+        f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0} "
+        f"why_not={readiness_snapshot.why_not}"
+    )
     print(f"    resume_safety={resume_safety}")
     print(
         "    "

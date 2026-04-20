@@ -12,7 +12,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
-from .recovery_policy import classify_canonical_recovery_state
+from .recovery_policy import classify_canonical_recovery_state, classify_canonical_tradeability_state
 
 
 @dataclass(frozen=True)
@@ -37,8 +37,16 @@ class RuntimeReadinessSnapshot:
     recovery_required_count: int
     position_authority_assessment: dict[str, object]
     canonical_state: str
+    residual_class: str
+    run_loop_allowed: bool
+    new_entry_allowed: bool
+    closeout_allowed: bool
+    effective_flat: bool
+    operator_action_required: bool
+    why_not: str
     execution_flat: bool
     accounting_flat: bool
+    tradeability: Any
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -62,8 +70,16 @@ class RuntimeReadinessSnapshot:
             "recovery_required_count": int(self.recovery_required_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
             "canonical_state": self.canonical_state,
+            "residual_class": self.residual_class,
+            "run_loop_allowed": bool(self.run_loop_allowed),
+            "new_entry_allowed": bool(self.new_entry_allowed),
+            "closeout_allowed": bool(self.closeout_allowed),
+            "effective_flat": bool(self.effective_flat),
+            "operator_action_required": bool(self.operator_action_required),
+            "why_not": self.why_not,
             "execution_flat": bool(self.execution_flat),
             "accounting_flat": bool(self.accounting_flat),
+            "tradeability": self.tradeability.as_dict(),
         }
 
 
@@ -346,12 +362,23 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             operator_next_action = "review_halt_state"
             recommended_command = "uv run python bot.py recovery-report"
 
+        resume_ready = not blockers
+        tradeability = classify_canonical_tradeability_state(
+            position_state=position_state,
+            recovery_state=canonical_recovery,
+            run_loop_allowed=resume_ready,
+        )
+
         return RuntimeReadinessSnapshot(
             recovery_stage=stage,
-            resume_ready=not blockers,
+            resume_ready=resume_ready,
             resume_blockers=tuple(blockers),
             blocker_categories=tuple(dict.fromkeys(categories)),
-            operator_next_action=operator_next_action,
+            operator_next_action=(
+                operator_next_action
+                if not tradeability.operator_action_required or not resume_ready
+                else tradeability.operator_next_action
+            ),
             recommended_command=recommended_command,
             position_state=position_state,
             lot_snapshot=lot_snapshot,
@@ -367,8 +394,16 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             recovery_required_count=recovery_required_count,
             position_authority_assessment=authority_assessment,
             canonical_state=canonical_recovery.canonical_state,
+            residual_class=tradeability.residual_class,
+            run_loop_allowed=tradeability.run_loop_allowed,
+            new_entry_allowed=tradeability.new_entry_allowed,
+            closeout_allowed=tradeability.closeout_allowed,
+            effective_flat=tradeability.effective_flat,
+            operator_action_required=tradeability.operator_action_required,
+            why_not=tradeability.why_not,
             execution_flat=canonical_recovery.execution_flat,
             accounting_flat=canonical_recovery.accounting_flat,
+            tradeability=tradeability,
         )
     finally:
         if close_conn:

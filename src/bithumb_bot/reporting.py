@@ -3599,10 +3599,29 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         }
     position_state = readiness_snapshot.position_state
     dust_view = position_state.operator_diagnostics
+    recent_buy_block_count = sum(
+        1
+        for row in recent_decision_flow
+        if str(row.raw_signal) == "BUY" and (bool(row.entry_blocked) or str(row.final_signal) != "BUY")
+    )
+    recent_sell_suppression_count = len(recent_sell_suppressions)
     payload["operator_recovery_summary"] = {
         "recovery_stage": readiness_snapshot.recovery_stage,
         "recovery_blocker_categories": list(readiness_snapshot.blocker_categories),
         "canonical_next_action": readiness_snapshot.operator_next_action,
+        "canonical_state": readiness_snapshot.canonical_state,
+        "residual_class": readiness_snapshot.residual_class,
+        "run_loop_allowed": bool(readiness_snapshot.run_loop_allowed),
+        "new_entry_allowed": bool(readiness_snapshot.new_entry_allowed),
+        "closeout_allowed": bool(readiness_snapshot.closeout_allowed),
+        "execution_flat": bool(readiness_snapshot.execution_flat),
+        "accounting_flat": bool(readiness_snapshot.accounting_flat),
+        "effective_flat": bool(readiness_snapshot.effective_flat),
+        "operator_action_required": bool(readiness_snapshot.operator_action_required),
+        "why_not": readiness_snapshot.why_not,
+        "recent_buy_block_count": int(recent_buy_block_count),
+        "recent_sell_suppression_count": int(recent_sell_suppression_count),
+        "tradeability": readiness_snapshot.tradeability.as_dict(),
         "unresolved_open_order_count": int(health_row["unresolved_open_order_count"] or 0) if health_row else 0,
         "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
         "position_authority_summary": position_state.normalized_exposure.position_authority_summary,
@@ -3676,6 +3695,13 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         "recovery_blocker_categories="
         f"{','.join(str(x) for x in operator_recovery['recovery_blocker_categories']) or 'none'} "
         f"canonical_next_action={operator_recovery['canonical_next_action']} "
+        f"canonical_state={operator_recovery['canonical_state']} "
+        f"residual_class={operator_recovery['residual_class']} "
+        f"run_loop_allowed={1 if operator_recovery['run_loop_allowed'] else 0} "
+        f"new_entry_allowed={1 if operator_recovery['new_entry_allowed'] else 0} "
+        f"closeout_allowed={1 if operator_recovery['closeout_allowed'] else 0} "
+        f"recent_buy_block_count={operator_recovery['recent_buy_block_count']} "
+        f"recent_sell_suppression_count={operator_recovery['recent_sell_suppression_count']} "
         f"unresolved_open_order_count={operator_recovery['unresolved_open_order_count']} "
         f"recovery_required_count={operator_recovery['recovery_required_count']} "
         f"dust_state={operator_recovery['dust_state']} "
@@ -3712,6 +3738,19 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"state_outcome={position_state.state_interpretation.operator_outcome} "
         f"exit_submit_expected={1 if position_state.state_interpretation.exit_submit_expected else 0} "
         f"state_message={position_state.state_interpretation.operator_message}"
+    )
+    print(
+        "  "
+        f"tradeability=canonical_state={readiness_snapshot.canonical_state} "
+        f"residual_class={readiness_snapshot.residual_class} "
+        f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+        f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
+        f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
+        f"execution_flat={1 if readiness_snapshot.execution_flat else 0} "
+        f"accounting_flat={1 if readiness_snapshot.accounting_flat else 0} "
+        f"effective_flat={1 if readiness_snapshot.effective_flat else 0} "
+        f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0} "
+        f"why_not={readiness_snapshot.why_not}"
     )
     print(
         "  "

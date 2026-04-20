@@ -113,11 +113,15 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     if (not exit_allowed) or sellable_executable_lot_count < 1:
         summary = {
             "status": "no_position",
+            "reason": str(exit_block_reason),
             "qty": float(canonical_exposure.open_exposure_qty),
             "raw_total_asset_qty": float(canonical_exposure.raw_total_asset_qty),
             "executable_exposure_qty": float(canonical_exposure.open_exposure_qty),
             "tracked_dust_qty": float(canonical_exposure.dust_tracking_qty),
             "terminal_state": terminal_state,
+            "execution_flat": True,
+            "closeout_allowed": False,
+            "sellable_executable_lot_count": int(sellable_executable_lot_count),
             "dry_run": int(bool(dry_run)),
             "trigger": trigger,
         }

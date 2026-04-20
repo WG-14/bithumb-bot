@@ -984,6 +984,128 @@ def test_ops_report_surfaces_missing_lot_authority_as_non_dust_recovery_state(
     assert summary["dust_state"] == "no_dust"
 
 
+def test_ops_report_makes_resume_ready_but_entry_blocked_tracked_dust_explicit(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = str(tmp_path / "ops-report-tracked-dust-tradeability.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "PAIR", "BTC_KRW")
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.get_effective_order_rules",
+        lambda _pair: order_rules.RuleResolution(
+            rules=order_rules.OrderRules(
+                min_qty=0.0001,
+                qty_step=0.0001,
+                min_notional_krw=5000.0,
+                max_qty_decimals=8,
+                bid_min_total_krw=5500.0,
+                ask_min_total_krw=5000.0,
+                bid_price_unit=10.0,
+                ask_price_unit=1.0,
+            ),
+            source={},
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.reporting.BithumbBroker",
+        lambda: type(
+            "_DiagBroker",
+            (),
+            {
+                "get_balance_snapshot": lambda self: None,
+                "get_accounts_validation_diagnostics": lambda self: {
+                    "source": "accounts_v1_rest_snapshot",
+                    "reason": "ok",
+                },
+            },
+        )(),
+    )
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        residual_qty = 0.00019996
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000.0, ?, 1000.0, 0.0, ?, 0.0)
+            """,
+            (residual_qty, residual_qty),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                1,
+                "tracked-dust-buy",
+                "tracked-dust-fill",
+                1_700_000_000_000,
+                7_050_000.0,
+                residual_qty,
+                0,
+                1,
+                1,
+                residual_qty,
+                0.0003,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "dust_tracking",
+                0.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.enable_trading()
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+            "dust_broker_qty": 0.0,
+            "dust_local_qty": 0.0,
+        },
+        now_epoch_sec=1000.0,
+    )
+
+    cmd_ops_report(limit=1)
+    out = capsys.readouterr().out
+
+    assert "dust_state=no_dust" in out
+    assert "position_authority_summary=holding_authority_state=dust_only" in out
+    assert "canonical_state=DUST_ONLY_TRACKED residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
+    assert "run_loop_allowed=1 new_entry_allowed=0 closeout_allowed=0" in out
+    assert "why_not=new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder" in out
+
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+    summary = payload["operator_recovery_summary"]
+    assert summary["canonical_state"] == "DUST_ONLY_TRACKED"
+    assert summary["residual_class"] == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert summary["run_loop_allowed"] is True
+    assert summary["new_entry_allowed"] is False
+    assert summary["closeout_allowed"] is False
+    assert summary["execution_flat"] is True
+    assert summary["accounting_flat"] is False
+    assert summary["operator_action_required"] is True
+    assert summary["dust_state"] == "no_dust"
+
+
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):
     db_path = str(tmp_path / "ops-report-position-state-top-level.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

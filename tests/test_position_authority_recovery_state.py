@@ -512,6 +512,15 @@ def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_s
     assert repair["repair"]["created"] is True
     assert after.recovery_stage == "RESUME_READY"
     assert after.resume_ready is True
+    assert after.canonical_state == "DUST_ONLY_TRACKED"
+    assert after.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert after.run_loop_allowed is True
+    assert after.new_entry_allowed is False
+    assert after.closeout_allowed is False
+    assert after.execution_flat is True
+    assert after.accounting_flat is False
+    assert after.operator_action_required is True
+    assert after.why_not == "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
     assert fee_gap_after["needs_repair"] is False
     assert fee_gap_after["already_repaired"] is True
 
@@ -547,15 +556,56 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
         conn.close()
 
     cases = [
-        (flat, flat_fee_gap, "FLAT", True, True),
-        (open_readiness, open_fee_gap, "OPEN_EXECUTABLE", False, False),
-        (dust_readiness, dust_fee_gap, "DUST_ONLY_TRACKED", True, False),
-        (non_exec_readiness, non_exec_fee_gap, "AUTHORITY_MISSING", False, False),
+        (flat, flat_fee_gap, "FLAT", "NONE", True, True, True, False),
+        (
+            open_readiness,
+            open_fee_gap,
+            "OPEN_EXECUTABLE",
+            "EXECUTABLE_OPEN_EXPOSURE",
+            False,
+            False,
+            False,
+            False,
+        ),
+        (
+            dust_readiness,
+            dust_fee_gap,
+            "DUST_ONLY_TRACKED",
+            "TRACKED_DUST_BLOCK_NEW_ENTRY",
+            True,
+            False,
+            False,
+            True,
+        ),
+        (
+            non_exec_readiness,
+            non_exec_fee_gap,
+            "AUTHORITY_MISSING",
+            "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION",
+            False,
+            False,
+            False,
+            True,
+        ),
     ]
-    for readiness, fee_gap, canonical_state, execution_flat, accounting_flat in cases:
+    for (
+        readiness,
+        fee_gap,
+        canonical_state,
+        residual_class,
+        execution_flat,
+        accounting_flat,
+        new_entry_allowed,
+        operator_action_required,
+    ) in cases:
         assert readiness.canonical_state == canonical_state
+        assert readiness.residual_class == residual_class
+        assert readiness.run_loop_allowed is readiness.resume_ready
+        assert readiness.new_entry_allowed is new_entry_allowed
+        assert readiness.operator_action_required is operator_action_required
         assert readiness.execution_flat is execution_flat
         assert readiness.accounting_flat is accounting_flat
+        assert readiness.tradeability.as_dict()["residual_class"] == residual_class
         assert fee_gap["canonical_state"] == canonical_state
         assert fee_gap["execution_flat"] is execution_flat
         assert fee_gap["accounting_flat"] is accounting_flat
