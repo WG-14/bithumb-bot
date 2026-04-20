@@ -15,6 +15,7 @@ from .db_core import (
 from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
+from .recovery_policy import classify_canonical_recovery_state
 from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
@@ -145,6 +146,12 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         int(lot_snapshot.open_lot_count) > 0
         and bool(readiness.position_state.normalized_exposure.has_executable_exposure)
     )
+    canonical_recovery = classify_canonical_recovery_state(
+        position_state=readiness.position_state,
+        lot_snapshot=lot_snapshot,
+        portfolio_asset_qty=portfolio_asset_qty,
+        reserved_exit_qty=reserved_exit_qty,
+    )
     policy = classify_fee_gap_debt_policy(
         needs_repair=needs_repair,
         already_repaired=already_repaired,
@@ -153,6 +160,9 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         blocked_by_open_exposure=blocked_by_open_exposure,
         blocked_by_dust_residue=blocked_by_dust_residue,
         has_executable_open_exposure=has_executable_open_exposure,
+        canonical_state=canonical_recovery.canonical_state,
+        execution_flat=canonical_recovery.execution_flat,
+        accounting_flat=canonical_recovery.accounting_flat,
     )
 
     if already_repaired and not needs_repair:
@@ -162,9 +172,19 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     else:
         eligibility_reason = ", ".join(reasons or ["fee-gap accounting repair not applicable"])
 
-    safe_to_apply = bool(needs_repair and not reasons)
+    safe_to_apply = bool(
+        needs_repair
+        and (
+            not reasons
+            or str(policy.repair_eligibility_state) == "safe_to_apply_with_tracked_dust"
+        )
+    )
     if safe_to_apply:
-        eligibility_reason = "fee-gap accounting repair applicable"
+        eligibility_reason = (
+            "fee-gap accounting repair applicable with tracked dust-only residue"
+            if str(policy.repair_eligibility_state) == "safe_to_apply_with_tracked_dust"
+            else "fee-gap accounting repair applicable"
+        )
     elif needs_repair and str(policy.repair_eligibility_state) == "blocked_until_flattened":
         eligibility_reason = (
             "fee-gap accounting repair deferred until open position is flat: "
@@ -202,6 +222,11 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "open_lot_count": int(lot_snapshot.open_lot_count),
         "dust_tracking_lot_count": int(lot_snapshot.dust_tracking_lot_count),
         "reserved_exit_qty": float(reserved_exit_qty),
+        "canonical_state": canonical_recovery.canonical_state,
+        "execution_flat": bool(canonical_recovery.execution_flat),
+        "accounting_flat": bool(canonical_recovery.accounting_flat),
+        "closeout_blocking_residue": bool(canonical_recovery.closeout_blocking_residue),
+        "residue_kind": canonical_recovery.residue_kind,
         "fee_gap_accounting_repair_count": int(repair_summary.get("repair_count") or 0),
         "fee_gap_accounting_repair_last_event_ts": repair_summary.get("last_event_ts"),
         "recovery_stage": readiness.recovery_stage,

@@ -6,7 +6,7 @@ import pytest
 
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, record_broker_fill_observation
+from bithumb_bot.db_core import ensure_db, record_broker_fill_observation, set_portfolio_breakdown
 from bithumb_bot.engine import (
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
@@ -14,8 +14,11 @@ from bithumb_bot.engine import (
     get_health_status,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
-from bithumb_bot.fee_gap_repair import build_fee_gap_accounting_repair_preview
-from bithumb_bot.fee_pending_repair import apply_fee_pending_accounting_repair
+from bithumb_bot.fee_gap_repair import apply_fee_gap_accounting_repair, build_fee_gap_accounting_repair_preview
+from bithumb_bot.fee_pending_repair import (
+    apply_fee_pending_accounting_repair,
+    build_fee_pending_accounting_repair_preview,
+)
 from bithumb_bot.lifecycle import summarize_position_lots
 from bithumb_bot.oms import set_status
 from bithumb_bot.position_authority_repair import (
@@ -457,3 +460,195 @@ def test_partial_close_residual_normalization_replays_buy_and_sell_authority(rec
     assert health["startup_gate_reason"] is None
     assert health["resume_gate_blocked"] is False
     assert all(ok for _label, ok, _detail in restart)
+
+
+def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_state(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        _corrupt_latest_buy_lot_as_incident(conn)
+        apply_position_authority_rebuild(conn)
+        _apply_fee_pending_sell(conn)
+        apply_position_authority_rebuild(conn)
+        conn.commit()
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="FEE_GAP_RECOVERY_REQUIRED",
+            metadata={
+                "fee_gap_recovery_required": 1,
+                "material_zero_fee_fill_count": 1,
+                "material_zero_fee_fill_latest_ts": 1_700_000_100_050,
+                "fee_gap_adjustment_count": 1,
+                "fee_gap_adjustment_total_krw": 17.73,
+                "fee_gap_adjustment_latest_event_ts": 1_700_000_200_000,
+                "external_cash_adjustment_reason": "reconcile_fee_gap_cash_drift",
+            },
+            now_epoch_sec=1.0,
+        )
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+        fee_gap = build_fee_gap_accounting_repair_preview(conn)
+        resume_allowed_before, resume_blockers_before = evaluate_resume_eligibility()
+        repair = apply_fee_gap_accounting_repair(conn)
+        conn.commit()
+        after = compute_runtime_readiness_snapshot(conn)
+        fee_gap_after = build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+
+    assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+    assert readiness.execution_flat is True
+    assert readiness.accounting_flat is False
+    assert readiness.recovery_stage == "HISTORICAL_FEE_GAP_PENDING"
+    assert fee_gap["canonical_state"] == "DUST_ONLY_TRACKED"
+    assert fee_gap["execution_flat"] is True
+    assert fee_gap["accounting_flat"] is False
+    assert fee_gap["needs_repair"] is True
+    assert fee_gap["safe_to_apply"] is True
+    assert fee_gap["repair_eligibility_state"] == "safe_to_apply_with_tracked_dust"
+    assert fee_gap["next_required_action"] == "apply_fee_gap_accounting_repair"
+    assert resume_allowed_before is False
+    assert any(blocker.reason_code == "FEE_GAP_RECOVERY_REQUIRED" for blocker in resume_blockers_before)
+    assert repair["repair"]["created"] is True
+    assert after.recovery_stage == "RESUME_READY"
+    assert after.resume_ready is True
+    assert fee_gap_after["needs_repair"] is False
+    assert fee_gap_after["already_repaired"] is True
+
+
+def test_recovery_policy_cross_module_consistency_for_representative_states(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        flat = compute_runtime_readiness_snapshot(conn)
+        flat_fee_gap = build_fee_gap_accounting_repair_preview(conn)
+
+        _apply_fee_pending_buy(conn, client_order_id="open_buy", fill_id="open-fill")
+        open_readiness = compute_runtime_readiness_snapshot(conn)
+        open_fee_gap = build_fee_gap_accounting_repair_preview(conn)
+
+        _apply_fee_pending_sell(conn, client_order_id="open_sell", fill_id="open-sell-fill")
+        apply_position_authority_rebuild(conn)
+        conn.commit()
+        dust_readiness = compute_runtime_readiness_snapshot(conn)
+        dust_fee_gap = build_fee_gap_accounting_repair_preview(conn)
+
+        conn.execute("DELETE FROM open_position_lots")
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.123,
+            asset_locked=0.0,
+        )
+        conn.commit()
+        non_exec_readiness = compute_runtime_readiness_snapshot(conn)
+        non_exec_fee_gap = build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+
+    cases = [
+        (flat, flat_fee_gap, "FLAT", True, True),
+        (open_readiness, open_fee_gap, "OPEN_EXECUTABLE", False, False),
+        (dust_readiness, dust_fee_gap, "DUST_ONLY_TRACKED", True, False),
+        (non_exec_readiness, non_exec_fee_gap, "AUTHORITY_MISSING", False, False),
+    ]
+    for readiness, fee_gap, canonical_state, execution_flat, accounting_flat in cases:
+        assert readiness.canonical_state == canonical_state
+        assert readiness.execution_flat is execution_flat
+        assert readiness.accounting_flat is accounting_flat
+        assert fee_gap["canonical_state"] == canonical_state
+        assert fee_gap["execution_flat"] is execution_flat
+        assert fee_gap["accounting_flat"] is accounting_flat
+
+
+def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomplete(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="fee_incomplete_existing_fill",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_002_000_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="fee_incomplete_existing_fill",
+            side="BUY",
+            fill_id="fee-incomplete-fill",
+            fill_ts=1_700_002_000_100,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=0.0,
+        )
+        set_status("fee_incomplete_existing_fill", "FILLED", conn=conn)
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_700_002_000_200,
+            client_order_id="fee_incomplete_existing_fill",
+            exchange_order_id="ex-fee-incomplete",
+            fill_id="fee-incomplete-fill",
+            fill_ts=1_700_002_000_100,
+            side="BUY",
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=None,
+            fee_status="missing",
+            accounting_status="fee_pending",
+            source="test_existing_fill_fee_pending",
+            raw_payload={"fixture": "existing-fill-fee-pending"},
+        )
+        conn.commit()
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="FILL_FEE_PENDING_RECOVERY_REQUIRED",
+            metadata={"fee_pending_recovery_required": 1},
+            now_epoch_sec=1.0,
+        )
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id="fee_incomplete_existing_fill",
+            fill_id="fee-incomplete-fill",
+            fee=3.21,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        result = apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="fee_incomplete_existing_fill",
+            fill_id="fee-incomplete-fill",
+            fee=3.21,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        conn.commit()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS cnt, SUM(fee) AS fee_total FROM fills WHERE client_order_id='fee_incomplete_existing_fill'"
+        ).fetchone()
+        complete_observation = conn.execute(
+            """
+            SELECT fee_status, accounting_status
+            FROM broker_fill_observations
+            WHERE client_order_id='fee_incomplete_existing_fill'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert readiness.fee_pending_count == 1
+    assert preview["needs_repair"] is True
+    assert preview["safe_to_apply"] is True
+    assert preview["repair_mode"] == "complete_existing_fill_fee"
+    assert "fill_already_accounted" not in preview["eligibility_reason"]
+    assert result["applied_fill"]["repair_mode"] == "complete_existing_fill_fee"
+    assert fill_count["cnt"] == 1
+    assert fill_count["fee_total"] == pytest.approx(3.21)
+    assert complete_observation["fee_status"] == "operator_confirmed"
+    assert complete_observation["accounting_status"] == "accounting_complete"

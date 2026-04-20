@@ -2757,6 +2757,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(
         "    "
         f"needed={1 if bool(fee_gap_repair_preview.get('needs_repair')) else 0} "
+        f"canonical_state={fee_gap_repair_preview.get('canonical_state') or 'unknown'} "
+        f"execution_flat={1 if bool(fee_gap_repair_preview.get('execution_flat')) else 0} "
+        f"accounting_flat={1 if bool(fee_gap_repair_preview.get('accounting_flat')) else 0} "
         f"resume_blocking={1 if bool(fee_gap_repair_preview.get('resume_blocking')) else 0} "
         f"closeout_blocking={1 if bool(fee_gap_repair_preview.get('closeout_blocking')) else 0} "
         f"resume_policy={fee_gap_repair_preview.get('resume_policy') or 'none'} "
@@ -3079,6 +3082,9 @@ def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False,
             f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
             f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
             f"already_repaired={1 if bool(preview['already_repaired']) else 0} "
+            f"canonical_state={preview.get('canonical_state') or 'unknown'} "
+            f"execution_flat={1 if bool(preview.get('execution_flat')) else 0} "
+            f"accounting_flat={1 if bool(preview.get('accounting_flat')) else 0} "
             f"resume_blocking={1 if bool(preview['resume_blocking']) else 0} "
             f"closeout_blocking={1 if bool(preview['closeout_blocking']) else 0} "
             f"resume_policy={preview['resume_policy']} "
@@ -3169,6 +3175,7 @@ def cmd_fee_pending_accounting_repair(
             "  "
             f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
             f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
+            f"repair_mode={preview.get('repair_mode') or 'unknown'} "
             f"eligibility_reason={preview['eligibility_reason']}"
         )
         print(
@@ -3191,6 +3198,8 @@ def cmd_fee_pending_accounting_repair(
             "  "
             f"order_status={preview.get('order_status') or 'none'} "
             f"projected_status={preview.get('projected_status') or 'none'} "
+            f"existing_fill_id={preview.get('existing_fill_id') or 'none'} "
+            f"existing_fill_fee={preview.get('existing_fill_fee') if preview.get('existing_fill_fee') is not None else 'none'} "
             f"pending_observation_count={int(preview['pending_observation_count'])} "
             f"existing_fee_pending_accounting_repairs={int(repair_summary.get('repair_count') or 0)}"
         )
@@ -3254,6 +3263,7 @@ def cmd_fee_pending_accounting_repair(
     print(
         "  "
         f"fee={float(repair['fee']):.8f} "
+        f"repair_mode={(result.get('applied_fill', {}).get('repair_mode') if isinstance(result.get('applied_fill'), dict) else None) or 'apply_missing_fill'} "
         f"open_lot_count={int(post_lot_snapshot.get('open_lot_count') or 0)} "
         f"dust_tracking_lot_count={int(post_lot_snapshot.get('dust_tracking_lot_count') or 0)} "
         f"executable_exposure_qty={float(post_lot_snapshot.get('executable_exposure_qty') or 0.0):.12f}"

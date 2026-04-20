@@ -52,11 +52,11 @@ def _load_pending_observations(
     ).fetchall()
 
 
-def _fill_already_accounted(conn, *, client_order_id: str, fill_id: str | None, fill_ts: int, price: float, qty: float) -> bool:
+def _load_existing_fill(conn, *, client_order_id: str, fill_id: str | None, fill_ts: int, price: float, qty: float):
     if fill_id:
         row = conn.execute(
             """
-            SELECT 1
+            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
             FROM fills
             WHERE client_order_id=? AND fill_id=?
             LIMIT 1
@@ -64,17 +64,31 @@ def _fill_already_accounted(conn, *, client_order_id: str, fill_id: str | None, 
             (client_order_id, fill_id),
         ).fetchone()
         if row is not None:
-            return True
-    row = conn.execute(
+            return row
+    return conn.execute(
         """
-        SELECT 1
+        SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
         FROM fills
         WHERE client_order_id=? AND fill_ts=? AND ABS(price-?) < 1e-12 AND ABS(qty-?) < 1e-12
         LIMIT 1
         """,
         (client_order_id, int(fill_ts), float(price), float(qty)),
     ).fetchone()
-    return row is not None
+
+
+def _existing_fill_fee_complete(existing_fill: Any | None) -> bool:
+    if existing_fill is None:
+        return False
+    try:
+        fee = existing_fill["fee"]
+    except (KeyError, IndexError, TypeError):
+        fee = None
+    if fee is None:
+        return False
+    try:
+        return float(fee) > 1e-12
+    except (TypeError, ValueError):
+        return False
 
 
 def build_fee_pending_accounting_repair_preview(
@@ -134,21 +148,24 @@ def build_fee_pending_accounting_repair_preview(
     notional = price * qty if math.isfinite(price) and math.isfinite(qty) else 0.0
 
     if observation is not None:
-        if side not in {"BUY", "SELL"}:
-            reasons.append(f"invalid_observed_side={side or 'none'}")
-        if price <= 0.0:
-            reasons.append("invalid_observed_price")
-        if qty <= 0.0:
-            reasons.append("invalid_observed_qty")
-        if _fill_already_accounted(
+        existing_fill = _load_existing_fill(
             conn,
             client_order_id=client_order_id_text,
             fill_id=observation_fill_id or None,
             fill_ts=fill_ts,
             price=price,
             qty=qty,
-        ):
+        )
+        if side not in {"BUY", "SELL"}:
+            reasons.append(f"invalid_observed_side={side or 'none'}")
+        if price <= 0.0:
+            reasons.append("invalid_observed_price")
+        if qty <= 0.0:
+            reasons.append("invalid_observed_qty")
+        if _existing_fill_fee_complete(existing_fill):
             reasons.append("fill_already_accounted")
+    else:
+        existing_fill = None
     if order is not None and observation is not None:
         order_side = _clean_text(order["side"]).upper()
         if order_side != side:
@@ -169,10 +186,13 @@ def build_fee_pending_accounting_repair_preview(
         ", ".join(reasons or ["fee-pending accounting repair not applicable"])
     )
 
+    repair_mode = "complete_existing_fill_fee" if existing_fill is not None else "apply_missing_fill"
     projected_status = "unknown"
     projected_qty_filled = None
     if order is not None and observation is not None:
-        projected_qty_filled = float(order["qty_filled"] or 0.0) + qty
+        projected_qty_filled = float(order["qty_filled"] or 0.0)
+        if existing_fill is None:
+            projected_qty_filled += qty
         qty_req = float(order["qty_req"] or 0.0)
         projected_status = (
             "FILLED"
@@ -181,16 +201,22 @@ def build_fee_pending_accounting_repair_preview(
         )
 
     return {
-        "needs_repair": bool(observation is not None and not bool(_fill_already_accounted(
-            conn,
-            client_order_id=client_order_id_text,
-            fill_id=(observation_fill_id or None),
-            fill_ts=fill_ts,
-            price=price,
-            qty=qty,
-        )) if observation is not None else False),
+        "needs_repair": bool(
+            observation is not None
+            and (
+                existing_fill is None
+                or not _existing_fill_fee_complete(existing_fill)
+            )
+        ),
         "safe_to_apply": safe_to_apply,
         "eligibility_reason": eligibility_reason,
+        "repair_mode": repair_mode,
+        "existing_fill_id": int(existing_fill["id"]) if existing_fill is not None else None,
+        "existing_fill_fee": (
+            float(existing_fill["fee"])
+            if existing_fill is not None and existing_fill["fee"] is not None
+            else None
+        ),
         "client_order_id": client_order_id_text,
         "exchange_order_id": observation_exchange_order_id or exchange_order_id_text,
         "fill_id": observation_fill_id or None,
@@ -289,18 +315,57 @@ def apply_fee_pending_accounting_repair(
         repair_basis=repair_basis,
         note=note,
     )
-    applied = apply_fill_and_trade(
-        conn,
-        client_order_id=str(preview["client_order_id"]),
-        side=str(preview["side"]),
-        fill_id=str(preview["fill_id"] or "") or None,
-        fill_ts=int(preview["fill_ts"]),
-        price=float(preview["price"]),
-        qty=float(preview["qty"]),
-        fee=float(preview["fee"]),
-        note=f"fee_pending_accounting_repair repair_key={repair['repair_key']}",
-        allow_entry_decision_fallback=False,
-    )
+    if str(preview.get("repair_mode")) == "complete_existing_fill_fee":
+        existing_fill_id = int(preview["existing_fill_id"] or 0)
+        if existing_fill_id <= 0:
+            raise RuntimeError("existing fill fee repair missing existing_fill_id")
+        conn.execute(
+            "UPDATE fills SET fee=? WHERE id=?",
+            (float(preview["fee"]), existing_fill_id),
+        )
+        conn.execute(
+            """
+            UPDATE trades
+            SET fee=?
+            WHERE client_order_id=?
+              AND ts=?
+              AND ABS(price-?) < 1e-12
+              AND ABS(qty-?) < 1e-12
+            """,
+            (
+                float(preview["fee"]),
+                str(preview["client_order_id"]),
+                int(preview["fill_ts"]),
+                float(preview["price"]),
+                float(preview["qty"]),
+            ),
+        )
+        replay_after_fee = compute_accounting_replay(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=normalize_cash_amount(replay_after_fee["replay_cash"]),
+            cash_locked=0.0,
+            asset_available=normalize_asset_qty(replay_after_fee["replay_qty"]),
+            asset_locked=0.0,
+        )
+        applied = {
+            "repair_mode": "complete_existing_fill_fee",
+            "existing_fill_id": existing_fill_id,
+            "fee": float(preview["fee"]),
+        }
+    else:
+        applied = apply_fill_and_trade(
+            conn,
+            client_order_id=str(preview["client_order_id"]),
+            side=str(preview["side"]),
+            fill_id=str(preview["fill_id"] or "") or None,
+            fill_ts=int(preview["fill_ts"]),
+            price=float(preview["price"]),
+            qty=float(preview["qty"]),
+            fee=float(preview["fee"]),
+            note=f"fee_pending_accounting_repair repair_key={repair['repair_key']}",
+            allow_entry_decision_fallback=False,
+        )
     set_status(
         str(preview["client_order_id"]),
         str(preview["projected_status"]),

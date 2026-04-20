@@ -12,6 +12,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
+from .recovery_policy import classify_canonical_recovery_state
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,9 @@ class RuntimeReadinessSnapshot:
     open_order_count: int
     recovery_required_count: int
     position_authority_assessment: dict[str, object]
+    canonical_state: str
+    execution_flat: bool
+    accounting_flat: bool
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -57,6 +61,9 @@ class RuntimeReadinessSnapshot:
             "open_order_count": int(self.open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
+            "canonical_state": self.canonical_state,
+            "execution_flat": bool(self.execution_flat),
+            "accounting_flat": bool(self.accounting_flat),
         }
 
 
@@ -105,6 +112,8 @@ def _unaccounted_fee_pending_observation_count(conn: Any) -> int:
                   SELECT 1
                   FROM fills f
                   WHERE f.client_order_id=b.client_order_id
+                    AND f.fee IS NOT NULL
+                    AND f.fee > 1e-12
                     AND (
                          (b.fill_id IS NOT NULL AND f.fill_id=b.fill_id)
                          OR (
@@ -195,6 +204,12 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         material_zero_fee_fill_count = _metadata_int(metadata, "material_zero_fee_fill_count")
         material_zero_fee_fill_latest_ts = _metadata_int(metadata, "material_zero_fee_fill_latest_ts")
         authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        canonical_recovery = classify_canonical_recovery_state(
+            position_state=position_state,
+            lot_snapshot=lot_snapshot,
+            portfolio_asset_qty=portfolio_asset_qty,
+            reserved_exit_qty=reserved_exit_qty,
+        )
         repair_summary = get_fee_gap_accounting_repair_summary(conn)
         already_repaired_fee_gap = matching_fee_gap_repair_present(
             repair_summary=repair_summary,
@@ -252,6 +267,9 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 int(lot_snapshot.open_lot_count) > 0
                 and position_state.normalized_exposure.has_executable_exposure
             ),
+            canonical_state=canonical_recovery.canonical_state,
+            execution_flat=canonical_recovery.execution_flat,
+            accounting_flat=canonical_recovery.accounting_flat,
         )
 
         blockers: list[str] = []
@@ -348,6 +366,9 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             open_order_count=open_order_count,
             recovery_required_count=recovery_required_count,
             position_authority_assessment=authority_assessment,
+            canonical_state=canonical_recovery.canonical_state,
+            execution_flat=canonical_recovery.execution_flat,
+            accounting_flat=canonical_recovery.accounting_flat,
         )
     finally:
         if close_conn:

@@ -83,6 +83,9 @@ def classify_fee_gap_debt_policy(
     blocked_by_open_exposure: bool,
     blocked_by_dust_residue: bool,
     has_executable_open_exposure: bool,
+    canonical_state: str = "UNKNOWN",
+    execution_flat: bool = False,
+    accounting_flat: bool = False,
 ) -> FeeGapDebtPolicy:
     unique_reasons = tuple(dict.fromkeys(str(reason) for reason in repair_blocker_reasons if str(reason)))
     reason_prefixes = {_reason_prefix(reason) for reason in unique_reasons}
@@ -146,6 +149,31 @@ def classify_fee_gap_debt_policy(
         )
 
     only_position_residue_blocks = bool(reason_prefixes) and reason_prefixes <= _POSITION_RESIDUE_REPAIR_BLOCKERS
+    if (
+        only_position_residue_blocks
+        and str(canonical_state) == "DUST_ONLY_TRACKED"
+        and bool(execution_flat)
+        and not bool(accounting_flat)
+        and blocked_by_dust_residue
+        and not has_executable_open_exposure
+    ):
+        return FeeGapDebtPolicy(
+            repair_eligibility_state="safe_to_apply_with_tracked_dust",
+            repair_blocker_reasons=unique_reasons,
+            resume_policy="hard_block_until_applied",
+            resume_blocking=True,
+            closeout_blocking=True,
+            readiness_stage="HISTORICAL_FEE_GAP_PENDING",
+            blocker_category="historical_accounting_debt",
+            operator_next_action="apply_fee_gap_accounting_repair",
+            recommended_command="uv run python bot.py fee-gap-accounting-repair --apply --yes",
+            next_required_action="apply_fee_gap_accounting_repair",
+            policy_reason=(
+                "fee-gap debt is historical and current residue is tracked dust only; "
+                "execution is flat, so the accounting repair may be recorded without a SELL"
+            ),
+        )
+
     if (
         only_position_residue_blocks
         and has_executable_open_exposure
