@@ -3651,6 +3651,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
             "reserved_exit_lot_count": int(position_state.normalized_exposure.reserved_exit_lot_count),
             "sellable_executable_lot_count": int(position_state.normalized_exposure.sellable_executable_lot_count),
             "sellable_executable_qty": float(position_state.normalized_exposure.sellable_executable_qty),
+            "internal_lot_size": float(position_state.normalized_exposure.internal_lot_size),
             "terminal_state": str(position_state.normalized_exposure.terminal_state),
             "exit_block_reason": str(position_state.normalized_exposure.exit_block_reason),
         }
@@ -3735,6 +3736,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"tracked_dust_qty={float(position_state.normalized_exposure.dust_tracking_qty):.8f} "
         f"reserved_exit_qty={float(position_state.normalized_exposure.reserved_exit_qty):.8f} "
         f"sellable_executable_qty={float(position_state.normalized_exposure.sellable_executable_qty):.8f} "
+        f"internal_lot_size={float(position_state.normalized_exposure.internal_lot_size):.8f} "
         f"terminal_state={position_state.normalized_exposure.terminal_state}"
     )
     print(

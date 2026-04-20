@@ -225,7 +225,7 @@ def _replace_with_tracked_dust_row(
             0,
             1,
             1,
-            residual_qty,
+            LOT_SIZE,
             min_qty,
             0.0001,
             0.0,
@@ -336,7 +336,8 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
         _apply_fee_pending_sell(conn)
         after_sell_rows = conn.execute(
             """
-            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, lot_min_qty, lot_qty_step
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count,
+                   internal_lot_size, lot_min_qty, lot_qty_step
             FROM open_position_lots
             WHERE entry_client_order_id='incident_buy'
             ORDER BY id ASC
@@ -362,6 +363,7 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
     assert after_sell_rows[0]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
     assert after_sell_rows[0]["executable_lot_count"] == 0
     assert after_sell_rows[0]["dust_tracking_lot_count"] == 1
+    assert after_sell_rows[0]["internal_lot_size"] == pytest.approx(LOT_SIZE)
     assert after_sell_rows[0]["lot_min_qty"] == pytest.approx(0.0002)
     assert after_sell_rows[0]["lot_qty_step"] == pytest.approx(0.0001)
     assert assessment["partial_close_residual_candidate"] is True
@@ -377,7 +379,7 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
     assert readiness.operator_action_required is False
     assert (
         readiness.position_state.normalized_exposure.dust_operability_state
-        == "sub_min_tracked_dust_entry_allowed"
+        == "below_internal_lot_boundary_tracked_residue_entry_allowed"
     )
     assert readiness.as_dict()["run_loop_scope"] == "process_resume_only"
     assert readiness.as_dict()["trading_permission_scope"] == "new_entry_or_closeout"
@@ -412,18 +414,92 @@ def test_sub_min_tracked_dust_paths_converge_to_entry_allowed_operability(recove
         assert readiness.accounting_flat is False
         assert readiness.position_state.normalized_exposure.sellable_executable_lot_count == 0
         assert readiness.position_state.normalized_exposure.dust_operability_state == (
-            "sub_min_tracked_dust_entry_allowed"
+            "below_internal_lot_boundary_tracked_residue_entry_allowed"
         )
+
+
+def test_incident_event_sourced_paths_converge_on_same_lot_contract(recovery_db, tmp_path):
+    def _materialize(path, *, corrupt_residual_contract: bool = False, repair: bool = False):
+        conn = ensure_db(str(path))
+        try:
+            _apply_fee_pending_buy(conn)
+            _apply_fee_pending_sell(conn)
+            if corrupt_residual_contract:
+                conn.execute(
+                    """
+                    UPDATE open_position_lots
+                    SET internal_lot_size=qty_open
+                    WHERE entry_client_order_id='incident_buy'
+                      AND position_state='dust_tracking'
+                    """
+                )
+                conn.commit()
+            if repair:
+                before = build_position_authority_assessment(conn)
+                assert before["needs_residual_normalization"] is True
+                apply_position_authority_rebuild(conn)
+                conn.commit()
+            readiness = compute_runtime_readiness_snapshot(conn)
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count,
+                           internal_lot_size, lot_min_qty, lot_qty_step
+                    FROM open_position_lots
+                    WHERE entry_client_order_id='incident_buy'
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+            ]
+            lifecycles = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT entry_client_order_id, exit_client_order_id, matched_qty
+                    FROM trade_lifecycles
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+            ]
+            return {
+                "rows": rows,
+                "lifecycles": lifecycles,
+                "canonical_state": readiness.canonical_state,
+                "residual_class": readiness.residual_class,
+                "execution_flat": readiness.execution_flat,
+                "accounting_flat": readiness.accounting_flat,
+                "new_entry_allowed": readiness.new_entry_allowed,
+                "closeout_allowed": readiness.closeout_allowed,
+                "normalized_exposure": readiness.position_state.normalized_exposure.as_dict(),
+            }
+        finally:
+            conn.close()
+
+    normal = _materialize(tmp_path / "normal.sqlite")
+    replay = _materialize(tmp_path / "replay.sqlite")
+    repaired = _materialize(
+        tmp_path / "repair.sqlite",
+        corrupt_residual_contract=True,
+        repair=True,
+    )
+
+    assert normal == replay == repaired
+    assert normal["rows"][0]["position_state"] == "dust_tracking"
+    assert normal["rows"][0]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert normal["rows"][0]["internal_lot_size"] == pytest.approx(LOT_SIZE)
+    assert normal["normalized_exposure"]["internal_lot_size"] == pytest.approx(LOT_SIZE)
+    assert normal["normalized_exposure"]["sellable_executable_lot_count"] == 0
 
 
 @pytest.mark.parametrize(
     ("residual_qty", "new_entry_allowed", "operability_state"),
     [
-        (0.0001, True, "sub_min_tracked_dust_entry_allowed"),
-        (0.00019996, True, "sub_min_tracked_dust_entry_allowed"),
-        (0.00019999, True, "sub_min_tracked_dust_entry_allowed"),
-        (0.0002, False, "tracked_dust_operator_review_required"),
-        (0.00020001, False, "tracked_dust_operator_review_required"),
+        (0.0001, True, "below_internal_lot_boundary_tracked_residue_entry_allowed"),
+        (0.00019996, True, "below_internal_lot_boundary_tracked_residue_entry_allowed"),
+        (0.0002, True, "below_internal_lot_boundary_tracked_residue_entry_allowed"),
+        (0.00039999, True, "below_internal_lot_boundary_tracked_residue_entry_allowed"),
+        (0.0004, False, "tracked_dust_operator_review_required"),
     ],
 )
 def test_tracked_dust_operability_boundary_uses_stored_lot_min_qty(
@@ -491,6 +567,7 @@ def test_authority_correction_repairs_incident_dust_row_with_historical_sell_his
     assert rows[1]["position_state"] == "dust_tracking"
     assert rows[1]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
     assert rows[1]["dust_tracking_lot_count"] == 1
+    assert rows[1]["internal_lot_size"] == pytest.approx(LOT_SIZE)
 
 
 def test_fee_gap_deadlock_reports_authority_correction_as_next_stage(recovery_db):

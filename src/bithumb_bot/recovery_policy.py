@@ -83,14 +83,14 @@ def build_tradeability_operator_fields(
         residue_policy_message = "No lot-native residue is blocking run loop, new entry, or closeout policy."
     elif residual_class == "HARMLESS_DUST_TREAT_AS_FLAT":
         residue_policy_message = (
-            "Lot-native residue is preserved as accounting evidence and classified as sub-minimum "
-            "non-executable dust for entry policy; new entries may continue while SELL authority "
-            "remains based on sellable executable lots."
+            "Lot-native residue is preserved as accounting evidence and classified as below the "
+            "authoritative internal lot boundary for entry policy; new entries may continue while "
+            "SELL authority remains based on sellable executable lots."
         )
     elif residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY":
         residue_policy_message = (
-            "Run loop is allowed, but lot-native tracked dust is not proven sub-minimum and non-executable; "
-            "new entry and closeout are blocked until an operator reviews or resolves the tracked residue."
+            "Run loop is allowed, but lot-native tracked dust is not proven below the authoritative internal "
+            "lot boundary; new entry and closeout are blocked until an operator reviews or resolves the tracked residue."
         )
     elif residual_class == "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION":
         residue_policy_message = (

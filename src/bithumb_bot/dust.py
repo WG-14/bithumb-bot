@@ -4,7 +4,7 @@ import json
 import math
 import re
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final
 
@@ -639,6 +639,7 @@ class NormalizedExposure:
     reserved_exit_lot_count: int
     sellable_executable_lot_count: int
     sellable_executable_qty: float
+    internal_lot_size: float
     effective_min_trade_qty: float
     exit_non_executable_reason: str
     dust_context: DustDisplayContext | DustClassification | str | dict[str, object] | None
@@ -767,6 +768,7 @@ class NormalizedExposure:
             "submit_lot_count": int(self.submit_lot_count),
             "position_state_lot_count": int(self.submit_lot_count),
             "sellable_executable_qty": float(self.sellable_executable_qty),
+            "internal_lot_size": float(self.internal_lot_size),
             "effective_min_trade_qty": float(self.effective_min_trade_qty),
             "exit_non_executable_reason": self.exit_non_executable_reason,
             "dust_classification": self.dust_classification,
@@ -1425,6 +1427,7 @@ def build_position_state_model(
     reserved_exit_qty: float | None = None,
     open_lot_count: int | None = None,
     dust_tracking_lot_count: int | None = None,
+    internal_lot_size: float | None = None,
     market_price: float | None = None,
     min_qty: float | None = None,
     qty_step: float | None = None,
@@ -1444,6 +1447,7 @@ def build_position_state_model(
         reserved_exit_qty=reserved_exit_qty,
         open_lot_count=open_lot_count,
         dust_tracking_lot_count=dust_tracking_lot_count,
+        internal_lot_size=internal_lot_size,
         market_price=market_price,
         min_qty=min_qty,
         qty_step=qty_step,
@@ -1503,6 +1507,7 @@ def _build_position_state_normalized_exposure(
     reserved_exit_qty: float | None,
     open_lot_count: int | None,
     dust_tracking_lot_count: int | None,
+    internal_lot_size: float | None,
     market_price: float | None,
     min_qty: float | None,
     qty_step: float | None,
@@ -1521,6 +1526,7 @@ def _build_position_state_normalized_exposure(
         reserved_exit_qty=reserved_exit_qty,
         open_lot_count=open_lot_count,
         dust_tracking_lot_count=dust_tracking_lot_count,
+        internal_lot_size=internal_lot_size,
         market_price=market_price,
         min_qty=min_qty,
         qty_step=qty_step,
@@ -1565,6 +1571,7 @@ def _build_position_state_fields(
         "reserved_exit_lot_count": int(normalized_exposure.reserved_exit_lot_count),
         "sellable_executable_lot_count": int(normalized_exposure.sellable_executable_lot_count),
         "sellable_executable_qty": float(normalized_exposure.sellable_executable_qty),
+        "internal_lot_size": float(normalized_exposure.internal_lot_size),
     }
 
 
@@ -1578,6 +1585,7 @@ def build_normalized_exposure(
     reserved_exit_qty: float | None = None,
     open_lot_count: int | None = None,
     dust_tracking_lot_count: int | None = None,
+    internal_lot_size: float | None = None,
     market_price: float | None = None,
     min_qty: float | None = None,
     qty_step: float | None = None,
@@ -1621,6 +1629,14 @@ def build_normalized_exposure(
         exit_buffer_ratio=exit_buffer_ratio,
         source_mode="derived",
     )
+    authoritative_internal_lot_size = 0.0 if internal_lot_size is None else max(0.0, float(internal_lot_size))
+    if authoritative_internal_lot_size > DUST_POSITION_EPS:
+        lot_rules = replace(
+            lot_rules,
+            lot_size=float(authoritative_internal_lot_size),
+            executable_min_qty=max(float(lot_rules.executable_min_qty), float(authoritative_internal_lot_size)),
+            dust_threshold=max(float(lot_rules.dust_threshold), float(authoritative_internal_lot_size)),
+        )
     inventory = _normalize_position_inventory(
         raw_qty_open=raw_qty_open,
         raw_total_asset_qty=raw_total_asset_qty,
@@ -1698,25 +1714,26 @@ def build_normalized_exposure(
     has_executable_exposure = bool(normalized_sellable_lot_count > 0)
     has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
     has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
-    dust_only_below_min = bool(
+    dust_operability_boundary_qty = max(normalized_min_qty, authoritative_internal_lot_size)
+    dust_only_below_boundary = bool(
         has_dust_only_remainder
-        and normalized_min_qty > DUST_POSITION_EPS
-        and normalized_dust_tracking_qty < normalized_min_qty
+        and dust_operability_boundary_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty < dust_operability_boundary_qty
     )
     dust_only_boundary_or_above = bool(
         has_dust_only_remainder
-        and normalized_min_qty > DUST_POSITION_EPS
-        and normalized_dust_tracking_qty >= normalized_min_qty
+        and dust_operability_boundary_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty >= dust_operability_boundary_qty
     )
     if not has_dust_only_remainder:
         dust_operability_state = "none"
         dust_operability_reason = "no_dust_only_remainder"
-    elif dust_only_below_min:
-        dust_operability_state = "sub_min_tracked_dust_entry_allowed"
-        dust_operability_reason = "dust_tracking_qty_below_min_qty_preserved_as_accounting_evidence"
+    elif dust_only_below_boundary:
+        dust_operability_state = "below_internal_lot_boundary_tracked_residue_entry_allowed"
+        dust_operability_reason = "dust_tracking_qty_below_authoritative_lot_boundary_preserved_as_accounting_evidence"
     elif dust_only_boundary_or_above:
         dust_operability_state = "tracked_dust_operator_review_required"
-        dust_operability_reason = "dust_tracking_qty_at_or_above_min_qty"
+        dust_operability_reason = "dust_tracking_qty_at_or_above_authoritative_lot_boundary"
     else:
         dust_operability_state = "tracked_dust_operator_review_required"
         dust_operability_reason = "dust_tracking_min_qty_unknown"
@@ -1737,7 +1754,7 @@ def build_normalized_exposure(
         recovery_block_reason = "unresolved_orders_present"
     else:
         recovery_block_reason = "none"
-    dust_operably_flat = bool(dust_operability_state == "sub_min_tracked_dust_entry_allowed")
+    dust_operably_flat = bool(dust_operability_state == "below_internal_lot_boundary_tracked_residue_entry_allowed")
     entry_allowed = bool(
         normalized_total_asset_qty <= DUST_POSITION_EPS
         or should_treat_as_flat_for_entry_gate(display_context)
@@ -1792,6 +1809,7 @@ def build_normalized_exposure(
         reserved_exit_lot_count=normalized_reserved_exit_lot_count,
         sellable_executable_lot_count=normalized_sellable_lot_count,
         sellable_executable_qty=sellable_executable_qty,
+        internal_lot_size=float(lot_size),
         effective_min_trade_qty=float(executable_exposure.executable_lot.effective_min_trade_qty),
         exit_non_executable_reason=str(executable_exposure.executable_lot.exit_non_executable_reason),
         dust_context=display_context,

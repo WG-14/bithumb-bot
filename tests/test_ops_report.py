@@ -1055,8 +1055,8 @@ def test_ops_report_makes_resume_ready_sub_min_tracked_dust_entry_policy_explici
                 0,
                 1,
                 1,
-                residual_qty,
-                0.0003,
+                0.0004,
+                0.0001,
                 0.0001,
                 0.0,
                 8,
@@ -1095,6 +1095,7 @@ def test_ops_report_makes_resume_ready_sub_min_tracked_dust_entry_policy_explici
     assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
     assert "run_loop_allowed=1 new_entry_allowed=1 closeout_allowed=0" in out
     assert "why_not=closeout_blocked:dust_only_remainder" in out
+    assert "internal_lot_size=0.00040000" in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     summary = payload["operator_recovery_summary"]
@@ -1112,7 +1113,8 @@ def test_ops_report_makes_resume_ready_sub_min_tracked_dust_entry_policy_explici
     assert summary["residue_policy_scope"] == "lot_native_tradeability"
     assert summary["residue_policy_state"] == "HARMLESS_DUST_TREAT_AS_FLAT"
     assert summary["dust_tradeability_consistent"] is True
-    assert "sub-minimum non-executable dust" in summary["tradeability_operator_message"]
+    assert "authoritative internal lot boundary" in summary["tradeability_operator_message"]
+    assert summary["normalized_exposure"]["internal_lot_size"] == pytest.approx(0.0004)
 
 
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):

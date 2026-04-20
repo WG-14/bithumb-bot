@@ -6232,7 +6232,7 @@ def test_restart_checklist_scopes_safe_to_resume_when_sub_min_tracked_dust_allow
                 0,
                 1,
                 1,
-                residual_qty,
+                0.0004,
                 0.0002,
                 0.0001,
                 0.0,
@@ -6267,7 +6267,7 @@ def test_restart_checklist_scopes_safe_to_resume_when_sub_min_tracked_dust_allow
     assert "operator_action_required=0" in out
     assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
     assert "trading_block_reason=closeout_blocked:dust_only_remainder" in out
-    assert "sub-minimum non-executable dust" in out
+    assert "authoritative internal lot boundary" in out
 
 
 class _FlattenBrokerSuccess:

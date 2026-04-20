@@ -468,36 +468,61 @@ def test_open_position_lots_schema_rejects_executable_qty_lot_size_mismatch(tmp_
     conn.close()
 
 
-def test_open_position_lots_schema_rejects_dust_qty_lot_size_mismatch(tmp_path):
-    conn = ensure_db(str(tmp_path / "schema_dust_qty_mismatch.sqlite"))
+def test_open_position_lots_schema_allows_dust_residual_below_authoritative_lot_size(tmp_path):
+    conn = ensure_db(str(tmp_path / "schema_dust_qty_residual.sqlite"))
 
-    with pytest.raises(sqlite3.IntegrityError, match="dust qty must match lot authority"):
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            internal_lot_size,
+            position_semantic_basis,
+            position_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "BTC_KRW",
+            1,
+            "dust_qty_residual",
+            1_700_000_000_000,
+            40_000_000.0,
+            0.00015,
+            0,
+            1,
+            0.0004,
+            "lot-native",
+            DUST_TRACKING_LOT_STATE,
+        ),
+    )
+    row = conn.execute("SELECT internal_lot_size FROM open_position_lots").fetchone()
+    assert row["internal_lot_size"] == pytest.approx(0.0004)
+
+    with pytest.raises(sqlite3.IntegrityError, match="dust qty must not exceed lot authority"):
         conn.execute(
             """
             INSERT INTO open_position_lots(
-                pair,
-                entry_trade_id,
-                entry_client_order_id,
-                entry_ts,
-                entry_price,
-                qty_open,
-                executable_lot_count,
-                dust_tracking_lot_count,
-                internal_lot_size,
-                position_semantic_basis,
-                position_state
+                pair, entry_trade_id, entry_client_order_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size,
+                position_semantic_basis, position_state
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "BTC_KRW",
-                1,
-                "dust_qty_mismatch",
+                2,
+                "dust_qty_exceeds",
                 1_700_000_000_000,
                 40_000_000.0,
-                0.00015,
+                0.00045,
                 0,
-                2,
-                0.0001,
+                1,
+                0.0004,
                 "lot-native",
                 DUST_TRACKING_LOT_STATE,
             ),

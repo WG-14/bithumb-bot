@@ -100,6 +100,9 @@ def _partial_close_residual_state_converged(
     target_dust_qty: float,
     target_executable_lot_count: int,
     target_dust_lot_count: int,
+    target_min_internal_lot_size: float,
+    target_max_internal_lot_size: float,
+    expected_internal_lot_size: float,
 ) -> bool:
     """Return True when current tables already reflect the post-replay state.
 
@@ -121,6 +124,11 @@ def _partial_close_residual_state_converged(
     if abs(normalize_asset_qty(target_open_qty)) > _EPS:
         return False
     if int(target_executable_lot_count) != 0 or int(target_dust_lot_count) <= 0:
+        return False
+    if expected_internal_lot_size > _EPS and (
+        abs(float(target_min_internal_lot_size) - float(expected_internal_lot_size)) > _EPS
+        or abs(float(target_max_internal_lot_size) - float(expected_internal_lot_size)) > _EPS
+    ):
         return False
 
     placeholders = ",".join("?" for _ in sell_trade_ids)
@@ -294,6 +302,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_dust_qty = normalize_asset_qty(_row_float(lot_row, "dust_tracking_qty"))
     target_executable_lot_count = _row_int(lot_row, "executable_lot_count")
     target_dust_lot_count = _row_int(lot_row, "dust_tracking_lot_count")
+    target_min_internal_lot_size = _row_float(lot_row, "min_internal_lot_size")
+    target_max_internal_lot_size = _row_float(lot_row, "max_internal_lot_size")
     sell_after_count = _row_int(sell_after_row, "cnt")
     sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
     sell_trade_ids = [_row_int(row, "id") for row in sell_after_rows]
@@ -345,6 +355,9 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         target_dust_qty=target_dust_qty,
         target_executable_lot_count=target_executable_lot_count,
         target_dust_lot_count=target_dust_lot_count,
+        target_min_internal_lot_size=target_min_internal_lot_size,
+        target_max_internal_lot_size=target_max_internal_lot_size,
+        expected_internal_lot_size=canonical_lot_size,
     )
     needs_residual_normalization = bool(
         partial_close_residual_candidate and not residual_state_converged
@@ -402,8 +415,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "existing_dust_tracking_qty": target_dust_qty,
         "existing_executable_lot_count": target_executable_lot_count,
         "existing_dust_tracking_lot_count": target_dust_lot_count,
-        "existing_min_internal_lot_size": _row_float(lot_row, "min_internal_lot_size"),
-        "existing_max_internal_lot_size": _row_float(lot_row, "max_internal_lot_size"),
+        "existing_min_internal_lot_size": target_min_internal_lot_size,
+        "existing_max_internal_lot_size": target_max_internal_lot_size,
         "sell_after_target_buy_count": sell_after_count,
         "sell_after_target_buy_qty": sell_after_qty,
         "sell_trade_ids": sell_trade_ids,

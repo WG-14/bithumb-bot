@@ -454,7 +454,7 @@ def _persist_missing_lot_definition_snapshot(
                     OR
                     (
                         position_state='dust_tracking'
-                        AND ABS(
+                        AND (
                             COALESCE(qty_open, 0.0)
                             - (COALESCE(dust_tracking_lot_count, 0) * ?)
                         ) <= 1e-12
@@ -661,7 +661,6 @@ def apply_fill_lifecycle(
         )
         executable_lot_count = int(split.lot_count if split.executable else 0)
         dust_lot_count = 1 if fill_lot.dust_qty > 1e-12 else 0
-        dust_lot_size = max(0.0, float(fill_lot.dust_qty)) if dust_lot_count > 0 else 0.0
         resolved_entry_decision_id = entry_decision_id
         resolved_strategy_name = strategy_name
         resolved_entry_decision_linkage = (
@@ -781,7 +780,7 @@ def apply_fill_lifecycle(
                         0,
                         dust_lot_count or 1,
                         lot_definition.semantic_version,
-                        dust_lot_size,
+                        lot_definition.internal_lot_size,
                         lot_definition.min_qty,
                         lot_definition.qty_step,
                         lot_definition.min_notional_krw,
