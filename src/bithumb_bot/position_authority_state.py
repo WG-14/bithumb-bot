@@ -87,6 +87,64 @@ def _matching_partial_close_residual_repair_present(
     return False
 
 
+def _partial_close_residual_state_converged(
+    conn,
+    *,
+    pair: str,
+    target_trade_id: int,
+    sell_trade_ids: list[int],
+    expected_residual_qty: float,
+    expected_closed_qty: float,
+    target_total_qty: float,
+    target_open_qty: float,
+    target_dust_qty: float,
+    target_executable_lot_count: int,
+    target_dust_lot_count: int,
+) -> bool:
+    """Return True when current tables already reflect the post-replay state.
+
+    A partial-close residual replay is only complete when the present authority
+    rows and lifecycle rows have converged. A historical repair event alone is
+    evidence, not proof that the current DB state is still converged.
+    """
+
+    if target_trade_id <= 0 or not sell_trade_ids:
+        return False
+    expected_residual = normalize_asset_qty(expected_residual_qty)
+    expected_closed = normalize_asset_qty(expected_closed_qty)
+    if expected_residual <= _EPS or expected_closed <= _EPS:
+        return False
+    if abs(normalize_asset_qty(target_total_qty) - expected_residual) > _EPS:
+        return False
+    if abs(normalize_asset_qty(target_dust_qty) - expected_residual) > _EPS:
+        return False
+    if abs(normalize_asset_qty(target_open_qty)) > _EPS:
+        return False
+    if int(target_executable_lot_count) != 0 or int(target_dust_lot_count) <= 0:
+        return False
+
+    placeholders = ",".join("?" for _ in sell_trade_ids)
+    try:
+        lifecycle_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS lifecycle_count,
+                COALESCE(SUM(matched_qty), 0.0) AS matched_qty
+            FROM trade_lifecycles
+            WHERE pair=?
+              AND entry_trade_id=?
+              AND exit_trade_id IN ({placeholders})
+            """,
+            (str(pair), int(target_trade_id), *[int(value) for value in sell_trade_ids]),
+        ).fetchone()
+    except (AssertionError, sqlite3.OperationalError):
+        return False
+
+    lifecycle_count = _row_int(lifecycle_row, "lifecycle_count")
+    lifecycle_matched_qty = normalize_asset_qty(_row_float(lifecycle_row, "matched_qty"))
+    return bool(lifecycle_count > 0 and abs(lifecycle_matched_qty - expected_closed) <= _EPS)
+
+
 def build_position_authority_assessment(conn, *, pair: str | None = None) -> dict[str, Any]:
     """Classify position-authority recovery state from one DB snapshot.
 
@@ -275,8 +333,21 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         sell_trade_ids=sell_trade_ids,
         expected_residual_qty=expected_residual_qty,
     )
+    residual_state_converged = _partial_close_residual_state_converged(
+        conn,
+        pair=pair_text,
+        target_trade_id=target_trade_id,
+        sell_trade_ids=sell_trade_ids,
+        expected_residual_qty=expected_residual_qty,
+        expected_closed_qty=sell_after_qty,
+        target_total_qty=target_total_qty,
+        target_open_qty=target_open_qty,
+        target_dust_qty=target_dust_qty,
+        target_executable_lot_count=target_executable_lot_count,
+        target_dust_lot_count=target_dust_lot_count,
+    )
     needs_residual_normalization = bool(
-        partial_close_residual_candidate and not residual_normalization_recorded
+        partial_close_residual_candidate and not residual_state_converged
     )
     needs_correction = bool(conflicting_dust_authority and not partial_close_residual_candidate)
 
@@ -339,6 +410,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "expected_residual_qty": expected_residual_qty,
         "partial_close_residual_candidate": partial_close_residual_candidate,
         "residual_normalization_recorded": residual_normalization_recorded,
+        "residual_repair_event_present": residual_normalization_recorded,
+        "residual_state_converged": residual_state_converged,
         "other_active_lot_count": other_active_lot_count,
         "other_active_qty": other_active_qty,
         "portfolio_qty": portfolio_qty,

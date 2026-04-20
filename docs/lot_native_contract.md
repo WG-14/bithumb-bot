@@ -97,6 +97,28 @@ semantic authority.
 - `qty` fields are non-authoritative derived values, not semantic SELL authority. They are still operationally required for broker interfacing, execution handoff, compatibility materialization, and reporting, even when the emitted context still includes qty aliases alongside canonical lot-native fields.
 - `sellable_qty` or any other qty-like snapshot value does not have semantic authority over the SELL boundary.
 
+## BUY Quantity Layers
+
+BUY execution has multiple quantity layers, and they are not interchangeable:
+
+- budget/request quantity is the strategy and cash-budget input
+- exchange-constrained/submitted quantity is the broker payload basis
+- `intended_lot_count` and `executable_lot_count` count internal executable lots
+- lifecycle ingestion splits the actual filled quantity into `open_exposure` lots plus explicit `dust_tracking` residue
+
+It is valid for a BUY to submit more exchange quantity than one internal lot
+when the extra quantity is not itself another full internal executable lot.
+For example, a submitted and filled quantity near `0.0006` with
+`internal_lot_size=0.0004` produces one executable internal lot and a tracked
+non-executable residue. That residue is born during BUY fill ingestion. A later
+SELL consumes only `open_exposure` lots and must not consume the existing
+`dust_tracking` row.
+
+This design is only acceptable when emitted diagnostics keep the layers
+explicit. Repair and recovery logic must verify present-state convergence
+rather than treating the existence of a repair event as proof that these layers
+still agree.
+
 ## Developer Guardrail
 
 When extending the SELL path, keep this implementation boundary explicit:

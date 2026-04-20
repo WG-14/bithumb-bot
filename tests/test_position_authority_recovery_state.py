@@ -6,7 +6,12 @@ import pytest
 
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, record_broker_fill_observation, set_portfolio_breakdown
+from bithumb_bot.db_core import (
+    ensure_db,
+    record_broker_fill_observation,
+    record_position_authority_repair,
+    set_portfolio_breakdown,
+)
 from bithumb_bot.engine import (
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
@@ -264,6 +269,70 @@ def test_fee_pending_repaired_buy_materializes_consistent_lot_authority(recovery
     assert summary.dust_tracking_lot_count == 1
 
 
+def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matching(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        after_buy_rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size
+            FROM open_position_lots
+            WHERE entry_client_order_id='incident_buy'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        after_buy = compute_runtime_readiness_snapshot(conn)
+
+        _apply_fee_pending_sell(conn)
+        after_sell_rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, lot_min_qty, lot_qty_step
+            FROM open_position_lots
+            WHERE entry_client_order_id='incident_buy'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        replay = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert len(after_buy_rows) == 2
+    assert after_buy_rows[0]["position_state"] == "open_exposure"
+    assert after_buy_rows[0]["qty_open"] == pytest.approx(LOT_SIZE)
+    assert after_buy_rows[0]["executable_lot_count"] == 1
+    assert after_buy_rows[1]["position_state"] == "dust_tracking"
+    assert after_buy_rows[1]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert after_buy_rows[1]["dust_tracking_lot_count"] == 1
+    assert after_buy.canonical_state == "OPEN_EXECUTABLE"
+
+    assert len(after_sell_rows) == 1
+    assert after_sell_rows[0]["position_state"] == "dust_tracking"
+    assert after_sell_rows[0]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert after_sell_rows[0]["executable_lot_count"] == 0
+    assert after_sell_rows[0]["dust_tracking_lot_count"] == 1
+    assert after_sell_rows[0]["lot_min_qty"] == pytest.approx(0.0002)
+    assert after_sell_rows[0]["lot_qty_step"] == pytest.approx(0.0001)
+    assert assessment["partial_close_residual_candidate"] is True
+    assert assessment["residual_state_converged"] is True
+    assert assessment["needs_residual_normalization"] is False
+    assert assessment["residual_repair_event_present"] is False
+    assert readiness.recovery_stage == "RESUME_READY"
+    assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+    assert readiness.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.as_dict()["run_loop_scope"] == "process_resume_only"
+    assert readiness.as_dict()["trading_permission_scope"] == "new_entry_or_closeout"
+    assert readiness.as_dict()["trading_allowed"] is False
+    assert readiness.as_dict()["trading_block_reason"] == (
+        "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
+    )
+    assert readiness.as_dict() == replay.as_dict()
+
+
 def test_authority_correction_repairs_incident_dust_row_with_historical_sell_history(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
@@ -404,6 +473,8 @@ def test_partial_close_residual_normalization_replays_buy_and_sell_authority(rec
         _corrupt_latest_buy_lot_as_incident(conn)
         apply_position_authority_rebuild(conn)
         _apply_fee_pending_sell(conn)
+        conn.execute("DELETE FROM trade_lifecycles WHERE exit_client_order_id='incident_sell'")
+        conn.commit()
 
         before = compute_runtime_readiness_snapshot(conn)
         conn.commit()
@@ -462,6 +533,48 @@ def test_partial_close_residual_normalization_replays_buy_and_sell_authority(rec
     assert all(ok for _label, ok, _detail in restart)
 
 
+def test_partial_close_residual_repair_event_does_not_replace_state_convergence(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        _apply_fee_pending_sell(conn)
+        sell_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM trades WHERE side='SELL' ORDER BY id ASC"
+            ).fetchall()
+        ]
+        target_trade = conn.execute(
+            "SELECT id FROM trades WHERE client_order_id='incident_buy' AND side='BUY'"
+        ).fetchone()
+        conn.execute("DELETE FROM trade_lifecycles WHERE exit_client_order_id='incident_sell'")
+        record_position_authority_repair(
+            conn,
+            event_ts=1_700_000_200_000,
+            source="test_stale_repair_event",
+            reason="partial_close_residual_authority_normalization",
+            repair_basis={
+                "event_type": "partial_close_residual_authority_normalization",
+                "target_trade_id": int(target_trade["id"]),
+                "sell_trade_ids": sell_ids,
+                "expected_residual_qty": FILL_QTY - LOT_SIZE,
+            },
+        )
+        conn.commit()
+
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert assessment["partial_close_residual_candidate"] is True
+    assert assessment["residual_repair_event_present"] is True
+    assert assessment["residual_state_converged"] is False
+    assert assessment["needs_residual_normalization"] is True
+    assert readiness.recovery_stage == "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
+    assert readiness.resume_blockers == ("POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",)
+
+
 def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_state(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
@@ -469,7 +582,6 @@ def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_s
         _corrupt_latest_buy_lot_as_incident(conn)
         apply_position_authority_rebuild(conn)
         _apply_fee_pending_sell(conn)
-        apply_position_authority_rebuild(conn)
         conn.commit()
         runtime_state.record_reconcile_result(
             success=True,
@@ -536,7 +648,6 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
         open_fee_gap = build_fee_gap_accounting_repair_preview(conn)
 
         _apply_fee_pending_sell(conn, client_order_id="open_sell", fill_id="open-sell-fill")
-        apply_position_authority_rebuild(conn)
         conn.commit()
         dust_readiness = compute_runtime_readiness_snapshot(conn)
         dust_fee_gap = build_fee_gap_accounting_repair_preview(conn)

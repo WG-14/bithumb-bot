@@ -118,6 +118,10 @@ def build_tradeability_operator_fields(
         )
 
     return {
+        "run_loop_scope": "process_resume_only",
+        "trading_permission_scope": "new_entry_or_closeout",
+        "trading_allowed": bool(tradeability.new_entry_allowed or tradeability.closeout_allowed),
+        "trading_block_reason": str(tradeability.why_not or "none"),
         "dust_display_scope": "broker_reconcile_signal",
         "broker_dust_signal_state": broker_dust_signal_state,
         "broker_dust_signal_message": broker_dust_signal_message,
