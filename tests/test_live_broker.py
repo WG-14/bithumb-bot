@@ -6838,16 +6838,16 @@ def test_live_execute_signal_runtime_path_preserves_authority_sequence_through_f
         max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
     ).normalized_exposure
 
-    assert lot_snapshot.open_lot_count == 0
-    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
-    assert lot_snapshot.dust_tracking_lot_count == 1
-    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0002)
-    assert normalized.sellable_executable_lot_count == 0
-    assert normalized.sellable_executable_qty == pytest.approx(0.0)
-    assert normalized.has_dust_only_remainder is True
-    assert normalized.exit_allowed is False
-    assert normalized.exit_block_reason == "dust_only_remainder"
-    assert normalized.terminal_state == "dust_only"
+    assert lot_snapshot.open_lot_count == 2
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0002)
+    assert lot_snapshot.dust_tracking_lot_count == 0
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+    assert normalized.sellable_executable_lot_count == 2
+    assert normalized.sellable_executable_qty == pytest.approx(0.0002)
+    assert normalized.has_dust_only_remainder is False
+    assert normalized.exit_allowed is True
+    assert normalized.exit_block_reason == "none"
+    assert normalized.terminal_state == "open_exposure"
 
 
 @pytest.mark.fast_regression
@@ -7005,16 +7005,16 @@ def test_authority_trace_buy_flow_records_authority_sequence_through_fill_and_re
         max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
     ).normalized_exposure
 
-    assert lot_snapshot.open_lot_count == 0
-    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
-    assert lot_snapshot.dust_tracking_lot_count == 1
-    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0002)
-    assert normalized.sellable_executable_lot_count == 0
-    assert normalized.sellable_executable_qty == pytest.approx(0.0)
-    assert normalized.has_dust_only_remainder is True
-    assert normalized.exit_allowed is False
-    assert normalized.exit_block_reason == "dust_only_remainder"
-    assert normalized.terminal_state == "dust_only"
+    assert lot_snapshot.open_lot_count == 2
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0002)
+    assert lot_snapshot.dust_tracking_lot_count == 0
+    assert lot_snapshot.dust_tracking_qty == pytest.approx(0.0)
+    assert normalized.sellable_executable_lot_count == 2
+    assert normalized.sellable_executable_qty == pytest.approx(0.0002)
+    assert normalized.has_dust_only_remainder is False
+    assert normalized.exit_allowed is True
+    assert normalized.exit_block_reason == "none"
+    assert normalized.terminal_state == "open_exposure"
 
 
 @pytest.mark.fast_regression

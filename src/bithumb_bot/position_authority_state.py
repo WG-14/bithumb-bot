@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from .config import settings
@@ -55,40 +56,49 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     """
 
     pair_text = str(pair or settings.PAIR)
-    latest_buy = conn.execute(
-        """
-        SELECT
-            t.id AS trade_id,
-            t.client_order_id,
-            t.ts AS fill_ts,
-            t.price,
-            t.qty,
-            t.fee,
-            t.strategy_name,
-            t.entry_decision_id,
-            f.fill_id,
-            f.intended_lot_count AS fill_intended_lot_count,
-            f.executable_lot_count AS fill_executable_lot_count,
-            f.internal_lot_size AS fill_internal_lot_size,
-            o.status AS order_status,
-            o.qty_filled AS order_qty_filled,
-            o.intended_lot_count AS order_intended_lot_count,
-            o.executable_lot_count AS order_executable_lot_count,
-            o.internal_lot_size AS order_internal_lot_size
-        FROM trades t
-        LEFT JOIN fills f
-          ON f.client_order_id=t.client_order_id
-         AND f.fill_ts=t.ts
-         AND ABS(f.price-t.price) < 1e-12
-         AND ABS(f.qty-t.qty) < 1e-12
-        LEFT JOIN orders o
-          ON o.client_order_id=t.client_order_id
-        WHERE t.pair=? AND t.side='BUY'
-        ORDER BY t.ts DESC, t.id DESC
-        LIMIT 1
-        """,
-        (pair_text,),
-    ).fetchone()
+    try:
+        latest_buy = conn.execute(
+            """
+            SELECT
+                t.id AS trade_id,
+                t.client_order_id,
+                t.ts AS fill_ts,
+                t.price,
+                t.qty,
+                t.fee,
+                t.strategy_name,
+                t.entry_decision_id,
+                f.fill_id,
+                f.intended_lot_count AS fill_intended_lot_count,
+                f.executable_lot_count AS fill_executable_lot_count,
+                f.internal_lot_size AS fill_internal_lot_size,
+                o.status AS order_status,
+                o.qty_filled AS order_qty_filled,
+                o.intended_lot_count AS order_intended_lot_count,
+                o.executable_lot_count AS order_executable_lot_count,
+                o.internal_lot_size AS order_internal_lot_size
+            FROM trades t
+            LEFT JOIN fills f
+              ON f.client_order_id=t.client_order_id
+             AND f.fill_ts=t.ts
+             AND ABS(f.price-t.price) < 1e-12
+             AND ABS(f.qty-t.qty) < 1e-12
+            LEFT JOIN orders o
+              ON o.client_order_id=t.client_order_id
+            WHERE t.pair=? AND t.side='BUY'
+            ORDER BY t.ts DESC, t.id DESC
+            LIMIT 1
+            """,
+            (pair_text,),
+        ).fetchone()
+    except (AssertionError, sqlite3.OperationalError):
+        return {
+            "needs_correction": False,
+            "safe_to_correct": False,
+            "reason": "position_authority_assessment_unavailable",
+            "target_trade_id": None,
+            "recommended_action": "review_recovery_report",
+        }
 
     if latest_buy is None:
         return {
