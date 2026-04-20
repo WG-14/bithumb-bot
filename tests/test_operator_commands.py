@@ -6194,6 +6194,85 @@ def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
     assert "safe_to_resume=1" in out
 
 
+def test_restart_checklist_scopes_safe_to_resume_when_tracked_dust_blocks_trading(
+    tmp_path, capsys
+):
+    _set_tmp_db(tmp_path)
+    runtime_state.enable_trading()
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        residual_qty = 0.00019996
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, ?, 1000000.0, 0.0, ?, 0.0)
+            """,
+            (residual_qty, residual_qty),
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                1,
+                "live_1776602640000_buy_ae184595",
+                "incident-buy-fill",
+                1_776_602_640_000,
+                7_050_000.0,
+                residual_qty,
+                0,
+                1,
+                1,
+                residual_qty,
+                0.0002,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "dust_tracking",
+                0.0,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+        },
+        now_epoch_sec=1000.0,
+    )
+
+    cmd_restart_checklist()
+    out = capsys.readouterr().out
+
+    assert "safe_to_resume=1" in out
+    assert "resume_scope=process_loop_only" in out
+    assert "run_loop_allowed=1 trading_allowed=0 new_entry_allowed=0 closeout_allowed=0" in out
+    assert "operator_action_required=1" in out
+    assert "canonical_state=DUST_ONLY_TRACKED residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
+    assert (
+        "trading_block_reason="
+        "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
+    ) in out
+    assert "Run loop is allowed, but lot-native tracked dust remains" in out
+
+
 class _FlattenBrokerSuccess:
     def __init__(self):
         self.calls: list[dict[str, str | float | None]] = []

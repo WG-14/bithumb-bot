@@ -3409,12 +3409,33 @@ def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
 def cmd_restart_checklist() -> None:
     checklist = _load_restart_safety_checklist()
     blocked = [item for item in checklist if not item[1]]
+    readiness_snapshot = compute_runtime_readiness_snapshot()
+    tradeability_fields = readiness_snapshot.tradeability_operator_fields
 
     print("[RESTART-SAFETY-CHECKLIST]")
     for label, ok, detail in checklist:
         status = "PASS" if ok else "BLOCKED"
         print(f"  - {status:<7} {label}: {detail}")
     print(f"  safe_to_resume={1 if not blocked else 0}")
+    print(
+        "  "
+        "resume_scope=process_loop_only "
+        f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+        f"trading_allowed={1 if tradeability_fields['trading_allowed'] else 0} "
+        f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
+        f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
+        f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0}"
+    )
+    print(
+        "  "
+        f"canonical_state={readiness_snapshot.canonical_state} "
+        f"residual_class={readiness_snapshot.residual_class} "
+        f"trading_block_reason={tradeability_fields['trading_block_reason']}"
+    )
+    print(
+        "  "
+        f"tradeability_operator_message={tradeability_fields['tradeability_operator_message']}"
+    )
 
 def _last_reconcile_failed(state) -> bool:
     status = str(getattr(state, "last_reconcile_status", "") or "").upper()
