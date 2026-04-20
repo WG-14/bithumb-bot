@@ -214,6 +214,12 @@ class _LoopConn:
                 }
             )
 
+        if "COUNT(*) AS repair_count" in q and "FROM fee_gap_accounting_repairs" in q:
+            return _Rows({"repair_count": 0})
+
+        if "FROM fee_gap_accounting_repairs" in q and "ORDER BY event_ts DESC" in q:
+            return _Rows(None)
+
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0
