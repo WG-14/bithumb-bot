@@ -6675,7 +6675,7 @@ def test_authority_boundary_live_execute_signal_sell_records_end_to_end_authorit
         max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
     ).normalized_exposure
 
-    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0002)
+    assert lot_snapshot.raw_open_exposure_qty == pytest.approx(0.0)
     assert lot_snapshot.executable_open_exposure_qty == pytest.approx(0.0)
     assert post_fill_open_lot_count == 0
     assert lot_snapshot.dust_tracking_lot_count == 1

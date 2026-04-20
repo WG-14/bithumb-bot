@@ -358,15 +358,40 @@ def _read_authoritative_lot_definition_snapshot(
         return None
 
     if not executable_rows:
-        return None
-
-    implied_lot_sizes: list[float] = []
-    for row in executable_rows:
-        qty_open = float(_row_value(row, "qty_open", 0) or 0.0)
-        executable_lot_count = int(_row_value(row, "executable_lot_count", 1) or 0)
-        if qty_open <= 1e-12 or executable_lot_count <= 0:
+        try:
+            dust_rows = conn.execute(
+                """
+                SELECT qty_open, dust_tracking_lot_count
+                FROM open_position_lots
+                WHERE pair=?
+                  AND qty_open > 1e-12
+                  AND COALESCE(position_semantic_basis, '')='lot-native'
+                  AND COALESCE(executable_lot_count, 0) = 0
+                  AND COALESCE(dust_tracking_lot_count, 0) > 0
+                """,
+                (str(pair),),
+            ).fetchall()
+        except sqlite3.OperationalError:
             return None
-        implied_lot_sizes.append(qty_open / float(executable_lot_count))
+        if not dust_rows:
+            return None
+        implied_lot_sizes = []
+        for row in dust_rows:
+            qty_open = float(_row_value(row, "qty_open", 0) or 0.0)
+            dust_lot_count = int(_row_value(row, "dust_tracking_lot_count", 1) or 0)
+            if qty_open <= 1e-12 or dust_lot_count <= 0:
+                return None
+            implied_lot_sizes.append(qty_open / float(dust_lot_count))
+        source_mode = "derived_from_dust_row_qty"
+    else:
+        implied_lot_sizes = []
+        for row in executable_rows:
+            qty_open = float(_row_value(row, "qty_open", 0) or 0.0)
+            executable_lot_count = int(_row_value(row, "executable_lot_count", 1) or 0)
+            if qty_open <= 1e-12 or executable_lot_count <= 0:
+                return None
+            implied_lot_sizes.append(qty_open / float(executable_lot_count))
+        source_mode = "derived_from_row_qty"
 
     baseline_lot_size = implied_lot_sizes[0]
     if baseline_lot_size <= 1e-12:
@@ -381,8 +406,76 @@ def _read_authoritative_lot_definition_snapshot(
         qty_step=None,
         min_notional_krw=None,
         max_qty_decimals=None,
-        source_mode="derived_from_row_qty",
+        source_mode=source_mode,
     )
+
+
+def _persist_missing_lot_definition_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    lot_definition: LotDefinitionSnapshot | None,
+) -> None:
+    if lot_definition is None or not lot_definition.is_authoritative:
+        return
+    try:
+        conn.execute(
+            """
+            UPDATE open_position_lots
+            SET lot_semantic_version=?,
+                internal_lot_size=?,
+                lot_min_qty=?,
+                lot_qty_step=?,
+                lot_min_notional_krw=?,
+                lot_max_qty_decimals=?,
+                lot_rule_source_mode=?
+            WHERE pair=?
+              AND qty_open > 1e-12
+              AND COALESCE(position_semantic_basis, '')='lot-native'
+              AND (
+                    COALESCE(executable_lot_count, 0) > 0
+                    OR COALESCE(dust_tracking_lot_count, 0) > 0
+                  )
+              AND lot_semantic_version IS NULL
+              AND internal_lot_size IS NULL
+              AND lot_min_qty IS NULL
+              AND lot_qty_step IS NULL
+              AND lot_min_notional_krw IS NULL
+              AND lot_max_qty_decimals IS NULL
+              AND lot_rule_source_mode IS NULL
+              AND (
+                    (
+                        position_state='open_exposure'
+                        AND ABS(
+                            COALESCE(qty_open, 0.0)
+                            - (COALESCE(executable_lot_count, 0) * ?)
+                        ) <= 1e-12
+                    )
+                    OR
+                    (
+                        position_state='dust_tracking'
+                        AND ABS(
+                            COALESCE(qty_open, 0.0)
+                            - (COALESCE(dust_tracking_lot_count, 0) * ?)
+                        ) <= 1e-12
+                    )
+                  )
+            """,
+            (
+                lot_definition.semantic_version,
+                lot_definition.internal_lot_size,
+                lot_definition.min_qty,
+                lot_definition.qty_step,
+                lot_definition.min_notional_krw,
+                lot_definition.max_qty_decimals,
+                lot_definition.source_mode,
+                str(pair),
+                float(lot_definition.internal_lot_size or 0.0),
+                float(lot_definition.internal_lot_size or 0.0),
+            ),
+        )
+    except (sqlite3.OperationalError, sqlite3.IntegrityError):
+        return
 
 
 def _load_strategy_for_decision_id(conn: sqlite3.Connection, *, decision_id: int) -> str | None:
@@ -714,6 +807,7 @@ def apply_fill_lifecycle(
     # dust_tracking lots remain operator evidence and are never matched here.
     lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
     lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
+    _persist_missing_lot_definition_snapshot(conn, pair=str(pair), lot_definition=lot_definition)
     if lot_definition is not None and lot_definition.internal_lot_size is not None:
         lot_rules = replace(
             lot_rules,
