@@ -196,6 +196,56 @@ def _record_historical_sell_history(conn) -> None:
     conn.commit()
 
 
+def _replace_with_tracked_dust_row(
+    conn,
+    *,
+    residual_qty: float,
+    min_qty: float = 0.0002,
+    client_order_id: str = "tracked_dust_buy",
+) -> None:
+    conn.execute("DELETE FROM open_position_lots")
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+            qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+            internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+            lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+            position_state, entry_fee_total
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            settings.PAIR,
+            999,
+            client_order_id,
+            "tracked-dust-fill",
+            1_700_000_000_000,
+            PRICE,
+            residual_qty,
+            0,
+            1,
+            1,
+            residual_qty,
+            min_qty,
+            0.0001,
+            0.0,
+            8,
+            "ledger",
+            "lot-native",
+            "dust_tracking",
+            0.0,
+        ),
+    )
+    set_portfolio_breakdown(
+        conn,
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=residual_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+
+
 def _apply_fee_pending_sell(conn, *, client_order_id: str = "incident_sell", fill_id: str = "sell-fill-9") -> None:
     record_order_if_missing(
         conn,
@@ -320,17 +370,86 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
     assert assessment["residual_repair_event_present"] is False
     assert readiness.recovery_stage == "RESUME_READY"
     assert readiness.canonical_state == "DUST_ONLY_TRACKED"
-    assert readiness.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert readiness.residual_class == "HARMLESS_DUST_TREAT_AS_FLAT"
     assert readiness.run_loop_allowed is True
-    assert readiness.new_entry_allowed is False
+    assert readiness.new_entry_allowed is True
     assert readiness.closeout_allowed is False
+    assert readiness.operator_action_required is False
+    assert (
+        readiness.position_state.normalized_exposure.dust_operability_state
+        == "sub_min_tracked_dust_entry_allowed"
+    )
     assert readiness.as_dict()["run_loop_scope"] == "process_resume_only"
     assert readiness.as_dict()["trading_permission_scope"] == "new_entry_or_closeout"
-    assert readiness.as_dict()["trading_allowed"] is False
-    assert readiness.as_dict()["trading_block_reason"] == (
-        "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
-    )
+    assert readiness.as_dict()["trading_allowed"] is True
+    assert readiness.as_dict()["trading_block_reason"] == "closeout_blocked:dust_only_remainder"
     assert readiness.as_dict() == replay.as_dict()
+
+
+def test_sub_min_tracked_dust_paths_converge_to_entry_allowed_operability(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        _apply_fee_pending_sell(conn)
+        lifecycle_readiness = compute_runtime_readiness_snapshot(conn)
+
+        _replace_with_tracked_dust_row(
+            conn,
+            residual_qty=FILL_QTY - LOT_SIZE,
+            client_order_id="manual-equivalent-dust",
+        )
+        equivalent_readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    for readiness in (lifecycle_readiness, equivalent_readiness):
+        assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+        assert readiness.residual_class == "HARMLESS_DUST_TREAT_AS_FLAT"
+        assert readiness.run_loop_allowed is True
+        assert readiness.new_entry_allowed is True
+        assert readiness.closeout_allowed is False
+        assert readiness.execution_flat is True
+        assert readiness.accounting_flat is False
+        assert readiness.position_state.normalized_exposure.sellable_executable_lot_count == 0
+        assert readiness.position_state.normalized_exposure.dust_operability_state == (
+            "sub_min_tracked_dust_entry_allowed"
+        )
+
+
+@pytest.mark.parametrize(
+    ("residual_qty", "new_entry_allowed", "operability_state"),
+    [
+        (0.0001, True, "sub_min_tracked_dust_entry_allowed"),
+        (0.00019996, True, "sub_min_tracked_dust_entry_allowed"),
+        (0.00019999, True, "sub_min_tracked_dust_entry_allowed"),
+        (0.0002, False, "tracked_dust_operator_review_required"),
+        (0.00020001, False, "tracked_dust_operator_review_required"),
+    ],
+)
+def test_tracked_dust_operability_boundary_uses_stored_lot_min_qty(
+    recovery_db,
+    residual_qty,
+    new_entry_allowed,
+    operability_state,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _replace_with_tracked_dust_row(conn, residual_qty=residual_qty)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is new_entry_allowed
+    assert readiness.closeout_allowed is False
+    assert readiness.position_state.normalized_exposure.dust_operability_state == operability_state
+    if new_entry_allowed:
+        assert readiness.residual_class == "HARMLESS_DUST_TREAT_AS_FLAT"
+        assert readiness.operator_action_required is False
+    else:
+        assert readiness.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+        assert readiness.operator_action_required is True
 
 
 def test_authority_correction_repairs_incident_dust_row_with_historical_sell_history(recovery_db):
@@ -625,14 +744,14 @@ def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_s
     assert after.recovery_stage == "RESUME_READY"
     assert after.resume_ready is True
     assert after.canonical_state == "DUST_ONLY_TRACKED"
-    assert after.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert after.residual_class == "HARMLESS_DUST_TREAT_AS_FLAT"
     assert after.run_loop_allowed is True
-    assert after.new_entry_allowed is False
+    assert after.new_entry_allowed is True
     assert after.closeout_allowed is False
     assert after.execution_flat is True
     assert after.accounting_flat is False
-    assert after.operator_action_required is True
-    assert after.why_not == "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
+    assert after.operator_action_required is False
+    assert after.why_not == "closeout_blocked:dust_only_remainder"
     assert fee_gap_after["needs_repair"] is False
     assert fee_gap_after["already_repaired"] is True
 
@@ -682,11 +801,11 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
             dust_readiness,
             dust_fee_gap,
             "DUST_ONLY_TRACKED",
-            "TRACKED_DUST_BLOCK_NEW_ENTRY",
+            "HARMLESS_DUST_TREAT_AS_FLAT",
             True,
             False,
-            False,
             True,
+            False,
         ),
         (
             non_exec_readiness,

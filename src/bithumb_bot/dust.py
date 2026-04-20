@@ -653,6 +653,8 @@ class NormalizedExposure:
     has_any_position_residue: bool
     has_non_executable_residue: bool
     has_dust_only_remainder: bool
+    dust_operability_state: str
+    dust_operability_reason: str
     recovery_blocked: bool
     recovery_block_reason: str
     unresolved_order_count: int
@@ -785,6 +787,8 @@ class NormalizedExposure:
             "has_any_position_residue": bool(self.has_any_position_residue),
             "has_non_executable_residue": bool(self.has_non_executable_residue),
             "has_dust_only_remainder": bool(self.has_dust_only_remainder),
+            "dust_operability_state": self.dust_operability_state,
+            "dust_operability_reason": self.dust_operability_reason,
             "authority_gap_reason": self.authority_gap_reason,
             "recovery_blocked": bool(self.recovery_blocked),
             "recovery_block_reason": self.recovery_block_reason,
@@ -1686,11 +1690,6 @@ def build_normalized_exposure(
     normalized_sellable_lot_count = max(0, normalized_open_lot_count - normalized_reserved_exit_lot_count)
     sellable_executable_qty = max(0.0, effective_open_exposure_qty - effective_reserved_exit_qty)
     has_any_position_residue = bool(normalized_total_asset_qty > DUST_POSITION_EPS)
-    entry_allowed = bool(
-        normalized_total_asset_qty <= DUST_POSITION_EPS
-        or should_treat_as_flat_for_entry_gate(display_context)
-    )
-    effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
     # `normalized_exposure_active` remains the broader lifecycle flag used by
     # restart/reconcile and operator-facing state summaries. It stays true for
     # active open lots or reserved exit inventory, while the explicit
@@ -1699,6 +1698,28 @@ def build_normalized_exposure(
     has_executable_exposure = bool(normalized_sellable_lot_count > 0)
     has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
     has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
+    dust_only_below_min = bool(
+        has_dust_only_remainder
+        and normalized_min_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty < normalized_min_qty
+    )
+    dust_only_boundary_or_above = bool(
+        has_dust_only_remainder
+        and normalized_min_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty >= normalized_min_qty
+    )
+    if not has_dust_only_remainder:
+        dust_operability_state = "none"
+        dust_operability_reason = "no_dust_only_remainder"
+    elif dust_only_below_min:
+        dust_operability_state = "sub_min_tracked_dust_entry_allowed"
+        dust_operability_reason = "dust_tracking_qty_below_min_qty_preserved_as_accounting_evidence"
+    elif dust_only_boundary_or_above:
+        dust_operability_state = "tracked_dust_operator_review_required"
+        dust_operability_reason = "dust_tracking_qty_at_or_above_min_qty"
+    else:
+        dust_operability_state = "tracked_dust_operator_review_required"
+        dust_operability_reason = "dust_tracking_min_qty_unknown"
     unresolved_order_count = max(
         0,
         int(display_context.fields.get("unresolved_open_order_count", 0) or 0),
@@ -1716,6 +1737,13 @@ def build_normalized_exposure(
         recovery_block_reason = "unresolved_orders_present"
     else:
         recovery_block_reason = "none"
+    dust_operably_flat = bool(dust_operability_state == "sub_min_tracked_dust_entry_allowed")
+    entry_allowed = bool(
+        normalized_total_asset_qty <= DUST_POSITION_EPS
+        or should_treat_as_flat_for_entry_gate(display_context)
+        or dust_operably_flat
+    )
+    effective_flat = bool(normalized_total_asset_qty <= DUST_POSITION_EPS or entry_allowed)
     normalized_qty = float(sellable_executable_qty if has_executable_exposure else 0.0)
     if entry_allowed:
         entry_block_reason = "none"
@@ -1778,6 +1806,8 @@ def build_normalized_exposure(
         has_any_position_residue=has_any_position_residue,
         has_non_executable_residue=has_non_executable_residue,
         has_dust_only_remainder=has_dust_only_remainder,
+        dust_operability_state=dust_operability_state,
+        dust_operability_reason=dust_operability_reason,
         recovery_blocked=recovery_blocked,
         recovery_block_reason=recovery_block_reason,
         unresolved_order_count=unresolved_order_count,

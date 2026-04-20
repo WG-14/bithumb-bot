@@ -6194,7 +6194,7 @@ def test_restart_checklist_passes_when_safe_to_resume(tmp_path, capsys):
     assert "safe_to_resume=1" in out
 
 
-def test_restart_checklist_scopes_safe_to_resume_when_tracked_dust_blocks_trading(
+def test_restart_checklist_scopes_safe_to_resume_when_sub_min_tracked_dust_allows_entry(
     tmp_path, capsys
 ):
     _set_tmp_db(tmp_path)
@@ -6263,14 +6263,11 @@ def test_restart_checklist_scopes_safe_to_resume_when_tracked_dust_blocks_tradin
 
     assert "safe_to_resume=1" in out
     assert "resume_scope=process_loop_only" in out
-    assert "run_loop_allowed=1 trading_allowed=0 new_entry_allowed=0 closeout_allowed=0" in out
-    assert "operator_action_required=1" in out
-    assert "canonical_state=DUST_ONLY_TRACKED residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
-    assert (
-        "trading_block_reason="
-        "new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder"
-    ) in out
-    assert "Run loop is allowed, but lot-native tracked dust remains" in out
+    assert "run_loop_allowed=1 trading_allowed=1 new_entry_allowed=1 closeout_allowed=0" in out
+    assert "operator_action_required=0" in out
+    assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
+    assert "trading_block_reason=closeout_blocked:dust_only_remainder" in out
+    assert "sub-minimum non-executable dust" in out
 
 
 class _FlattenBrokerSuccess:

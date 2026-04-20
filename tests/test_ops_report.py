@@ -984,7 +984,7 @@ def test_ops_report_surfaces_missing_lot_authority_as_non_dust_recovery_state(
     assert summary["dust_state"] == "no_dust"
 
 
-def test_ops_report_makes_resume_ready_but_entry_blocked_tracked_dust_explicit(
+def test_ops_report_makes_resume_ready_sub_min_tracked_dust_entry_policy_explicit(
     tmp_path, monkeypatch, capsys
 ):
     db_path = str(tmp_path / "ops-report-tracked-dust-tradeability.sqlite")
@@ -1089,31 +1089,30 @@ def test_ops_report_makes_resume_ready_but_entry_blocked_tracked_dust_explicit(
 
     assert "dust_state=no_dust" in out
     assert "dust_display_scope=broker_reconcile_signal" in out
-    assert "residue_policy_state=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
-    assert "dust_tradeability_consistent=0" in out
+    assert "residue_policy_state=HARMLESS_DUST_TREAT_AS_FLAT" in out
+    assert "dust_tradeability_consistent=1" in out
     assert "position_authority_summary=holding_authority_state=dust_only" in out
-    assert "canonical_state=DUST_ONLY_TRACKED residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
-    assert "run_loop_allowed=1 new_entry_allowed=0 closeout_allowed=0" in out
-    assert "why_not=new_entry_blocked:dust_only_remainder;closeout_blocked:dust_only_remainder" in out
+    assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
+    assert "run_loop_allowed=1 new_entry_allowed=1 closeout_allowed=0" in out
+    assert "why_not=closeout_blocked:dust_only_remainder" in out
 
     payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
     summary = payload["operator_recovery_summary"]
     assert summary["canonical_state"] == "DUST_ONLY_TRACKED"
-    assert summary["residual_class"] == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert summary["residual_class"] == "HARMLESS_DUST_TREAT_AS_FLAT"
     assert summary["run_loop_allowed"] is True
-    assert summary["new_entry_allowed"] is False
+    assert summary["new_entry_allowed"] is True
     assert summary["closeout_allowed"] is False
     assert summary["execution_flat"] is True
     assert summary["accounting_flat"] is False
-    assert summary["operator_action_required"] is True
+    assert summary["operator_action_required"] is False
     assert summary["dust_state"] == "no_dust"
     assert summary["dust_display_scope"] == "broker_reconcile_signal"
     assert summary["broker_dust_signal_state"] == "no_dust"
     assert summary["residue_policy_scope"] == "lot_native_tradeability"
-    assert summary["residue_policy_state"] == "TRACKED_DUST_BLOCK_NEW_ENTRY"
-    assert summary["dust_tradeability_consistent"] is False
-    assert "Broker/local dust signal is no_dust" in summary["dust_operator_message"]
-    assert "Run loop is allowed" in summary["tradeability_operator_message"]
+    assert summary["residue_policy_state"] == "HARMLESS_DUST_TREAT_AS_FLAT"
+    assert summary["dust_tradeability_consistent"] is True
+    assert "sub-minimum non-executable dust" in summary["tradeability_operator_message"]
 
 
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):

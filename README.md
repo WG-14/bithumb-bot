@@ -17,6 +17,7 @@ The notes in this section describe the current implementation and its compatibil
 
 - `open_exposure` is the canonical lot-native executable exposure.
 - `dust_tracking` is operator-tracking residue and is kept separate from executable exposure.
+- Dust operability is a projection on top of preserved evidence. A dust-only, sub-minimum, zero-executable state may be treated as flat for new-entry policy while still remaining accounting residue and excluded from SELL authority.
 - `reserved_exit` is executable exposure that is already reserved by open SELL lifecycle state.
 - `sellable_executable_lot_count` is the canonical SELL authority after subtracting reserved exit lots from open executable lots.
 - `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They are not proof of zero holdings and do not define SELL authority, recovery authority, executable-position authority, recovery completeness, literal flatness, or restart safety.

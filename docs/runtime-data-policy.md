@@ -317,6 +317,7 @@ Derived / interpreted outputs from the lot-state and dust interpretation layer:
 - `dust_tracking_qty`: interpreted operator-only residual quantity materialized from the dust-tracking lot state.
 - `sellable_executable_qty`: interpreted sell-submit quantity derived from sellable executable lot count, not a persisted column.
 - `sellable_executable_lot_count`, `reserved_exit_lot_count`, `exit_allowed`, and `exit_block_reason`: normalized execution/reporting authority fields materialized from persisted lot rows plus reservation and dust interpretation; they are not direct `open_position_lots` storage columns.
+- `dust_operability_state` and `dust_operability_reason`: normalized tradeability projection fields. They explain whether preserved `dust_tracking` evidence is sub-minimum non-executable residue that may be treated as flat for new-entry policy, or whether operator review is still required.
 - Storage-level checks and schema normalization are necessary inputs to that materialization, but they are not by themselves proof of final runtime SELL authority.
 
 Practical routing rules:
@@ -324,7 +325,9 @@ Practical routing rules:
 - BUY fills create or refresh `open_exposure` lots.
 - SELL matching consumes `open_exposure` lots only.
 - `dust_tracking` lots are not sellable inventory and must not be counted as the basis for a normal SELL order.
-- Harmless dust suppression is defined around the `dust_tracking` path, not the `open_exposure` path.
+- Harmless dust suppression is defined around the normalized dust operability projection, not around a stored row alone.
+- A dust-only, sub-minimum, zero-executable state may be treated as flat for new-entry policy after recovery has otherwise converged. This preserves accounting evidence while allowing the experiment to continue.
+- A `dust_tracking` row at or above the stored minimum quantity, or one whose minimum boundary is unavailable, remains non-operable and requires operator review.
 - Suppression behavior must avoid creating a normal SELL order, SELL event, or fresh client order ID for dust-only exits unless an operator explicitly clears the dust state.
 - Reporting should surface the interpreted fields `open_lot_count`, `open_exposure_qty`, `dust_tracking_qty`, `sellable_executable_qty`, and `raw_total_asset_qty` together with the persisted lot-state fields so operators can explain the gap between broker-visible holdings and the sellable position base.
 - Boundary rule: `qty_open < min_qty` may be reclassified to `dust_tracking`; `qty_open == min_qty` stays `open_exposure`.

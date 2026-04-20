@@ -199,6 +199,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
 
         dust_context = build_dust_display_context(metadata)
         lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+        lot_definition = getattr(lot_snapshot, "lot_definition", None)
         reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
         position_state = build_position_state_model(
             raw_qty_open=portfolio_asset_qty,
@@ -213,6 +214,10 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             open_lot_count=int(lot_snapshot.open_lot_count),
             dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
             reserved_exit_qty=reserved_exit_qty,
+            min_qty=(None if lot_definition is None else lot_definition.min_qty),
+            qty_step=(None if lot_definition is None else lot_definition.qty_step),
+            min_notional_krw=(None if lot_definition is None else lot_definition.min_notional_krw),
+            max_qty_decimals=(None if lot_definition is None else lot_definition.max_qty_decimals),
         )
         fee_pending_count = _unaccounted_fee_pending_observation_count(conn)
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
