@@ -80,7 +80,7 @@ from .position_authority_repair import (
     build_position_authority_rebuild_preview,
 )
 from .runtime_readiness import compute_runtime_readiness_snapshot
-from .lifecycle import summarize_reserved_exit_qty
+from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .markets import canonical_market_with_raw
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
@@ -893,6 +893,10 @@ def cmd_health() -> None:
     print(
         "    "
         f"dust_state={dust_view.state} "
+        f"dust_display_scope={readiness_snapshot.tradeability_operator_fields['dust_display_scope']} "
+        f"residue_policy_state={readiness_snapshot.tradeability_operator_fields['residue_policy_state']} "
+        "dust_tradeability_consistent="
+        f"{1 if readiness_snapshot.tradeability_operator_fields['dust_tradeability_consistent'] else 0} "
         f"dust_action={dust_view.operator_action} "
         f"dust_new_orders_allowed={1 if dust_view.new_orders_allowed else 0} "
         f"dust_resume_allowed={1 if dust_view.resume_allowed else 0} "
@@ -908,6 +912,10 @@ def cmd_health() -> None:
         f"dust_broker_local_match={1 if dust_view.broker_local_match else 0} "
         f"dust_qty_below_min={dust_context.qty_below_min_summary} "
         f"dust_notional_below_min={dust_context.notional_below_min_summary}"
+    )
+    print(
+        "    "
+        f"tradeability_operator_message={readiness_snapshot.tradeability_operator_fields['tradeability_operator_message']}"
     )
     print(
         "    "
@@ -2521,6 +2529,24 @@ def _load_recovery_report(
         "remote_known_unresolved_verification_summary": remote_known_unresolved_verification_summary,
         "balance_split_mismatch_summary": balance_split_mismatch_summary,
         **{key: value for key, value in dust_fields.items() if key != "dust_threshold_basis"},
+        **{
+            key: value
+            for key, value in runtime_readiness_snapshot.items()
+            if key
+            in {
+                "dust_display_scope",
+                "broker_dust_signal_state",
+                "broker_dust_signal_message",
+                "dust_tradeability_consistent",
+                "dust_operator_message",
+                "residue_policy_scope",
+                "residue_policy_state",
+                "residue_policy_message",
+                "residue_blocks_new_entry",
+                "residue_blocks_closeout",
+                "tradeability_operator_message",
+            }
+        },
         "recent_dust_unsellable_event": (
             {
                 "event_ts": int(recent_dust_unsellable_event["event_ts"]),
@@ -2593,19 +2619,23 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
             asset_available=float(asset_available),
             asset_locked=float(asset_locked),
         )
+        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
         reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
     finally:
         conn.close()
     position_state = build_position_state_model(
         raw_qty_open=portfolio_asset_qty,
         metadata_raw=report,
-        raw_total_asset_qty=max(portfolio_asset_qty, float(dust_context.raw_holdings.broker_qty)),
-        dust_tracking_qty=(
-            float(dust_context.raw_holdings.local_qty)
-            if bool(dust_context.classification.present)
-            else 0.0
+        raw_total_asset_qty=max(
+            portfolio_asset_qty,
+            float(lot_snapshot.raw_total_asset_qty),
+            float(dust_context.raw_holdings.broker_qty),
         ),
+        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
+        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
         reserved_exit_qty=reserved_exit_qty,
+        open_lot_count=int(lot_snapshot.open_lot_count),
+        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
     )
     lot_exposure = position_state.normalized_exposure
     dust_tracking_lot_count = int(lot_exposure.dust_tracking_lot_count)
@@ -2689,9 +2719,13 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    allow_resume={1 if bool(report.get('dust_residual_allow_resume')) else 0}")
     print(f"    policy_reason={report.get('dust_policy_reason') or 'none'}")
     print(f"    state={report.get('dust_state') or 'none'}")
+    print(f"    display_scope={report.get('dust_display_scope') or 'broker_reconcile_signal'}")
+    print(f"    residue_policy_state={report.get('residue_policy_state') or 'unknown'}")
+    print(f"    dust_tradeability_consistent={1 if bool(report.get('dust_tradeability_consistent', True)) else 0}")
     print(f"    state_label={report.get('dust_state_label') or 'none'}")
     print(f"    operator_action={report.get('dust_operator_action') or 'none'}")
     print(f"    operator_message={report.get('dust_operator_message') or 'none'}")
+    print(f"    residue_policy_message={report.get('residue_policy_message') or 'none'}")
     print(
         "    "
         f"observed_broker_qty={float(report.get('dust_broker_qty') or 0.0):.8f} "
@@ -3013,6 +3047,7 @@ def cmd_manual_flat_accounting_repair(*, apply: bool = False, confirm: bool = Fa
     conn = ensure_db()
     try:
         preview = build_manual_flat_accounting_repair_preview(conn)
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
         repair_summary = get_manual_flat_accounting_repair_summary(conn)
         print("[MANUAL-FLAT-ACCOUNTING-REPAIR] preview")
         print(
@@ -3047,6 +3082,22 @@ def cmd_manual_flat_accounting_repair(*, apply: bool = False, confirm: bool = Fa
             f"last_reconcile_reason_code={preview['last_reconcile_reason_code']} "
             "existing_manual_flat_accounting_repairs="
             f"{int(repair_summary.get('repair_count') or 0)}"
+        )
+        print(
+            "  "
+            f"canonical_state={readiness_snapshot.canonical_state} "
+            f"residual_class={readiness_snapshot.residual_class} "
+            f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+            f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
+            f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
+            f"execution_flat={1 if readiness_snapshot.execution_flat else 0} "
+            f"accounting_flat={1 if readiness_snapshot.accounting_flat else 0} "
+            f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0}"
+        )
+        print(
+            "  "
+            "tradeability_operator_message="
+            f"{readiness_snapshot.tradeability_operator_fields['tradeability_operator_message']}"
         )
         print(f"  recommended_command={preview['recommended_command']}")
 
@@ -3742,7 +3793,23 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
     qty = float(summary.get("qty") or 0.0)
 
     if status == "no_position":
-        print("[FLATTEN-POSITION] no position to flatten (BTC qty=0)")
+        print(
+            "[FLATTEN-POSITION] no position to flatten: no executable position "
+            f"(sellable_lot_count={int(summary.get('sellable_executable_lot_count') or 0)} "
+            f"terminal_state={summary.get('terminal_state') or 'unknown'} "
+            f"reason={summary.get('reason') or 'no_position'})"
+        )
+        if (
+            float(summary.get("raw_total_asset_qty") or 0.0) > 0.0
+            or float(summary.get("tracked_dust_qty") or 0.0) > 0.0
+        ):
+            print(
+                "  "
+                f"raw_total_asset_qty={float(summary.get('raw_total_asset_qty') or 0.0):.10f} "
+                f"executable_exposure_qty={float(summary.get('executable_exposure_qty') or 0.0):.10f} "
+                f"tracked_dust_qty={float(summary.get('tracked_dust_qty') or 0.0):.10f} "
+                f"closeout_allowed={1 if bool(summary.get('closeout_allowed')) else 0}"
+            )
         return
 
     print(f"[FLATTEN-POSITION] target=BTC side=SELL qty={qty:.8f} dry_run={1 if dry_run else 0}")

@@ -4361,6 +4361,10 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "dust_policy_reason",
         "dust_residual_summary",
         "dust_state",
+        "dust_display_scope",
+        "broker_dust_signal_state",
+        "broker_dust_signal_message",
+        "dust_tradeability_consistent",
         "dust_state_label",
         "dust_operator_action",
         "dust_operator_message",
@@ -4378,6 +4382,12 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "dust_broker_notional_below_min",
         "dust_local_notional_below_min",
         "effective_flat_due_to_harmless_dust",
+        "residue_policy_scope",
+        "residue_policy_state",
+        "residue_policy_message",
+        "residue_blocks_new_entry",
+        "residue_blocks_closeout",
+        "tradeability_operator_message",
         "recent_dust_unsellable_event",
         "recent_external_cash_adjustment",
         "manual_flat_accounting_repair_preview",
@@ -4489,6 +4499,11 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["recommended_next_action"]
     assert payload["resume_blocked_reason"]
     assert payload["recommended_command"]
+    assert payload["dust_display_scope"] == "broker_reconcile_signal"
+    assert payload["residue_policy_scope"] == "lot_native_tradeability"
+    assert payload["residue_policy_state"]
+    assert isinstance(payload["dust_tradeability_consistent"], bool)
+    assert payload["tradeability_operator_message"]
 
 
 

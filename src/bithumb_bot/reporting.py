@@ -3626,6 +3626,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         "recovery_required_count": int(health_row["recovery_required_count"] or 0) if health_row else 0,
         "position_authority_summary": position_state.normalized_exposure.position_authority_summary,
         **dust_context.fields,
+        **readiness_snapshot.tradeability_operator_fields,
         "raw_holdings": position_state.raw_holdings.as_dict(),
         "normalized_exposure": position_state.normalized_exposure.as_dict(),
         "state_interpretation": position_state.state_interpretation.as_dict(),
@@ -3705,6 +3706,9 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"unresolved_open_order_count={operator_recovery['unresolved_open_order_count']} "
         f"recovery_required_count={operator_recovery['recovery_required_count']} "
         f"dust_state={operator_recovery['dust_state']} "
+        f"dust_display_scope={operator_recovery['dust_display_scope']} "
+        f"residue_policy_state={operator_recovery['residue_policy_state']} "
+        f"dust_tradeability_consistent={1 if operator_recovery['dust_tradeability_consistent'] else 0} "
         f"dust_action={operator_recovery['dust_operator_action']} "
         f"dust_new_orders_allowed={1 if operator_recovery['dust_new_orders_allowed'] else 0} "
         f"dust_resume_allowed={1 if operator_recovery['dust_resume_allowed_by_policy'] else 0} "
@@ -3752,6 +3756,7 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0} "
         f"why_not={readiness_snapshot.why_not}"
     )
+    print(f"  tradeability_operator_message={operator_recovery['tradeability_operator_message']}")
     print(
         "  "
         f"dust_broker_qty={float(position_state.raw_holdings.broker_qty):.8f} "

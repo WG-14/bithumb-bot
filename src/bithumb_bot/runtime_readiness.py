@@ -12,7 +12,11 @@ from .dust import build_dust_display_context, build_position_state_model
 from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
-from .recovery_policy import classify_canonical_recovery_state, classify_canonical_tradeability_state
+from .recovery_policy import (
+    build_tradeability_operator_fields,
+    classify_canonical_recovery_state,
+    classify_canonical_tradeability_state,
+)
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ class RuntimeReadinessSnapshot:
     execution_flat: bool
     accounting_flat: bool
     tradeability: Any
+    tradeability_operator_fields: dict[str, object]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -80,6 +85,7 @@ class RuntimeReadinessSnapshot:
             "execution_flat": bool(self.execution_flat),
             "accounting_flat": bool(self.accounting_flat),
             "tradeability": self.tradeability.as_dict(),
+            **self.tradeability_operator_fields,
         }
 
 
@@ -368,6 +374,10 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             recovery_state=canonical_recovery,
             run_loop_allowed=resume_ready,
         )
+        tradeability_operator_fields = build_tradeability_operator_fields(
+            tradeability=tradeability,
+            dust_fields=dust_context.fields,
+        )
 
         return RuntimeReadinessSnapshot(
             recovery_stage=stage,
@@ -404,6 +414,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             execution_flat=canonical_recovery.execution_flat,
             accounting_flat=canonical_recovery.accounting_flat,
             tradeability=tradeability,
+            tradeability_operator_fields=tradeability_operator_fields,
         )
     finally:
         if close_conn:

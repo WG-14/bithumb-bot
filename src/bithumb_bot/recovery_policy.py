@@ -59,6 +59,79 @@ class CanonicalTradeabilityState:
         }
 
 
+def build_tradeability_operator_fields(
+    *,
+    tradeability: CanonicalTradeabilityState,
+    dust_fields: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build operator-facing residue fields from canonical tradeability policy.
+
+    Reconcile dust metadata and lot-native residue policy are related but not
+    identical surfaces. These fields keep that split explicit so a stale or
+    empty reconcile dust signal cannot read as permission to trade when
+    lot-native tracked residue is still blocking entries.
+    """
+
+    dust_fields = dict(dust_fields or {})
+    broker_dust_signal_state = str(dust_fields.get("dust_state") or "no_dust")
+    broker_dust_signal_message = str(
+        dust_fields.get("dust_operator_message") or "No broker/local dust signal was reported."
+    )
+    residual_class = str(tradeability.residual_class or "UNKNOWN")
+
+    if residual_class == "NONE":
+        residue_policy_message = "No lot-native residue is blocking run loop, new entry, or closeout policy."
+    elif residual_class == "HARMLESS_DUST_TREAT_AS_FLAT":
+        residue_policy_message = (
+            "Lot-native residue is classified as harmless dust for entry policy; "
+            "new entries may continue while SELL authority remains based on sellable executable lots."
+        )
+    elif residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY":
+        residue_policy_message = (
+            "Run loop is allowed, but lot-native tracked dust remains in accounting state; "
+            "new entry and closeout are blocked until an operator reviews or resolves the tracked residue."
+        )
+    elif residual_class == "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION":
+        residue_policy_message = (
+            "Non-executable residue exists without normal SELL authority; operator recovery review is required."
+        )
+    elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
+        residue_policy_message = (
+            "Executable open exposure remains; manage the open position or flatten through the normal SELL authority path."
+        )
+    else:
+        residue_policy_message = "Tradeability policy is unknown; review recovery report before trading."
+
+    dust_tradeability_consistent = not (
+        broker_dust_signal_state == "no_dust"
+        and residual_class in {
+            "TRACKED_DUST_BLOCK_NEW_ENTRY",
+            "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION",
+        }
+    )
+    if dust_tradeability_consistent:
+        dust_operator_message = broker_dust_signal_message
+    else:
+        dust_operator_message = (
+            f"Broker/local dust signal is {broker_dust_signal_state}, but lot-native residue policy is "
+            f"{residual_class}; use canonical tradeability fields for trading permission."
+        )
+
+    return {
+        "dust_display_scope": "broker_reconcile_signal",
+        "broker_dust_signal_state": broker_dust_signal_state,
+        "broker_dust_signal_message": broker_dust_signal_message,
+        "dust_tradeability_consistent": bool(dust_tradeability_consistent),
+        "dust_operator_message": dust_operator_message,
+        "residue_policy_scope": "lot_native_tradeability",
+        "residue_policy_state": residual_class,
+        "residue_policy_message": residue_policy_message,
+        "residue_blocks_new_entry": bool(not tradeability.new_entry_allowed and residual_class != "NONE"),
+        "residue_blocks_closeout": bool(not tradeability.closeout_allowed and residual_class != "NONE"),
+        "tradeability_operator_message": residue_policy_message,
+    }
+
+
 def classify_canonical_tradeability_state(
     *,
     position_state: Any,

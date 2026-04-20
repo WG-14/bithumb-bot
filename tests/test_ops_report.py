@@ -1088,6 +1088,9 @@ def test_ops_report_makes_resume_ready_but_entry_blocked_tracked_dust_explicit(
     out = capsys.readouterr().out
 
     assert "dust_state=no_dust" in out
+    assert "dust_display_scope=broker_reconcile_signal" in out
+    assert "residue_policy_state=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
+    assert "dust_tradeability_consistent=0" in out
     assert "position_authority_summary=holding_authority_state=dust_only" in out
     assert "canonical_state=DUST_ONLY_TRACKED residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY" in out
     assert "run_loop_allowed=1 new_entry_allowed=0 closeout_allowed=0" in out
@@ -1104,6 +1107,13 @@ def test_ops_report_makes_resume_ready_but_entry_blocked_tracked_dust_explicit(
     assert summary["accounting_flat"] is False
     assert summary["operator_action_required"] is True
     assert summary["dust_state"] == "no_dust"
+    assert summary["dust_display_scope"] == "broker_reconcile_signal"
+    assert summary["broker_dust_signal_state"] == "no_dust"
+    assert summary["residue_policy_scope"] == "lot_native_tradeability"
+    assert summary["residue_policy_state"] == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert summary["dust_tradeability_consistent"] is False
+    assert "Broker/local dust signal is no_dust" in summary["dust_operator_message"]
+    assert "Run loop is allowed" in summary["tradeability_operator_message"]
 
 
 def test_ops_report_surfaces_top_level_position_state_truth_sources(tmp_path, monkeypatch, capsys):
