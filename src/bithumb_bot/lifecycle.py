@@ -713,6 +713,35 @@ def apply_fill_lifecycle(
     # position_state.normalized_exposure.sellable_executable_lot_count.
     # dust_tracking lots remain operator evidence and are never matched here.
     lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
+    lot_definition = _read_authoritative_lot_definition_snapshot(conn, pair=str(pair))
+    if lot_definition is not None and lot_definition.internal_lot_size is not None:
+        lot_rules = replace(
+            lot_rules,
+            lot_size=float(lot_definition.internal_lot_size),
+            executable_min_qty=float(lot_definition.internal_lot_size),
+            dust_threshold=float(lot_definition.internal_lot_size),
+            min_qty=(
+                float(lot_definition.min_qty)
+                if lot_definition.min_qty is not None
+                else float(lot_rules.min_qty)
+            ),
+            qty_step=(
+                float(lot_definition.qty_step)
+                if lot_definition.qty_step is not None
+                else float(lot_rules.qty_step)
+            ),
+            min_notional_krw=(
+                float(lot_definition.min_notional_krw)
+                if lot_definition.min_notional_krw is not None
+                else float(lot_rules.min_notional_krw)
+            ),
+            max_qty_decimals=(
+                int(lot_definition.max_qty_decimals)
+                if lot_definition.max_qty_decimals is not None
+                else int(lot_rules.max_qty_decimals)
+            ),
+            source_mode=str(lot_definition.source_mode or lot_rules.source_mode),
+        )
     rows = _fetch_sellable_open_exposure_lots(conn, pair=str(pair))
 
     remaining_lots = int(qty_to_executable_lot_count(qty=float(qty), lot_rules=lot_rules))

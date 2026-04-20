@@ -165,6 +165,11 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
             "POSITION_AUTHORITY_CORRECTION_REQUIRED",
             "lot authority conflicts with accounted fill evidence; authority correction required",
         )
+    if "position_authority_residual_normalization_required=" in reason:
+        return (
+            "POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",
+            "lot authority needs post-partial-close residual normalization",
+        )
     if "fee_gap_recovery_required=" in reason:
         return (
             "FEE_GAP_RECOVERY_REQUIRED",
@@ -785,6 +790,12 @@ def evaluate_startup_safety_gate() -> str | None:
         portfolio_conn.close()
 
     normalized_position = readiness_snapshot.position_state.normalized_exposure
+    if readiness_snapshot.recovery_stage == "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING":
+        assessment = readiness_snapshot.position_authority_assessment
+        reasons.append(
+            "position_authority_residual_normalization_required="
+            f"{assessment.get('reason') or 'partial-close residual authority normalization required'}"
+        )
     if readiness_snapshot.recovery_stage == "AUTHORITY_CORRECTION_PENDING":
         assessment = readiness_snapshot.position_authority_assessment
         reasons.append(
@@ -1144,6 +1155,13 @@ def build_resume_guidance(
             "Do not resume trading. Correct the conflicting lot authority from accounted BUY evidence, then rerun recovery-report."
         )
         resume_blocked_reason = "resume blocked by conflicting lot authority"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED" for b in blocker_list):
+        operator_next_action = "position_authority_residual_normalization_required"
+        recommended_command = "uv run python bot.py rebuild-position-authority"
+        recommended_next_action = (
+            "Do not resume trading. Normalize the post-partial-close residual authority from accounted BUY/SELL evidence, then rerun recovery-report."
+        )
+        resume_blocked_reason = "resume blocked by unnormalized partial-close residual authority"
     elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
         operator_next_action = "manual_flat_accounting_repair_required"
         recommended_command = "uv run python bot.py manual-flat-accounting-repair"
@@ -1334,14 +1352,25 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
     dust_context = build_dust_display_context(readiness_snapshot.reconcile_metadata)
     dust_present = bool(dust_context.classification.present)
     dust_resume_safe = bool(dust_present and dust_context.operator_view.resume_allowed)
+    persisted_dust_resume_safe = bool(
+        readiness_snapshot.resume_ready
+        and str(normalized_exposure.terminal_state) == "dust_only"
+        and normalized_exposure.has_dust_only_remainder
+        and str(normalized_exposure.authority_gap_reason or "none") == "none"
+    )
     asset_qty = float(normalized_exposure.raw_qty_open)
-    raw_qty_without_dust_evidence = bool(asset_qty > 1e-12 and not dust_present)
+    raw_qty_without_dust_evidence = bool(
+        asset_qty > 1e-12
+        and not dust_present
+        and not normalized_exposure.has_dust_only_remainder
+    )
     raw_qty_residue_without_resume_safe_dust = bool(
         raw_qty_without_dust_evidence
         or (
             asset_qty > 1e-12
             and not normalized_exposure.has_any_position_residue
             and not dust_resume_safe
+            and not persisted_dust_resume_safe
         )
     )
     authority_gap_reason = str(normalized_exposure.authority_gap_reason or "")
@@ -1361,7 +1390,10 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             and (
                 executable_open_position_manageable
                 or str(normalized_exposure.terminal_state) == "flat"
-                or (str(normalized_exposure.terminal_state) == "dust_only" and dust_resume_safe)
+                or (
+                    str(normalized_exposure.terminal_state) == "dust_only"
+                    and (dust_resume_safe or persisted_dust_resume_safe)
+                )
             )
         )
     )

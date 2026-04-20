@@ -235,6 +235,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             fee_gap_reasons.append(f"reserved_exit_qty={float(reserved_exit_qty):.12f}")
         blocked_by_authority_rebuild = bool(
             bool(authority_assessment.get("needs_correction"))
+            or bool(authority_assessment.get("needs_residual_normalization"))
             or str(position_state.normalized_exposure.authority_gap_reason or "")
             == "authority_missing_recovery_required"
         )
@@ -268,6 +269,20 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 "uv run python bot.py fee-pending-accounting-repair "
                 "--client-order-id <id> --fill-id <fill_id> --fee <fee> "
                 "--fee-provenance <source> --apply --yes"
+            )
+        elif bool(authority_assessment.get("needs_residual_normalization")):
+            stage = "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
+            blockers.append("POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED")
+            categories.append("executable_authority")
+            operator_next_action = (
+                "apply_rebuild_position_authority"
+                if bool(authority_assessment.get("safe_to_normalize_residual"))
+                else "review_position_authority_evidence"
+            )
+            recommended_command = (
+                "uv run python bot.py rebuild-position-authority --apply --yes"
+                if bool(authority_assessment.get("safe_to_normalize_residual"))
+                else "uv run python bot.py rebuild-position-authority"
             )
         elif bool(authority_assessment.get("needs_correction")):
             stage = "AUTHORITY_CORRECTION_PENDING"

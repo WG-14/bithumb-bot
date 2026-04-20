@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -8,6 +9,7 @@ from .db_core import normalize_asset_qty
 
 
 _EPS = 1e-12
+PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON = "partial_close_residual_authority_normalization"
 
 
 def _row_float(row: Any, key: str, default: float = 0.0) -> float:
@@ -44,6 +46,45 @@ def _row_text(row: Any, key: str, default: str = "") -> str:
     except (KeyError, IndexError, TypeError):
         return default
     return str(value or default)
+
+
+def _matching_partial_close_residual_repair_present(
+    conn,
+    *,
+    target_trade_id: int,
+    sell_trade_ids: list[int],
+    expected_residual_qty: float,
+) -> bool:
+    if target_trade_id <= 0 or not sell_trade_ids:
+        return False
+    rows = conn.execute(
+        """
+        SELECT repair_basis
+        FROM position_authority_repairs
+        WHERE reason=?
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 20
+        """,
+        (PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON,),
+    ).fetchall()
+    expected_sell_ids = [int(value) for value in sell_trade_ids]
+    for row in rows:
+        try:
+            basis = json.loads(str(row["repair_basis"]))
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError, IndexError):
+            continue
+        if int(basis.get("target_trade_id") or 0) != int(target_trade_id):
+            continue
+        basis_sell_ids = [int(value) for value in basis.get("sell_trade_ids") or []]
+        if basis_sell_ids != expected_sell_ids:
+            continue
+        try:
+            basis_residual_qty = normalize_asset_qty(float(basis.get("expected_residual_qty") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if abs(basis_residual_qty - normalize_asset_qty(expected_residual_qty)) <= _EPS:
+            return True
+    return False
 
 
 def build_position_authority_assessment(conn, *, pair: str | None = None) -> dict[str, Any]:
@@ -147,8 +188,31 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         (pair_text, target_trade_id),
     ).fetchone()
     sell_after_row = conn.execute(
-        "SELECT COUNT(*) AS cnt FROM trades WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))",
+        """
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(qty), 0.0) AS qty
+        FROM trades
+        WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))
+        """,
         (pair_text, fill_ts, fill_ts, target_trade_id),
+    ).fetchone()
+    sell_after_rows = conn.execute(
+        """
+        SELECT id, client_order_id, ts, price, qty, fee
+        FROM trades
+        WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))
+        ORDER BY ts ASC, id ASC
+        """,
+        (pair_text, fill_ts, fill_ts, target_trade_id),
+    ).fetchall()
+    other_active_row = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(qty_open), 0.0) AS qty
+        FROM open_position_lots
+        WHERE pair=?
+          AND qty_open > 1e-12
+          AND entry_trade_id != ?
+        """,
+        (pair_text, target_trade_id),
     ).fetchone()
     portfolio_row = conn.execute(
         "SELECT asset_qty, asset_available, asset_locked FROM portfolio WHERE id=1"
@@ -173,6 +237,13 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_executable_lot_count = _row_int(lot_row, "executable_lot_count")
     target_dust_lot_count = _row_int(lot_row, "dust_tracking_lot_count")
     sell_after_count = _row_int(sell_after_row, "cnt")
+    sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
+    sell_trade_ids = [_row_int(row, "id") for row in sell_after_rows]
+    other_active_lot_count = _row_int(other_active_row, "cnt")
+    other_active_qty = normalize_asset_qty(_row_float(other_active_row, "qty"))
+    canonical_executable_qty = normalize_asset_qty(
+        float(canonical_lot_size) * float(max(0, canonical_executable_lot_count))
+    )
 
     conflicting_dust_authority = bool(
         lot_row_count > 0
@@ -184,14 +255,37 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     )
     target_qty_matches_fill = bool(abs(target_total_qty - fill_qty) <= 1e-12)
     portfolio_matches_target = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= 1e-12)
-    needs_correction = bool(conflicting_dust_authority)
+    expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - sell_after_qty))
+    partial_close_residual_candidate = bool(
+        conflicting_dust_authority
+        and sell_after_count > 0
+        and canonical_executable_qty > _EPS
+        and abs(sell_after_qty - canonical_executable_qty) <= _EPS
+        and expected_residual_qty > _EPS
+        and abs(target_total_qty - expected_residual_qty) <= _EPS
+        and abs(target_open_qty) <= _EPS
+        and target_dust_lot_count > 0
+        and other_active_lot_count == 0
+        and abs(other_active_qty) <= _EPS
+        and portfolio_matches_target
+    )
+    residual_normalization_recorded = _matching_partial_close_residual_repair_present(
+        conn,
+        target_trade_id=target_trade_id,
+        sell_trade_ids=sell_trade_ids,
+        expected_residual_qty=expected_residual_qty,
+    )
+    needs_residual_normalization = bool(
+        partial_close_residual_candidate and not residual_normalization_recorded
+    )
+    needs_correction = bool(conflicting_dust_authority and not partial_close_residual_candidate)
 
     blockers: list[str] = []
-    if not needs_correction:
+    if not needs_correction and not needs_residual_normalization:
         blockers.append("no_repairable_authority_conflict")
-    if sell_after_count > 0:
+    if sell_after_count > 0 and not needs_residual_normalization:
         blockers.append(f"sell_after_target_buy={sell_after_count}")
-    if not target_qty_matches_fill:
+    if not target_qty_matches_fill and not needs_residual_normalization:
         blockers.append(
             f"target_lot_qty_fill_mismatch=target_qty={target_total_qty:.12f},fill_qty={fill_qty:.12f}"
         )
@@ -202,15 +296,24 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     if order_status not in {"FILLED", "PARTIAL", "NEW", "unknown"}:
         blockers.append(f"order_status={order_status}")
 
-    safe_to_correct = bool(needs_correction and not blockers)
-    reason = "position authority correction applicable" if safe_to_correct else ", ".join(blockers)
+    safe_to_normalize_residual = bool(needs_residual_normalization and not blockers)
+    safe_to_correct = bool((needs_correction and not blockers) or safe_to_normalize_residual)
+    if safe_to_normalize_residual:
+        reason = "partial-close residual authority normalization applicable"
+    elif safe_to_correct:
+        reason = "position authority correction applicable"
+    else:
+        reason = ", ".join(blockers)
     return {
         "needs_correction": needs_correction,
+        "needs_residual_normalization": needs_residual_normalization,
         "safe_to_correct": safe_to_correct,
+        "safe_to_normalize_residual": safe_to_normalize_residual,
         "reason": reason,
         "recommended_action": (
             "apply_rebuild_position_authority" if safe_to_correct else "review_recovery_report"
         ),
+        "repair_mode": "residual_normalization" if needs_residual_normalization else "correction",
         "target_trade_id": target_trade_id,
         "target_client_order_id": client_order_id,
         "target_fill_id": fill_id,
@@ -221,6 +324,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "canonical_internal_lot_size": canonical_lot_size,
         "canonical_intended_lot_count": canonical_intended_lot_count,
         "canonical_executable_lot_count": canonical_executable_lot_count,
+        "canonical_executable_qty": canonical_executable_qty,
         "existing_lot_rows": lot_row_count,
         "existing_total_qty": target_total_qty,
         "existing_open_exposure_qty": target_open_qty,
@@ -230,6 +334,13 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "existing_min_internal_lot_size": _row_float(lot_row, "min_internal_lot_size"),
         "existing_max_internal_lot_size": _row_float(lot_row, "max_internal_lot_size"),
         "sell_after_target_buy_count": sell_after_count,
+        "sell_after_target_buy_qty": sell_after_qty,
+        "sell_trade_ids": sell_trade_ids,
+        "expected_residual_qty": expected_residual_qty,
+        "partial_close_residual_candidate": partial_close_residual_candidate,
+        "residual_normalization_recorded": residual_normalization_recorded,
+        "other_active_lot_count": other_active_lot_count,
+        "other_active_qty": other_active_qty,
         "portfolio_qty": portfolio_qty,
         "blockers": blockers,
     }

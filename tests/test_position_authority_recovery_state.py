@@ -7,7 +7,12 @@ import pytest
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db, record_broker_fill_observation
-from bithumb_bot.engine import evaluate_resume_eligibility, evaluate_startup_safety_gate
+from bithumb_bot.engine import (
+    evaluate_restart_readiness,
+    evaluate_resume_eligibility,
+    evaluate_startup_safety_gate,
+    get_health_status,
+)
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.fee_gap_repair import build_fee_gap_accounting_repair_preview
 from bithumb_bot.fee_pending_repair import apply_fee_pending_accounting_repair
@@ -183,6 +188,49 @@ def _record_historical_sell_history(conn) -> None:
     conn.commit()
 
 
+def _apply_fee_pending_sell(conn, *, client_order_id: str = "incident_sell", fill_id: str = "sell-fill-9") -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side="SELL",
+        qty_req=LOT_SIZE,
+        price=PRICE,
+        ts_ms=1_700_000_100_000,
+        status="NEW",
+        internal_lot_size=LOT_SIZE,
+        effective_min_trade_qty=0.0002,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    record_broker_fill_observation(
+        conn,
+        event_ts=1_700_000_100_100,
+        client_order_id=client_order_id,
+        exchange_order_id="ex-sell-71",
+        fill_id=fill_id,
+        fill_ts=1_700_000_100_050,
+        side="SELL",
+        price=PRICE,
+        qty=LOT_SIZE,
+        fee=None,
+        fee_status="missing",
+        accounting_status="fee_pending",
+        source="test_reconcile_fee_pending",
+        raw_payload={"fixture": "incident-sell"},
+    )
+    result = apply_fee_pending_accounting_repair(
+        conn,
+        client_order_id=client_order_id,
+        fill_id=fill_id,
+        fee=17.73,
+        fee_provenance="operator_fixture",
+    )
+    assert result["applied_fill"] is not None
+    conn.commit()
+
+
 def test_fee_pending_repaired_buy_materializes_consistent_lot_authority(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
@@ -346,39 +394,66 @@ def test_fee_pending_and_authority_repair_resume_open_position_with_deferred_fee
     assert resume_blockers == []
 
 
-def test_authority_correction_fails_closed_when_target_buy_was_later_sold(recovery_db):
+def test_partial_close_residual_normalization_replays_buy_and_sell_authority(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
         _apply_fee_pending_buy(conn)
         _corrupt_latest_buy_lot_as_incident(conn)
-        record_order_if_missing(
-            conn,
-            client_order_id="later_sell",
-            side="SELL",
-            qty_req=LOT_SIZE,
-            price=PRICE,
-            ts_ms=1_700_000_100_000,
-            status="NEW",
-            internal_lot_size=LOT_SIZE,
-            intended_lot_count=1,
-            executable_lot_count=1,
-        )
-        conn.execute(
-            """
-            INSERT INTO trades(ts, pair, interval, side, price, qty, fee, cash_after, asset_after, client_order_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (1_700_000_100_100, settings.PAIR, settings.INTERVAL, "SELL", PRICE, LOT_SIZE, 1.0, 0.0, 0.0, "later_sell"),
-        )
-        set_status("later_sell", "FILLED", conn=conn)
+        apply_position_authority_rebuild(conn)
+        _apply_fee_pending_sell(conn)
+
+        before = compute_runtime_readiness_snapshot(conn)
         conn.commit()
         assessment = build_position_authority_assessment(conn)
         preview = build_position_authority_rebuild_preview(conn)
+        result = apply_position_authority_rebuild(conn)
+        conn.commit()
+        after = compute_runtime_readiness_snapshot(conn)
+        rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size
+            FROM open_position_lots
+            WHERE entry_client_order_id='incident_buy'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        repair = conn.execute(
+            """
+            SELECT reason, repair_basis
+            FROM position_authority_repairs
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        startup_reason = evaluate_startup_safety_gate()
+        resume_allowed, resume_blockers = evaluate_resume_eligibility()
+        restart = evaluate_restart_readiness()
+        health = get_health_status()
     finally:
         conn.close()
 
-    assert assessment["needs_correction"] is True
-    assert assessment["safe_to_correct"] is False
-    assert "sell_after_target_buy=1" in assessment["blockers"]
-    assert preview["safe_to_apply"] is False
-    assert "sell_after_target_buy=1" in preview["eligibility_reason"]
+    assert before.recovery_stage == "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
+    assert assessment["needs_residual_normalization"] is True
+    assert assessment["safe_to_normalize_residual"] is True
+    assert assessment["expected_residual_qty"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert preview["repair_mode"] == "residual_normalization"
+    assert preview["safe_to_apply"] is True
+    assert result["repair"]["reason"] == "partial_close_residual_authority_normalization"
+    assert repair["reason"] == "partial_close_residual_authority_normalization"
+    basis = json.loads(repair["repair_basis"])
+    assert basis["event_type"] == "partial_close_residual_authority_normalization"
+    assert basis["target_trade_id"] == assessment["target_trade_id"]
+    assert basis["expected_residual_qty"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert len(rows) == 1
+    assert rows[0]["position_state"] == "dust_tracking"
+    assert rows[0]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert rows[0]["executable_lot_count"] == 0
+    assert rows[0]["dust_tracking_lot_count"] == 1
+    assert after.recovery_stage == "RESUME_READY"
+    assert after.resume_ready is True
+    assert startup_reason is None
+    assert resume_allowed is True
+    assert resume_blockers == []
+    assert health["startup_gate_reason"] is None
+    assert health["resume_gate_blocked"] is False
+    assert all(ok for _label, ok, _detail in restart)
