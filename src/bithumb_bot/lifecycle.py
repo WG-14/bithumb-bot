@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .config import settings
 from .dust import (
@@ -164,6 +164,64 @@ def _build_fill_lot_rules(*, pair: str, market_price: float) -> object:
         rules=fallback_rules,
         source_mode="ledger",
     )
+
+
+def _read_fill_lot_rules_override(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+) -> dict[str, float | int] | None:
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(f.internal_lot_size, o.internal_lot_size) AS internal_lot_size,
+            COALESCE(o.effective_min_trade_qty, f.internal_lot_size, o.internal_lot_size) AS effective_min_trade_qty,
+            COALESCE(o.qty_step, f.internal_lot_size, o.internal_lot_size) AS qty_step,
+            COALESCE(o.min_notional_krw, 0.0) AS min_notional_krw,
+            COALESCE(o.executable_lot_count, f.executable_lot_count, 0) AS executable_lot_count,
+            COALESCE(o.intended_lot_count, f.intended_lot_count, 0) AS intended_lot_count
+        FROM orders o
+        LEFT JOIN fills f
+          ON f.client_order_id=o.client_order_id
+         AND (
+              (? IS NOT NULL AND f.fill_id=?)
+              OR (
+                    f.fill_ts=?
+                AND ABS(f.price-?) < 1e-12
+                AND ABS(f.qty-?) < 1e-12
+              )
+         )
+        WHERE o.client_order_id=?
+        ORDER BY f.id DESC
+        LIMIT 1
+        """,
+        (
+            fill_id,
+            fill_id,
+            int(fill_ts),
+            float(price),
+            float(qty),
+            str(client_order_id),
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    internal_lot_size = float(row["internal_lot_size"] or 0.0)
+    executable_lot_count = int(row["executable_lot_count"] or 0)
+    if internal_lot_size <= 1e-12 or executable_lot_count <= 0:
+        return None
+    return {
+        "internal_lot_size": internal_lot_size,
+        "effective_min_trade_qty": max(0.0, float(row["effective_min_trade_qty"] or internal_lot_size)),
+        "qty_step": max(0.0, float(row["qty_step"] or internal_lot_size)),
+        "min_notional_krw": max(0.0, float(row["min_notional_krw"] or 0.0)),
+        "executable_lot_count": executable_lot_count,
+        "intended_lot_count": int(row["intended_lot_count"] or executable_lot_count),
+    }
 
 
 def _row_executable_lot_count(row: object, *, qty_open: float, lot_rules: object) -> int:
@@ -474,18 +532,41 @@ def apply_fill_lifecycle(
         # The stored executable quantity is the exact executable lot multiple;
         # the non-executable remainder is tracked separately as dust evidence.
         lot_rules = _build_fill_lot_rules(pair=pair, market_price=price)
-        lot_definition = _lot_definition_from_rules(lot_rules=lot_rules)
-        fill_lot = build_executable_lot(
+        override = _read_fill_lot_rules_override(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            fill_ts=int(fill_ts),
+            price=float(price),
             qty=float(qty),
-            market_price=float(price),
-            min_qty=float(lot_rules.lot_size),
-            qty_step=float(lot_rules.lot_size),
+        )
+        if override is not None:
+            lot_rules = replace(
+                lot_rules,
+                lot_size=float(override["internal_lot_size"]),
+                executable_min_qty=float(override["internal_lot_size"]),
+                dust_threshold=float(override["internal_lot_size"]),
+                min_qty=float(override["effective_min_trade_qty"]),
+                qty_step=float(override["qty_step"]),
+                min_notional_krw=float(override["min_notional_krw"]),
+            )
+        lot_definition = _lot_definition_from_rules(lot_rules=lot_rules)
+        split = lot_rules.split_qty(float(qty))
+        fill_lot = ExecutableLot(
+            raw_qty=float(qty),
+            executable_qty=float(split.executable_qty),
+            dust_qty=float(split.dust_qty),
+            effective_min_trade_qty=float(split.executable_min_qty),
+            min_qty=float(lot_rules.min_qty),
+            qty_step=float(lot_rules.qty_step),
             min_notional_krw=float(lot_rules.min_notional_krw),
-            max_qty_decimals=int(lot_rules.max_qty_decimals),
+            exit_price_floor=None,
+            exit_fee_ratio=0.0,
+            exit_slippage_ratio=0.0,
+            exit_buffer_ratio=0.0,
+            exit_non_executable_reason=str(split.non_executable_reason),
         )
-        executable_lot_count = int(
-            qty_to_executable_lot_count(qty=float(fill_lot.executable_qty), lot_rules=lot_rules)
-        )
+        executable_lot_count = int(split.lot_count if split.executable else 0)
         dust_lot_count = 1 if fill_lot.dust_qty > 1e-12 else 0
         dust_lot_size = max(0.0, float(fill_lot.dust_qty)) if dust_lot_count > 0 else 0.0
         resolved_entry_decision_id = entry_decision_id

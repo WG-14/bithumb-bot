@@ -7,9 +7,10 @@ from typing import Any
 
 from . import runtime_state
 from .config import settings
-from .db_core import ensure_db, get_broker_fill_observation_summary, portfolio_asset_total
+from .db_core import ensure_db, portfolio_asset_total
 from .dust import build_dust_display_context, build_position_state_model
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+from .position_authority_state import build_position_authority_assessment
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class RuntimeReadinessSnapshot:
     material_zero_fee_fill_count: int
     open_order_count: int
     recovery_required_count: int
+    position_authority_assessment: dict[str, object]
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -47,6 +49,7 @@ class RuntimeReadinessSnapshot:
             "material_zero_fee_fill_count": int(self.material_zero_fee_fill_count),
             "open_order_count": int(self.open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
+            "position_authority_assessment": dict(self.position_authority_assessment),
         }
 
 
@@ -84,16 +87,31 @@ def _row_int(row: Any, key: str, default: int = 0) -> int:
         return default
 
 
-def _safe_broker_fill_observation_summary(conn: Any) -> dict[str, object]:
+def _unaccounted_fee_pending_observation_count(conn: Any) -> int:
     try:
-        return get_broker_fill_observation_summary(conn)
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM broker_fill_observations b
+            WHERE b.accounting_status='fee_pending'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM fills f
+                  WHERE f.client_order_id=b.client_order_id
+                    AND (
+                         (b.fill_id IS NOT NULL AND f.fill_id=b.fill_id)
+                         OR (
+                              f.fill_ts=b.fill_ts
+                          AND ABS(f.price-b.price) < 1e-12
+                          AND ABS(f.qty-b.qty) < 1e-12
+                         )
+                    )
+              )
+            """
+        ).fetchone()
     except (AssertionError, sqlite3.OperationalError):
-        return {
-            "observation_count": 0,
-            "fee_pending_count": 0,
-            "accounting_complete_count": 0,
-            "last_event_ts": None,
-        }
+        return 0
+    return _row_int(row, "cnt")
 
 
 def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
@@ -158,11 +176,11 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
             reserved_exit_qty=reserved_exit_qty,
         )
-        observation_summary = _safe_broker_fill_observation_summary(conn)
-        fee_pending_count = int(observation_summary.get("fee_pending_count") or 0)
+        fee_pending_count = _unaccounted_fee_pending_observation_count(conn)
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
         fee_gap_adjustment_count = _metadata_int(metadata, "fee_gap_adjustment_count")
         material_zero_fee_fill_count = _metadata_int(metadata, "material_zero_fee_fill_count")
+        authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
 
         blockers: list[str] = []
         categories: list[str] = []
@@ -179,6 +197,20 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 "uv run python bot.py fee-pending-accounting-repair "
                 "--client-order-id <id> --fill-id <fill_id> --fee <fee> "
                 "--fee-provenance <source> --apply --yes"
+            )
+        elif bool(authority_assessment.get("needs_correction")):
+            stage = "AUTHORITY_CORRECTION_PENDING"
+            blockers.append("POSITION_AUTHORITY_CORRECTION_REQUIRED")
+            categories.append("executable_authority")
+            operator_next_action = (
+                "apply_rebuild_position_authority"
+                if bool(authority_assessment.get("safe_to_correct"))
+                else "review_position_authority_evidence"
+            )
+            recommended_command = (
+                "uv run python bot.py rebuild-position-authority --apply --yes"
+                if bool(authority_assessment.get("safe_to_correct"))
+                else "uv run python bot.py rebuild-position-authority"
             )
         elif str(position_state.normalized_exposure.authority_gap_reason or "") == "authority_missing_recovery_required":
             stage = "AUTHORITY_REBUILD_PENDING"
@@ -221,6 +253,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             material_zero_fee_fill_count=material_zero_fee_fill_count,
             open_order_count=open_order_count,
             recovery_required_count=recovery_required_count,
+            position_authority_assessment=authority_assessment,
         )
     finally:
         if close_conn:

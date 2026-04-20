@@ -152,7 +152,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         reasons.append(f"reserved_exit_qty={float(reserved_exit_qty):.12f}")
 
     blocked_by_authority_rebuild = bool(
-        readiness.recovery_stage == "AUTHORITY_REBUILD_PENDING"
+        readiness.recovery_stage in {"AUTHORITY_REBUILD_PENDING", "AUTHORITY_CORRECTION_PENDING"}
         or str(readiness.position_state.normalized_exposure.authority_gap_reason or "")
         == "authority_missing_recovery_required"
     )
@@ -204,6 +204,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "recovery_stage": readiness.recovery_stage,
         "blocker_categories": list(readiness.blocker_categories),
         "blocked_by_authority_rebuild": blocked_by_authority_rebuild,
+        "blocked_by_authority_correction": readiness.recovery_stage == "AUTHORITY_CORRECTION_PENDING",
         "blocked_by_open_exposure": blocked_by_open_exposure,
         "blocked_by_dust_residue": blocked_by_dust_residue,
         "next_required_action": (

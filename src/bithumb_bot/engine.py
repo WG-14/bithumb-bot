@@ -160,6 +160,11 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
             "POSITION_AUTHORITY_RECOVERY_REQUIRED",
             "lot authority is missing; manual recovery required",
         )
+    if "position_authority_correction_required=" in reason:
+        return (
+            "POSITION_AUTHORITY_CORRECTION_REQUIRED",
+            "lot authority conflicts with accounted fill evidence; authority correction required",
+        )
     if "fee_gap_recovery_required=" in reason:
         return (
             "FEE_GAP_RECOVERY_REQUIRED",
@@ -778,6 +783,12 @@ def evaluate_startup_safety_gate() -> str | None:
         portfolio_conn.close()
 
     normalized_position = readiness_snapshot.position_state.normalized_exposure
+    if readiness_snapshot.recovery_stage == "AUTHORITY_CORRECTION_PENDING":
+        assessment = readiness_snapshot.position_authority_assessment
+        reasons.append(
+            "position_authority_correction_required="
+            f"{assessment.get('reason') or 'authority conflict'}"
+        )
     if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
         reasons.append(
             "position_authority_gap="
@@ -1124,6 +1135,13 @@ def build_resume_guidance(
             "Do not resume trading. Holdings exist but canonical lot authority is missing; repair or explicitly recover the position state first."
         )
         resume_blocked_reason = "resume blocked by missing lot authority"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_CORRECTION_REQUIRED" for b in blocker_list):
+        operator_next_action = "position_authority_correction_required"
+        recommended_command = "uv run python bot.py rebuild-position-authority"
+        recommended_next_action = (
+            "Do not resume trading. Correct the conflicting lot authority from accounted BUY evidence, then rerun recovery-report."
+        )
+        resume_blocked_reason = "resume blocked by conflicting lot authority"
     elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
         operator_next_action = "manual_flat_accounting_repair_required"
         recommended_command = "uv run python bot.py manual-flat-accounting-repair"
