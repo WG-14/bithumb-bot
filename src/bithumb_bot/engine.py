@@ -323,7 +323,7 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
         fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
         conn.close()
-    if not bool(fee_gap_preview.get("needs_repair")):
+    if not bool(fee_gap_preview.get("needs_repair")) or not bool(fee_gap_preview.get("resume_blocking", True)):
         return None
 
     return _resume_blocker(
@@ -332,7 +332,9 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
             "fee-related cash drift detected during reconcile: "
             f"material_zero_fee_fill_count={zero_fee_fill_count} "
             f"fee_gap_adjustment_count={fee_gap_adjustment_count} "
-            f"fee_gap_accounting_repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)}"
+            f"fee_gap_accounting_repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)} "
+            f"resume_policy={fee_gap_preview.get('resume_policy') or 'hard_block'} "
+            f"next_action={fee_gap_preview.get('next_required_action') or 'review_recovery_report'}"
         ),
         reason_code="FEE_GAP_RECOVERY_REQUIRED",
         summary="fee-related accounting inconsistency requires manual recovery",
@@ -810,7 +812,7 @@ def evaluate_startup_safety_gate() -> str | None:
             fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
         finally:
             conn.close()
-        if bool(fee_gap_preview.get("needs_repair")):
+        if bool(fee_gap_preview.get("needs_repair")) and bool(fee_gap_preview.get("resume_blocking", True)):
             reasons.append(
                 "fee_gap_recovery_required="
                 f"{fee_gap_recovery_required}"
@@ -1342,12 +1344,25 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             and not dust_resume_safe
         )
     )
+    authority_gap_reason = str(normalized_exposure.authority_gap_reason or "")
+    executable_open_position_manageable = bool(
+        normalized_exposure.has_executable_exposure
+        and str(normalized_exposure.terminal_state) == "open_exposure"
+        and not authority_gap_reason
+    )
+    readiness_deferred_open_position = bool(
+        readiness_snapshot.resume_ready
+        and readiness_snapshot.recovery_stage == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+    )
     position_state_clear = bool(
-        not raw_qty_residue_without_resume_safe_dust
-        and not normalized_exposure.has_executable_exposure
-        and (
-            str(normalized_exposure.terminal_state) == "flat"
-            or (str(normalized_exposure.terminal_state) == "dust_only" and dust_resume_safe)
+        readiness_deferred_open_position
+        or (
+            not raw_qty_residue_without_resume_safe_dust
+            and (
+                executable_open_position_manageable
+                or str(normalized_exposure.terminal_state) == "flat"
+                or (str(normalized_exposure.terminal_state) == "dust_only" and dust_resume_safe)
+            )
         )
     )
     display_terminal_state = (
@@ -1396,9 +1411,14 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
         f"safe_to_apply={1 if bool(manual_flat_preview.get('safe_to_apply')) else 0} "
         f"reason={manual_flat_preview.get('eligibility_reason') or 'none'}"
     )
-    fee_gap_repair_needed = bool(fee_gap_preview.get("needs_repair"))
+    fee_gap_repair_needed = bool(
+        fee_gap_preview.get("needs_repair") and fee_gap_preview.get("resume_blocking", True)
+    )
     fee_gap_repair_detail = (
-        f"needed={1 if fee_gap_repair_needed else 0} "
+        f"needed={1 if bool(fee_gap_preview.get('needs_repair')) else 0} "
+        f"resume_blocking={1 if bool(fee_gap_preview.get('resume_blocking')) else 0} "
+        f"closeout_blocking={1 if bool(fee_gap_preview.get('closeout_blocking')) else 0} "
+        f"resume_policy={fee_gap_preview.get('resume_policy') or 'none'} "
         f"safe_to_apply={1 if bool(fee_gap_preview.get('safe_to_apply')) else 0} "
         f"repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)} "
         f"reason={fee_gap_preview.get('eligibility_reason') or 'none'}"

@@ -293,6 +293,59 @@ def test_fee_gap_deadlock_reports_authority_correction_as_next_stage(recovery_db
     assert any(blocker.reason_code == "POSITION_AUTHORITY_CORRECTION_REQUIRED" for blocker in resume_blockers)
 
 
+def test_fee_pending_and_authority_repair_resume_open_position_with_deferred_fee_gap(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _record_historical_sell_history(conn)
+        _apply_fee_pending_buy(conn)
+        _corrupt_latest_buy_lot_as_incident(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="FEE_GAP_RECOVERY_REQUIRED",
+            metadata={
+                "fee_gap_recovery_required": 1,
+                "material_zero_fee_fill_count": 1,
+                "material_zero_fee_fill_latest_ts": 1_699_999_000_100,
+                "fee_gap_adjustment_count": 1,
+                "fee_gap_adjustment_total_krw": 4.23,
+                "fee_gap_adjustment_latest_event_ts": 1_700_000_010_000,
+                "external_cash_adjustment_reason": "reconcile_fee_gap_cash_drift",
+            },
+            now_epoch_sec=1.0,
+        )
+
+        before = compute_runtime_readiness_snapshot(conn)
+        repair = apply_position_authority_rebuild(conn)
+        conn.commit()
+        after = compute_runtime_readiness_snapshot(conn)
+        fee_gap = build_fee_gap_accounting_repair_preview(conn)
+        lots = summarize_position_lots(conn, pair=settings.PAIR)
+        startup_reason = evaluate_startup_safety_gate()
+        resume_allowed, resume_blockers = evaluate_resume_eligibility()
+    finally:
+        conn.close()
+
+    assert before.recovery_stage == "AUTHORITY_CORRECTION_PENDING"
+    assert repair["repair"]["reason"] == "accounted_buy_fill_authority_correction"
+    assert lots.open_lot_count >= 1
+    assert lots.dust_tracking_lot_count == 1
+    assert after.recovery_stage == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+    assert after.resume_ready is True
+    assert after.resume_blockers == ()
+    assert after.blocker_categories == ("advisory_historical_debt",)
+    assert fee_gap["needs_repair"] is True
+    assert fee_gap["safe_to_apply"] is False
+    assert fee_gap["repair_eligibility_state"] == "blocked_until_flattened"
+    assert fee_gap["resume_policy"] == "defer_for_open_position_management"
+    assert fee_gap["resume_blocking"] is False
+    assert fee_gap["closeout_blocking"] is True
+    assert fee_gap["blocked_by_open_exposure"] is True
+    assert fee_gap["blocked_by_dust_residue"] is True
+    assert startup_reason is None
+    assert resume_allowed is True
+    assert resume_blockers == []
+
+
 def test_authority_correction_fails_closed_when_target_buy_was_later_sold(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:

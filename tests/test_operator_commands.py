@@ -44,6 +44,7 @@ from bithumb_bot.engine import (
     build_resume_guidance,
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
+    evaluate_startup_safety_gate,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.oms import add_fill, set_exchange_order_id, set_status
@@ -5011,10 +5012,61 @@ def test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp
 
     assert result["repair"]["created"] is True
     assert int(result["lot_snapshot_after"]["open_lot_count"]) > 0
-    assert post_snapshot.recovery_stage == "HISTORICAL_FEE_GAP_PENDING"
-    assert post_snapshot.blocker_categories == ("historical_accounting_debt",)
+    assert post_snapshot.recovery_stage == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+    assert post_snapshot.resume_ready is True
+    assert post_snapshot.resume_blockers == ()
+    assert post_snapshot.blocker_categories == ("advisory_historical_debt",)
     assert post_fee_gap_preview["blocked_by_authority_rebuild"] is False
-    assert post_fee_gap_preview["next_required_action"] == "resolve_open_exposure_before_fee_gap_repair"
+    assert post_fee_gap_preview["repair_eligibility_state"] == "blocked_until_flattened"
+    assert post_fee_gap_preview["resume_policy"] == "defer_for_open_position_management"
+    assert post_fee_gap_preview["resume_blocking"] is False
+    assert post_fee_gap_preview["closeout_blocking"] is True
+    assert post_fee_gap_preview["next_required_action"] == "manage_open_position_until_flat_then_apply_fee_gap_repair"
+
+    startup_reason = evaluate_startup_safety_gate()
+    resume_allowed, resume_blockers = evaluate_resume_eligibility()
+
+    assert startup_reason is None
+    assert resume_allowed is True
+    assert resume_blockers == []
+
+
+def test_open_position_fee_gap_debt_is_consistent_across_operator_surfaces(tmp_path, monkeypatch, capsys):
+    test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp_path)
+    monkeypatch.setattr("bithumb_bot.app._safe_recent_broker_orders_snapshot", lambda limit=100: ([], None))
+    monkeypatch.setattr(
+        "bithumb_bot.app.build_broker_with_auth_diagnostics",
+        lambda **_kwargs: (SimpleNamespace(get_accounts_validation_diagnostics=lambda: {}), {}),
+    )
+
+    report = _load_recovery_report()
+    cmd_health()
+    health_out = capsys.readouterr().out
+    cmd_recovery_report()
+    recovery_out = capsys.readouterr().out
+    app_module.cmd_ops_report(limit=1)
+    ops_out = capsys.readouterr().out
+    cmd_restart_checklist()
+    checklist_out = capsys.readouterr().out
+    resume_allowed, resume_blockers = evaluate_resume_eligibility()
+
+    assert report["runtime_readiness"]["recovery_stage"] == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+    assert report["recovery_blocker_categories"] == ["advisory_historical_debt"]
+    assert report["resume_allowed"] is True
+    assert report["can_resume"] is True
+    assert report["operator_next_action"] == "resume_manage_open_position_then_repair_fee_gap_after_flatten"
+    assert report["fee_gap_accounting_repair_preview"]["resume_policy"] == "defer_for_open_position_management"
+    assert "recovery_stage=RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT" in health_out
+    assert "fee_gap_accounting_repair_resume_blocking=0" in health_out
+    assert "recovery_stage=RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT" in recovery_out
+    assert "recovery_blocker_categories=advisory_historical_debt" in recovery_out
+    assert "resume_policy=defer_for_open_position_management" in recovery_out
+    assert "recovery_stage=RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT" in ops_out
+    assert "PASS    normalized position state:" in checklist_out
+    assert "PASS    fee-gap accounting repair:" in checklist_out
+    assert "safe_to_resume=1" in checklist_out
+    assert resume_allowed is True
+    assert resume_blockers == []
 
 
 def test_runtime_readiness_is_consistent_across_reports_for_authority_gap(tmp_path, capsys):

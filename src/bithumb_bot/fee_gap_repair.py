@@ -12,6 +12,7 @@ from .db_core import (
     normalize_cash_amount,
     record_fee_gap_accounting_repair,
 )
+from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .runtime_readiness import compute_runtime_readiness_snapshot
@@ -29,32 +30,6 @@ def _metadata_float(metadata: dict[str, object], key: str) -> float:
         return float(metadata.get(key, 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _matching_fee_gap_repair_present(
-    *,
-    repair_summary: dict[str, Any],
-    fee_gap_adjustment_count: int,
-    fee_gap_adjustment_total_krw: float,
-    fee_gap_adjustment_latest_event_ts: int,
-    material_zero_fee_fill_count: int,
-    material_zero_fee_fill_latest_ts: int,
-) -> bool:
-    basis_raw = repair_summary.get("last_repair_basis")
-    if not basis_raw:
-        return False
-    try:
-        basis = json.loads(str(basis_raw))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False
-    return bool(
-        int(basis.get("fee_gap_adjustment_count", 0) or 0) == fee_gap_adjustment_count
-        and normalize_cash_amount(basis.get("fee_gap_adjustment_total_krw", 0.0) or 0.0)
-        == normalize_cash_amount(fee_gap_adjustment_total_krw)
-        and int(basis.get("fee_gap_adjustment_latest_event_ts", 0) or 0) == fee_gap_adjustment_latest_event_ts
-        and int(basis.get("material_zero_fee_fill_count", 0) or 0) == material_zero_fee_fill_count
-        and int(basis.get("material_zero_fee_fill_latest_ts", 0) or 0) == material_zero_fee_fill_latest_ts
-    )
 
 
 def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
@@ -103,7 +78,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     cash_available = normalize_cash_amount(portfolio_row["cash_available"] if portfolio_row is not None else cash_krw)
     cash_locked = normalize_cash_amount(portfolio_row["cash_locked"] if portfolio_row is not None else 0.0)
 
-    already_repaired = _matching_fee_gap_repair_present(
+    already_repaired = matching_fee_gap_repair_present(
         repair_summary=repair_summary,
         fee_gap_adjustment_count=fee_gap_adjustment_count,
         fee_gap_adjustment_total_krw=fee_gap_adjustment_total_krw,
@@ -162,6 +137,19 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         or abs(float(asset_locked)) > 1e-12
     )
     blocked_by_dust_residue = bool(int(lot_snapshot.dust_tracking_lot_count) > 0)
+    has_executable_open_exposure = bool(
+        int(lot_snapshot.open_lot_count) > 0
+        and bool(readiness.position_state.normalized_exposure.has_executable_exposure)
+    )
+    policy = classify_fee_gap_debt_policy(
+        needs_repair=needs_repair,
+        already_repaired=already_repaired,
+        repair_blocker_reasons=reasons,
+        blocked_by_authority_rebuild=blocked_by_authority_rebuild,
+        blocked_by_open_exposure=blocked_by_open_exposure,
+        blocked_by_dust_residue=blocked_by_dust_residue,
+        has_executable_open_exposure=has_executable_open_exposure,
+    )
 
     if already_repaired and not needs_repair:
         eligibility_reason = "matching fee-gap accounting repair already recorded"
@@ -173,11 +161,22 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     safe_to_apply = bool(needs_repair and not reasons)
     if safe_to_apply:
         eligibility_reason = "fee-gap accounting repair applicable"
+    elif needs_repair and str(policy.repair_eligibility_state) == "blocked_until_flattened":
+        eligibility_reason = (
+            "fee-gap accounting repair deferred until open position is flat: "
+            + ", ".join(policy.repair_blocker_reasons)
+        )
 
-    return {
+    preview = {
         "needs_repair": needs_repair,
         "safe_to_apply": safe_to_apply,
         "eligibility_reason": eligibility_reason,
+        "repair_eligibility_state": policy.repair_eligibility_state,
+        "repair_blocker_reasons": list(policy.repair_blocker_reasons),
+        "resume_policy": policy.resume_policy,
+        "resume_blocking": bool(policy.resume_blocking),
+        "closeout_blocking": bool(policy.closeout_blocking),
+        "fee_gap_policy_reason": policy.policy_reason,
         "already_repaired": already_repaired,
         "open_order_count": open_order_count,
         "recovery_required_count": recovery_required_count,
@@ -207,25 +206,11 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "blocked_by_authority_correction": readiness.recovery_stage == "AUTHORITY_CORRECTION_PENDING",
         "blocked_by_open_exposure": blocked_by_open_exposure,
         "blocked_by_dust_residue": blocked_by_dust_residue,
-        "next_required_action": (
-            "rebuild_position_authority"
-            if blocked_by_authority_rebuild
-            else (
-                "resolve_open_exposure_before_fee_gap_repair"
-                if blocked_by_open_exposure or blocked_by_dust_residue
-                else ("apply_fee_gap_accounting_repair" if safe_to_apply else "review_recovery_report")
-            )
-        ),
-        "recommended_command": (
-            "uv run python bot.py fee-gap-accounting-repair --apply --yes"
-            if safe_to_apply
-            else (
-                "uv run python bot.py rebuild-position-authority"
-                if blocked_by_authority_rebuild
-                else ("uv run python bot.py recovery-report" if needs_repair or reasons else "none")
-            )
-        ),
+        "next_required_action": policy.next_required_action,
+        "recommended_command": policy.recommended_command,
     }
+    preview.update(policy.as_dict())
+    return preview
 
 
 def apply_fee_gap_accounting_repair(conn, *, note: str | None = None) -> dict[str, Any]:

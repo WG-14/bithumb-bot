@@ -955,6 +955,9 @@ def cmd_health() -> None:
         "    "
         "fee_gap_accounting_repair="
         f"needed={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('needs_repair')) else 0} "
+        f"resume_blocking={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('resume_blocking')) else 0} "
+        f"closeout_blocking={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('closeout_blocking')) else 0} "
+        f"resume_policy={fee_gap_repair_preview.get('resume_policy') if isinstance(fee_gap_repair_preview, dict) else 'none'} "
         f"safe_to_apply={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('safe_to_apply')) else 0} "
         f"repair_count={int(fee_gap_repair_summary.get('repair_count') or 0) if isinstance(fee_gap_repair_summary, dict) else 0} "
         f"reason={fee_gap_repair_preview.get('eligibility_reason') if isinstance(fee_gap_repair_preview, dict) else 'none'}"
@@ -1160,6 +1163,14 @@ def cmd_health() -> None:
     print(
         "  fee_gap_accounting_repair_safe_to_apply="
         f"{1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('safe_to_apply')) else 0}"
+    )
+    print(
+        "  fee_gap_accounting_repair_resume_blocking="
+        f"{1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('resume_blocking')) else 0}"
+    )
+    print(
+        "  fee_gap_accounting_repair_resume_policy="
+        f"{fee_gap_repair_preview.get('resume_policy') if isinstance(fee_gap_repair_preview, dict) else 'none'}"
     )
     print(
         "  fee_gap_accounting_repair_reason="
@@ -2467,6 +2478,24 @@ def _load_recovery_report(
             }
         )
 
+    runtime_stage = str(runtime_readiness_snapshot.get("recovery_stage") or "")
+    readiness_has_deferred_debt = runtime_stage == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+    report_operator_next_action = (
+        str(runtime_readiness_snapshot.get("operator_next_action") or operator_next_action)
+        if bool(resume_allowed) and readiness_has_deferred_debt
+        else operator_next_action
+    )
+    report_recommended_command = (
+        str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
+        if bool(resume_allowed) and readiness_has_deferred_debt
+        else recommended_command
+    )
+    report_recommended_next_action = (
+        "Resume may manage the open executable position; repair deferred historical fee-gap debt after flatten/closeout."
+        if bool(resume_allowed) and readiness_has_deferred_debt
+        else recommended_next_action
+    )
+
     return {
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
@@ -2525,10 +2554,10 @@ def _load_recovery_report(
         "non_overridable_blockers": non_overridable_blockers,
         "unresolved_summary": oldest_orders,
         "recovery_required_summary": recovery_required_orders,
-        "operator_next_action": operator_next_action,
-        "recommended_next_action": recommended_next_action,
+        "operator_next_action": report_operator_next_action,
+        "recommended_next_action": report_recommended_next_action,
         "resume_blocked_reason": resume_blocked_reason,
-        "recommended_command": recommended_command,
+        "recommended_command": report_recommended_command,
         "recent_order_lifecycle": recent_order_lifecycle,
         "recovery_candidates": candidate_report,
         "broker_recent_orders_snapshot_error": broker_snapshot_error,
@@ -2728,10 +2757,14 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(
         "    "
         f"needed={1 if bool(fee_gap_repair_preview.get('needs_repair')) else 0} "
+        f"resume_blocking={1 if bool(fee_gap_repair_preview.get('resume_blocking')) else 0} "
+        f"closeout_blocking={1 if bool(fee_gap_repair_preview.get('closeout_blocking')) else 0} "
+        f"resume_policy={fee_gap_repair_preview.get('resume_policy') or 'none'} "
         f"safe_to_apply={1 if bool(fee_gap_repair_preview.get('safe_to_apply')) else 0} "
         f"repair_count={int(fee_gap_repair_summary.get('repair_count') or 0)} "
         f"reason={fee_gap_repair_preview.get('eligibility_reason') or 'none'}"
     )
+    print(f"    next_action={fee_gap_repair_preview.get('next_required_action') or 'none'}")
     print(f"    command={fee_gap_repair_preview.get('recommended_command') or 'none'}")
     fee_pending_repair_summary = report.get("fee_pending_accounting_repair_summary") or {}
     print("  [P3.0d2] fee_pending_accounting_repair")
@@ -3046,6 +3079,9 @@ def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False,
             f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
             f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
             f"already_repaired={1 if bool(preview['already_repaired']) else 0} "
+            f"resume_blocking={1 if bool(preview['resume_blocking']) else 0} "
+            f"closeout_blocking={1 if bool(preview['closeout_blocking']) else 0} "
+            f"resume_policy={preview['resume_policy']} "
             f"eligibility_reason={preview['eligibility_reason']}"
         )
         print(
@@ -3070,6 +3106,8 @@ def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False,
             f"{int(repair_summary.get('repair_count') or 0)}"
         )
         print(f"  recommended_command={preview['recommended_command']}")
+        print(f"  next_required_action={preview['next_required_action']}")
+        print(f"  policy_reason={preview['fee_gap_policy_reason']}")
 
         if not apply:
             print("[FEE-GAP-ACCOUNTING-REPAIR] dry-run: no changes applied")

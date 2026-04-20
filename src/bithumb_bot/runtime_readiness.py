@@ -7,8 +7,9 @@ from typing import Any
 
 from . import runtime_state
 from .config import settings
-from .db_core import ensure_db, portfolio_asset_total
+from .db_core import ensure_db, get_fee_gap_accounting_repair_summary, portfolio_asset_total
 from .dust import build_dust_display_context, build_position_state_model
+from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
 
@@ -26,6 +27,9 @@ class RuntimeReadinessSnapshot:
     reconcile_metadata: dict[str, object]
     fee_pending_count: int
     fee_gap_recovery_required: bool
+    fee_gap_resume_blocking: bool
+    fee_gap_resume_policy: str
+    fee_gap_closeout_blocking: bool
     fee_gap_adjustment_count: int
     material_zero_fee_fill_count: int
     open_order_count: int
@@ -45,6 +49,9 @@ class RuntimeReadinessSnapshot:
             "lot_snapshot": self.lot_snapshot.as_dict(),
             "fee_pending_count": int(self.fee_pending_count),
             "fee_gap_recovery_required": bool(self.fee_gap_recovery_required),
+            "fee_gap_resume_blocking": bool(self.fee_gap_resume_blocking),
+            "fee_gap_resume_policy": self.fee_gap_resume_policy,
+            "fee_gap_closeout_blocking": bool(self.fee_gap_closeout_blocking),
             "fee_gap_adjustment_count": int(self.fee_gap_adjustment_count),
             "material_zero_fee_fill_count": int(self.material_zero_fee_fill_count),
             "open_order_count": int(self.open_order_count),
@@ -179,8 +186,72 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         fee_pending_count = _unaccounted_fee_pending_observation_count(conn)
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
         fee_gap_adjustment_count = _metadata_int(metadata, "fee_gap_adjustment_count")
+        fee_gap_adjustment_latest_event_ts = _metadata_int(metadata, "fee_gap_adjustment_latest_event_ts")
+        fee_gap_adjustment_total_krw = 0.0
+        try:
+            fee_gap_adjustment_total_krw = float(metadata.get("fee_gap_adjustment_total_krw", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fee_gap_adjustment_total_krw = 0.0
         material_zero_fee_fill_count = _metadata_int(metadata, "material_zero_fee_fill_count")
+        material_zero_fee_fill_latest_ts = _metadata_int(metadata, "material_zero_fee_fill_latest_ts")
         authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        repair_summary = get_fee_gap_accounting_repair_summary(conn)
+        already_repaired_fee_gap = matching_fee_gap_repair_present(
+            repair_summary=repair_summary,
+            fee_gap_adjustment_count=fee_gap_adjustment_count,
+            fee_gap_adjustment_total_krw=fee_gap_adjustment_total_krw,
+            fee_gap_adjustment_latest_event_ts=fee_gap_adjustment_latest_event_ts,
+            material_zero_fee_fill_count=material_zero_fee_fill_count,
+            material_zero_fee_fill_latest_ts=material_zero_fee_fill_latest_ts,
+        )
+        fee_gap_needs_repair = bool(
+            fee_gap_required
+            and material_zero_fee_fill_count > 0
+            and fee_gap_adjustment_count > 0
+            and not already_repaired_fee_gap
+        )
+        fee_gap_reasons: list[str] = []
+        external_cash_adjustment_reason = str(metadata.get("external_cash_adjustment_reason") or "none")
+        if fee_gap_required and material_zero_fee_fill_count <= 0:
+            fee_gap_reasons.append("material_zero_fee_fill_count=0")
+        if fee_gap_required and fee_gap_adjustment_count <= 0:
+            fee_gap_reasons.append("fee_gap_adjustment_count=0")
+        if external_cash_adjustment_reason not in {"reconcile_fee_gap_cash_drift", "none"}:
+            fee_gap_reasons.append(f"external_cash_adjustment_reason={external_cash_adjustment_reason}")
+        if open_order_count > 0:
+            fee_gap_reasons.append(f"open_or_unresolved_orders={open_order_count}")
+        if recovery_required_count > 0:
+            fee_gap_reasons.append(f"recovery_required_orders={recovery_required_count}")
+        if str(state.last_reconcile_status or "").lower() != "ok":
+            fee_gap_reasons.append(f"last_reconcile_status={state.last_reconcile_status or 'none'}")
+        if abs(float(portfolio_asset_qty)) > 1e-12:
+            fee_gap_reasons.append(f"portfolio_not_flat=asset_qty={float(portfolio_asset_qty):.12f}")
+        if int(lot_snapshot.open_lot_count) > 0 or int(lot_snapshot.dust_tracking_lot_count) > 0:
+            fee_gap_reasons.append(
+                "lot_residue_present="
+                f"open_lot_count={int(lot_snapshot.open_lot_count)},dust_tracking_lot_count={int(lot_snapshot.dust_tracking_lot_count)}"
+            )
+        if abs(float(reserved_exit_qty)) > 1e-12:
+            fee_gap_reasons.append(f"reserved_exit_qty={float(reserved_exit_qty):.12f}")
+        blocked_by_authority_rebuild = bool(
+            bool(authority_assessment.get("needs_correction"))
+            or str(position_state.normalized_exposure.authority_gap_reason or "")
+            == "authority_missing_recovery_required"
+        )
+        fee_gap_policy = classify_fee_gap_debt_policy(
+            needs_repair=fee_gap_needs_repair,
+            already_repaired=already_repaired_fee_gap,
+            repair_blocker_reasons=fee_gap_reasons,
+            blocked_by_authority_rebuild=blocked_by_authority_rebuild,
+            blocked_by_open_exposure=bool(
+                int(lot_snapshot.open_lot_count) > 0 or abs(float(portfolio_asset_qty)) > 1e-12
+            ),
+            blocked_by_dust_residue=bool(int(lot_snapshot.dust_tracking_lot_count) > 0),
+            has_executable_open_exposure=bool(
+                int(lot_snapshot.open_lot_count) > 0
+                and position_state.normalized_exposure.has_executable_exposure
+            ),
+        )
 
         blockers: list[str] = []
         categories: list[str] = []
@@ -218,12 +289,17 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append("executable_authority")
             operator_next_action = "rebuild_position_authority"
             recommended_command = "uv run python bot.py rebuild-position-authority --apply --yes"
-        elif fee_gap_required:
-            stage = "HISTORICAL_FEE_GAP_PENDING"
+        elif fee_gap_policy.closeout_blocking and not fee_gap_policy.resume_blocking:
+            stage = fee_gap_policy.readiness_stage
+            categories.append(fee_gap_policy.blocker_category)
+            operator_next_action = fee_gap_policy.operator_next_action
+            recommended_command = fee_gap_policy.recommended_command
+        elif fee_gap_policy.resume_blocking:
+            stage = fee_gap_policy.readiness_stage
             blockers.append("FEE_GAP_RECOVERY_REQUIRED")
-            categories.append("historical_accounting_debt")
-            operator_next_action = "review_fee_gap_accounting_repair"
-            recommended_command = "uv run python bot.py fee-gap-accounting-repair"
+            categories.append(fee_gap_policy.blocker_category)
+            operator_next_action = fee_gap_policy.operator_next_action
+            recommended_command = fee_gap_policy.recommended_command
         elif open_order_count > 0 or recovery_required_count > 0:
             stage = "RESUME_BLOCKED_BY_POLICY"
             blockers.append("ORDER_RECOVERY_REQUIRED")
@@ -249,6 +325,9 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             reconcile_metadata=metadata,
             fee_pending_count=fee_pending_count,
             fee_gap_recovery_required=fee_gap_required,
+            fee_gap_resume_blocking=fee_gap_policy.resume_blocking,
+            fee_gap_resume_policy=fee_gap_policy.resume_policy,
+            fee_gap_closeout_blocking=fee_gap_policy.closeout_blocking,
             fee_gap_adjustment_count=fee_gap_adjustment_count,
             material_zero_fee_fill_count=material_zero_fee_fill_count,
             open_order_count=open_order_count,
