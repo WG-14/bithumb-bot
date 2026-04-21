@@ -145,10 +145,13 @@ Read `health` and `recovery-report` as status maps, not as a simple green/red st
 
 ### Fee-Pending Fill Recovery
 
-If `recovery-report` shows broker fill observations with `fee_status=missing`
-or `accounting_status=fee_pending`, the exchange-side fill is observed but the
-local ledger has not accepted it as accounted. Do not use `resume --force` for
-this state.
+If `recovery-report` shows broker fill observations with `fee_status=missing`,
+`fee_status=order_level_candidate`, or `accounting_status=fee_pending`, the
+exchange-side fill is observed but the local ledger has not accepted it as
+accounted. `order_level_candidate` means the broker omitted trade-level fee
+fields while exposing an order-level fee candidate, such as `paid_fee`, in the
+same order payload. Treat that as repair evidence, not automatic accounting
+truth. Do not use `resume --force` for this state.
 
 Use the fee-pending repair command only after checking broker evidence for the
 exact fill fee:

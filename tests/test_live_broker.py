@@ -628,6 +628,51 @@ class _StrictMissingFeeRecoveryBroker(_FakeBroker):
         ]
 
 
+class _OrderLevelFeeCandidateRecoveryBroker(_FakeBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "C0101000002939307963",
+            "BUY",
+            "FILLED",
+            5372000.0,
+            0.01,
+            0.01,
+            1776745440000,
+            1776745441000,
+            raw={"paid_fee": "26.86", "trades": [{"uuid": "trade-no-fee"}]},
+        )
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
+        if not client_order_id:
+            return []
+        if parse_mode == "strict":
+            raise BrokerRejectError("/v1/order.trade schema mismatch: missing fee field for materially sized fill")
+        return [
+            BrokerFill(
+                client_order_id=client_order_id,
+                fill_id="trade-no-fee",
+                fill_ts=1776745441000,
+                price=5372000.0,
+                qty=0.01,
+                fee=26.86,
+                exchange_order_id=exchange_order_id or "C0101000002939307963",
+                fee_status="order_level_candidate",
+                parse_warnings=("missing_fee_field", "order_level_fee_candidate:paid_fee"),
+                raw={
+                    "trade": {"uuid": "trade-no-fee", "price": "5372000", "volume": "0.01"},
+                    "order_fee_fields": {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"},
+                },
+            )
+        ]
+
+
 class _CancelOpenOrdersBroker(_FakeBroker):
     def __init__(self) -> None:
         super().__init__()
@@ -3714,6 +3759,60 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert report["can_resume"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
+
+
+def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "order_level_fee_candidate.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    conn = ensure_db(str(tmp_path / "order_level_fee_candidate.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1776745440000_buy_ae9d0d6e','C0101000002939307963','NEW','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_OrderLevelFeeCandidateRecoveryBroker())
+
+    conn = ensure_db(str(tmp_path / "order_level_fee_candidate.sqlite"))
+    row = conn.execute(
+        "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'"
+    ).fetchone()
+    fill_count = conn.execute("SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'").fetchone()
+    observation = conn.execute(
+        """
+        SELECT fee, fee_status, accounting_status, source, parse_warnings, raw_payload
+        FROM broker_fill_observations
+        WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.close()
+    state = runtime_state.snapshot()
+    metadata = json.loads(str(state.last_reconcile_metadata))
+
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert "accounting is fee-pending" in str(row["last_error"])
+    assert fill_count["cnt"] == 0
+    assert observation is not None
+    assert observation["fee"] == pytest.approx(26.86)
+    assert observation["fee_status"] == "order_level_candidate"
+    assert observation["accounting_status"] == "fee_pending"
+    assert observation["source"] == "reconcile_salvage"
+    assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
+    assert "paid_fee" in str(observation["raw_payload"])
+    assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
+    assert metadata["observed_fill_count"] == 1
+    assert metadata["fee_pending_fill_count"] == 1
+    assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
+    assert metadata["fee_pending_operator_next_action"].startswith("inspect broker_fill_observations")
 
 
 def test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_authority(tmp_path):

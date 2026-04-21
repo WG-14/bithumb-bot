@@ -13,6 +13,49 @@ from .order_lookup_v1 import (
 )
 
 
+_ORDER_LEVEL_FEE_KEYS = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+
+
+def _order_level_fee_candidate(
+    broker,
+    row: dict[str, object],
+    *,
+    trades: list[object],
+) -> tuple[float | None, str | None]:
+    present_keys = [key for key in _ORDER_LEVEL_FEE_KEYS if key in row]
+    for key in present_keys:
+        fee = broker._to_float(row.get(key), default=None)
+        if fee is None:
+            continue
+        if fee < 0:
+            continue
+        if len(trades) != 1:
+            return None, f"order_level_fee_candidate_ambiguous:{key}"
+        return float(fee), f"order_level_fee_candidate:{key}"
+    if present_keys:
+        return None, f"order_level_fee_candidate_unparseable:{present_keys[0]}"
+    return None, None
+
+
+def _trade_fee_warnings(
+    broker,
+    row: dict[str, object],
+    *,
+    trade_fee: float | None,
+    trades: list[object],
+) -> tuple[str, ...]:
+    candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
+    if candidate_warning is None:
+        return ()
+    if candidate_fee is None:
+        return (candidate_warning,)
+    if trade_fee is None:
+        return (candidate_warning,)
+    if abs(float(trade_fee) - float(candidate_fee)) > 1e-12:
+        return (f"order_level_fee_disagrees:{candidate_warning.split(':', 1)[-1]}",)
+    return ()
+
+
 def get_order(
     broker,
     *,
@@ -249,6 +292,24 @@ def get_fills(
                     price=price,
                     strict=strict_fee_parse,
                 )
+                fee = fee_observation.fee
+                fee_status = fee_observation.status
+                warnings = [fee_observation.warning] if fee_observation.warning else []
+                if not strict_fee_parse and fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
+                    candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
+                    if candidate_warning:
+                        warnings.append(candidate_warning)
+                    if candidate_fee is not None:
+                        fee = candidate_fee
+                        fee_status = "order_level_candidate"
+                else:
+                    warnings.extend(_trade_fee_warnings(broker, row, trade_fee=fee, trades=trades))
+                order_fee_fields = {key: row.get(key) for key in _ORDER_LEVEL_FEE_KEYS if key in row}
+                raw_fill_payload = (
+                    {"trade": trade, "order_fee_fields": order_fee_fields}
+                    if order_fee_fields
+                    else trade
+                )
                 ts_raw = trade.get("created_at")
                 ts = broker._strict_parse_ts(ts_raw, field_name="created_at", context="/v1/order.trades")
                 trade_client_order_id, _ = broker._resolve_order_identifiers(
@@ -262,11 +323,11 @@ def get_fills(
                         fill_ts=ts,
                         price=float(price),
                         qty=float(qty),
-                        fee=fee_observation.fee,
+                        fee=fee,
                         exchange_order_id=str(row.get("uuid") or ""),
-                        fee_status=fee_observation.status,
-                        parse_warnings=((fee_observation.warning,) if fee_observation.warning else ()),
-                        raw=broker._sanitize_debug_value(trade),
+                        fee_status=fee_status,
+                        parse_warnings=tuple(warnings),
+                        raw=broker._sanitize_debug_value(raw_fill_payload),
                     )
                 )
             continue

@@ -4200,6 +4200,148 @@ def test_get_fills_accepts_paid_fee_when_fee_field_is_absent(monkeypatch):
     assert fills[0].fee == pytest.approx(2.22)
 
 
+def test_get_order_observes_filled_order_when_trade_fee_is_missing_but_order_fee_exists(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "C0101000002939307963",
+        "client_order_id": "live_1776745440000_buy_ae9d0d6e",
+        "state": "done",
+        "side": "bid",
+        "price": "5372000",
+        "volume": "0.01",
+        "remaining_volume": "0",
+        "executed_volume": "0.01",
+        "paid_fee": "26.86",
+        "reserved_fee": "26.86",
+        "remaining_fee": "0",
+        "created_at": "2026-04-21T00:24:00+09:00",
+        "updated_at": "2026-04-21T00:24:01+09:00",
+        "trades": [
+            {
+                "uuid": "trade-no-fee",
+                "price": "5372000",
+                "volume": "0.01",
+                "created_at": "2026-04-21T00:24:01+09:00",
+            }
+        ],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    order = broker.get_order(
+        client_order_id="live_1776745440000_buy_ae9d0d6e",
+        exchange_order_id="C0101000002939307963",
+    )
+
+    assert order.status == "FILLED"
+    assert order.qty_filled == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize(
+    ("trade_fee_fields", "order_fee_fields", "strict_error", "expected_fee", "expected_status", "expected_warning"),
+    [
+        ({"fee": "1.23"}, {"paid_fee": "1.23"}, None, 1.23, "complete", ()),
+        ({}, {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"}, "missing fee field", 26.86, "order_level_candidate", ("missing_fee_field", "order_level_fee_candidate:paid_fee")),
+        ({}, {}, "missing fee field", None, "missing", ("missing_fee_field",)),
+        ({"fee": ""}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
+        ({"fee": None}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
+        ({"fee": "0"}, {}, "zero fee field 'fee'", None, "zero_reported", ("zero_fee_field:fee",)),
+        ({"fee": "1.00"}, {"paid_fee": "2.00"}, None, 1.0, "complete", ("order_level_fee_disagrees:paid_fee",)),
+    ],
+)
+def test_get_fills_fee_observation_modes_for_order_payload_schema_drift(
+    monkeypatch,
+    trade_fee_fields,
+    order_fee_fields,
+    strict_error,
+    expected_fee,
+    expected_status,
+    expected_warning,
+):
+    _configure_live()
+    broker = BithumbBroker()
+    trade = {
+        "uuid": "trade-fee-schema",
+        "price": "5372000",
+        "volume": "0.01",
+        "created_at": "2026-04-21T00:24:01+09:00",
+        **trade_fee_fields,
+    }
+    payload = {
+        "uuid": "ex-fee-schema",
+        "client_order_id": "cid-fee-schema",
+        "state": "done",
+        "side": "bid",
+        "price": "5372000",
+        "volume": "0.01",
+        "remaining_volume": "0",
+        "executed_volume": "0.01",
+        "created_at": "2026-04-21T00:24:00+09:00",
+        "updated_at": "2026-04-21T00:24:01+09:00",
+        "trades": [trade],
+        **order_fee_fields,
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    if strict_error is None:
+        strict_fills = broker.get_fills(client_order_id="cid-fee-schema", exchange_order_id="ex-fee-schema")
+        assert len(strict_fills) == 1
+        assert strict_fills[0].fee == pytest.approx(expected_fee)
+    else:
+        with pytest.raises(BrokerRejectError, match=strict_error):
+            broker.get_fills(client_order_id="cid-fee-schema", exchange_order_id="ex-fee-schema")
+
+    salvage_fills = broker.get_fills(
+        client_order_id="cid-fee-schema",
+        exchange_order_id="ex-fee-schema",
+        parse_mode="salvage",
+    )
+    assert len(salvage_fills) == 1
+    if expected_fee is None:
+        assert salvage_fills[0].fee is None
+    else:
+        assert salvage_fills[0].fee == pytest.approx(expected_fee)
+    assert salvage_fills[0].fee_status == expected_status
+    assert salvage_fills[0].parse_warnings == expected_warning
+
+
+def test_get_fills_order_level_fee_candidate_is_ambiguous_for_multiple_trade_rows(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "ex-multi-order-fee",
+        "client_order_id": "cid-multi-order-fee",
+        "state": "done",
+        "side": "bid",
+        "price": "5372000",
+        "volume": "0.02",
+        "remaining_volume": "0",
+        "executed_volume": "0.02",
+        "paid_fee": "53.72",
+        "created_at": "2026-04-21T00:24:00+09:00",
+        "updated_at": "2026-04-21T00:24:01+09:00",
+        "trades": [
+            {"uuid": "trade-a", "price": "5372000", "volume": "0.01", "created_at": "2026-04-21T00:24:01+09:00"},
+            {"uuid": "trade-b", "price": "5372000", "volume": "0.01", "created_at": "2026-04-21T00:24:02+09:00"},
+        ],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    with pytest.raises(BrokerRejectError, match="missing fee field"):
+        broker.get_fills(client_order_id="cid-multi-order-fee", exchange_order_id="ex-multi-order-fee")
+
+    fills = broker.get_fills(
+        client_order_id="cid-multi-order-fee",
+        exchange_order_id="ex-multi-order-fee",
+        parse_mode="salvage",
+    )
+
+    assert len(fills) == 2
+    assert {fill.fee for fill in fills} == {None}
+    assert {fill.fee_status for fill in fills} == {"missing"}
+    assert all(fill.parse_warnings == ("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee") for fill in fills)
+
+
 def test_get_fills_client_order_id_path_does_not_regress_to_done_scan(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
