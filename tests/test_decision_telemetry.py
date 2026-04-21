@@ -333,6 +333,73 @@ def test_record_strategy_decision_prefers_entry_allowed_truth_source(tmp_path, m
     assert _collect_residue_paths(ctx) == []
 
 
+def test_record_strategy_decision_ignores_stale_position_entry_block_reason_when_canonical_allows_entry(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = str(tmp_path / "decision-stale-entry-block.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=1,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="dust_only_remainder",
+            candle_ts=1,
+            market_price=100_000_000.0,
+            context={
+                "base_signal": "BUY",
+                "raw_signal": "BUY",
+                "final_signal": "HOLD",
+                "entry_blocked": True,
+                "entry_block_reason": "dust_only_remainder",
+                "position_state": {
+                    "normalized_exposure": {
+                        "raw_qty_open": 0.0,
+                        "raw_total_asset_qty": 0.00019996,
+                        "open_exposure_qty": 0.0,
+                        "dust_tracking_qty": 0.00019996,
+                        "open_lot_count": 0,
+                        "dust_tracking_lot_count": 1,
+                        "reserved_exit_lot_count": 0,
+                        "sellable_executable_lot_count": 0,
+                        "reserved_exit_qty": 0.0,
+                        "sellable_executable_qty": 0.0,
+                        "entry_allowed": True,
+                        "entry_block_reason": "none",
+                        "effective_flat": True,
+                        "entry_gate_effective_flat": True,
+                        "has_executable_exposure": False,
+                        "has_any_position_residue": True,
+                        "has_non_executable_residue": True,
+                        "has_dust_only_remainder": True,
+                        "exit_allowed": False,
+                        "exit_block_reason": "dust_only_remainder",
+                        "terminal_state": "dust_only",
+                    }
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    snapshot = resolve_canonical_position_exposure_snapshot(ctx)
+    assert snapshot.entry_allowed is True
+    assert snapshot.entry_block_reason == "none"
+    assert ctx["entry_allowed"] is True
+    assert ctx["entry_block_reason"] == "none"
+    assert ctx["position_state"]["normalized_exposure"]["entry_block_reason"] == "none"
+    assert "stale_position_entry_block_reason_ignored" in ctx["authority_anomalies"]
+
+
 def test_decision_telemetry_summary_prefers_canonical_normalized_exposure_snapshot(tmp_path, monkeypatch):
     db_path = str(tmp_path / "decision-telemetry-canonical.sqlite")
     monkeypatch.setenv("DB_PATH", db_path)

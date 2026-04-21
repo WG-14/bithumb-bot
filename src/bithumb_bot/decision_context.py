@@ -44,6 +44,7 @@ class CanonicalPositionExposureSnapshot:
 
     dust_classification: str
     entry_allowed: bool
+    entry_block_reason: str
     effective_flat: bool
     entry_gate_effective_flat: bool
     holding_authority_state: str
@@ -903,6 +904,23 @@ def resolve_canonical_position_exposure_snapshot(
     }:
         normalized_exposure_active = False
 
+    if bool(entry_allowed):
+        canonical_entry_block_reason = "none"
+    else:
+        canonical_entry_block_reason = _as_text(
+            position_normalized.get("entry_block_reason"),
+            default="",
+        ).strip()
+        if not canonical_entry_block_reason or canonical_entry_block_reason == "none":
+            if bool(has_dust_only_remainder):
+                canonical_entry_block_reason = "dust_only_remainder"
+            elif bool(has_executable_exposure):
+                canonical_entry_block_reason = "position_has_executable_exposure"
+            elif bool(has_any_position_residue):
+                canonical_entry_block_reason = "legacy_lot_metadata_missing"
+            else:
+                canonical_entry_block_reason = "none"
+
     position_qty = float(open_exposure_qty)
     submit_payload_qty = float(normalized_exposure_qty)
     sell_submit_lot_count = int(sellable_executable_lot_count)
@@ -931,6 +949,7 @@ def resolve_canonical_position_exposure_snapshot(
     return CanonicalPositionExposureSnapshot(
         dust_classification=dust_classification,
         entry_allowed=bool(entry_allowed),
+        entry_block_reason=canonical_entry_block_reason,
         # Preserve the legacy field name, but keep it aligned with the explicit
         # entry-gate interpretation rather than SELL/recovery authority.
         effective_flat=bool(effective_flat),
@@ -1043,6 +1062,7 @@ def normalize_strategy_decision_context(
     canonical_exposure = resolve_canonical_position_exposure_snapshot(payload)
     dust_classification = canonical_exposure.dust_classification
     entry_allowed = canonical_exposure.entry_allowed
+    canonical_entry_block_reason = canonical_exposure.entry_block_reason
     effective_flat = canonical_exposure.effective_flat
     entry_gate_effective_flat = canonical_exposure.entry_gate_effective_flat
     holding_authority_state = canonical_exposure.holding_authority_state
@@ -1076,13 +1096,25 @@ def normalize_strategy_decision_context(
     sell_normalized_exposure_qty = canonical_exposure.sell_normalized_exposure_qty
     sell_open_exposure_qty = canonical_exposure.sell_open_exposure_qty
     sell_dust_tracking_qty = canonical_exposure.sell_dust_tracking_qty
-    entry_block_reason = _as_text(
-        payload.get(
-            "entry_block_reason",
-            position_normalized.get("entry_block_reason", position_state.get("entry_block_reason")),
-        ),
-        default="",
+    stale_position_block_reason = bool(
+        entry_allowed
+        and entry_block_reason_text
+        and entry_block_reason_text
+        in {
+            "dust_only_remainder",
+            "legacy_lot_metadata_missing",
+            "position_has_executable_exposure",
+            "entry_blocked_by_position_state",
+        }
     )
+    authority_anomalies = list(payload.get("authority_anomalies") or [])
+    if stale_position_block_reason:
+        authority_anomalies.append("stale_position_entry_block_reason_ignored")
+        block_reason_hierarchy = [
+            item for item in block_reason_hierarchy if item != entry_block_reason_text
+        ]
+        entry_block_reason_text = None
+    entry_block_reason = canonical_entry_block_reason
     submit_lot_source = _CANONICAL_SELL_LOT_AUTHORITY
     submit_qty_source = _CANONICAL_SELL_QTY_DERIVATION
     sell_submit_qty_source = submit_qty_source
@@ -1102,7 +1134,6 @@ def normalize_strategy_decision_context(
         "raw_signal": raw_signal,
         "final_signal": final_signal,
         "entry_blocked": bool(entry_blocked),
-        "entry_block_reason": entry_block_reason_text,
         "dust_classification": dust_classification,
         "entry_allowed": bool(entry_allowed),
         "entry_block_reason": entry_block_reason,
@@ -1154,12 +1185,12 @@ def normalize_strategy_decision_context(
     payload["blocked_filters"] = blocked_filters
     payload["filter_blocked"] = bool(filter_blocked)
     payload["entry_blocked"] = bool(entry_blocked)
-    payload["entry_block_reason"] = entry_block_reason_text
+    payload["decision_entry_block_reason"] = entry_block_reason_text
     payload["signal_strength_label"] = signal_strength_label
     payload["market_observations"] = market_observations
     payload["dust_classification"] = dust_classification
     payload["entry_allowed"] = bool(entry_allowed)
-    payload["entry_block_reason"] = entry_block_reason_text or entry_block_reason
+    payload["entry_block_reason"] = entry_block_reason
     payload["effective_flat"] = bool(effective_flat)
     payload["entry_gate_effective_flat"] = bool(entry_gate_effective_flat)
     payload["holding_authority_state"] = holding_authority_state
@@ -1198,6 +1229,8 @@ def normalize_strategy_decision_context(
     payload["sell_failure_category"] = sell_failure_category
     payload["sell_failure_detail"] = sell_failure_detail
     payload["decision_summary"] = decision_summary
+    if authority_anomalies:
+        payload["authority_anomalies"] = authority_anomalies
 
     payload["strategy_name"] = _as_text(payload.get("strategy_name", strategy_name), default=strategy_name)
     payload["pair"] = _as_text(payload.get("pair", pair), default=pair)

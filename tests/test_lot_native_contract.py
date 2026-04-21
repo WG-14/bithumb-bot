@@ -201,6 +201,71 @@ def test_position_state_model_bases_exitability_and_flatness_on_lot_state_not_qt
     assert model.state_interpretation.exit_submit_expected is False
 
 
+@pytest.mark.lot_native_regression_gate
+def test_dust_only_residual_replay_keeps_buy_authority_consistent_across_surfaces() -> None:
+    model = build_position_state_model(
+        raw_qty_open=0.0,
+        metadata_raw={
+            "dust_state": "harmless_dust",
+            "dust_residual_present": 1,
+            "dust_effective_flat": 0,
+            "dust_broker_qty": 0.00019996,
+            "dust_local_qty": 0.00019996,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0002,
+            "dust_min_notional_krw": 0.0,
+            "dust_qty_gap_small": 1,
+        },
+        raw_total_asset_qty=0.00019996,
+        open_exposure_qty=0.0,
+        dust_tracking_qty=0.00019996,
+        reserved_exit_qty=0.0,
+        open_lot_count=0,
+        dust_tracking_lot_count=1,
+        internal_lot_size=0.0004,
+        market_price=100_000_000.0,
+        min_qty=0.0002,
+        qty_step=0.00000001,
+        min_notional_krw=0.0,
+        max_qty_decimals=8,
+    )
+    context = normalize_strategy_decision_context(
+        context={
+            "raw_signal": "BUY",
+            "final_signal": "BUY",
+            "base_signal": "BUY",
+            "position_state": model.as_dict(),
+            "position_gate": model.normalized_exposure.as_dict(),
+        },
+        signal="BUY",
+        reason="sma golden cross",
+        strategy_name="sma_with_filter",
+        pair="KRW-BTC",
+        interval="1m",
+        decision_ts=1,
+        candle_ts=1,
+        market_price=100_000_000.0,
+    )
+    snapshot = resolve_canonical_position_exposure_snapshot(context)
+
+    assert model.normalized_exposure.entry_allowed is True
+    assert model.normalized_exposure.entry_block_reason == "none"
+    assert model.normalized_exposure.effective_flat is True
+    assert model.normalized_exposure.has_dust_only_remainder is True
+    assert model.normalized_exposure.exit_allowed is False
+    assert model.normalized_exposure.exit_block_reason == "dust_only_remainder"
+    assert context["entry_allowed"] is True
+    assert context["entry_block_reason"] == "none"
+    assert context["decision_summary"]["entry_allowed"] is True
+    assert context["decision_summary"]["entry_block_reason"] == "none"
+    assert context["position_state"]["normalized_exposure"]["entry_allowed"] is True
+    assert context["position_state"]["normalized_exposure"]["entry_block_reason"] == "none"
+    assert snapshot.entry_allowed is True
+    assert snapshot.entry_block_reason == "none"
+    assert snapshot.dust_tracking_qty == pytest.approx(0.00019996)
+    assert snapshot.sellable_executable_lot_count == 0
+
+
 # Reserved-exit SELL authority boundary behavior.
 
 @pytest.mark.lot_native_regression_gate

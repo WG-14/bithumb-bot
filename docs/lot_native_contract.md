@@ -88,6 +88,11 @@ semantic authority.
   - recovery/lifecycle summary surface: the materialized interpretation label `holding_authority_state` together with `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`
   - decision/reporting materialization surface: derived qty fields and compatibility aliases may be emitted or recorded as non-authoritative materializations
 - `effective_flat` and `entry_gate_effective_flat` are BUY entry-gate interpretations only. They must not be used as SELL authority, recovery authority, or executable-position authority.
+- `entry_block_reason` is part of the same canonical BUY authority surface as
+  `entry_allowed`: when `entry_allowed=1`, canonical `entry_block_reason`
+  must be `none`. Strategy/filter explanations for a non-submitted decision
+  may still be emitted separately as diagnostic decision context, but they must
+  not override canonical position authority.
 - Current recovery and lifecycle interpretation should be read from the materialized holding/exit summary fields `holding_authority_state`, `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`; `holding_authority_state` is an interpretive label derived from the underlying lot counts and exit flags, not a root authority field. Qty-only legacy rows still fail closed there and can resolve to non-executable or no-open-lot summary outcomes without regaining executable SELL authority.
 - Canonical authority remains the lot-native semantic authority surface above; execution, recovery/lifecycle summaries, and decision/reporting materializations are distinct consumer surfaces built from it.
 - Derived qty materialization fields such as `sellable_executable_qty` and `open_exposure_qty` remain operational outputs re-materialized from lot-native authority via lot sizing for broker payloads and reporting.
@@ -216,6 +221,9 @@ They do not mean the system failed to submit a valid SELL order.
 - `terminal_state` remains part of the internal normalized position-state model.
 - Current recorded/materialized flatness and exit interpretation should be read from the derived interpretation label `holding_authority_state` together with `sellable_executable_lot_count`, `exit_allowed`, and `exit_block_reason`, not from qty aggregation.
 - `open_exposure` and `dust_tracking` must not be merged into a single SELL executable inventory.
+- Dust-only residue below the persisted internal-lot boundary can be treated as
+  effectively flat for BUY entry only when reconcile/operator dust state is not
+  `blocking_dust`; blocking dust remains fail-closed for new entries.
 
 ## Batch Evaluation
 

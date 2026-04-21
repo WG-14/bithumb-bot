@@ -1358,6 +1358,7 @@ def _clear_reconcile_halt_if_safe(
     dust_resume_allowed = bool(int(metadata.get("dust_residual_allow_resume", 0) or 0) == 1)
     dust_context = build_dust_display_context(metadata)
     lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
+    lot_definition = getattr(lot_snapshot, "lot_definition", None)
     position_state = build_position_state_model(
         raw_qty_open=position_qty,
         metadata_raw=metadata,
@@ -1370,6 +1371,11 @@ def _clear_reconcile_halt_if_safe(
         dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
         open_lot_count=int(lot_snapshot.open_lot_count),
         dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
+        internal_lot_size=(None if lot_definition is None else lot_definition.internal_lot_size),
+        min_qty=(None if lot_definition is None else lot_definition.min_qty),
+        qty_step=(None if lot_definition is None else lot_definition.qty_step),
+        min_notional_krw=(None if lot_definition is None else lot_definition.min_notional_krw),
+        max_qty_decimals=(None if lot_definition is None else lot_definition.max_qty_decimals),
     )
     normalized_exposure = position_state.normalized_exposure
     position_flat = str(normalized_exposure.terminal_state) == "flat"

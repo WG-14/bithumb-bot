@@ -1967,6 +1967,7 @@ def _determine_live_execution_position_state(
     cash, qty = get_portfolio(conn)
     raw_total_asset_qty = float(qty)
     position_snapshot = _load_position_lot_snapshot(conn=conn)
+    lot_definition = getattr(position_snapshot, "lot_definition", None)
     open_exposure_qty = float(position_snapshot.raw_open_exposure_qty)
     dust_tracking_qty = float(position_snapshot.dust_tracking_qty)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
@@ -1980,11 +1981,28 @@ def _determine_live_execution_position_state(
         reserved_exit_qty=float(reserved_exit_qty),
         open_lot_count=int(position_snapshot.open_lot_count),
         dust_tracking_lot_count=int(position_snapshot.dust_tracking_lot_count),
+        internal_lot_size=(None if lot_definition is None else lot_definition.internal_lot_size),
         market_price=float(market_price),
-        min_qty=float(effective_rules.min_qty),
-        qty_step=float(effective_rules.qty_step),
-        min_notional_krw=float(effective_rules.min_notional_krw),
-        max_qty_decimals=int(effective_rules.max_qty_decimals),
+        min_qty=(
+            float(effective_rules.min_qty)
+            if lot_definition is None or lot_definition.min_qty is None
+            else lot_definition.min_qty
+        ),
+        qty_step=(
+            float(effective_rules.qty_step)
+            if lot_definition is None or lot_definition.qty_step is None
+            else lot_definition.qty_step
+        ),
+        min_notional_krw=(
+            float(effective_rules.min_notional_krw)
+            if lot_definition is None or lot_definition.min_notional_krw is None
+            else lot_definition.min_notional_krw
+        ),
+        max_qty_decimals=(
+            int(effective_rules.max_qty_decimals)
+            if lot_definition is None or lot_definition.max_qty_decimals is None
+            else lot_definition.max_qty_decimals
+        ),
         exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
@@ -2008,6 +2026,12 @@ def _determine_live_execution_position_state(
             "sellable_executable_qty": float(normalized_exposure.sellable_executable_qty),
             "normalized_exposure_qty": float(normalized_exposure.normalized_exposure_qty),
             "normalized_exposure_active": bool(normalized_exposure.normalized_exposure_active),
+            "entry_allowed": bool(normalized_exposure.entry_allowed),
+            "effective_flat": bool(normalized_exposure.effective_flat),
+            "has_executable_exposure": bool(normalized_exposure.has_executable_exposure),
+            "has_any_position_residue": bool(normalized_exposure.has_any_position_residue),
+            "has_non_executable_residue": bool(normalized_exposure.has_non_executable_residue),
+            "has_dust_only_remainder": bool(normalized_exposure.has_dust_only_remainder),
             "effective_min_trade_qty": float(normalized_exposure.effective_min_trade_qty),
             "exit_non_executable_reason": str(normalized_exposure.exit_non_executable_reason),
             "entry_block_reason": str(normalized_exposure.entry_block_reason),
@@ -2027,6 +2051,8 @@ def _determine_live_execution_position_state(
             "position_state": {"normalized_exposure": normalized_exposure.as_dict()},
             "position_state_source": str(normalized_exposure.sell_submit_lot_source),
             "position_state_source_truth_source": "derived:sellable_executable_lot_count",
+            "entry_allowed_truth_source": "position_state.normalized_exposure.entry_allowed",
+            "effective_flat_truth_source": "position_state.normalized_exposure.effective_flat",
         }
     )
 

@@ -1754,7 +1754,10 @@ def build_normalized_exposure(
         recovery_block_reason = "unresolved_orders_present"
     else:
         recovery_block_reason = "none"
-    dust_operably_flat = bool(dust_operability_state == "below_internal_lot_boundary_tracked_residue_entry_allowed")
+    dust_operably_flat = bool(
+        dust_operability_state == "below_internal_lot_boundary_tracked_residue_entry_allowed"
+        and display_context.operator_view.state != DustState.BLOCKING_DUST.value
+    )
     entry_allowed = bool(
         normalized_total_asset_qty <= DUST_POSITION_EPS
         or should_treat_as_flat_for_entry_gate(display_context)

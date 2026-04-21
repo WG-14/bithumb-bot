@@ -301,6 +301,7 @@ def _load_position_context(
 
     if row is None or row[0] is None or row[2] is None:
         lot_snapshot = summarize_position_lots(conn, pair=pair)
+        lot_definition = getattr(lot_snapshot, "lot_definition", None)
         tracked_qty = float(lot_snapshot.raw_total_asset_qty)
         raw_qty_open = (
             tracked_qty
@@ -320,11 +321,28 @@ def _load_position_context(
             reserved_exit_qty=reserved_exit_qty,
             open_lot_count=lot_snapshot.open_lot_count,
             dust_tracking_lot_count=lot_snapshot.dust_tracking_lot_count,
+            internal_lot_size=(None if lot_definition is None else lot_definition.internal_lot_size),
             market_price=float(market_price),
-            min_qty=float(rules.min_qty),
-            qty_step=float(rules.qty_step),
-            min_notional_krw=float(rules.min_notional_krw),
-            max_qty_decimals=int(rules.max_qty_decimals),
+            min_qty=(
+                float(rules.min_qty)
+                if lot_definition is None or lot_definition.min_qty is None
+                else lot_definition.min_qty
+            ),
+            qty_step=(
+                float(rules.qty_step)
+                if lot_definition is None or lot_definition.qty_step is None
+                else lot_definition.qty_step
+            ),
+            min_notional_krw=(
+                float(rules.min_notional_krw)
+                if lot_definition is None or lot_definition.min_notional_krw is None
+                else lot_definition.min_notional_krw
+            ),
+            max_qty_decimals=(
+                int(rules.max_qty_decimals)
+                if lot_definition is None or lot_definition.max_qty_decimals is None
+                else lot_definition.max_qty_decimals
+            ),
             exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
             exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
@@ -366,6 +384,7 @@ def _load_position_context(
         except sqlite3.OperationalError:
             pass
     lot_snapshot = summarize_position_lots(conn, pair=pair, executable_lot=executable_lot)
+    lot_definition = getattr(lot_snapshot, "lot_definition", None)
     position_state = build_position_state_model(
         raw_qty_open=qty_open,
         metadata_raw=dust_context.classification,
@@ -375,11 +394,28 @@ def _load_position_context(
         reserved_exit_qty=reserved_exit_qty,
         open_lot_count=lot_snapshot.open_lot_count,
         dust_tracking_lot_count=lot_snapshot.dust_tracking_lot_count,
+        internal_lot_size=(None if lot_definition is None else lot_definition.internal_lot_size),
         market_price=float(market_price),
-        min_qty=float(rules.min_qty),
-        qty_step=float(rules.qty_step),
-        min_notional_krw=float(rules.min_notional_krw),
-        max_qty_decimals=int(rules.max_qty_decimals),
+        min_qty=(
+            float(rules.min_qty)
+            if lot_definition is None or lot_definition.min_qty is None
+            else lot_definition.min_qty
+        ),
+        qty_step=(
+            float(rules.qty_step)
+            if lot_definition is None or lot_definition.qty_step is None
+            else lot_definition.qty_step
+        ),
+        min_notional_krw=(
+            float(rules.min_notional_krw)
+            if lot_definition is None or lot_definition.min_notional_krw is None
+            else lot_definition.min_notional_krw
+        ),
+        max_qty_decimals=(
+            int(rules.max_qty_decimals)
+            if lot_definition is None or lot_definition.max_qty_decimals is None
+            else lot_definition.max_qty_decimals
+        ),
         exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),

@@ -5697,7 +5697,7 @@ def test_live_execute_signal_buy_passes_typed_buy_authority_to_sizing(tmp_path, 
     assert isinstance(captured["authority"], BuyExecutionAuthority)
     assert captured["authority"] == BuyExecutionAuthority(
         entry_allowed=True,
-        entry_allowed_truth_source="context.entry_allowed",
+        entry_allowed_truth_source="position_state.normalized_exposure.entry_allowed",
     )
 
 
@@ -8533,8 +8533,8 @@ def test_live_execute_signal_sell_dust_unsellable_records_operational_event_and_
     assert suppression_context["terminal_state"] in {"dust_only", "non_executable_position"}
     assert suppression_context["exit_block_reason"] in {"dust_only_remainder", "no_position"}
     assert "decision_truth_sources" in suppression_context
-    assert suppression_context["entry_allowed_truth_source"] == "-"
-    assert suppression_context["effective_flat_truth_source"] == "-"
+    assert suppression_context["entry_allowed_truth_source"] == "position_state.normalized_exposure.entry_allowed"
+    assert suppression_context["effective_flat_truth_source"] == "position_state.normalized_exposure.effective_flat"
     assert suppression_context["observed_position_qty"] == pytest.approx(0.00009)
     assert suppression_context["submit_payload_qty"] == pytest.approx(0.0)
     assert suppression_context["normalized_qty"] == pytest.approx(0.0)

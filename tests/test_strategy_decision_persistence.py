@@ -139,7 +139,8 @@ def test_record_strategy_decision_preserves_buy_to_hold_explanation_fields(tmp_p
     assert ctx["raw_signal"] == "BUY"
     assert ctx["final_signal"] == "HOLD"
     assert ctx["entry_blocked"] is True
-    assert ctx["entry_block_reason"] == "position held: no exit rule triggered"
+    assert ctx["decision_entry_block_reason"] == "position held: no exit rule triggered"
+    assert ctx["entry_block_reason"] == "legacy_lot_metadata_missing"
     assert ctx["dust_classification"] == "harmless_dust"
     assert ctx["effective_flat"] is False
     assert ctx["raw_qty_open"] == pytest.approx(0.00009629)

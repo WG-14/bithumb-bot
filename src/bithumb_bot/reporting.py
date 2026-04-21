@@ -1276,6 +1276,7 @@ def fetch_recent_decision_flow(
                 0
             ) AS entry_allowed,
             COALESCE(
+                NULLIF(json_extract(context_json, '$.decision_entry_block_reason'), ''),
                 NULLIF(json_extract(context_json, '$.entry_block_reason'), ''),
                 NULLIF(json_extract(context_json, '$.block_reason'), ''),
                 NULLIF(json_extract(context_json, '$.entry_reason'), ''),
@@ -1644,7 +1645,8 @@ def fetch_decision_telemetry_summary(
             else raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
         )
         block_reason = str(
-            context.get("entry_block_reason")
+            context.get("decision_entry_block_reason")
+            or context.get("entry_block_reason")
             or context.get("block_reason")
             or context.get("entry_reason")
             or context.get("reason")

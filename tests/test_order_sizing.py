@@ -63,6 +63,26 @@ def test_buy_execution_sizing_finalizes_order_qty_from_entry_budget(sizing_rule_
     assert plan.decision_reason_code == "none"
 
 
+def test_documented_buy_quantity_layers_keep_submitted_qty_and_internal_lots_distinct(
+    sizing_rule_overrides,
+) -> None:
+    object.__setattr__(settings, "MAX_ORDER_KRW", 12000.0)
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=24000.0,
+        market_price=20_000_000.0,
+    )
+
+    assert plan.allowed is True
+    assert plan.requested_qty == pytest.approx(0.0006)
+    assert plan.exchange_constrained_qty == pytest.approx(0.0006)
+    assert plan.executable_qty == pytest.approx(0.0006)
+    assert plan.internal_lot_size == pytest.approx(0.0004)
+    assert plan.intended_lot_count == 1
+    assert plan.executable_lot_count == 1
+    assert plan.qty_source == "entry.intent_budget_exchange_constraints"
+
+
 # BUY execution authority and sizing handoff.
 
 def test_buy_execution_sizing_consumes_entry_intent_and_still_finalizes_qty_in_sizing(
