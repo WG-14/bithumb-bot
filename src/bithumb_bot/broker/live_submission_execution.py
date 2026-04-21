@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ..config import settings
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
+from ..fill_reading import FillReadPolicy, get_broker_fills
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
 from ..oms import (
@@ -190,7 +191,12 @@ def reconcile_apply_fills_and_refresh(
     exchange_order_id = submission.exchange_order_id
     side = submission.side
 
-    fills = broker.get_fills(client_order_id=client_order_id, exchange_order_id=exchange_order_id)
+    fills = get_broker_fills(
+        broker,
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        policy=FillReadPolicy.ACCOUNTING_STRICT,
+    )
     try:
         fills_to_apply = live_module._aggregate_fills_for_apply(
             fills=fills,

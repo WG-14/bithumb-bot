@@ -3748,7 +3748,7 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert observation["fee"] is None
     assert observation["fee_status"] == "missing"
     assert observation["accounting_status"] == "fee_pending"
-    assert observation["source"] == "reconcile_salvage"
+    assert observation["source"] == "reconcile_fee_pending"
     assert "missing_fee_field" in str(observation["parse_warnings"])
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
     assert metadata["observed_fill_count"] == 1
@@ -3805,7 +3805,7 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     assert observation["fee"] == pytest.approx(26.86)
     assert observation["fee_status"] == "order_level_candidate"
     assert observation["accounting_status"] == "fee_pending"
-    assert observation["source"] == "reconcile_salvage"
+    assert observation["source"] == "reconcile_fee_pending"
     assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
     assert "paid_fee" in str(observation["raw_payload"])
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
@@ -4000,7 +4000,7 @@ def test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_
     assert observation is not None
     assert observation["fee_status"] == "missing"
     assert observation["accounting_status"] == "fee_pending"
-    assert observation["source"] == "manual_recover_order_salvage"
+    assert observation["source"] == "manual_recover_order_fee_pending"
     report = _load_recovery_report()
     assert report["can_resume"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1

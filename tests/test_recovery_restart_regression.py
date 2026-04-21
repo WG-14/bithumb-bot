@@ -290,6 +290,36 @@ class _SubmitUnknownRecentFillBroker(_NoopBroker):
         ]
 
 
+class _SubmitUnknownMissingFeeRecentFillBroker(_NoopBroker):
+    def __init__(self) -> None:
+        self.parse_modes: list[str] = []
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
+        self.parse_modes.append(parse_mode)
+        if parse_mode == "strict":
+            raise RuntimeError("strict fill parsing should not be used for restart observation")
+        return [
+            BrokerFill(
+                client_order_id="submit_timeout_restart",
+                fill_id="submit_unknown_missing_fee_fill",
+                fill_ts=300,
+                price=100.0,
+                qty=1.0,
+                fee=None,
+                exchange_order_id="ex-submit-unknown-missing-fee-fill",
+                fee_status="missing",
+                parse_warnings=("missing_fee_field",),
+                raw={"uuid": "submit_unknown_missing_fee_fill", "price": "100", "volume": "1"},
+            )
+        ]
+
+
 class _SubmitUnknownRecentOrderBroker(_NoopBroker):
     def get_recent_orders(
         self,
@@ -1793,6 +1823,77 @@ def test_submit_unknown_timeout_metadata_recent_fill_only_resolves_on_restart(is
     assert autolink is not None
     assert "outcome=fill_only" in str(autolink["message"])
     assert gate_reason is None
+
+
+def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="submit_timeout_restart",
+            side="BUY",
+            qty_req=1.0,
+            price=100.0,
+            ts_ms=100,
+            status="SUBMIT_UNKNOWN",
+        )
+        _insert_submit_timeout_attempt_metadata(
+            conn=conn,
+            client_order_id="submit_timeout_restart",
+            submit_attempt_id="attempt_timeout_meta",
+            qty=1.0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _SubmitUnknownMissingFeeRecentFillBroker()
+    reconcile_with_broker(broker)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        row = conn.execute(
+            "SELECT status, exchange_order_id, last_error, qty_filled FROM orders WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
+        observation = conn.execute(
+            """
+            SELECT fill_id, fee, fee_status, accounting_status, source, parse_warnings
+            FROM broker_fill_observations
+            WHERE client_order_id='submit_timeout_restart'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    state = runtime_state.snapshot()
+    metadata = json.loads(str(state.last_reconcile_metadata))
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert broker.parse_modes == ["salvage"]
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["exchange_order_id"] == "ex-submit-unknown-missing-fee-fill"
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert "accounting is fee-pending" in str(row["last_error"])
+    assert fill_count["cnt"] == 0
+    assert observation is not None
+    assert observation["fill_id"] == "submit_unknown_missing_fee_fill"
+    assert observation["fee"] is None
+    assert observation["fee_status"] == "missing"
+    assert observation["accounting_status"] == "fee_pending"
+    assert observation["source"] == "reconcile_recent_activity_fee_pending"
+    assert "missing_fee_field" in str(observation["parse_warnings"])
+    assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
+    assert metadata["observed_fill_count"] == 1
+    assert metadata["fee_pending_fill_count"] == 1
+    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_latest_fee_status"] == "missing"
+    assert "recovery_required_orders=1" in str(gate_reason)
 
 
 def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):
