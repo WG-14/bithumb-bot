@@ -322,7 +322,19 @@ The current codebase expects:
 ## Lot State Quantity Contract
 
 `open_position_lots` is the persisted storage contract for the base lot-native
-position rows.
+position rows. It is a persisted projection of accounted fills, not the
+authoritative source of whether a broker fill occurred.
+
+For accounted trade convergence, the current authoritative input chain is:
+
+- `orders`: local order intent, side, requested quantity, exchange identifier, and status
+- `fills`: deduplicated fill evidence accepted for accounting
+- `trades`: the ordered accounting ledger rows derived from accepted fills
+
+Projection tables and readiness-facing summaries must be reproducible from
+that authoritative input chain. In particular, `open_position_lots` and
+`trade_lifecycles` are rebuilt from ordered `trades` during supported repair
+flows instead of being treated as separate truth surfaces.
 
 Execution and reporting do not read final SELL authority directly from an
 individual stored row. They materialize normalized authority from the persisted

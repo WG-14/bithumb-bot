@@ -161,8 +161,12 @@ uv run bithumb-bot fee-pending-accounting-repair --client-order-id <id> --fill-i
 ```
 
 The command records an audited fee-pending accounting repair, applies the fill
-through normal accounting/lifecycle code, records an accounting-complete broker
-fill observation, and leaves trading disabled until an explicit `resume`.
+through normal accounting code, records an accounting-complete broker fill
+observation, then rebuilds the lot/lifecycle projections from the accounted
+trade sequence. This means operator fee evidence updates `fills` and `trades`
+first; `open_position_lots` and `trade_lifecycles` are replayed projections,
+not independently patched truth. Trading remains disabled until an explicit
+`resume`.
 Material live fills still require a positive fee; a zero-fee repair for a
 material live fill is refused.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.

@@ -15,7 +15,7 @@ from .db_core import (
     set_portfolio_breakdown,
 )
 from .execution import apply_fill_and_trade, order_fill_tolerance
-from .lifecycle import summarize_position_lots
+from .lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from .oms import set_status
 
 
@@ -396,6 +396,11 @@ def apply_fee_pending_accounting_repair(
             "raw_payload_present": preview["raw_payload_present"],
         },
     )
+    projection_replay = rebuild_lifecycle_projections_from_trades(
+        conn,
+        pair=settings.PAIR,
+        allow_entry_decision_fallback=False,
+    )
     after_lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
     return {
         "preview": preview,
@@ -403,4 +408,5 @@ def apply_fee_pending_accounting_repair(
         "applied_fill": applied,
         "lot_snapshot_before": before_lot_snapshot,
         "lot_snapshot_after": after_lot_snapshot,
+        "projection_replay": projection_replay.as_dict(),
     }

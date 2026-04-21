@@ -279,7 +279,16 @@ These outputs are diagnostic and recovery-critical, not disposable logs.
 ## Lot State Routing Rule
 
 `open_position_lots` is the persisted storage contract for the base lot-native
-position rows.
+position rows. It is a persisted projection of accounted fills, not the
+authoritative source of whether a broker fill occurred.
+
+For accounted trade convergence, the current authoritative input chain is
+`orders` plus accepted `fills`, with ordered `trades` as the accounting ledger
+derived from those fills. `open_position_lots`, `trade_lifecycles`, and
+readiness-facing summaries must be reproducible from that chain. Supported
+repair flows should add or correct evidence in the authoritative chain, then
+replay projections instead of patching each derived table as an independent
+truth surface.
 
 Execution and reporting do not treat a single stored row as the whole SELL
 authority surface. They materialize normalized authority from the persisted

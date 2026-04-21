@@ -128,6 +128,30 @@ class PositionLotSnapshot:
         return payload
 
 
+@dataclass(frozen=True)
+class ProjectionReplayResult:
+    pair: str
+    replayed_trade_count: int
+    replayed_buy_count: int
+    replayed_sell_count: int
+    deleted_open_position_lot_count: int
+    deleted_trade_lifecycle_count: int
+    lot_snapshot_before: PositionLotSnapshot
+    lot_snapshot_after: PositionLotSnapshot
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "pair": self.pair,
+            "replayed_trade_count": int(self.replayed_trade_count),
+            "replayed_buy_count": int(self.replayed_buy_count),
+            "replayed_sell_count": int(self.replayed_sell_count),
+            "deleted_open_position_lot_count": int(self.deleted_open_position_lot_count),
+            "deleted_trade_lifecycle_count": int(self.deleted_trade_lifecycle_count),
+            "lot_snapshot_before": self.lot_snapshot_before.as_dict(),
+            "lot_snapshot_after": self.lot_snapshot_after.as_dict(),
+        }
+
+
 def _lot_definition_from_rules(*, lot_rules: object) -> LotDefinitionSnapshot:
     return LotDefinitionSnapshot(
         semantic_version=LOT_SEMANTIC_VERSION_V1,
@@ -1007,6 +1031,99 @@ def apply_fill_lifecycle(
           AND COALESCE(executable_lot_count, 0) <= 0
         """,
         (str(pair), OPEN_EXPOSURE_LOT_STATE, eps),
+    )
+
+
+def rebuild_lifecycle_projections_from_trades(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    allow_entry_decision_fallback: bool = False,
+) -> ProjectionReplayResult:
+    """Rebuild lot/lifecycle projections from accounted trade rows.
+
+    Authoritative fill accounting is stored in orders/fills/trades. The
+    open-position lot table and lifecycle table are projections and must be
+    reproducible from the accounted trade sequence during recovery/repair.
+    """
+
+    pair_text = str(pair)
+    before = summarize_position_lots(conn, pair=pair_text)
+    lot_delete = conn.execute(
+        "DELETE FROM open_position_lots WHERE pair=?",
+        (pair_text,),
+    )
+    lifecycle_delete = conn.execute(
+        "DELETE FROM trade_lifecycles WHERE pair=?",
+        (pair_text,),
+    )
+    rows = conn.execute(
+        """
+        SELECT
+            t.id AS trade_id,
+            t.ts AS fill_ts,
+            t.pair,
+            t.side,
+            t.price,
+            t.qty,
+            t.fee,
+            t.client_order_id,
+            t.strategy_name,
+            t.entry_decision_id,
+            t.exit_decision_id,
+            t.exit_reason,
+            t.exit_rule_name,
+            f.fill_id
+        FROM trades t
+        LEFT JOIN fills f
+          ON f.client_order_id=t.client_order_id
+         AND f.fill_ts=t.ts
+         AND ABS(f.price-t.price) < 1e-12
+         AND ABS(f.qty-t.qty) < 1e-12
+        WHERE t.pair=?
+          AND t.side IN ('BUY', 'SELL')
+        ORDER BY t.ts ASC, t.id ASC
+        """,
+        (pair_text,),
+    ).fetchall()
+
+    buy_count = 0
+    sell_count = 0
+    for row in rows:
+        side = str(row["side"] or "").upper()
+        if side == "BUY":
+            buy_count += 1
+        elif side == "SELL":
+            sell_count += 1
+        apply_fill_lifecycle(
+            conn,
+            side=side,
+            pair=pair_text,
+            trade_id=int(row["trade_id"]),
+            client_order_id=str(row["client_order_id"]),
+            fill_id=(str(row["fill_id"]) if row["fill_id"] is not None else None),
+            fill_ts=int(row["fill_ts"]),
+            price=float(row["price"]),
+            qty=float(row["qty"]),
+            fee=float(row["fee"] or 0.0),
+            strategy_name=(str(row["strategy_name"]) if row["strategy_name"] is not None else None),
+            entry_decision_id=(int(row["entry_decision_id"]) if row["entry_decision_id"] is not None else None),
+            exit_decision_id=(int(row["exit_decision_id"]) if row["exit_decision_id"] is not None else None),
+            exit_reason=(str(row["exit_reason"]) if row["exit_reason"] is not None else None),
+            exit_rule_name=(str(row["exit_rule_name"]) if row["exit_rule_name"] is not None else None),
+            allow_entry_decision_fallback=allow_entry_decision_fallback,
+        )
+
+    after = summarize_position_lots(conn, pair=pair_text)
+    return ProjectionReplayResult(
+        pair=pair_text,
+        replayed_trade_count=len(rows),
+        replayed_buy_count=buy_count,
+        replayed_sell_count=sell_count,
+        deleted_open_position_lot_count=max(0, int(lot_delete.rowcount or 0)),
+        deleted_trade_lifecycle_count=max(0, int(lifecycle_delete.rowcount or 0)),
+        lot_snapshot_before=before,
+        lot_snapshot_after=after,
     )
 
 

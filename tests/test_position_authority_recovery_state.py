@@ -24,7 +24,7 @@ from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
 )
-from bithumb_bot.lifecycle import summarize_position_lots
+from bithumb_bot.lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from bithumb_bot.oms import set_status
 from bithumb_bot.position_authority_repair import (
     apply_position_authority_rebuild,
@@ -769,6 +769,225 @@ def test_partial_close_residual_repair_event_does_not_replace_state_convergence(
     assert assessment["needs_residual_normalization"] is True
     assert readiness.recovery_stage == "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
     assert readiness.resume_blockers == ("POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",)
+
+
+def test_fee_pending_existing_sell_fee_repair_replays_lifecycle_projection(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="fee_buy",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_000_000_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="fee_buy",
+            side="BUY",
+            fill_id="fee-buy-fill",
+            fill_ts=1_700_000_000_050,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=1.0,
+            allow_entry_decision_fallback=False,
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="fee_sell",
+            side="SELL",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_000_100_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="fee_sell",
+            side="SELL",
+            fill_id="fee-sell-fill",
+            fill_ts=1_700_000_100_050,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=0.0,
+            allow_entry_decision_fallback=False,
+        )
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_700_000_100_100,
+            client_order_id="fee_sell",
+            exchange_order_id="fee-sell-ex",
+            fill_id="fee-sell-fill",
+            fill_ts=1_700_000_100_050,
+            side="SELL",
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=None,
+            fee_status="order_level_candidate",
+            accounting_status="fee_pending",
+            source="test_fee_pending_existing_fill",
+            parse_warnings=("missing_fee_field", "order_level_fee_candidate:paid_fee"),
+            raw_payload={"trade": {"uuid": "fee-sell-fill"}, "order_fee_fields": {"paid_fee": "17.73"}},
+        )
+        conn.commit()
+
+        before_lifecycle = conn.execute(
+            "SELECT fee_total, net_pnl FROM trade_lifecycles WHERE exit_client_order_id='fee_sell'"
+        ).fetchone()
+        result = apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="fee_sell",
+            fill_id="fee-sell-fill",
+            fee=17.73,
+            fee_provenance="order_level_paid_fee",
+        )
+        conn.commit()
+        after_lifecycle = conn.execute(
+            "SELECT fee_total, net_pnl FROM trade_lifecycles WHERE exit_client_order_id='fee_sell'"
+        ).fetchone()
+        sell_fill = conn.execute("SELECT fee FROM fills WHERE client_order_id='fee_sell'").fetchone()
+        sell_trade = conn.execute("SELECT fee FROM trades WHERE client_order_id='fee_sell'").fetchone()
+    finally:
+        conn.close()
+
+    assert before_lifecycle["fee_total"] == pytest.approx(1.0)
+    assert result["applied_fill"]["repair_mode"] == "complete_existing_fill_fee"
+    assert result["projection_replay"]["replayed_buy_count"] == 1
+    assert result["projection_replay"]["replayed_sell_count"] == 1
+    assert sell_fill["fee"] == pytest.approx(17.73)
+    assert sell_trade["fee"] == pytest.approx(17.73)
+    assert after_lifecycle["fee_total"] == pytest.approx(18.73)
+    assert after_lifecycle["net_pnl"] == pytest.approx(-18.73)
+
+
+def test_projection_replay_removes_stale_latest_buy_open_projection(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _record_historical_sell_history(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="latest_buy",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_000_000_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="latest_buy",
+            side="BUY",
+            fill_id="latest-buy-fill",
+            fill_ts=1_700_000_000_050,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=1.0,
+            allow_entry_decision_fallback=False,
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="latest_sell",
+            side="SELL",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_000_100_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="latest_sell",
+            side="SELL",
+            fill_id="latest-sell-fill",
+            fill_ts=1_700_000_100_050,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=1.0,
+            allow_entry_decision_fallback=False,
+        )
+        conn.execute("DELETE FROM trade_lifecycles WHERE exit_client_order_id='latest_sell'")
+        latest_buy_trade = conn.execute(
+            "SELECT id, ts FROM trades WHERE client_order_id='latest_buy'"
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                int(latest_buy_trade["id"]),
+                "latest_buy",
+                "latest-buy-fill",
+                int(latest_buy_trade["ts"]),
+                PRICE,
+                LOT_SIZE,
+                1,
+                0,
+                1,
+                LOT_SIZE,
+                0.0002,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "open_exposure",
+                1.0,
+            ),
+        )
+        conn.commit()
+
+        stale = summarize_position_lots(conn, pair=settings.PAIR)
+        replay = rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
+        conn.commit()
+        repaired = summarize_position_lots(conn, pair=settings.PAIR)
+        latest_lifecycle = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM trade_lifecycles WHERE exit_client_order_id='latest_sell'"
+        ).fetchone()
+        latest_lot = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM open_position_lots WHERE entry_client_order_id='latest_buy'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert stale.open_lot_count == 1
+    assert replay.replayed_buy_count == 2
+    assert replay.replayed_sell_count == 2
+    assert repaired.open_lot_count == 0
+    assert repaired.raw_total_asset_qty == pytest.approx(0.0)
+    assert latest_lifecycle["cnt"] == 1
+    assert latest_lot["cnt"] == 0
 
 
 def test_dust_only_fee_gap_deadlock_converges_through_canonical_execution_flat_state(recovery_db):

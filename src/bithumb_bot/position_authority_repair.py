@@ -5,7 +5,7 @@ from typing import Any
 
 from .config import settings
 from .db_core import normalize_asset_qty, record_position_authority_repair
-from .lifecycle import apply_fill_lifecycle, summarize_position_lots
+from .lifecycle import apply_fill_lifecycle, rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from .position_authority_state import (
     PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON,
     build_position_authority_assessment,
@@ -54,6 +54,8 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
 
     buy_qty = normalize_asset_qty(sum(float(row["qty"] or 0.0) for row in rows))
     sell_count = int(sell_row["cnt"] if sell_row else 0)
+    sell_qty = normalize_asset_qty(float(sell_row["qty"] or 0.0) if sell_row else 0.0)
+    net_accounted_qty = normalize_asset_qty(max(0.0, buy_qty - sell_qty))
     existing_lot_count = int(existing_lot_row["cnt"] if existing_lot_row else 0)
     reasons: list[str] = []
 
@@ -74,14 +76,16 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     if repair_mode == "rebuild":
         if existing_lot_count > 0:
             reasons.append(f"existing_lot_rows={existing_lot_count}")
-        if sell_count > 0:
-            reasons.append(f"sell_history_present={sell_count}")
         if not rows:
             reasons.append("accounted_buy_fill_evidence_missing")
         if portfolio_qty <= 1e-12:
             reasons.append("portfolio_asset_qty_not_positive")
-        if abs(buy_qty - normalize_asset_qty(portfolio_qty)) > 1e-12:
-            reasons.append(f"buy_qty_portfolio_mismatch=buy_qty={buy_qty:.12f},portfolio_qty={portfolio_qty:.12f}")
+        if abs(net_accounted_qty - normalize_asset_qty(portfolio_qty)) > 1e-12:
+            reasons.append(
+                "accounted_net_qty_portfolio_mismatch="
+                f"buy_qty={buy_qty:.12f},sell_qty={sell_qty:.12f},"
+                f"net_qty={net_accounted_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+            )
 
     safe_to_apply = not reasons
     return {
@@ -111,6 +115,8 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
         "position_authority_assessment": authority_assessment,
         "portfolio_qty": portfolio_qty,
         "accounted_buy_qty": buy_qty,
+        "accounted_sell_qty": sell_qty,
+        "accounted_net_qty": net_accounted_qty,
         "accounted_buy_fill_count": len(rows),
         "sell_trade_count": sell_count,
         "existing_lot_rows": existing_lot_count,
@@ -318,54 +324,18 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             "lot_snapshot_after": after,
         }
 
-    rows = conn.execute(
-        """
-        SELECT
-            t.id AS trade_id,
-            t.client_order_id,
-            t.ts AS fill_ts,
-            t.price,
-            t.qty,
-            t.fee,
-            t.strategy_name,
-            t.entry_decision_id,
-            f.fill_id
-        FROM trades t
-        LEFT JOIN fills f
-          ON f.client_order_id=t.client_order_id
-         AND f.fill_ts=t.ts
-         AND ABS(f.price-t.price) < 1e-12
-         AND ABS(f.qty-t.qty) < 1e-12
-        WHERE t.pair=? AND t.side='BUY'
-        ORDER BY t.ts ASC, t.id ASC
-        """,
-        (settings.PAIR,),
-    ).fetchall()
-
-    for row in rows:
-        apply_fill_lifecycle(
-            conn,
-            side="BUY",
-            pair=settings.PAIR,
-            trade_id=int(row["trade_id"]),
-            client_order_id=str(row["client_order_id"]),
-            fill_id=(str(row["fill_id"]) if row["fill_id"] is not None else None),
-            fill_ts=int(row["fill_ts"]),
-            price=float(row["price"]),
-            qty=float(row["qty"]),
-            fee=float(row["fee"] or 0.0),
-            strategy_name=(str(row["strategy_name"]) if row["strategy_name"] is not None else None),
-            entry_decision_id=(int(row["entry_decision_id"]) if row["entry_decision_id"] is not None else None),
-            allow_entry_decision_fallback=False,
-        )
-
+    projection_replay = rebuild_lifecycle_projections_from_trades(
+        conn,
+        pair=settings.PAIR,
+        allow_entry_decision_fallback=False,
+    )
     after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
     repair_basis = {
         "event_type": "position_authority_rebuild",
         "preview": preview,
         "lot_snapshot_before": before,
         "lot_snapshot_after": after,
-        "rebuilt_fill_count": len(rows),
+        "projection_replay": projection_replay.as_dict(),
     }
     repair = record_position_authority_repair(
         conn,
