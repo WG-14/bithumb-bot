@@ -48,6 +48,7 @@ from .engine import (
     perform_panic_stop_cleanup,
 )
 from .recovery import (
+    backfill_broker_order_with_exchange_id,
     cancel_open_orders_with_broker,
     load_recent_order_lifecycle,
     reconcile_with_broker,
@@ -4077,6 +4078,60 @@ def cmd_recover_order(
     print("  trading remains disabled; run `uv run python bot.py resume` when ready")
 
 
+def cmd_backfill_broker_order(
+    *,
+    exchange_order_id: str,
+    dry_run: bool = False,
+    confirm: bool = False,
+    broker_factory=None,
+) -> None:
+    if settings.MODE != "live":
+        print(f"[BACKFILL-BROKER-ORDER] skipped: MODE={settings.MODE} (live only)")
+        raise SystemExit(1)
+
+    broker = broker_factory() if broker_factory is not None else None
+    if broker is None:
+        from .broker.bithumb import BithumbBroker
+
+        broker = BithumbBroker()
+
+    remote = broker.get_order(client_order_id=None, exchange_order_id=exchange_order_id)
+    print("[BACKFILL-BROKER-ORDER] preview")
+    print(f"  exchange_order_id={exchange_order_id}")
+    print(f"  broker_client_order_id={remote.client_order_id or '-'}")
+    print(f"  broker_status={remote.status}")
+    print(f"  side={remote.side} qty_req={float(remote.qty_req or 0.0):.12f} qty_filled={float(remote.qty_filled or 0.0):.12f}")
+    print("  proposed_action=create synthetic local OMS lineage and apply recoverable broker fills")
+
+    if dry_run:
+        print("[BACKFILL-BROKER-ORDER] dry-run: no changes applied")
+        return
+
+    if not confirm:
+        print("[BACKFILL-BROKER-ORDER] confirmation required: re-run with --yes to apply")
+        raise SystemExit(1)
+
+    disable_trading_until(float("inf"), reason="broker-known backfill in progress")
+    try:
+        result = backfill_broker_order_with_exchange_id(
+            broker,
+            exchange_order_id=exchange_order_id,
+        )
+    except Exception as e:
+        disable_trading_until(float("inf"), reason="broker-known backfill failed; resume required")
+        print(f"[BACKFILL-BROKER-ORDER] failed: {type(e).__name__}: {e}")
+        raise SystemExit(1)
+
+    disable_trading_until(float("inf"), reason="broker-known backfill completed; explicit resume required")
+    print("[BACKFILL-BROKER-ORDER] completed")
+    print(f"  client_order_id={result['client_order_id']}")
+    print(f"  exchange_order_id={result['exchange_order_id']}")
+    print(f"  status={result['status']}")
+    print(f"  fill_count={result['fill_count']} applied_fill_count={result['applied_fill_count']}")
+    print(f"  blocked_reason={result['blocked_reason']}")
+    print("  trading remains disabled; run reconcile and recovery-report before resume")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bithumb-bot")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -4170,6 +4225,11 @@ def main(argv: list[str] | None = None) -> int:
     recover_order.add_argument("--exchange-order-id", required=True)
     recover_order.add_argument("--dry-run", action="store_true")
     recover_order.add_argument("--yes", action="store_true")
+
+    backfill_broker_order = sub.add_parser("backfill-broker-order")
+    backfill_broker_order.add_argument("--exchange-order-id", required=True)
+    backfill_broker_order.add_argument("--dry-run", action="store_true")
+    backfill_broker_order.add_argument("--yes", action="store_true")
 
     report = sub.add_parser("report")
     report.add_argument("--days", type=int, default=30)
@@ -4483,6 +4543,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "recover-order":
         cmd_recover_order(
             client_order_id=str(args.client_order_id),
+            exchange_order_id=str(args.exchange_order_id),
+            dry_run=bool(args.dry_run),
+            confirm=bool(args.yes),
+        )
+    elif args.cmd == "backfill-broker-order":
+        cmd_backfill_broker_order(
             exchange_order_id=str(args.exchange_order_id),
             dry_run=bool(args.dry_run),
             confirm=bool(args.yes),

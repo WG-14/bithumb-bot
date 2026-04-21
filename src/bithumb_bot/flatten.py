@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 import inspect
+import json
 import time
+import uuid
 
 from . import runtime_state
+from . import db_core
 from .config import settings
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, init_portfolio
@@ -12,6 +15,15 @@ from .dust import build_dust_display_context, build_position_state_model
 from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
+from .execution import record_order_if_missing
+from .oms import (
+    payload_fingerprint,
+    record_submit_attempt,
+    record_submit_started,
+    record_status_transition,
+    set_exchange_order_id,
+    set_status,
+)
 from .order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
@@ -64,6 +76,245 @@ def _validate_flatten_pretrade(*, broker, qty: float) -> None:
         raise ValueError(
             f"insufficient available asset: need={required_asset:.12f} avail={available_asset:.12f}"
         )
+
+
+def _flatten_submit_evidence(
+    *,
+    client_order_id: str,
+    submit_attempt_id: str,
+    trigger: str,
+    qty: float,
+    market_price: float | None,
+    phase: str,
+    status: str,
+    exchange_order_id: str | None = None,
+    error: str | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "client_order_id": client_order_id,
+            "submit_attempt_id": submit_attempt_id,
+            "submit_path": "operator_flatten",
+            "trigger": trigger,
+            "symbol": settings.PAIR,
+            "side": "SELL",
+            "qty": float(qty),
+            "price": None,
+            "reference_price": float(market_price) if market_price is not None else None,
+            "phase": phase,
+            "status": status,
+            "exchange_order_id": exchange_order_id,
+            "error": error,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def _stage_flatten_submit_intent(
+    *,
+    client_order_id: str,
+    trigger: str,
+    qty: float,
+    market_price: float,
+    lot_snapshot,
+    exit_sizing,
+) -> tuple[str, str, int]:
+    submit_attempt_id = f"{client_order_id}:submit:{uuid.uuid4().hex[:8]}"
+    ts = int(time.time() * 1000)
+    payload_hash = payload_fingerprint(
+        {
+            "client_order_id": client_order_id,
+            "submit_attempt_id": submit_attempt_id,
+            "symbol": settings.PAIR,
+            "side": "SELL",
+            "qty": float(qty),
+            "price": None,
+            "trigger": trigger,
+            "submit_path": "operator_flatten",
+        }
+    )
+    evidence = _flatten_submit_evidence(
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        trigger=trigger,
+        qty=qty,
+        market_price=market_price,
+        phase="pre_submit",
+        status="PENDING_SUBMIT",
+    )
+    conn = db_core.ensure_db()
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            symbol=settings.PAIR,
+            side="SELL",
+            qty_req=float(qty),
+            price=None,
+            strategy_name="operator_flatten",
+            exit_rule_name=trigger,
+            order_type="market",
+            internal_lot_size=float(exit_sizing.internal_lot_size),
+            effective_min_trade_qty=float(exit_sizing.effective_min_trade_qty),
+            qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+            min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+            intended_lot_count=int(exit_sizing.intended_lot_count),
+            executable_lot_count=int(exit_sizing.executable_lot_count),
+            final_intended_qty=float(exit_sizing.executable_qty),
+            final_submitted_qty=float(qty),
+            decision_reason_code="operator_flatten",
+            local_intent_state="PENDING_SUBMIT",
+            ts_ms=ts,
+            status="PENDING_SUBMIT",
+        )
+        record_submit_started(
+            client_order_id,
+            conn=conn,
+            submit_attempt_id=submit_attempt_id,
+            symbol=settings.PAIR,
+            side="SELL",
+            qty=float(qty),
+            mode=settings.MODE,
+            message=f"operator flatten submit staged before broker dispatch; trigger={trigger}",
+        )
+        record_submit_attempt(
+            conn=conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            symbol=settings.PAIR,
+            side="SELL",
+            qty=float(qty),
+            price=float(market_price),
+            submit_ts=ts,
+            payload_fingerprint=payload_hash,
+            broker_response_summary="operator_flatten_pre_submit_journaled",
+            submission_reason_code="operator_flatten_pre_submit_journaled",
+            exception_class=None,
+            timeout_flag=False,
+            submit_evidence=evidence,
+            exchange_order_id_obtained=False,
+            order_status="PENDING_SUBMIT",
+            submit_phase="operator_pre_submit",
+            submit_plan_id=f"{submit_attempt_id}:plan",
+            signed_request_id=f"{submit_attempt_id}:signed",
+            submission_id=f"{submit_attempt_id}:submission",
+            confirmation_id=f"{submit_attempt_id}:confirmation",
+            event_type="submit_attempt_preflight",
+            message=f"operator flatten trigger={trigger}",
+            order_type="market",
+            internal_lot_size=float(exit_sizing.internal_lot_size),
+            effective_min_trade_qty=float(exit_sizing.effective_min_trade_qty),
+            qty_step=float(settings.LIVE_ORDER_QTY_STEP),
+            min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
+            intended_lot_count=int(exit_sizing.intended_lot_count),
+            executable_lot_count=int(exit_sizing.executable_lot_count),
+            final_intended_qty=float(exit_sizing.executable_qty),
+            final_submitted_qty=float(qty),
+            decision_reason_code="operator_flatten",
+        )
+        conn.commit()
+    except Exception:
+        if hasattr(conn, "rollback"):
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return submit_attempt_id, payload_hash, ts
+
+
+def _record_flatten_submit_ack(
+    *,
+    client_order_id: str,
+    submit_attempt_id: str,
+    payload_hash: str,
+    trigger: str,
+    qty: float,
+    market_price: float,
+    order,
+) -> None:
+    exchange_order_id = str(getattr(order, "exchange_order_id", "") or "")
+    order_status = str(getattr(order, "status", "") or "NEW")
+    ts = int(time.time() * 1000)
+    evidence = _flatten_submit_evidence(
+        client_order_id=client_order_id,
+        submit_attempt_id=submit_attempt_id,
+        trigger=trigger,
+        qty=qty,
+        market_price=market_price,
+        phase="broker_ack",
+        status=order_status,
+        exchange_order_id=exchange_order_id or None,
+    )
+    conn = db_core.ensure_db()
+    try:
+        if exchange_order_id:
+            set_exchange_order_id(client_order_id, exchange_order_id, conn=conn)
+        record_submit_attempt(
+            conn=conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            symbol=settings.PAIR,
+            side="SELL",
+            qty=float(qty),
+            price=float(market_price),
+            submit_ts=ts,
+            payload_fingerprint=payload_hash,
+            broker_response_summary=f"operator_flatten_ack status={order_status} exchange_order_id={exchange_order_id or '-'}",
+            submission_reason_code="operator_flatten_ack",
+            exception_class=None,
+            timeout_flag=False,
+            submit_evidence=evidence,
+            exchange_order_id_obtained=bool(exchange_order_id),
+            order_status=order_status,
+            submit_phase="broker_ack",
+            submit_plan_id=f"{submit_attempt_id}:plan",
+            signed_request_id=f"{submit_attempt_id}:signed",
+            submission_id=f"{submit_attempt_id}:submission",
+            confirmation_id=f"{submit_attempt_id}:confirmation",
+            event_type="submit_attempt_acknowledged",
+            order_type="market",
+        )
+        set_status(client_order_id, order_status, conn=conn)
+        conn.commit()
+    except Exception:
+        if hasattr(conn, "rollback"):
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _mark_flatten_submit_unknown(
+    *,
+    client_order_id: str,
+    submit_attempt_id: str,
+    reason: str,
+) -> None:
+    conn = db_core.ensure_db()
+    try:
+        row = conn.execute(
+            "SELECT status FROM orders WHERE client_order_id=?",
+            (client_order_id,),
+        ).fetchone()
+        if row is not None and str(row["status"]) != "SUBMIT_UNKNOWN":
+            record_status_transition(
+                client_order_id,
+                from_status=str(row["status"] or "UNKNOWN"),
+                to_status="SUBMIT_UNKNOWN",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "SUBMIT_UNKNOWN", last_error=reason, conn=conn)
+        conn.commit()
+    except Exception:
+        if hasattr(conn, "rollback"):
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "operator") -> dict[str, object]:
@@ -183,6 +434,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
     client_order_id = f"flatten_{int(time.time() * 1000)}"
     normalized_qty = float(exit_sizing.executable_qty)
+    submit_attempt_id: str | None = None
     try:
         quote = fetch_orderbook_top(settings.PAIR)
         bid, _ask = validated_best_quote_prices(quote, requested_market=settings.PAIR)
@@ -190,6 +442,14 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
 
         normalized_qty = _normalize_flatten_qty(qty=normalized_qty, market_price=market_price)
         _validate_flatten_pretrade(broker=broker, qty=normalized_qty)
+        submit_attempt_id, payload_hash, _submit_ts = _stage_flatten_submit_intent(
+            client_order_id=client_order_id,
+            trigger=trigger,
+            qty=normalized_qty,
+            market_price=market_price,
+            lot_snapshot=lot_snapshot,
+            exit_sizing=exit_sizing,
+        )
 
         place_order_kwargs = {
             "client_order_id": client_order_id,
@@ -216,8 +476,23 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             )
             place_order_kwargs["submit_plan"] = submit_plan
         order = broker.place_order(**place_order_kwargs)
+        _record_flatten_submit_ack(
+            client_order_id=client_order_id,
+            submit_attempt_id=submit_attempt_id,
+            payload_hash=payload_hash,
+            trigger=trigger,
+            qty=normalized_qty,
+            market_price=market_price,
+            order=order,
+        )
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
+        if submit_attempt_id is not None:
+            _mark_flatten_submit_unknown(
+                client_order_id=client_order_id,
+                submit_attempt_id=submit_attempt_id,
+                reason=f"operator flatten submit outcome unknown after pre-submit journal: {err}",
+            )
         summary = {
             "status": "failed",
             "qty": float(normalized_qty),

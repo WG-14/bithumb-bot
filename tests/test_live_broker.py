@@ -55,7 +55,12 @@ from bithumb_bot.reason_codes import (
     SELL_FAILURE_CATEGORY_BOUNDARY_BELOW_MIN,
     SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
 )
-from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
+from bithumb_bot.recovery import (
+    backfill_broker_order_with_exchange_id,
+    cancel_open_orders_with_broker,
+    reconcile_with_broker,
+    recover_order_with_exchange_id,
+)
 from bithumb_bot import config as config_module
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
@@ -4387,6 +4392,104 @@ def test_manual_recover_order_attaches_exchange_order_id_and_applies_fills(tmp_p
     assert row["exchange_order_id"] == "ex_manual_fill"
     assert float(row["qty_filled"]) == 0.01
     assert fill is not None
+
+
+def test_backfill_broker_order_creates_synthetic_lineage_for_local_missing_execution(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "broker_backfill.sqlite"))
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+
+    result = backfill_broker_order_with_exchange_id(_FakeBroker(), exchange_order_id="ex_backfill_fill")
+
+    conn = ensure_db(str(tmp_path / "broker_backfill.sqlite"))
+    try:
+        row = conn.execute(
+            """
+            SELECT client_order_id, status, exchange_order_id, side, qty_filled, strategy_name, local_intent_state
+            FROM orders
+            WHERE exchange_order_id='ex_backfill_fill'
+            """
+        ).fetchone()
+        assert row is not None
+        event_types = {
+            str(event["event_type"])
+            for event in conn.execute(
+                "SELECT event_type FROM order_events WHERE client_order_id=?",
+                (row["client_order_id"],),
+            ).fetchall()
+        }
+        fill = conn.execute(
+            "SELECT fill_id, qty, fee FROM fills WHERE client_order_id=?",
+            (row["client_order_id"],),
+        ).fetchone()
+        trade = conn.execute(
+            "SELECT note FROM trades WHERE client_order_id=?",
+            (row["client_order_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert result["status"] == "FILLED"
+    assert result["blocked_reason"] == "none"
+    assert row["status"] == "FILLED"
+    assert row["side"] == "BUY"
+    assert row["strategy_name"] == "broker_backfill"
+    assert row["local_intent_state"] == "BACKFILLED_BROKER_OBSERVED"
+    assert float(row["qty_filled"]) == 0.01
+    assert {"intent_created", "exchange_order_id_attached", "fill_applied", "status_changed"} <= event_types
+    assert fill is not None
+    assert fill["fill_id"] == "f1"
+    assert float(fill["fee"]) == 10.0
+    assert trade is not None
+    assert "broker-known backfill exchange_order_id=ex_backfill_fill" in str(trade["note"])
+
+
+def test_backfill_broker_order_fee_pending_keeps_recovery_required_with_observation(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "broker_backfill_fee_pending.sqlite"))
+
+    class _FeePendingBackfillBroker(_FakeBroker):
+        def get_fills(self, *, client_order_id: str | None = None, exchange_order_id: str | None = None) -> list[BrokerFill]:
+            return [
+                BrokerFill(
+                    client_order_id=client_order_id or "remote_missing_fee",
+                    exchange_order_id=exchange_order_id or "ex_backfill_missing_fee",
+                    fill_id="missing_fee_fill",
+                    fill_ts=1000,
+                    price=100000000.0,
+                    qty=0.01,
+                    fee=None,
+                )
+            ]
+
+    result = backfill_broker_order_with_exchange_id(
+        _FeePendingBackfillBroker(),
+        exchange_order_id="ex_backfill_missing_fee",
+    )
+
+    conn = ensure_db(str(tmp_path / "broker_backfill_fee_pending.sqlite"))
+    try:
+        row = conn.execute(
+            "SELECT client_order_id, status, last_error FROM orders WHERE exchange_order_id='ex_backfill_missing_fee'"
+        ).fetchone()
+        observation = conn.execute(
+            """
+            SELECT source, fee_status, accounting_status
+            FROM broker_fill_observations
+            WHERE exchange_order_id='ex_backfill_missing_fee'
+            """
+        ).fetchone()
+        fill_count = conn.execute("SELECT COUNT(*) AS n FROM fills").fetchone()
+    finally:
+        conn.close()
+
+    assert result["status"] == "RECOVERY_REQUIRED"
+    assert result["blocked_reason"] == "fee_pending"
+    assert row is not None
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "fee-pending" in str(row["last_error"])
+    assert observation is not None
+    assert observation["source"] == "broker_known_backfill_fee_pending"
+    assert observation["accounting_status"] == "fee_pending"
+    assert int(fill_count["n"]) == 0
 
 
 def test_reconcile_conflicting_sources_halts_conservatively(monkeypatch, tmp_path):

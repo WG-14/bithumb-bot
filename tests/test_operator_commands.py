@@ -2443,6 +2443,37 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
     assert len(broker.cancel_calls) == 1
     assert len(broker.place_order_calls) == 1
     assert broker.place_order_calls[0]["side"] == "SELL"
+    conn = ensure_db()
+    try:
+        flatten_row = conn.execute(
+            """
+            SELECT client_order_id, exchange_order_id, status, side, qty_req, strategy_name, local_intent_state
+            FROM orders
+            WHERE client_order_id LIKE 'flatten_%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert flatten_row is not None
+        assert flatten_row["exchange_order_id"] == "ex-panic-stop"
+        assert flatten_row["status"] == "NEW"
+        assert flatten_row["side"] == "SELL"
+        assert flatten_row["strategy_name"] == "operator_flatten"
+        assert flatten_row["local_intent_state"] == "PENDING_SUBMIT"
+        event_types = {
+            str(row["event_type"])
+            for row in conn.execute(
+                """
+                SELECT event_type
+                FROM order_events
+                WHERE client_order_id=?
+                """,
+                (flatten_row["client_order_id"],),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert {"intent_created", "submit_started", "submit_attempt_preflight", "submit_attempt_acknowledged"} <= event_types
     out = capsys.readouterr().out
     assert "flatten_requested=1" in out
     assert "resume_allowed=0" in out
@@ -6550,6 +6581,38 @@ def test_flatten_position_submits_sell_when_position_exists(monkeypatch, tmp_pat
         assert len(broker.calls) == 1
         assert broker.calls[0]["side"] == "SELL"
         assert abs(float(broker.calls[0]["qty"]) - 0.123456) < 1e-12
+        conn = ensure_db()
+        try:
+            flatten_order = conn.execute(
+                """
+                SELECT client_order_id, exchange_order_id, status, side, qty_req, strategy_name
+                FROM orders
+                WHERE client_order_id LIKE 'flatten_%'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            assert flatten_order is not None
+            assert flatten_order["exchange_order_id"] == "ex-flat-1"
+            assert flatten_order["status"] == "NEW"
+            assert flatten_order["side"] == "SELL"
+            assert flatten_order["strategy_name"] == "operator_flatten"
+            assert abs(float(flatten_order["qty_req"]) - 0.123456) < 1e-12
+            event_rows = conn.execute(
+                """
+                SELECT event_type, submit_phase, broker_response_summary, exchange_order_id_obtained
+                FROM order_events
+                WHERE client_order_id=?
+                ORDER BY id
+                """,
+                (flatten_order["client_order_id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        event_types = {str(row["event_type"]) for row in event_rows}
+        assert {"intent_created", "submit_started", "submit_attempt_preflight", "submit_attempt_acknowledged"} <= event_types
+        assert any(str(row["submit_phase"]) == "operator_pre_submit" for row in event_rows)
+        assert any(int(row["exchange_order_id_obtained"] or 0) == 1 for row in event_rows)
         state = runtime_state.snapshot()
         assert state.last_flatten_position_status == "submitted"
     finally:
@@ -6783,6 +6846,31 @@ def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys
     assert state.last_flatten_position_status == "failed"
     assert state.last_flatten_position_summary is not None
     assert "submit boom" in state.last_flatten_position_summary
+    conn = ensure_db()
+    try:
+        flatten_order = conn.execute(
+            """
+            SELECT client_order_id, status, side, last_error
+            FROM orders
+            WHERE client_order_id LIKE 'flatten_%'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert flatten_order is not None
+        assert flatten_order["status"] == "SUBMIT_UNKNOWN"
+        assert flatten_order["side"] == "SELL"
+        assert "operator flatten submit outcome unknown" in str(flatten_order["last_error"])
+        event_types = {
+            str(row["event_type"])
+            for row in conn.execute(
+                "SELECT event_type FROM order_events WHERE client_order_id=?",
+                (flatten_order["client_order_id"],),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert {"intent_created", "submit_started", "submit_attempt_preflight", "status_transition", "submit_timeout"} <= event_types
 
 
 def test_flatten_position_validation_failure_blocks_submission(monkeypatch, tmp_path, capsys):

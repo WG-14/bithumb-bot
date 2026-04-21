@@ -2399,6 +2399,247 @@ def recover_order_with_exchange_id(
         runtime_state.refresh_open_order_health()
 
 
+def backfill_broker_order_with_exchange_id(
+    broker: Broker,
+    *,
+    exchange_order_id: str,
+) -> dict[str, str | int | float]:
+    exchange_order_id = str(exchange_order_id or "").strip()
+    if not exchange_order_id:
+        raise RuntimeError("exchange_order_id is required for broker-known backfill")
+
+    conn = ensure_db()
+    client_order_id = ""
+    try:
+        existing = conn.execute(
+            """
+            SELECT client_order_id, status
+            FROM orders
+            WHERE exchange_order_id=?
+            """,
+            (exchange_order_id,),
+        ).fetchone()
+        if existing is not None:
+            raise RuntimeError(
+                "broker order already has local lineage: "
+                f"client_order_id={existing['client_order_id']} status={existing['status']}"
+            )
+
+        remote = broker.get_order(client_order_id=None, exchange_order_id=exchange_order_id)
+        resolved_exchange_order_id = str(remote.exchange_order_id or exchange_order_id).strip()
+        remote_client_order_id = str(remote.client_order_id or "").strip()
+        if remote_client_order_id:
+            client_order_id = remote_client_order_id
+            existing_client = conn.execute(
+                "SELECT status FROM orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if existing_client is not None:
+                raise RuntimeError(
+                    "broker order client_order_id already exists locally with different/missing exchange linkage: "
+                    f"client_order_id={client_order_id} status={existing_client['status']}"
+                )
+        else:
+            client_order_id = _safe_recovery_client_order_id(
+                tag="broker_backfill",
+                exchange_order_id=resolved_exchange_order_id,
+                ts=int(remote.updated_ts or time.time() * 1000),
+            )
+
+        side = str(remote.side or "").upper()
+        if side not in {"BUY", "SELL"}:
+            raise RuntimeError(f"broker order side is invalid for backfill: {remote.side}")
+
+        record_order_if_missing(
+            conn,
+            client_order_id=client_order_id,
+            submit_attempt_id=f"{client_order_id}:broker_backfill",
+            symbol=settings.PAIR,
+            side=side,
+            qty_req=float(remote.qty_req or 0.0),
+            price=remote.price,
+            strategy_name="broker_backfill",
+            decision_reason="broker-known local-missing recovery backfill",
+            order_type=None,
+            local_intent_state="BACKFILLED_BROKER_OBSERVED",
+            ts_ms=int(remote.created_ts or remote.updated_ts or time.time() * 1000),
+            status="RECOVERY_REQUIRED",
+        )
+        set_exchange_order_id(client_order_id, resolved_exchange_order_id, conn=conn)
+
+        fills = _get_salvage_fills(
+            broker,
+            client_order_id=client_order_id,
+            exchange_order_id=resolved_exchange_order_id,
+        )
+        invalid_fill = next((fill for fill in fills if float(fill.price) <= 0), None)
+        if invalid_fill is not None:
+            reason = (
+                "broker-known backfill blocked: fill has missing/invalid execution price; "
+                f"exchange_order_id={resolved_exchange_order_id}; fill_id={invalid_fill.fill_id}"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return {
+                "client_order_id": client_order_id,
+                "exchange_order_id": resolved_exchange_order_id,
+                "status": "RECOVERY_REQUIRED",
+                "fill_count": len(fills),
+                "applied_fill_count": 0,
+                "blocked_reason": "invalid_fill_price",
+            }
+
+        fee_pending_fill = next((fill for fill in fills if not _fill_fee_is_accounting_complete(fill)), None)
+        if fee_pending_fill is not None:
+            observation_summary = _record_fee_pending_observations(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                exchange_order_id=resolved_exchange_order_id,
+                fills=fills,
+                source="broker_known_backfill_fee_pending",
+            )
+            reason = (
+                "broker-known backfill blocked: broker fill observed but accounting is fee-pending; "
+                f"exchange_order_id={resolved_exchange_order_id}; "
+                f"fill_id={fee_pending_fill.fill_id}; "
+                f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
+                "manual fee resolution required before ledger apply"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return {
+                "client_order_id": client_order_id,
+                "exchange_order_id": resolved_exchange_order_id,
+                "status": "RECOVERY_REQUIRED",
+                "fill_count": len(fills),
+                "applied_fill_count": 0,
+                "blocked_reason": "fee_pending",
+            }
+
+        applied_fill_count = 0
+        for fill in fills:
+            apply_fill_and_trade(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=fill.fee,
+                note=f"broker-known backfill exchange_order_id={resolved_exchange_order_id}",
+                allow_entry_decision_fallback=False,
+            )
+            applied_fill_count += 1
+
+        remote_status = str(remote.status or "").upper()
+        if remote_status == "CANCELLED":
+            remote_status = "CANCELED"
+        if remote_status == "REJECTED":
+            remote_status = "FAILED"
+        if remote_status == "FILLED" and applied_fill_count <= 0:
+            reason = (
+                "broker-known backfill blocked: terminal FILLED broker order has no recoverable fills; "
+                f"exchange_order_id={resolved_exchange_order_id}"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return {
+                "client_order_id": client_order_id,
+                "exchange_order_id": resolved_exchange_order_id,
+                "status": "RECOVERY_REQUIRED",
+                "fill_count": len(fills),
+                "applied_fill_count": applied_fill_count,
+                "blocked_reason": "filled_without_fills",
+            }
+
+        if remote_status in LOCAL_RECONCILE_STATUSES:
+            reason = (
+                "broker-known backfill observed unresolved broker order; "
+                f"exchange_order_id={resolved_exchange_order_id}; status={remote_status}; "
+                "cancel/reconcile required before resume"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return {
+                "client_order_id": client_order_id,
+                "exchange_order_id": resolved_exchange_order_id,
+                "status": "RECOVERY_REQUIRED",
+                "fill_count": len(fills),
+                "applied_fill_count": applied_fill_count,
+                "blocked_reason": "remote_unresolved",
+            }
+
+        if remote_status not in {"FILLED", "CANCELED", "FAILED"}:
+            reason = (
+                "broker-known backfill blocked: broker order terminal status is unsupported; "
+                f"exchange_order_id={resolved_exchange_order_id}; status={remote_status or '<missing>'}"
+            )
+            record_status_transition(
+                client_order_id,
+                from_status="RECOVERY_REQUIRED",
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
+            conn.commit()
+            return {
+                "client_order_id": client_order_id,
+                "exchange_order_id": resolved_exchange_order_id,
+                "status": "RECOVERY_REQUIRED",
+                "fill_count": len(fills),
+                "applied_fill_count": applied_fill_count,
+                "blocked_reason": "unsupported_remote_status",
+            }
+
+        set_status(client_order_id, remote_status, conn=conn)
+        conn.commit()
+        return {
+            "client_order_id": client_order_id,
+            "exchange_order_id": resolved_exchange_order_id,
+            "status": remote_status,
+            "fill_count": len(fills),
+            "applied_fill_count": applied_fill_count,
+            "blocked_reason": "none",
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+        runtime_state.refresh_open_order_health()
+
+
 def cancel_open_orders_with_broker(broker: Broker) -> dict[str, int | list[str]]:
     conn = ensure_db()
     try:
