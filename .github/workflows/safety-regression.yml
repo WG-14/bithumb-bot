@@ -30,6 +30,7 @@ jobs:
           tests/test_bithumb_private_api.py::test_order_submit_rejects_transmitted_body_byte_drift
           tests/test_bithumb_private_api.py::test_order_submit_rejects_json_kwarg_contract_drift
           tests/test_bithumb_private_api.py::test_order_submit_rejects_content_type_contract_drift
+          tests/test_execution_planner.py
           tests/test_order_submit_hardening.py
           tests/test_bithumb_execution_modules.py
           tests/test_live_preflight.py

@@ -30,6 +30,7 @@ from .live_submit_planning import build_live_submit_plan
 from .live_submit_orchestrator import (
     StandardSubmitPlanningFailureRequest,
     StandardSubmitPipelineRequest,
+    _runtime_identity_fields,
     record_standard_submit_planning_failure,
     run_standard_submit_pipeline,
 )
@@ -115,6 +116,7 @@ def _record_application_phase(
             "submit_phase": "application",
             "execution_state": execution_state,
             "submit_mode": settings.MODE,
+            **_runtime_identity_fields(),
             "execution_trace_id": client_order_id,
             "submit_plan_id": f"{client_order_id}:plan",
             "signed_request_id": f"{client_order_id}:signed_request",

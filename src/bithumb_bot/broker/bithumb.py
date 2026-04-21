@@ -851,11 +851,9 @@ class BithumbPrivateAPI:
             is_order_submit_endpoint
             and _order_submit_authority is not self._ORDER_SUBMIT_AUTHORITY_TOKEN
         ):
-            direct_submit_client_order_id = str((json_body or {}).get("client_order_id") or "").strip()
-            if not (_order_submit_authority is None and direct_submit_client_order_id):
-                raise BrokerRejectError(
-                    "direct /v2/orders private request is disabled; use BithumbPrivateAPI.submit_order()"
-                )
+            raise BrokerRejectError(
+                "direct /v2/orders private request is disabled; use BithumbPrivateAPI.submit_order()"
+            )
 
         attempts = 3 if retry_safe else 1
         auth_payload = params if method in {"GET", "DELETE"} else json_body

@@ -10,6 +10,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker, BithumbPrivateAPI
 from bithumb_bot.config import (
     live_execution_contract_fingerprint,
     live_execution_contract_summary,
+    runtime_code_provenance,
     settings,
 )
 
@@ -32,6 +33,28 @@ def test_private_api_rejects_legacy_order_submit_post_routes() -> None:
     for endpoint in sorted(FORBIDDEN_ALTERNATE_POST_ENDPOINTS):
         with pytest.raises(BrokerRejectError, match="alternate order submit route is disabled"):
             api.request("POST", endpoint, json_body={"market": "KRW-BTC"})
+
+
+def test_private_api_rejects_direct_v2_order_submit_even_with_client_order_id() -> None:
+    api = BithumbPrivateAPI(
+        api_key="k",
+        api_secret="s",
+        base_url="https://api.bithumb.com",
+        dry_run=False,
+    )
+
+    with pytest.raises(BrokerRejectError, match="direct /v2/orders private request is disabled"):
+        api.request(
+            "POST",
+            "/v2/orders",
+            json_body={
+                "market": "KRW-BTC",
+                "side": "bid",
+                "order_type": "price",
+                "price": "10000",
+                "client_order_id": "direct-bypass",
+            },
+        )
 
 
 def test_broker_private_request_rejects_legacy_order_submit_post_routes() -> None:
@@ -106,3 +129,20 @@ def test_live_execution_contract_fingerprint_includes_explicit_env_provenance() 
     assert live_execution_contract_fingerprint(base_summary) != live_execution_contract_fingerprint(
         drifted_summary
     )
+
+
+def test_runtime_code_provenance_accepts_explicit_deploy_commit_env(monkeypatch) -> None:
+    runtime_code_provenance.cache_clear()
+    monkeypatch.setenv("BITHUMB_DEPLOY_COMMIT_SHA", "abc123live")
+    monkeypatch.setenv("BITHUMB_DEPLOY_DIRTY", "true")
+    try:
+        provenance = runtime_code_provenance()
+    finally:
+        runtime_code_provenance.cache_clear()
+
+    assert provenance == {
+        "commit_sha": "abc123live",
+        "working_tree_dirty": True,
+        "source": "env",
+        "git_available": False,
+    }

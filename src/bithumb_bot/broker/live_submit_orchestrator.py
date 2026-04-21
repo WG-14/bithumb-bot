@@ -5,7 +5,12 @@ import logging
 import time
 from dataclasses import dataclass
 
-from ..config import LIVE_SUBMIT_CONTRACT_PROFILE_V1, settings
+from ..config import (
+    LIVE_SUBMIT_CONTRACT_PROFILE_V1,
+    live_execution_contract_fingerprint,
+    live_execution_contract_summary,
+    settings,
+)
 from ..execution import record_order_if_missing
 from ..execution_models import OrderIntent, SubmitPlan
 from ..notifier import notify
@@ -129,6 +134,7 @@ class _StandardSubmitAttemptContext:
     symbol: str
     submit_path: str
     phase_trace_fields: dict[str, str]
+    runtime_identity_fields: dict[str, object]
     lot_evidence_fields: dict[str, object]
     base_submit_contract_fields: dict[str, object]
     base_submit_failure_fields: dict[str, object]
@@ -159,6 +165,28 @@ def _submit_phase_trace_fields(*, client_order_id: str) -> dict[str, str]:
         "signed_request_id": f"{trace_id}:signed_request",
         "submission_id": f"{trace_id}:submission",
         "confirmation_id": f"{trace_id}:confirmation",
+    }
+
+
+def _runtime_identity_fields() -> dict[str, object]:
+    from ..bootstrap import describe_explicit_env_file, get_last_explicit_env_load_summary
+
+    loaded_summary = get_last_explicit_env_load_summary()
+    env_summary = loaded_summary.as_dict()
+    if not env_summary.get("env_file"):
+        env_summary = describe_explicit_env_file(str(settings.MODE)).as_dict()
+    summary = live_execution_contract_summary(settings, env_summary=env_summary)
+    code_provenance = summary.get("code_provenance") if isinstance(summary.get("code_provenance"), dict) else {}
+    explicit_env = summary.get("explicit_env") if isinstance(summary.get("explicit_env"), dict) else {}
+    return {
+        "live_execution_contract_fingerprint": live_execution_contract_fingerprint(summary),
+        "code_commit_sha": code_provenance.get("commit_sha"),
+        "code_working_tree_dirty": code_provenance.get("working_tree_dirty"),
+        "code_provenance_source": code_provenance.get("source"),
+        "explicit_env_source_key": explicit_env.get("source_key"),
+        "explicit_env_file": explicit_env.get("env_file"),
+        "explicit_env_exists": explicit_env.get("exists"),
+        "explicit_env_loaded": explicit_env.get("loaded"),
     }
 
 
@@ -580,6 +608,7 @@ def _planning_failure(
             "submit_phase": "planning",
             "execution_state": "planning_failed",
             "submit_mode": settings.MODE,
+            **_runtime_identity_fields(),
             **phase_trace_fields,
             **failure_submit_contract_fields,
             **failure_submit_fields,
@@ -754,6 +783,7 @@ def _build_context(*, request: StandardSubmitPipelineRequest, submit_plan: Submi
         symbol=settings.PAIR,
         submit_path="live_standard_market",
         phase_trace_fields=phase_trace_fields,
+        runtime_identity_fields=_runtime_identity_fields(),
         lot_evidence_fields={
             "order_type": planned_order_type,
             "internal_lot_size": None if request.internal_lot_size is None else float(request.internal_lot_size),
@@ -802,6 +832,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "submit_phase": "planning",
             "execution_state": "validated_pre_submit",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **context.base_submit_contract_fields,
             **context.base_submit_failure_fields,
@@ -890,6 +921,7 @@ def _plan_submit_attempt(*, context: _StandardSubmitAttemptContext) -> None:
             "plan_phase_result": context.submit_plan.phase_result,
             "signed_request_phase_identity": "signed_request",
             "signed_request_phase_result": "prepared",
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **context.base_submit_contract_fields,
             **context.base_submit_failure_fields,
@@ -1015,6 +1047,7 @@ def _handle_temporary_submit_error(*, context: _StandardSubmitAttemptContext, er
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **failure_submit_contract_fields,
             **failure_submit_fields,
@@ -1088,6 +1121,7 @@ def _handle_reject_submit_error(*, context: _StandardSubmitAttemptContext, error
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **failure_submit_contract_fields,
             **failure_submit_fields,
@@ -1161,6 +1195,7 @@ def _handle_unexpected_submit_error(*, context: _StandardSubmitAttemptContext, e
             "submit_phase": "submission",
             "execution_state": "dispatch_attempted",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **failure_submit_contract_fields,
             **failure_submit_fields,
@@ -1252,6 +1287,7 @@ def _confirm_submit_attempt(*, context: _StandardSubmitAttemptContext, order: Br
             "submit_phase": "confirmation",
             "execution_state": "broker_response_received",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **success_submit_contract_fields,
             **success_submit_failure_fields,
@@ -1333,6 +1369,7 @@ def _confirm_submit_missing_exchange_id(*, context: _StandardSubmitAttemptContex
             "submit_phase": "confirmation",
             "execution_state": "broker_response_received",
             "submit_mode": settings.MODE,
+            **context.runtime_identity_fields,
             **context.phase_trace_fields,
             **missing_id_submit_contract_fields,
             **missing_id_submit_failure_fields,

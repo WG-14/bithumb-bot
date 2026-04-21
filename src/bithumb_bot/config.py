@@ -6,7 +6,9 @@ import math
 import os
 import logging
 import re
+import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from .markets import (
@@ -1035,6 +1037,44 @@ def validate_live_run_startup_contract(cfg: Settings) -> None:
     validate_live_real_order_execution_preflight(cfg)
 
 
+def _git_output(args: tuple[str, ...], *, cwd: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            ("git", *args),
+            cwd=str(cwd),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return None
+    return completed.stdout.strip()
+
+
+@lru_cache(maxsize=1)
+def runtime_code_provenance() -> dict[str, object]:
+    """Return redacted code identity suitable for logs and submit evidence."""
+    env_commit = str(os.getenv("BITHUMB_DEPLOY_COMMIT_SHA") or "").strip()
+    env_dirty = str(os.getenv("BITHUMB_DEPLOY_DIRTY") or "").strip().lower()
+    if env_commit:
+        return {
+            "commit_sha": env_commit,
+            "working_tree_dirty": env_dirty in {"1", "true", "yes", "y", "on"},
+            "source": "env",
+            "git_available": False,
+        }
+
+    commit_sha = _git_output(("rev-parse", "HEAD"), cwd=PROJECT_ROOT)
+    dirty_probe = _git_output(("status", "--porcelain"), cwd=PROJECT_ROOT)
+    return {
+        "commit_sha": commit_sha,
+        "working_tree_dirty": bool(dirty_probe) if dirty_probe is not None else None,
+        "source": "git" if commit_sha else "unavailable",
+        "git_available": bool(commit_sha),
+    }
+
+
 def live_execution_contract_summary(
     cfg: Settings,
     *,
@@ -1063,6 +1103,7 @@ def live_execution_contract_summary(
         "api_key_length": len(str(cfg.BITHUMB_API_KEY or "")),
         "api_secret_present": bool(str(cfg.BITHUMB_API_SECRET or "").strip()),
         "api_secret_length": len(str(cfg.BITHUMB_API_SECRET or "")),
+        "code_provenance": runtime_code_provenance(),
         "explicit_env": explicit_env,
         "managed_roots": managed_roots,
         "runtime_paths": runtime_paths,
@@ -1088,6 +1129,7 @@ def log_live_execution_contract(
     roots = summary.get("managed_roots") if isinstance(summary.get("managed_roots"), dict) else {}
     paths = summary.get("runtime_paths") if isinstance(summary.get("runtime_paths"), dict) else {}
     explicit_env = summary.get("explicit_env") if isinstance(summary.get("explicit_env"), dict) else {}
+    code_provenance = summary.get("code_provenance") if isinstance(summary.get("code_provenance"), dict) else {}
     logging.getLogger("bithumb_bot.run").info(
         format_log_kv(
             "[LIVE_EXECUTION_CONTRACT]",
@@ -1104,6 +1146,9 @@ def log_live_execution_contract(
             api_key_length=summary.get("api_key_length"),
             api_secret_present=1 if bool(summary.get("api_secret_present")) else 0,
             api_secret_length=summary.get("api_secret_length"),
+            code_commit_sha=code_provenance.get("commit_sha"),
+            code_working_tree_dirty=code_provenance.get("working_tree_dirty"),
+            code_provenance_source=code_provenance.get("source"),
             env_source_key=explicit_env.get("source_key"),
             env_file=explicit_env.get("env_file"),
             env_loaded=explicit_env.get("loaded"),

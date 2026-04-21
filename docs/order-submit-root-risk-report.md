@@ -45,6 +45,29 @@
    scanning.
 4. Add minimal CI coverage for the safety-critical regression set.
 
+## BUY Submit Authority Update
+
+The live BUY dispatch contract is now explicitly treated as a planned-submit
+contract:
+
+- `SubmitPlan.requested_qty` records the strategy/cash-budget request.
+- `SubmitPlan.exchange_constrained_qty` records exchange-step constrained BUY
+  quantity.
+- `SubmitPlan.submitted_qty` is the canonical broker dispatch quantity.
+- `SubmitPlan.lifecycle_executable_qty` is lifecycle ingestion context, not
+  dispatch authority.
+
+Direct `POST /v2/orders` remains disabled at the private request layer even when
+a caller supplies `client_order_id`; the only permitted order-submit route is
+the validated place-order flow carrying the internal order-submit authority
+token.
+
+Submit evidence also carries compact runtime identity fields, including the
+live execution contract fingerprint, code commit provenance when available,
+working-tree dirty marker when available, and explicit env-file selection. These
+fields are diagnostic and forensic surfaces only; they do not change order
+authority.
+
 ## Why This Reduces Fill Instability
 
 - Live submission now has fewer viable bypass surfaces: exact legacy POST order

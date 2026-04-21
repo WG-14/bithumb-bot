@@ -119,6 +119,23 @@ explicit. Repair and recovery logic must verify present-state convergence
 rather than treating the existence of a repair event as proof that these layers
 still agree.
 
+Current live BUY dispatch authority is `SubmitPlan.submitted_qty`, with
+`SubmitPlan.submit_qty_authority` expected to identify
+`submit_plan.exchange_constraints` for quantity-based BUY payloads. The strategy
+or sizing request quantity remains `SubmitPlan.requested_qty`; it may differ
+from `submitted_qty` after exchange-step flooring or other exchange constraints.
+Lifecycle ingestion authority is separate again: it interprets actual fills into
+`open_exposure` lots plus `dust_tracking` residue and must not retroactively
+change the dispatched exchange quantity.
+
+For live dispatch, `intent.qty`, `requested_qty`, `normalized_qty`,
+`submit_payload_qty`, `final_submitted_qty`, and `position_qty` are not
+interchangeable authority fields. They may be emitted as compatibility or
+observability surfaces only when the evidence makes their role clear. Any live
+BUY submit route that lacks a planned `SubmitPlan` or dispatches a raw request
+quantity instead of `SubmitPlan.submitted_qty` is outside the current contract
+and must fail closed before broker dispatch.
+
 ## Developer Guardrail
 
 When extending the SELL path, keep this implementation boundary explicit:

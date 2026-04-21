@@ -56,6 +56,7 @@ from bithumb_bot.reason_codes import (
     SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
 )
 from bithumb_bot.recovery import cancel_open_orders_with_broker, reconcile_with_broker, recover_order_with_exchange_id
+from bithumb_bot import config as config_module
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.public_api_orderbook import BestQuote
@@ -2897,6 +2898,100 @@ def test_run_standard_submit_pipeline_dispatches_valid_explicit_submit_plan(monk
         assert broker.place_order_calls == 1
         assert order.client_order_id == "live_submit_plan_explicit"
     finally:
+        conn.close()
+
+
+def test_run_standard_submit_pipeline_dispatches_buy_submitted_qty_when_request_differs(monkeypatch, tmp_path):
+    config_module.runtime_code_provenance.cache_clear()
+    monkeypatch.setenv("BITHUMB_DEPLOY_COMMIT_SHA", "ec2-buy-contract-fixture")
+    monkeypatch.setenv("BITHUMB_DEPLOY_DIRTY", "false")
+    _stub_live_reference_quote(monkeypatch, price=20_000_000.0)
+    db_path = tmp_path / "buy_submitted_qty_authority.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _FakeBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=0.0,
+        ask_min_total_krw=0.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_buy_submitted_qty_authority",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.00065,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=20_000_000.0,
+            trace_id="live_buy_submitted_qty_authority",
+        ),
+        rules=rules,
+    )
+    request = replace(
+        _standard_submit_request(
+            conn=conn,
+            submit_plan=submit_plan,
+            effective_rules=rules,
+            client_order_id="live_buy_submitted_qty_authority",
+            qty=submit_plan.submitted_qty,
+            reference_price=20_000_000.0,
+        ),
+        order_qty=0.00065,
+        final_intended_qty=0.00065,
+        final_submitted_qty=submit_plan.submitted_qty,
+        submit_qty_source=submit_plan.submit_qty_authority,
+        submit_observability_fields={
+            "requested_qty": submit_plan.requested_qty,
+            "exchange_constrained_qty": submit_plan.exchange_constrained_qty,
+            "lifecycle_executable_qty": submit_plan.lifecycle_executable_qty,
+            "submitted_qty": submit_plan.submitted_qty,
+            "submit_payload_qty": submit_plan.submitted_qty,
+            "rejected_qty_remainder": submit_plan.rejected_qty_remainder,
+            "unused_budget_krw": submit_plan.unused_budget_krw,
+            "submit_qty_source": submit_plan.submit_qty_authority,
+        },
+    )
+
+    try:
+        order = run_standard_submit_pipeline(broker=broker, request=request)
+
+        assert order is not None
+        assert submit_plan.requested_qty == pytest.approx(0.00065)
+        assert submit_plan.submitted_qty == pytest.approx(0.0006)
+        assert broker._last_qty == pytest.approx(submit_plan.submitted_qty)
+        assert broker._last_qty != pytest.approx(submit_plan.requested_qty)
+        preflight = conn.execute(
+            """
+            SELECT submit_evidence
+            FROM order_events
+            WHERE client_order_id=? AND event_type='submit_attempt_preflight'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (request.client_order_id,),
+        ).fetchone()
+        evidence = json.loads(str(preflight["submit_evidence"]))
+        assert evidence["requested_qty"] == pytest.approx(0.00065)
+        assert evidence["submitted_qty"] == pytest.approx(0.0006)
+        assert evidence["live_execution_contract_fingerprint"]
+        assert evidence["code_commit_sha"] == "ec2-buy-contract-fixture"
+        assert evidence["code_working_tree_dirty"] is False
+        assert evidence["code_provenance_source"] == "env"
+    finally:
+        config_module.runtime_code_provenance.cache_clear()
         conn.close()
 
 
