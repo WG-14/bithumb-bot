@@ -78,6 +78,14 @@ def build_tradeability_operator_fields(
         dust_fields.get("dust_operator_message") or "No broker/local dust signal was reported."
     )
     residual_class = str(tradeability.residual_class or "UNKNOWN")
+    if not tradeability.run_loop_allowed:
+        strategy_tradeability_state = "run_loop_blocked"
+    elif tradeability.new_entry_allowed:
+        strategy_tradeability_state = "reentry_allowed"
+    elif tradeability.closeout_allowed:
+        strategy_tradeability_state = "closeout_allowed"
+    else:
+        strategy_tradeability_state = "running_not_tradable"
 
     if residual_class == "NONE":
         residue_policy_message = "No lot-native residue is blocking run loop, new entry, or closeout policy."
@@ -86,6 +94,12 @@ def build_tradeability_operator_fields(
             "Lot-native residue is preserved as accounting evidence and classified as below the "
             "authoritative internal lot boundary for entry policy; new entries may continue while "
             "SELL authority remains based on sellable executable lots."
+        )
+    elif residual_class == "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED":
+        residue_policy_message = (
+            "Tracked accounting residue remains execution-flat and broker/local/portfolio evidence is "
+            "consistent within the authoritative lot-boundary tolerance; new entries may continue while "
+            "SELL authority remains zero for the tracked residue."
         )
     elif residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY":
         residue_policy_message = (
@@ -121,6 +135,9 @@ def build_tradeability_operator_fields(
     return {
         "run_loop_scope": "process_resume_only",
         "trading_permission_scope": "new_entry_or_closeout",
+        "strategy_tradeability_state": strategy_tradeability_state,
+        "entry_policy_state": "allowed" if tradeability.new_entry_allowed else "blocked",
+        "closeout_policy_state": "allowed" if tradeability.closeout_allowed else "blocked",
         "trading_allowed": bool(tradeability.new_entry_allowed or tradeability.closeout_allowed),
         "trading_block_reason": str(tradeability.why_not or "none"),
         "dust_display_scope": "broker_reconcile_signal",
@@ -158,11 +175,14 @@ def classify_canonical_tradeability_state(
     has_non_executable = bool(getattr(normalized, "has_non_executable_residue", False))
     has_executable = bool(getattr(normalized, "has_executable_exposure", False))
     dust_state = str(getattr(normalized, "dust_state", "no_dust") or "no_dust")
+    dust_operability_state = str(getattr(normalized, "dust_operability_state", "none") or "none")
     entry_block_reason = str(getattr(normalized, "entry_block_reason", "none") or "none")
     exit_block_reason = str(getattr(normalized, "exit_block_reason", "none") or "none")
 
     if has_executable or terminal_state in {"open_exposure", "reserved_exit_pending"}:
         residual_class = "EXECUTABLE_OPEN_EXPOSURE"
+    elif has_dust_only and entry_allowed and dust_operability_state == "boundary_near_tracked_residue_entry_allowed":
+        residual_class = "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED"
     elif has_dust_only and entry_allowed:
         residual_class = "HARMLESS_DUST_TREAT_AS_FLAT"
     elif has_dust_only:
@@ -196,7 +216,10 @@ def classify_canonical_tradeability_state(
         operator_next_action = "review_non_executable_residue"
     elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
         operator_next_action = "manage_or_flatten_open_position"
-    elif residual_class == "HARMLESS_DUST_TREAT_AS_FLAT":
+    elif residual_class in {
+        "HARMLESS_DUST_TREAT_AS_FLAT",
+        "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED",
+    }:
         operator_next_action = "resume_or_continue_new_entries_allowed"
     elif residual_class == "NONE":
         operator_next_action = "resume_or_continue"

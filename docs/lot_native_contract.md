@@ -224,6 +224,12 @@ They do not mean the system failed to submit a valid SELL order.
 - Dust-only residue below the persisted internal-lot boundary can be treated as
   effectively flat for BUY entry only when reconcile/operator dust state is not
   `blocking_dust`; blocking dust remains fail-closed for new entries.
+- Dust-only residue at or very near the persisted internal-lot boundary can be
+  treated as flat for BUY entry only through the explicit boundary-tolerance
+  policy: executable lot count is zero, SELL authority remains zero, no local
+  unresolved or recovery-required orders are present, and broker/local/portfolio
+  residue evidence agrees within the tolerance. This policy affects BUY
+  re-entry only and must not convert tracked dust into SELL authority.
 
 ## Batch Evaluation
 

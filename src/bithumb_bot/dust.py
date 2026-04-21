@@ -14,6 +14,7 @@ from .lot_model import build_market_lot_rules, lot_count_to_qty
 DUST_POSITION_EPS = 1e-12
 OPEN_EXPOSURE_LOT_STATE: Final = "open_exposure"
 DUST_TRACKING_LOT_STATE: Final = "dust_tracking"
+BOUNDARY_NEAR_RESIDUE_TOLERANCE_RATIO: Final = 0.0001
 _SUMMARY_TOKEN_RE = re.compile(r"([a-z_]+)=([^\s]+)")
 _DECIMAL_ZERO = Decimal("0")
 
@@ -656,6 +657,9 @@ class NormalizedExposure:
     has_dust_only_remainder: bool
     dust_operability_state: str
     dust_operability_reason: str
+    dust_operability_boundary_qty: float
+    dust_operability_boundary_tolerance_qty: float
+    dust_operability_evidence_consistent: bool
     recovery_blocked: bool
     recovery_block_reason: str
     unresolved_order_count: int
@@ -791,6 +795,13 @@ class NormalizedExposure:
             "has_dust_only_remainder": bool(self.has_dust_only_remainder),
             "dust_operability_state": self.dust_operability_state,
             "dust_operability_reason": self.dust_operability_reason,
+            "dust_operability_boundary_qty": float(self.dust_operability_boundary_qty),
+            "dust_operability_boundary_tolerance_qty": float(
+                self.dust_operability_boundary_tolerance_qty
+            ),
+            "dust_operability_evidence_consistent": bool(
+                self.dust_operability_evidence_consistent
+            ),
             "authority_gap_reason": self.authority_gap_reason,
             "recovery_blocked": bool(self.recovery_blocked),
             "recovery_block_reason": self.recovery_block_reason,
@@ -1575,6 +1586,35 @@ def _build_position_state_fields(
     }
 
 
+def _boundary_near_residue_tolerance(boundary_qty: float) -> float:
+    normalized_boundary = max(0.0, float(boundary_qty))
+    if normalized_boundary <= DUST_POSITION_EPS:
+        return DUST_POSITION_EPS
+    return max(DUST_POSITION_EPS, normalized_boundary * BOUNDARY_NEAR_RESIDUE_TOLERANCE_RATIO)
+
+
+def _dust_only_evidence_consistent_with_holdings(
+    *,
+    display_context: DustDisplayContext,
+    normalized_total_asset_qty: float,
+    normalized_dust_tracking_qty: float,
+    tolerance_qty: float,
+) -> bool:
+    """Return whether external residue evidence agrees with tracked lot residue."""
+
+    tolerance = max(DUST_POSITION_EPS, float(tolerance_qty))
+    broker_qty = max(0.0, float(display_context.raw_holdings.broker_qty))
+    local_qty = max(0.0, float(display_context.raw_holdings.local_qty))
+    if broker_qty <= DUST_POSITION_EPS and local_qty <= DUST_POSITION_EPS:
+        return False
+    return bool(
+        abs(broker_qty - local_qty) <= tolerance
+        and abs(broker_qty - float(normalized_total_asset_qty)) <= tolerance
+        and abs(local_qty - float(normalized_total_asset_qty)) <= tolerance
+        and abs(float(normalized_dust_tracking_qty) - float(normalized_total_asset_qty)) <= tolerance
+    )
+
+
 def build_normalized_exposure(
     *,
     raw_qty_open: float,
@@ -1714,29 +1754,6 @@ def build_normalized_exposure(
     has_executable_exposure = bool(normalized_sellable_lot_count > 0)
     has_non_executable_residue = bool(has_any_position_residue and not has_executable_exposure)
     has_dust_only_remainder = bool(normalized_dust_tracking_qty > DUST_POSITION_EPS and normalized_open_lot_count <= 0)
-    dust_operability_boundary_qty = max(normalized_min_qty, authoritative_internal_lot_size)
-    dust_only_below_boundary = bool(
-        has_dust_only_remainder
-        and dust_operability_boundary_qty > DUST_POSITION_EPS
-        and normalized_dust_tracking_qty < dust_operability_boundary_qty
-    )
-    dust_only_boundary_or_above = bool(
-        has_dust_only_remainder
-        and dust_operability_boundary_qty > DUST_POSITION_EPS
-        and normalized_dust_tracking_qty >= dust_operability_boundary_qty
-    )
-    if not has_dust_only_remainder:
-        dust_operability_state = "none"
-        dust_operability_reason = "no_dust_only_remainder"
-    elif dust_only_below_boundary:
-        dust_operability_state = "below_internal_lot_boundary_tracked_residue_entry_allowed"
-        dust_operability_reason = "dust_tracking_qty_below_authoritative_lot_boundary_preserved_as_accounting_evidence"
-    elif dust_only_boundary_or_above:
-        dust_operability_state = "tracked_dust_operator_review_required"
-        dust_operability_reason = "dust_tracking_qty_at_or_above_authoritative_lot_boundary"
-    else:
-        dust_operability_state = "tracked_dust_operator_review_required"
-        dust_operability_reason = "dust_tracking_min_qty_unknown"
     unresolved_order_count = max(
         0,
         int(display_context.fields.get("unresolved_open_order_count", 0) or 0),
@@ -1754,8 +1771,60 @@ def build_normalized_exposure(
         recovery_block_reason = "unresolved_orders_present"
     else:
         recovery_block_reason = "none"
+    dust_operability_boundary_qty = max(normalized_min_qty, authoritative_internal_lot_size)
+    dust_operability_boundary_tolerance_qty = _boundary_near_residue_tolerance(
+        dust_operability_boundary_qty
+    )
+    dust_only_below_boundary = bool(
+        has_dust_only_remainder
+        and dust_operability_boundary_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty < dust_operability_boundary_qty
+    )
+    dust_only_within_boundary_tolerance = bool(
+        has_dust_only_remainder
+        and dust_operability_boundary_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty <= (
+            dust_operability_boundary_qty + dust_operability_boundary_tolerance_qty
+        )
+    )
+    dust_only_boundary_or_above = bool(
+        has_dust_only_remainder
+        and dust_operability_boundary_qty > DUST_POSITION_EPS
+        and normalized_dust_tracking_qty >= dust_operability_boundary_qty
+    )
+    dust_operability_evidence_consistent = bool(
+        has_dust_only_remainder
+        and not recovery_blocked
+        and _dust_only_evidence_consistent_with_holdings(
+            display_context=display_context,
+            normalized_total_asset_qty=normalized_total_asset_qty,
+            normalized_dust_tracking_qty=normalized_dust_tracking_qty,
+            tolerance_qty=dust_operability_boundary_tolerance_qty,
+        )
+    )
+    if not has_dust_only_remainder:
+        dust_operability_state = "none"
+        dust_operability_reason = "no_dust_only_remainder"
+    elif dust_only_below_boundary:
+        dust_operability_state = "below_internal_lot_boundary_tracked_residue_entry_allowed"
+        dust_operability_reason = "dust_tracking_qty_below_authoritative_lot_boundary_preserved_as_accounting_evidence"
+    elif dust_only_within_boundary_tolerance and dust_operability_evidence_consistent:
+        dust_operability_state = "boundary_near_tracked_residue_entry_allowed"
+        dust_operability_reason = (
+            "dust_tracking_qty_within_authoritative_lot_boundary_tolerance_with_consistent_broker_local_portfolio_evidence"
+        )
+    elif dust_only_boundary_or_above:
+        dust_operability_state = "tracked_dust_operator_review_required"
+        dust_operability_reason = "dust_tracking_qty_at_or_above_authoritative_lot_boundary"
+    else:
+        dust_operability_state = "tracked_dust_operator_review_required"
+        dust_operability_reason = "dust_tracking_min_qty_unknown"
     dust_operably_flat = bool(
-        dust_operability_state == "below_internal_lot_boundary_tracked_residue_entry_allowed"
+        dust_operability_state
+        in {
+            "below_internal_lot_boundary_tracked_residue_entry_allowed",
+            "boundary_near_tracked_residue_entry_allowed",
+        }
         and display_context.operator_view.state != DustState.BLOCKING_DUST.value
     )
     entry_allowed = bool(
@@ -1829,6 +1898,9 @@ def build_normalized_exposure(
         has_dust_only_remainder=has_dust_only_remainder,
         dust_operability_state=dust_operability_state,
         dust_operability_reason=dust_operability_reason,
+        dust_operability_boundary_qty=float(dust_operability_boundary_qty),
+        dust_operability_boundary_tolerance_qty=float(dust_operability_boundary_tolerance_qty),
+        dust_operability_evidence_consistent=dust_operability_evidence_consistent,
         recovery_blocked=recovery_blocked,
         recovery_block_reason=recovery_block_reason,
         unresolved_order_count=unresolved_order_count,

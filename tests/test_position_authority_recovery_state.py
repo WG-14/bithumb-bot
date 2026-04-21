@@ -286,6 +286,79 @@ def _replace_with_tracked_dust_row(
     conn.commit()
 
 
+def _replace_with_tracked_dust_rows(
+    conn,
+    *,
+    residual_qty: float,
+    row_count: int = 2,
+    client_order_id_prefix: str = "tracked_dust_buy",
+) -> None:
+    conn.execute("DELETE FROM open_position_lots")
+    per_row_qty = float(residual_qty) / float(row_count)
+    for idx in range(row_count):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                10_000 + idx,
+                f"{client_order_id_prefix}_{idx}",
+                f"tracked-dust-fill-{idx}",
+                1_700_000_000_000 + idx,
+                PRICE,
+                per_row_qty,
+                0,
+                1,
+                1,
+                LOT_SIZE,
+                0.0002,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "dust_tracking",
+                0.0,
+            ),
+        )
+    set_portfolio_breakdown(
+        conn,
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=residual_qty,
+        asset_locked=0.0,
+    )
+    conn.commit()
+
+
+def _record_consistent_residue_reconcile_metadata(residual_qty: float) -> None:
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+            "dust_broker_qty": float(residual_qty),
+            "dust_local_qty": float(residual_qty),
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0002,
+            "dust_min_notional_krw": 0.0,
+            "dust_broker_qty_is_dust": 0,
+            "dust_local_qty_is_dust": 0,
+            "dust_qty_gap_small": 1,
+        },
+        now_epoch_sec=1_700_000_010.0,
+    )
+
+
 def _apply_fee_pending_sell(conn, *, client_order_id: str = "incident_sell", fill_id: str = "sell-fill-9") -> None:
     record_order_if_missing(
         conn,
@@ -566,6 +639,132 @@ def test_tracked_dust_operability_boundary_uses_stored_lot_min_qty(
     else:
         assert readiness.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
         assert readiness.operator_action_required is True
+
+
+def test_ec2_boundary_near_dust_only_residue_allows_reentry_without_sell_authority(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    residual_qty = 0.00039988
+    try:
+        _replace_with_tracked_dust_rows(conn, residual_qty=residual_qty, row_count=2)
+        _record_consistent_residue_reconcile_metadata(residual_qty)
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    exposure = readiness.position_state.normalized_exposure
+    assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+    assert readiness.residual_class == "HARMLESS_DUST_TREAT_AS_FLAT"
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is True
+    assert readiness.closeout_allowed is False
+    assert readiness.execution_flat is True
+    assert readiness.accounting_flat is False
+    assert readiness.operator_action_required is False
+    assert exposure.open_lot_count == 0
+    assert exposure.dust_tracking_lot_count == 2
+    assert exposure.dust_tracking_qty == pytest.approx(residual_qty)
+    assert exposure.internal_lot_size == pytest.approx(LOT_SIZE)
+    assert exposure.sellable_executable_lot_count == 0
+    assert exposure.sellable_executable_qty == pytest.approx(0.0)
+    assert exposure.dust_operability_state == "below_internal_lot_boundary_tracked_residue_entry_allowed"
+    assert readiness.tradeability_operator_fields["trading_allowed"] is True
+    assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "reentry_allowed"
+    assert readiness.tradeability_operator_fields["entry_policy_state"] == "allowed"
+    assert readiness.tradeability_operator_fields["closeout_policy_state"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("residual_qty", "expected_allowed", "expected_residual_class", "expected_operability_state"),
+    [
+        (
+            0.00039999,
+            True,
+            "HARMLESS_DUST_TREAT_AS_FLAT",
+            "below_internal_lot_boundary_tracked_residue_entry_allowed",
+        ),
+        (
+            0.0004,
+            True,
+            "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED",
+            "boundary_near_tracked_residue_entry_allowed",
+        ),
+        (
+            0.00040001,
+            True,
+            "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED",
+            "boundary_near_tracked_residue_entry_allowed",
+        ),
+        (
+            0.00040005,
+            False,
+            "TRACKED_DUST_BLOCK_NEW_ENTRY",
+            "tracked_dust_operator_review_required",
+        ),
+    ],
+)
+def test_boundary_near_tracked_residue_requires_consistent_evidence_for_reentry(
+    recovery_db,
+    residual_qty,
+    expected_allowed,
+    expected_residual_class,
+    expected_operability_state,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _replace_with_tracked_dust_rows(conn, residual_qty=residual_qty, row_count=2)
+        _record_consistent_residue_reconcile_metadata(residual_qty)
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    exposure = readiness.position_state.normalized_exposure
+    assert readiness.new_entry_allowed is expected_allowed
+    assert readiness.closeout_allowed is False
+    assert readiness.residual_class == expected_residual_class
+    assert exposure.sellable_executable_lot_count == 0
+    assert exposure.dust_operability_state == expected_operability_state
+    assert exposure.dust_operability_boundary_qty == pytest.approx(LOT_SIZE)
+    assert exposure.dust_operability_boundary_tolerance_qty == pytest.approx(LOT_SIZE * 0.0001)
+    assert exposure.dust_operability_evidence_consistent is True
+    if expected_allowed:
+        assert readiness.operator_action_required is False
+    else:
+        assert readiness.operator_action_required is True
+
+
+def test_boundary_near_tracked_residue_without_broker_local_evidence_still_blocks(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _replace_with_tracked_dust_rows(conn, residual_qty=LOT_SIZE, row_count=2)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "dust_residual_present": 0,
+                "dust_state": "no_dust",
+                "dust_policy_reason": "no_dust_residual",
+                "dust_broker_qty": 0.0,
+                "dust_local_qty": 0.0,
+            },
+            now_epoch_sec=1_700_000_010.0,
+        )
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    exposure = readiness.position_state.normalized_exposure
+    assert readiness.canonical_state == "DUST_ONLY_TRACKED"
+    assert readiness.residual_class == "TRACKED_DUST_BLOCK_NEW_ENTRY"
+    assert readiness.new_entry_allowed is False
+    assert readiness.operator_action_required is True
+    assert exposure.dust_operability_state == "tracked_dust_operator_review_required"
+    assert exposure.dust_operability_evidence_consistent is False
+    assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "running_not_tradable"
+    assert readiness.tradeability_operator_fields["entry_policy_state"] == "blocked"
+    assert readiness.tradeability_operator_fields["closeout_policy_state"] == "blocked"
 
 
 def test_authority_correction_repairs_incident_dust_row_with_historical_sell_history(recovery_db):

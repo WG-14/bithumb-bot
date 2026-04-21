@@ -881,6 +881,7 @@ def cmd_health() -> None:
         "    "
         f"canonical_state={readiness_snapshot.canonical_state} "
         f"residual_class={readiness_snapshot.residual_class} "
+        f"strategy_tradeability_state={readiness_snapshot.tradeability_operator_fields['strategy_tradeability_state']} "
         f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
         f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
         f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
@@ -2545,6 +2546,9 @@ def _load_recovery_report(
                 "residue_policy_message",
                 "residue_blocks_new_entry",
                 "residue_blocks_closeout",
+                "strategy_tradeability_state",
+                "entry_policy_state",
+                "closeout_policy_state",
                 "tradeability_operator_message",
             }
         },
@@ -2722,6 +2726,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    state={report.get('dust_state') or 'none'}")
     print(f"    display_scope={report.get('dust_display_scope') or 'broker_reconcile_signal'}")
     print(f"    residue_policy_state={report.get('residue_policy_state') or 'unknown'}")
+    print(f"    strategy_tradeability_state={report.get('strategy_tradeability_state') or 'unknown'}")
     print(f"    dust_tradeability_consistent={1 if bool(report.get('dust_tradeability_consistent', True)) else 0}")
     print(f"    state_label={report.get('dust_state_label') or 'none'}")
     print(f"    operator_action={report.get('dust_operator_action') or 'none'}")
@@ -3441,6 +3446,7 @@ def cmd_restart_checklist() -> None:
         "  "
         f"canonical_state={readiness_snapshot.canonical_state} "
         f"residual_class={readiness_snapshot.residual_class} "
+        f"strategy_tradeability_state={readiness_snapshot.tradeability_operator_fields['strategy_tradeability_state']} "
         f"trading_block_reason={tradeability_fields['trading_block_reason']}"
     )
     print(
