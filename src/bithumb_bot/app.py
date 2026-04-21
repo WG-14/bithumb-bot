@@ -84,6 +84,7 @@ from .runtime_readiness import compute_runtime_readiness_snapshot
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
 from .markets import canonical_market_with_raw
+from .position_state_snapshot import build_canonical_position_snapshot
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .reporting import (
@@ -336,12 +337,18 @@ def cmd_status():
     except Exception as exc:
         auth_diag = {}
         balance_diag["reason"] = f"diagnostic_probe_failed: {type(exc).__name__}"
-    position_state = build_position_state_model(
-        raw_qty_open=qty,
-        metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
-        reserved_exit_qty=reserved_exit_qty,
-    )
-    dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
+    conn = ensure_db()
+    try:
+        snapshot = build_canonical_position_snapshot(
+            conn,
+            metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+            pair=settings.PAIR,
+            portfolio_asset_qty=qty,
+        )
+    finally:
+        conn.close()
+    position_state = snapshot.position_state
+    dust_context = snapshot.dust_context
     dust = position_state.raw_holdings
     dust_view = position_state.operator_diagnostics
     if dust_context.classification.present and dust_view.resume_allowed and dust_view.treat_as_flat:
@@ -2624,24 +2631,15 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
             asset_available=float(asset_available),
             asset_locked=float(asset_locked),
         )
-        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        snapshot = build_canonical_position_snapshot(
+            conn,
+            metadata_raw=report,
+            pair=settings.PAIR,
+            portfolio_asset_qty=portfolio_asset_qty,
+        )
     finally:
         conn.close()
-    position_state = build_position_state_model(
-        raw_qty_open=portfolio_asset_qty,
-        metadata_raw=report,
-        raw_total_asset_qty=max(
-            portfolio_asset_qty,
-            float(lot_snapshot.raw_total_asset_qty),
-            float(dust_context.raw_holdings.broker_qty),
-        ),
-        open_exposure_qty=float(lot_snapshot.raw_open_exposure_qty),
-        dust_tracking_qty=float(lot_snapshot.dust_tracking_qty),
-        reserved_exit_qty=reserved_exit_qty,
-        open_lot_count=int(lot_snapshot.open_lot_count),
-        dust_tracking_lot_count=int(lot_snapshot.dust_tracking_lot_count),
-    )
+    position_state = snapshot.position_state
     lot_exposure = position_state.normalized_exposure
     dust_tracking_lot_count = int(lot_exposure.dust_tracking_lot_count)
     if (

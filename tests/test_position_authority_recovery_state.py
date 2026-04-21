@@ -531,6 +531,65 @@ def test_sub_min_tracked_dust_paths_converge_to_entry_allowed_operability(recove
         )
 
 
+def test_dust_only_snapshot_preserves_effective_min_trade_qty_from_authoritative_lot_metadata(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _replace_with_tracked_dust_row(conn, residual_qty=0.00039988)
+        summary = summarize_position_lots(conn, pair=settings.PAIR)
+    finally:
+        conn.close()
+
+    assert summary.open_lot_count == 0
+    assert summary.dust_tracking_lot_count == 1
+    assert summary.effective_min_trade_qty == pytest.approx(0.0002)
+    assert summary.exit_non_executable_reason == "dust_only_remainder"
+    assert summary.lot_definition is not None
+    assert summary.lot_definition.min_qty == pytest.approx(0.0002)
+    assert summary.lot_definition.qty_step == pytest.approx(0.0001)
+
+
+def test_dust_only_snapshot_recovers_lot_definition_from_accounted_buy_evidence_when_lot_rows_are_sparse(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        _apply_fee_pending_sell(conn)
+        conn.execute(
+            """
+            UPDATE open_position_lots
+            SET lot_semantic_version=NULL,
+                internal_lot_size=NULL,
+                lot_min_qty=NULL,
+                lot_qty_step=NULL,
+                lot_min_notional_krw=NULL,
+                lot_max_qty_decimals=NULL,
+                lot_rule_source_mode=NULL
+            WHERE position_state='dust_tracking'
+            """
+        )
+        conn.commit()
+
+        summary = summarize_position_lots(conn, pair=settings.PAIR)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert summary.lot_definition is not None
+    assert summary.lot_definition.source_mode == "accounted_buy_evidence"
+    assert summary.lot_definition.internal_lot_size == pytest.approx(LOT_SIZE)
+    assert summary.lot_definition.min_qty == pytest.approx(0.0002)
+    assert summary.lot_definition.qty_step == pytest.approx(0.0001)
+    assert summary.effective_min_trade_qty == pytest.approx(0.0002)
+    assert readiness.position_state.normalized_exposure.dust_operability_state == (
+        "below_internal_lot_boundary_tracked_residue_entry_allowed"
+    )
+    assert readiness.position_state.normalized_exposure.entry_allowed is True
+    assert readiness.closeout_allowed is False
+
+
 def test_incident_event_sourced_paths_converge_on_same_lot_contract(recovery_db, tmp_path):
     def _materialize(path, *, corrupt_residual_contract: bool = False, repair: bool = False):
         conn = ensure_db(str(path))

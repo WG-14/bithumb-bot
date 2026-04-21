@@ -4,7 +4,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Callable, Protocol
 from ..config import prepare_db_path_for_connection, settings
-from ..dust import build_dust_display_context, build_normalized_exposure, dust_qty_gap_tolerance
+from ..dust import dust_qty_gap_tolerance
+from ..position_state_snapshot import build_canonical_position_snapshot
 from .accounts_v1 import AccountsRequiredCurrencyMissingError
 from .base import BrokerBalance, BrokerSchemaError, BrokerTemporaryError
 
@@ -307,8 +308,14 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
         portfolio_row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         asset_qty = float(portfolio_row["asset_qty"] if portfolio_row is not None else 0.0)
         if abs(asset_qty) > 1e-12:
-            dust_context = build_dust_display_context(runtime_state.snapshot().last_reconcile_metadata)
-            exposure = build_normalized_exposure(raw_qty_open=asset_qty, dust_context=dust_context)
+            snapshot = build_canonical_position_snapshot(
+                conn,
+                metadata_raw=runtime_state.snapshot().last_reconcile_metadata,
+                pair=settings.PAIR,
+                portfolio_asset_qty=asset_qty,
+            )
+            dust_context = snapshot.dust_context
+            exposure = snapshot.position_state.normalized_exposure
             if exposure.harmless_dust_effective_flat:
                 return True, f"flat_start_effective_flat({dust_context.compact_summary})"
             if dust_context.classification.present:

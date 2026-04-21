@@ -11,10 +11,10 @@ from . import db_core
 from .config import settings
 from .decision_context import resolve_canonical_position_exposure_snapshot
 from .db_core import ensure_db, init_portfolio
-from .dust import build_dust_display_context, build_position_state_model
 from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
+from .position_state_snapshot import build_canonical_position_snapshot
 from .execution import record_order_if_missing
 from .oms import (
     payload_fingerprint,
@@ -26,7 +26,6 @@ from .oms import (
 )
 from .order_sizing import SellExecutionAuthority, build_sell_execution_sizing
 from .reason_codes import EMERGENCY_FLATTEN_FAILED, EMERGENCY_FLATTEN_STARTED, EMERGENCY_FLATTEN_SUCCEEDED
-from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .execution_models import OrderIntent
 from .broker.order_submit import plan_place_order
 
@@ -323,40 +322,18 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     try:
         init_portfolio(conn)
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
-        lot_snapshot = summarize_position_lots(conn, pair=settings.PAIR)
-        reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
+        qty = float(row["asset_qty"] if row is not None else 0.0)
+        snapshot = build_canonical_position_snapshot(
+            conn,
+            metadata_raw=state_snapshot.last_reconcile_metadata,
+            pair=settings.PAIR,
+            portfolio_asset_qty=qty,
+        )
     finally:
         conn.close()
 
-    qty = float(row["asset_qty"] if row is not None else 0.0)
-    dust_context = build_dust_display_context(state_snapshot.last_reconcile_metadata)
-    open_exposure_qty = float(lot_snapshot.raw_open_exposure_qty)
-    open_lot_count = int(lot_snapshot.open_lot_count)
-    dust_tracking_qty = float(lot_snapshot.dust_tracking_qty)
-    dust_tracking_lot_count = int(lot_snapshot.dust_tracking_lot_count)
-    # Flatten is a SELL-capable path, so qty-only holdings stay observational.
-    # Without explicit lot-native executable authority, we must suppress.
-    position_state = build_position_state_model(
-        raw_qty_open=qty,
-        metadata_raw=state_snapshot.last_reconcile_metadata,
-        raw_total_asset_qty=max(
-            qty,
-            float(lot_snapshot.raw_total_asset_qty),
-            float(dust_context.raw_holdings.broker_qty),
-        ),
-        open_exposure_qty=open_exposure_qty,
-        dust_tracking_qty=dust_tracking_qty,
-        reserved_exit_qty=reserved_exit_qty,
-        open_lot_count=open_lot_count,
-        dust_tracking_lot_count=dust_tracking_lot_count,
-        min_qty=float(settings.LIVE_MIN_ORDER_QTY),
-        qty_step=float(settings.LIVE_ORDER_QTY_STEP),
-        min_notional_krw=float(settings.MIN_ORDER_NOTIONAL_KRW),
-        max_qty_decimals=int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
-        exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
-        exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
-    )
+    qty = snapshot.portfolio_asset_qty
+    position_state = snapshot.position_state
     canonical_exposure, sellable_executable_lot_count, exit_allowed, exit_block_reason = _resolve_flatten_sell_authority(
         position_state=position_state,
     )
@@ -387,7 +364,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             exit_allowed=bool(exit_allowed),
             exit_block_reason=str(exit_block_reason),
         ),
-        lot_definition=lot_snapshot.lot_definition,
+        lot_definition=snapshot.lot_snapshot.lot_definition,
     )
 
     runtime_state.record_flatten_position_result(
@@ -447,7 +424,7 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
             trigger=trigger,
             qty=normalized_qty,
             market_price=market_price,
-            lot_snapshot=lot_snapshot,
+            lot_snapshot=snapshot.lot_snapshot,
             exit_sizing=exit_sizing,
         )
 

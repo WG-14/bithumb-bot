@@ -358,14 +358,17 @@ def _read_authoritative_lot_definition_snapshot(
         if snapshot.is_authoritative:
             snapshots.append(snapshot)
 
-    if not snapshots:
-        first = None
-    else:
+    if snapshots:
         first = snapshots[0]
-    if first is not None and any(snapshot != first for snapshot in snapshots[1:]):
-        first = None
-    if first is not None:
-        return first
+        if not any(snapshot != first for snapshot in snapshots[1:]):
+            return first
+
+    evidence_snapshot = _read_authoritative_lot_definition_from_accounted_buy_evidence(
+        conn,
+        pair=str(pair),
+    )
+    if evidence_snapshot is not None:
+        return evidence_snapshot
 
     try:
         executable_rows = conn.execute(
@@ -434,6 +437,65 @@ def _read_authoritative_lot_definition_snapshot(
         max_qty_decimals=None,
         source_mode=source_mode,
     )
+
+
+def _read_authoritative_lot_definition_from_accounted_buy_evidence(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+) -> LotDefinitionSnapshot | None:
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT
+                COALESCE(f.internal_lot_size, o.internal_lot_size) AS internal_lot_size,
+                COALESCE(o.effective_min_trade_qty, f.internal_lot_size, o.internal_lot_size) AS min_qty,
+                COALESCE(o.qty_step, f.internal_lot_size, o.internal_lot_size) AS qty_step,
+                COALESCE(o.min_notional_krw, 0.0) AS min_notional_krw
+            FROM trades t
+            LEFT JOIN fills f
+              ON f.client_order_id=t.client_order_id
+             AND f.fill_ts=t.ts
+             AND ABS(f.price-t.price) < 1e-12
+             AND ABS(f.qty-t.qty) < 1e-12
+            LEFT JOIN orders o
+              ON o.client_order_id=t.client_order_id
+            WHERE t.pair=?
+              AND t.side='BUY'
+              AND COALESCE(f.internal_lot_size, o.internal_lot_size, 0.0) > 1e-12
+            """,
+            (str(pair),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+
+    if not rows:
+        return None
+
+    snapshots: list[LotDefinitionSnapshot] = []
+    for row in rows:
+        internal_lot_size = float(_row_value(row, "internal_lot_size", 0) or 0.0)
+        if internal_lot_size <= 1e-12:
+            continue
+        snapshots.append(
+            LotDefinitionSnapshot(
+                semantic_version=LOT_SEMANTIC_VERSION_V1,
+                internal_lot_size=internal_lot_size,
+                min_qty=float(_row_value(row, "min_qty", 1) or 0.0),
+                qty_step=float(_row_value(row, "qty_step", 2) or 0.0),
+                min_notional_krw=float(_row_value(row, "min_notional_krw", 3) or 0.0),
+                max_qty_decimals=None,
+                source_mode="accounted_buy_evidence",
+            )
+        )
+
+    if not snapshots:
+        return None
+
+    first = snapshots[0]
+    if any(snapshot != first for snapshot in snapshots[1:]):
+        return None
+    return first
 
 
 def _persist_missing_lot_definition_snapshot(
@@ -1467,7 +1529,11 @@ def summarize_position_lots(
         lot_definition = None
     if executable_lot is None:
         executable_qty = 0.0
-        effective_min_trade_qty = 0.0
+        effective_min_trade_qty = (
+            0.0
+            if lot_definition is None or lot_definition.min_qty is None
+            else float(lot_definition.min_qty)
+        )
         if open_lot_count > 0:
             exit_non_executable_reason = "none"
         elif dust_lot_count > 0:
