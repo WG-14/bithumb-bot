@@ -4,7 +4,12 @@ import time
 from typing import Any
 
 from .config import settings
-from .db_core import normalize_asset_qty, record_position_authority_repair
+from .db_core import (
+    compute_accounting_replay,
+    normalize_asset_qty,
+    record_external_position_adjustment,
+    record_position_authority_repair,
+)
 from .lifecycle import (
     apply_fill_lifecycle,
     apply_portfolio_anchored_projection_repair_basis,
@@ -304,6 +309,55 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             )
             after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
             repair_basis["lot_snapshot_after"] = after
+            portfolio_row = conn.execute(
+                """
+                SELECT cash_available, cash_locked, asset_available, asset_locked
+                FROM portfolio
+                WHERE id=1
+                """
+            ).fetchone()
+            replay = compute_accounting_replay(conn)
+            portfolio_cash = 0.0
+            portfolio_qty = 0.0
+            if portfolio_row is not None:
+                portfolio_cash = float(portfolio_row["cash_available"] or 0.0) + float(portfolio_row["cash_locked"] or 0.0)
+                portfolio_qty = float(portfolio_row["asset_available"] or 0.0) + float(portfolio_row["asset_locked"] or 0.0)
+            accounting_preview = {
+                "replay_cash": float(replay.get("replay_cash") or 0.0),
+                "replay_qty": float(replay.get("replay_qty") or 0.0),
+                "portfolio_cash": float(portfolio_cash),
+                "portfolio_qty": float(portfolio_qty),
+                "cash_delta": float(portfolio_cash) - float(replay.get("replay_cash") or 0.0),
+                "asset_qty_delta": float(portfolio_qty) - float(replay.get("replay_qty") or 0.0),
+                "safe_to_apply": True,
+                "needs_repair": bool(
+                    abs(float(portfolio_cash) - float(replay.get("replay_cash") or 0.0)) > 1e-8
+                    or abs(float(portfolio_qty) - float(replay.get("replay_qty") or 0.0)) > 1e-12
+                ),
+            }
+            repair_basis["external_position_accounting_preview"] = accounting_preview
+            adjustment = None
+            if bool(accounting_preview.get("needs_repair")):
+                adjustment_basis = {
+                    "event_type": "external_position_adjustment",
+                    "source_event_type": "portfolio_anchored_authority_projection_repair",
+                    "target_trade_id": target_trade_id,
+                    "target_client_order_id": assessment.get("target_client_order_id"),
+                    "target_fill_id": assessment.get("target_fill_id"),
+                    "position_authority_preview": preview,
+                    "accounting_preview": accounting_preview,
+                }
+                adjustment = record_external_position_adjustment(
+                    conn,
+                    event_ts=int(time.time() * 1000),
+                    asset_qty_delta=float(accounting_preview.get("asset_qty_delta") or 0.0),
+                    cash_delta=float(accounting_preview.get("cash_delta") or 0.0),
+                    source="manual_portfolio_anchored_authority_projection_repair",
+                    reason="portfolio_projection_external_position_adjustment",
+                    adjustment_basis=adjustment_basis,
+                    note=note,
+                )
+            repair_basis["external_position_adjustment"] = adjustment
             repair = record_position_authority_repair(
                 conn,
                 event_ts=int(time.time() * 1000),
@@ -315,6 +369,7 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             return {
                 "preview": preview,
                 "repair": repair,
+                "external_position_adjustment": adjustment,
                 "lot_snapshot_before": before,
                 "lot_snapshot_after": after,
             }

@@ -813,6 +813,10 @@ def evaluate_startup_safety_gate() -> str | None:
             "position_authority_projection_repair_required="
             f"{assessment.get('reason') or 'projection/portfolio divergence'}"
         )
+    if readiness_snapshot.recovery_stage == "ACCOUNTING_EXTERNAL_POSITION_REPAIR_PENDING":
+        reasons.append("external_position_accounting_repair_required=portfolio/replay mismatch after external position change")
+    if readiness_snapshot.recovery_stage == "ACCOUNTING_REPLAY_MISMATCH_PENDING":
+        reasons.append("accounting_replay_mismatch_review_required=portfolio and replay remain split")
     if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
         reasons.append(
             "position_authority_gap="
@@ -1180,6 +1184,20 @@ def build_resume_guidance(
             "Do not resume trading. Review the broker/portfolio evidence gates and apply the projection repair only if the preview is safe."
         )
         resume_blocked_reason = "resume blocked by projection/portfolio divergence"
+    elif "EXTERNAL_POSITION_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
+        operator_next_action = "external_position_accounting_repair_required"
+        recommended_command = "uv run python bot.py external-position-accounting-repair"
+        recommended_next_action = (
+            "Do not resume trading. Record the replay-compatible external position adjustment before resuming."
+        )
+        resume_blocked_reason = "resume blocked pending replay-compatible external position repair"
+    elif "ACCOUNTING_REPLAY_MISMATCH_REVIEW_REQUIRED" in blocker_codes:
+        operator_next_action = "review_accounting_replay_evidence"
+        recommended_command = "uv run python bot.py external-position-accounting-repair"
+        recommended_next_action = (
+            "Do not resume trading. Review why portfolio and accounting replay diverge, then record or correct canonical accounting evidence."
+        )
+        resume_blocked_reason = "resume blocked by unresolved accounting replay mismatch"
     elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
         operator_next_action = "manual_flat_accounting_repair_required"
         recommended_command = "uv run python bot.py manual-flat-accounting-repair"

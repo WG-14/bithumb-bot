@@ -19,6 +19,10 @@ from bithumb_bot.engine import (
     get_health_status,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.external_position_repair import (
+    apply_external_position_accounting_repair,
+    build_external_position_accounting_repair_preview,
+)
 from bithumb_bot.fee_gap_repair import apply_fee_gap_accounting_repair, build_fee_gap_accounting_repair_preview
 from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
@@ -934,6 +938,9 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
         repair = conn.execute(
             "SELECT reason, repair_basis FROM position_authority_repairs ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        adjustment = conn.execute(
+            "SELECT reason, adjustment_basis FROM external_position_adjustments ORDER BY id DESC LIMIT 1"
+        ).fetchone()
 
         replay = rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
         conn.commit()
@@ -945,6 +952,7 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
             ORDER BY id ASC
             """
         ).fetchall()
+        preview_after = build_external_position_accounting_repair_preview(conn)
     finally:
         conn.close()
 
@@ -952,10 +960,15 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert preview["safe_to_apply"] is True
     assert preview["eligibility_reason"] == "portfolio-anchored projection repair applicable"
     assert result["repair"]["reason"] == "portfolio_anchored_authority_projection_repair"
+    assert result["external_position_adjustment"]["reason"] == "portfolio_projection_external_position_adjustment"
     assert repair["reason"] == "portfolio_anchored_authority_projection_repair"
+    assert adjustment["reason"] == "portfolio_projection_external_position_adjustment"
     basis = json.loads(repair["repair_basis"])
     assert basis["event_type"] == "portfolio_anchored_authority_projection_repair"
     assert basis["target_remainder_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    adjustment_basis = json.loads(adjustment["adjustment_basis"])
+    assert adjustment_basis["event_type"] == "external_position_adjustment"
+    assert adjustment_basis["source_event_type"] == "portfolio_anchored_authority_projection_repair"
     assert len(rows) == 1
     assert rows[0]["position_state"] == "dust_tracking"
     assert rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
@@ -966,11 +979,60 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert after.resume_ready is True
     assert after.canonical_state == "DUST_ONLY_TRACKED"
     assert after.position_state.normalized_exposure.sellable_executable_lot_count == 0
+    assert preview_after["needs_repair"] is False
     assert replay.replayed_buy_count == 1
     assert len(replay_rows) == 1
     assert replay_rows[0]["position_state"] == "dust_tracking"
     assert replay_rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
     assert replay_rows[0]["executable_lot_count"] == 0
+
+
+def test_external_position_accounting_repair_blocks_resume_until_recorded_for_historical_split(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_portfolio_projection_divergence(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "balance_observed_ts_ms": 1_776_745_500_000,
+                "remote_open_order_found": 0,
+                "unresolved_open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 1,
+                "dust_effective_flat": 1,
+                "dust_state": "harmless_dust",
+                "dust_broker_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "dust_local_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "dust_delta_qty": 0.0,
+                "dust_qty_gap_tolerance": 0.000001,
+                "dust_qty_gap_small": 1,
+                "dust_min_qty": LOT_SIZE,
+            },
+            now_epoch_sec=1.0,
+        )
+        apply_position_authority_rebuild(conn)
+        conn.execute("DELETE FROM external_position_adjustments")
+        conn.commit()
+
+        before = compute_runtime_readiness_snapshot(conn)
+        preview = build_external_position_accounting_repair_preview(conn)
+        result = apply_external_position_accounting_repair(conn, note="historical off-bot reduction")
+        conn.commit()
+        after = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert before.recovery_stage == "ACCOUNTING_EXTERNAL_POSITION_REPAIR_PENDING"
+    assert before.resume_blockers == ("EXTERNAL_POSITION_ACCOUNTING_REPAIR_REQUIRED",)
+    assert preview["needs_repair"] is True
+    assert preview["safe_to_apply"] is True
+    assert preview["asset_qty_delta"] == pytest.approx(-0.00020004)
+    assert result["adjustment"]["reason"] == "external_position_accounting_repair"
+    assert after.recovery_stage == "RESUME_READY"
+    assert after.resume_ready is True
 
 
 def test_fee_gap_deadlock_reports_authority_correction_as_next_stage(recovery_db):

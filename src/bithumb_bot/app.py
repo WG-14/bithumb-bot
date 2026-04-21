@@ -24,6 +24,7 @@ from .db_core import (
     ensure_db,
     get_broker_fill_observation_summary,
     get_external_cash_adjustment_summary,
+    get_external_position_adjustment_summary,
     get_fee_gap_accounting_repair_summary,
     get_fee_pending_accounting_repair_summary,
     get_manual_flat_accounting_repair_summary,
@@ -83,6 +84,10 @@ from .position_authority_repair import (
 from .runtime_readiness import compute_runtime_readiness_snapshot
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import apply_manual_flat_accounting_repair, build_manual_flat_accounting_repair_preview
+from .external_position_repair import (
+    apply_external_position_accounting_repair,
+    build_external_position_accounting_repair_preview,
+)
 from .markets import canonical_market_with_raw
 from .position_state_snapshot import build_canonical_position_snapshot
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
@@ -642,8 +647,10 @@ def cmd_health() -> None:
     attribution_quality = None
     recovery_attribution_signals = None
     external_cash_adjustment_summary = None
+    external_position_adjustment_summary = None
     manual_flat_repair_summary = None
     manual_flat_repair_preview = None
+    external_position_repair_preview = None
     fee_gap_repair_summary = None
     fee_gap_repair_preview = None
     conn = ensure_db()
@@ -661,8 +668,10 @@ def cmd_health() -> None:
             ),
         )
         external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
+        external_position_adjustment_summary = get_external_position_adjustment_summary(conn)
         manual_flat_repair_summary = get_manual_flat_accounting_repair_summary(conn)
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
+        external_position_repair_preview = build_external_position_accounting_repair_preview(conn)
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
@@ -1175,6 +1184,18 @@ def cmd_health() -> None:
     print(f"  balance_source_flat_start_allowed={balance_diag.get('flat_start_allowed')}")
     print(f"  balance_source_flat_start_reason={balance_diag.get('flat_start_reason')}")
     print(
+        "  external_position_accounting_repair_needed="
+        f"{1 if bool(external_position_repair_preview and external_position_repair_preview.get('needs_repair')) else 0}"
+    )
+    print(
+        "  external_position_accounting_repair_safe_to_apply="
+        f"{1 if bool(external_position_repair_preview and external_position_repair_preview.get('safe_to_apply')) else 0}"
+    )
+    print(
+        "  external_position_accounting_repair_reason="
+        f"{external_position_repair_preview.get('eligibility_reason') if isinstance(external_position_repair_preview, dict) else 'none'}"
+    )
+    print(
         "  manual_flat_accounting_repair_needed="
         f"{1 if bool(manual_flat_repair_preview and manual_flat_repair_preview.get('needs_repair')) else 0}"
     )
@@ -1267,8 +1288,13 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         "manual_flat_accounting_repair_count": int(replay["manual_flat_accounting_repair_count"]),
         "manual_flat_accounting_repair_cash_total": float(replay["manual_flat_accounting_repair_cash_total"]),
         "manual_flat_accounting_repair_asset_total": float(replay["manual_flat_accounting_repair_asset_total"]),
+        "external_position_adjustment_count": int(replay["external_position_adjustment_count"]),
+        "external_position_adjustment_cash_total": float(replay["external_position_adjustment_cash_total"]),
+        "external_position_adjustment_asset_total": float(replay["external_position_adjustment_asset_total"]),
         "fee_gap_accounting_repair_count": int(replay["fee_gap_accounting_repair_count"]),
         "dup_fill_count": int(replay["dup_fill_count"]),
+        "included_event_families": tuple(replay["included_event_families"]),
+        "omitted_event_families": tuple(replay["omitted_event_families"]),
         "consistent": consistent,
     }
 
@@ -1291,8 +1317,13 @@ def cmd_audit_ledger() -> None:
     print(f"  manual_flat_accounting_repair_count={int(replay['manual_flat_accounting_repair_count'])}")
     print(f"  manual_flat_accounting_repair_cash_total={float(replay['manual_flat_accounting_repair_cash_total']):,.3f}")
     print(f"  manual_flat_accounting_repair_asset_total={float(replay['manual_flat_accounting_repair_asset_total']):.10f}")
+    print(f"  external_position_adjustment_count={int(replay['external_position_adjustment_count'])}")
+    print(f"  external_position_adjustment_cash_total={float(replay['external_position_adjustment_cash_total']):,.3f}")
+    print(f"  external_position_adjustment_asset_total={float(replay['external_position_adjustment_asset_total']):.10f}")
     print(f"  fee_gap_accounting_repair_count={int(replay['fee_gap_accounting_repair_count'])}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
+    print(f"  included_event_families={','.join(replay['included_event_families'])}")
+    print(f"  omitted_event_families={','.join(replay['omitted_event_families'])}")
 
     if not bool(replay["consistent"]):
         print("[AUDIT-LEDGER] FAILED: replay result mismatches portfolio")
@@ -2347,6 +2378,25 @@ def _load_recovery_report(
         "eligibility_reason": "not_checked",
         "recommended_command": "uv run python bot.py recovery-report",
     }
+    external_position_adjustment_summary = {
+        "adjustment_count": 0,
+        "asset_qty_total": 0.0,
+        "cash_total": 0.0,
+        "last_event_ts": None,
+        "last_adjustment_key": None,
+        "last_asset_qty_delta": None,
+        "last_cash_delta": None,
+        "last_source": None,
+        "last_reason": None,
+        "last_adjustment_basis": None,
+        "last_note": None,
+    }
+    external_position_repair_preview = {
+        "needs_repair": False,
+        "safe_to_apply": False,
+        "eligibility_reason": "not_checked",
+        "recommended_command": "uv run python bot.py recovery-report",
+    }
     fee_gap_repair_summary = {
         "repair_count": 0,
         "last_event_ts": None,
@@ -2433,8 +2483,10 @@ def _load_recovery_report(
             (DUST_RESIDUAL_UNSELLABLE,),
         ).fetchone()
         external_cash_adjustment_summary = get_external_cash_adjustment_summary(conn)
+        external_position_adjustment_summary = get_external_position_adjustment_summary(conn)
         manual_flat_repair_summary = get_manual_flat_accounting_repair_summary(conn)
         manual_flat_repair_preview = build_manual_flat_accounting_repair_preview(conn)
+        external_position_repair_preview = build_external_position_accounting_repair_preview(conn)
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
         fee_pending_repair_summary = get_fee_pending_accounting_repair_summary(conn)
@@ -2576,6 +2628,8 @@ def _load_recovery_report(
             else None
         ),
         "recent_external_cash_adjustment": external_cash_adjustment_summary,
+        "external_position_accounting_repair_preview": external_position_repair_preview,
+        "external_position_adjustment_summary": external_position_adjustment_summary,
         "manual_flat_accounting_repair_preview": manual_flat_repair_preview,
         "manual_flat_accounting_repair_summary": manual_flat_repair_summary,
         "fee_gap_accounting_repair_preview": fee_gap_repair_preview,
@@ -2793,6 +2847,21 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     )
     manual_flat_repair_preview = report.get("manual_flat_accounting_repair_preview") or {}
     manual_flat_repair_summary = report.get("manual_flat_accounting_repair_summary") or {}
+    external_position_repair_preview = report.get("external_position_accounting_repair_preview") or {}
+    external_position_adjustment_summary = report.get("external_position_adjustment_summary") or {}
+    print("  [P3.0b] external_position_accounting_repair")
+    print(
+        "    "
+        f"needs_repair={1 if bool(external_position_repair_preview.get('needs_repair')) else 0} "
+        f"safe_to_apply={1 if bool(external_position_repair_preview.get('safe_to_apply')) else 0} "
+        f"reason={external_position_repair_preview.get('eligibility_reason', 'none')}"
+    )
+    print(
+        "    "
+        f"repair_count={int(external_position_adjustment_summary.get('adjustment_count') or 0)} "
+        f"asset_qty_total={float(external_position_adjustment_summary.get('asset_qty_total') or 0.0):.10f} "
+        f"cash_total={float(external_position_adjustment_summary.get('cash_total') or 0.0):,.3f}"
+    )
     print("  [P3.0c] manual_flat_accounting_repair")
     print(
         "    "
@@ -3131,6 +3200,91 @@ def cmd_manual_flat_accounting_repair(*, apply: bool = False, confirm: bool = Fa
         f"event_ts={kst_str(int(repair['event_ts']))} "
         f"cash_delta={float(repair['cash_delta']):,.3f} "
         f"asset_qty_delta={float(repair['asset_qty_delta']):.10f}"
+    )
+    print(
+        "  "
+        f"remaining_needs_repair={1 if bool(post_preview['needs_repair']) else 0} "
+        f"safe_to_apply={1 if bool(post_preview['safe_to_apply']) else 0} "
+        f"eligibility_reason={post_preview['eligibility_reason']}"
+    )
+
+
+def cmd_external_position_accounting_repair(*, apply: bool = False, confirm: bool = False, note: str | None = None) -> None:
+    conn = ensure_db()
+    try:
+        preview = build_external_position_accounting_repair_preview(conn)
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+        adjustment_summary = get_external_position_adjustment_summary(conn)
+        print("[EXTERNAL-POSITION-ACCOUNTING-REPAIR] preview")
+        print(
+            "  "
+            f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
+            f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
+            f"eligibility_reason={preview['eligibility_reason']}"
+        )
+        print(
+            "  "
+            f"replay_cash={float(preview['replay_cash']):,.3f} "
+            f"portfolio_cash={float(preview['portfolio_cash']):,.3f} "
+            f"cash_delta={float(preview['cash_delta']):,.3f}"
+        )
+        print(
+            "  "
+            f"replay_qty={float(preview['replay_qty']):.10f} "
+            f"portfolio_qty={float(preview['portfolio_qty']):.10f} "
+            f"asset_qty_delta={float(preview['asset_qty_delta']):.10f}"
+        )
+        print(
+            "  "
+            f"open_order_count={int(preview['open_order_count'])} "
+            f"recovery_required_count={int(preview['recovery_required_count'])} "
+            f"open_lot_count={int(preview['open_lot_count'])} "
+            f"dust_tracking_lot_count={int(preview['dust_tracking_lot_count'])} "
+            f"reserved_exit_qty={float(preview['reserved_exit_qty']):.10f}"
+        )
+        print(
+            "  "
+            f"last_reconcile_status={preview['last_reconcile_status']} "
+            f"last_reconcile_reason_code={preview['last_reconcile_reason_code']} "
+            f"balance_observed_ts_ms={int(preview['balance_observed_ts_ms'])} "
+            "existing_external_position_adjustments="
+            f"{int(adjustment_summary.get('adjustment_count') or 0)}"
+        )
+        print(
+            "  "
+            f"canonical_state={readiness_snapshot.canonical_state} "
+            f"residual_class={readiness_snapshot.residual_class} "
+            f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+            f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
+            f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0}"
+        )
+        print(f"  recommended_command={preview['recommended_command']}")
+
+        if not apply:
+            print("[EXTERNAL-POSITION-ACCOUNTING-REPAIR] dry-run: no changes applied")
+            return
+
+        if not bool(preview["safe_to_apply"]):
+            print("[EXTERNAL-POSITION-ACCOUNTING-REPAIR] refused: unsafe repair request")
+            raise SystemExit(1)
+        if not confirm:
+            print("[EXTERNAL-POSITION-ACCOUNTING-REPAIR] confirmation required: re-run with --apply --yes")
+            raise SystemExit(1)
+
+        result = apply_external_position_accounting_repair(conn, note=note)
+        post_preview = build_external_position_accounting_repair_preview(conn)
+        adjustment = result["adjustment"]
+    finally:
+        conn.close()
+
+    print("[EXTERNAL-POSITION-ACCOUNTING-REPAIR] applied")
+    print(
+        "  "
+        f"created={1 if bool(adjustment.get('created')) else 0} "
+        f"adjustment_key={adjustment['adjustment_key']} "
+        f"event_ts={kst_str(int(adjustment['event_ts']))} "
+        f"cash_delta={float(adjustment['cash_delta']):,.3f} "
+        f"asset_qty_delta={float(adjustment['asset_qty_delta']):.10f}"
     )
     print(
         "  "
@@ -4389,6 +4543,14 @@ def main(argv: list[str] | None = None) -> int:
     manual_flat_accounting_repair.add_argument("--apply", action="store_true")
     manual_flat_accounting_repair.add_argument("--yes", action="store_true")
     manual_flat_accounting_repair.add_argument("--note")
+    external_position_accounting_repair = sub.add_parser(
+        "external-position-accounting-repair",
+        help="preview or apply a replay-compatible external position adjustment",
+        description="Record an explicit accounting adjustment after broker/offline position changes have already been reconciled into portfolio truth.",
+    )
+    external_position_accounting_repair.add_argument("--apply", action="store_true")
+    external_position_accounting_repair.add_argument("--yes", action="store_true")
+    external_position_accounting_repair.add_argument("--note")
 
     r = sub.add_parser("run")
     r.add_argument("--short", type=int, default=SMA_SHORT)
@@ -4528,6 +4690,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.cmd == "manual-flat-accounting-repair":
         cmd_manual_flat_accounting_repair(
+            apply=bool(args.apply),
+            confirm=bool(args.yes),
+            note=str(args.note) if args.note is not None else None,
+        )
+    elif args.cmd == "external-position-accounting-repair":
+        cmd_external_position_accounting_repair(
             apply=bool(args.apply),
             confirm=bool(args.yes),
             note=str(args.note) if args.note is not None else None,

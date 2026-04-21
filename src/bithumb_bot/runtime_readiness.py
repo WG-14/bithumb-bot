@@ -9,6 +9,7 @@ from . import runtime_state
 from .config import settings
 from .db_core import ensure_db, get_fee_gap_accounting_repair_summary, portfolio_asset_total
 from .dust import build_dust_display_context, build_position_state_model
+from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
@@ -299,6 +300,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             execution_flat=canonical_recovery.execution_flat,
             accounting_flat=canonical_recovery.accounting_flat,
         )
+        replay_mismatch_preview = build_external_position_accounting_repair_preview(conn)
 
         blockers: list[str] = []
         categories: list[str] = []
@@ -367,6 +369,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append(fee_gap_policy.blocker_category)
             operator_next_action = fee_gap_policy.operator_next_action
             recommended_command = fee_gap_policy.recommended_command
+        elif bool(replay_mismatch_preview.get("needs_repair")) and bool(replay_mismatch_preview.get("safe_to_apply")):
+            stage = "ACCOUNTING_EXTERNAL_POSITION_REPAIR_PENDING"
+            blockers.append("EXTERNAL_POSITION_ACCOUNTING_REPAIR_REQUIRED")
+            categories.append("accounting_truth")
+            operator_next_action = "apply_external_position_accounting_repair"
+            recommended_command = "uv run python bot.py external-position-accounting-repair --apply --yes"
+        elif bool(replay_mismatch_preview.get("needs_repair")):
+            stage = "ACCOUNTING_REPLAY_MISMATCH_PENDING"
+            blockers.append("ACCOUNTING_REPLAY_MISMATCH_REVIEW_REQUIRED")
+            categories.append("accounting_truth")
+            operator_next_action = "review_accounting_replay_evidence"
+            recommended_command = "uv run python bot.py external-position-accounting-repair"
         elif open_order_count > 0 or recovery_required_count > 0:
             stage = "RESUME_BLOCKED_BY_POLICY"
             blockers.append("ORDER_RECOVERY_REQUIRED")
