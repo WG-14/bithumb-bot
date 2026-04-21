@@ -2353,9 +2353,24 @@ def run_loop(short_n: int, long_n: int) -> None:
                             )
                             continue
 
+                        position_loss_qty = float(position_state.normalized_exposure.open_exposure_qty)
+                        dust_view = position_state.normalized_exposure.dust_operator_view
+                        min_position_loss_qty = max(
+                            0.0,
+                            float(0.0 if lot_definition is None else lot_definition.min_qty),
+                            float(getattr(settings, "LIVE_MIN_ORDER_QTY", 0.0) or 0.0),
+                        )
+                        if (
+                            bool(dust_context.classification.present)
+                            and bool(dust_view.resume_allowed)
+                            and min_position_loss_qty > 0.0
+                            and 0.0 < float(portfolio_qty) < min_position_loss_qty
+                        ):
+                            position_loss_qty = 0.0
+
                         blocked, reason = evaluate_position_loss_breach(
                             conn,
-                            qty=float(position_state.normalized_exposure.open_exposure_qty),
+                            qty=position_loss_qty,
                             price=float(last_close),
                         )
                         if blocked:

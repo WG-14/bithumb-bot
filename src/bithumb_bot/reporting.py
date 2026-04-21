@@ -1625,6 +1625,13 @@ def fetch_decision_telemetry_summary(
             return SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH
         return None
 
+    def _decision_reason(*values: object) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text and text.lower() != "none":
+                return text
+        return "none"
+
     grouped: dict[tuple[object, ...], int] = {}
     for row in rows:
         try:
@@ -1644,13 +1651,13 @@ def fetch_decision_telemetry_summary(
             if "entry_blocked" in context
             else raw_signal in {"BUY", "SELL"} and final_signal != raw_signal
         )
-        block_reason = str(
-            context.get("decision_entry_block_reason")
-            or context.get("entry_block_reason")
-            or context.get("block_reason")
-            or context.get("entry_reason")
-            or context.get("reason")
-            or row["reason"]
+        block_reason = _decision_reason(
+            context.get("decision_entry_block_reason"),
+            context.get("entry_block_reason"),
+            context.get("block_reason"),
+            context.get("entry_reason"),
+            context.get("reason"),
+            row["reason"],
         )
         strategy_name = str(context.get("strategy_name") or row["strategy_name"] or "<unknown>")
         pair = str(context.get("pair") or "<unknown>")
