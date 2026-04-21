@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import settings
 from .db_core import normalize_asset_qty
+from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
 
 _EPS = 1e-12
@@ -83,6 +84,44 @@ def _matching_partial_close_residual_repair_present(
         except (TypeError, ValueError):
             continue
         if abs(basis_residual_qty - normalize_asset_qty(expected_residual_qty)) <= _EPS:
+            return True
+    return False
+
+
+def _matching_portfolio_projection_repair_present(
+    conn,
+    *,
+    target_trade_id: int,
+    target_remainder_qty: float,
+    portfolio_qty: float,
+) -> bool:
+    if target_trade_id <= 0:
+        return False
+    rows = conn.execute(
+        """
+        SELECT repair_basis
+        FROM position_authority_repairs
+        WHERE reason=?
+        ORDER BY event_ts DESC, id DESC
+        LIMIT 20
+        """,
+        (PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON,),
+    ).fetchall()
+    expected_remainder = normalize_asset_qty(target_remainder_qty)
+    expected_portfolio = normalize_asset_qty(portfolio_qty)
+    for row in rows:
+        try:
+            basis = json.loads(str(row["repair_basis"]))
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError, IndexError):
+            continue
+        if int(basis.get("target_trade_id") or 0) != int(target_trade_id):
+            continue
+        try:
+            basis_remainder = normalize_asset_qty(float(basis.get("target_remainder_qty") or 0.0))
+            basis_portfolio = normalize_asset_qty(float(basis.get("portfolio_qty") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if abs(basis_remainder - expected_remainder) <= _EPS and abs(basis_portfolio - expected_portfolio) <= _EPS:
             return True
     return False
 
@@ -324,6 +363,9 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_qty_matches_fill = bool(abs(target_total_qty - fill_qty) <= 1e-12)
     portfolio_matches_target = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= 1e-12)
     expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - sell_after_qty))
+    projected_total_qty = normalize_asset_qty(target_total_qty + other_active_qty)
+    projected_qty_excess = normalize_asset_qty(max(0.0, projected_total_qty - portfolio_qty))
+    portfolio_target_remainder_qty = normalize_asset_qty(max(0.0, portfolio_qty - other_active_qty))
     partial_close_residual_candidate = bool(
         conflicting_dust_authority
         and sell_after_count > 0
@@ -336,6 +378,18 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         and other_active_lot_count == 0
         and abs(other_active_qty) <= _EPS
         and portfolio_matches_target
+    )
+    portfolio_projection_divergence_candidate = bool(
+        lot_row_count > 0
+        and target_open_qty > _EPS
+        and target_executable_lot_count > 0
+        and canonical_executable_lot_count > 0
+        and canonical_lot_size > _EPS
+        and sell_after_count == 0
+        and portfolio_qty > _EPS
+        and projected_qty_excess > _EPS
+        and portfolio_target_remainder_qty < canonical_lot_size - _EPS
+        and portfolio_target_remainder_qty <= target_total_qty + _EPS
     )
     residual_normalization_recorded = _matching_partial_close_residual_repair_present(
         conn,
@@ -362,18 +416,41 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     needs_residual_normalization = bool(
         partial_close_residual_candidate and not residual_state_converged
     )
-    needs_correction = bool(conflicting_dust_authority and not partial_close_residual_candidate)
+    portfolio_projection_repair_recorded = _matching_portfolio_projection_repair_present(
+        conn,
+        target_trade_id=target_trade_id,
+        target_remainder_qty=portfolio_target_remainder_qty,
+        portfolio_qty=portfolio_qty,
+    )
+    portfolio_projection_state_converged = bool(
+        portfolio_projection_repair_recorded
+        and lot_row_count > 0
+        and abs(target_total_qty - portfolio_target_remainder_qty) <= _EPS
+        and abs(target_open_qty) <= _EPS
+        and abs(target_dust_qty - portfolio_target_remainder_qty) <= _EPS
+        and target_executable_lot_count == 0
+        and target_dust_lot_count > 0
+        and target_min_internal_lot_size > _EPS
+        and abs(target_min_internal_lot_size - canonical_lot_size) <= _EPS
+        and abs(target_max_internal_lot_size - canonical_lot_size) <= _EPS
+    )
+    needs_correction = bool(
+        conflicting_dust_authority
+        and not partial_close_residual_candidate
+        and not portfolio_projection_state_converged
+    )
+    needs_portfolio_projection_repair = bool(portfolio_projection_divergence_candidate)
 
     blockers: list[str] = []
-    if not needs_correction and not needs_residual_normalization:
+    if not needs_correction and not needs_residual_normalization and not needs_portfolio_projection_repair:
         blockers.append("no_repairable_authority_conflict")
-    if sell_after_count > 0 and not needs_residual_normalization:
+    if sell_after_count > 0 and not needs_residual_normalization and not needs_portfolio_projection_repair:
         blockers.append(f"sell_after_target_buy={sell_after_count}")
-    if not target_qty_matches_fill and not needs_residual_normalization:
+    if not target_qty_matches_fill and not needs_residual_normalization and not needs_portfolio_projection_repair:
         blockers.append(
             f"target_lot_qty_fill_mismatch=target_qty={target_total_qty:.12f},fill_qty={fill_qty:.12f}"
         )
-    if not portfolio_matches_target:
+    if not portfolio_matches_target and not needs_portfolio_projection_repair:
         blockers.append(
             f"portfolio_target_qty_mismatch=portfolio_qty={portfolio_qty:.12f},target_qty={target_total_qty:.12f}"
         )
@@ -381,23 +458,48 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         blockers.append(f"order_status={order_status}")
 
     safe_to_normalize_residual = bool(needs_residual_normalization and not blockers)
+    safe_to_repair_portfolio_projection = bool(needs_portfolio_projection_repair and not blockers)
     safe_to_correct = bool((needs_correction and not blockers) or safe_to_normalize_residual)
     if safe_to_normalize_residual:
         reason = "partial-close residual authority normalization applicable"
+    elif safe_to_repair_portfolio_projection:
+        reason = "portfolio-anchored projection repair requires broker/portfolio evidence gates"
     elif safe_to_correct:
         reason = "position authority correction applicable"
     else:
         reason = ", ".join(blockers)
     return {
+        "incident_class": (
+            "PROJECTION_PORTFOLIO_DIVERGENCE"
+            if needs_portfolio_projection_repair
+            else (
+                "PROJECTION_RESIDUAL_DIVERGENCE"
+                if needs_residual_normalization
+                else ("LOT_AUTHORITY_CONFLICT" if needs_correction else "NONE")
+            )
+        ),
         "needs_correction": needs_correction,
         "needs_residual_normalization": needs_residual_normalization,
+        "needs_portfolio_projection_repair": needs_portfolio_projection_repair,
         "safe_to_correct": safe_to_correct,
         "safe_to_normalize_residual": safe_to_normalize_residual,
+        "safe_to_repair_portfolio_projection": safe_to_repair_portfolio_projection,
         "reason": reason,
         "recommended_action": (
-            "apply_rebuild_position_authority" if safe_to_correct else "review_recovery_report"
+            "apply_rebuild_position_authority"
+            if safe_to_correct or safe_to_repair_portfolio_projection
+            else "review_recovery_report"
         ),
-        "repair_mode": "residual_normalization" if needs_residual_normalization else "correction",
+        "repair_mode": (
+            "portfolio_projection_repair"
+            if needs_portfolio_projection_repair
+            else ("residual_normalization" if needs_residual_normalization else "correction")
+        ),
+        "repair_reason": (
+            PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
+            if needs_portfolio_projection_repair
+            else None
+        ),
         "target_trade_id": target_trade_id,
         "target_client_order_id": client_order_id,
         "target_fill_id": fill_id,
@@ -421,7 +523,13 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "sell_after_target_buy_qty": sell_after_qty,
         "sell_trade_ids": sell_trade_ids,
         "expected_residual_qty": expected_residual_qty,
+        "projected_total_qty": projected_total_qty,
+        "projected_qty_excess": projected_qty_excess,
+        "portfolio_target_remainder_qty": portfolio_target_remainder_qty,
         "partial_close_residual_candidate": partial_close_residual_candidate,
+        "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,
+        "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
+        "portfolio_projection_state_converged": portfolio_projection_state_converged,
         "residual_normalization_recorded": residual_normalization_recorded,
         "residual_repair_event_present": residual_normalization_recorded,
         "residual_state_converged": residual_state_converged,

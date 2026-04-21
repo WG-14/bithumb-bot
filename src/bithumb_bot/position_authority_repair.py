@@ -5,7 +5,13 @@ from typing import Any
 
 from .config import settings
 from .db_core import normalize_asset_qty, record_position_authority_repair
-from .lifecycle import apply_fill_lifecycle, rebuild_lifecycle_projections_from_trades, summarize_position_lots
+from .lifecycle import (
+    apply_fill_lifecycle,
+    apply_portfolio_anchored_projection_repair_basis,
+    rebuild_lifecycle_projections_from_trades,
+    summarize_position_lots,
+)
+from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 from .position_authority_state import (
     PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON,
     build_position_authority_assessment,
@@ -59,13 +65,15 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     existing_lot_count = int(existing_lot_row["cnt"] if existing_lot_row else 0)
     reasons: list[str] = []
 
-    if bool(authority_assessment.get("needs_residual_normalization")):
+    if bool(authority_assessment.get("needs_portfolio_projection_repair")):
+        repair_mode = "portfolio_projection_repair"
+    elif bool(authority_assessment.get("needs_residual_normalization")):
         repair_mode = "residual_normalization"
     elif bool(authority_assessment.get("needs_correction")):
         repair_mode = "correction"
     else:
         repair_mode = "rebuild"
-    if repair_mode in {"correction", "residual_normalization"}:
+    if repair_mode in {"correction", "residual_normalization", "portfolio_projection_repair"}:
         reasons.extend(str(item) for item in authority_assessment.get("blockers") or [])
     elif snapshot.recovery_stage != "AUTHORITY_REBUILD_PENDING":
         reasons.append(f"recovery_stage={snapshot.recovery_stage}")
@@ -73,6 +81,30 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
         reasons.append(f"open_or_unresolved_orders={snapshot.open_order_count}")
     if snapshot.recovery_required_count > 0:
         reasons.append(f"recovery_required_orders={snapshot.recovery_required_count}")
+    broker_qty = float(snapshot.position_state.normalized_exposure.raw_holdings.broker_qty)
+    broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
+    remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
+    if repair_mode == "portfolio_projection_repair":
+        portfolio_remainder_qty = normalize_asset_qty(
+            float(authority_assessment.get("portfolio_target_remainder_qty") or 0.0)
+        )
+        canonical_lot_size = float(authority_assessment.get("canonical_internal_lot_size") or 0.0)
+        if remote_open_order_count > 0:
+            reasons.append(f"remote_open_orders={remote_open_order_count}")
+        if not broker_qty_known:
+            reasons.append("broker_position_qty_evidence_missing")
+        elif abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(portfolio_qty)) > 1e-12:
+            reasons.append(
+                "broker_portfolio_qty_mismatch="
+                f"broker_qty={broker_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+            )
+        if canonical_lot_size <= 1e-12:
+            reasons.append("canonical_internal_lot_size_missing")
+        elif portfolio_remainder_qty >= canonical_lot_size - 1e-12:
+            reasons.append(
+                "portfolio_remainder_still_executable="
+                f"remainder_qty={portfolio_remainder_qty:.12f},lot_size={canonical_lot_size:.12f}"
+            )
     if repair_mode == "rebuild":
         if existing_lot_count > 0:
             reasons.append(f"existing_lot_rows={existing_lot_count}")
@@ -93,15 +125,20 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
             "AUTHORITY_REBUILD_PENDING",
             "AUTHORITY_CORRECTION_PENDING",
             "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING",
+            "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING",
         },
         "safe_to_apply": safe_to_apply,
         "eligibility_reason": (
             "partial-close residual authority normalization applicable"
             if safe_to_apply and repair_mode == "residual_normalization"
             else (
+                "portfolio-anchored projection repair applicable"
+                if safe_to_apply and repair_mode == "portfolio_projection_repair"
+                else (
                 "position authority correction applicable"
                 if safe_to_apply and repair_mode == "correction"
                 else ("position authority rebuild applicable" if safe_to_apply else ", ".join(dict.fromkeys(reasons)))
+                )
             )
         ),
         "recovery_stage": snapshot.recovery_stage,
@@ -123,6 +160,9 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
         "open_lot_count": int(lot_snapshot.open_lot_count),
         "dust_tracking_lot_count": int(lot_snapshot.dust_tracking_lot_count),
         "authority_gap_reason": position.authority_gap_reason,
+        "broker_qty": broker_qty,
+        "broker_qty_known": broker_qty_known,
+        "remote_open_order_count": remote_open_order_count,
     }
 
 
@@ -132,7 +172,11 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
         raise RuntimeError(f"position authority rebuild is not safe to apply: {preview['eligibility_reason']}")
 
     before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
-    if str(preview.get("repair_mode") or "rebuild") in {"correction", "residual_normalization"}:
+    if str(preview.get("repair_mode") or "rebuild") in {
+        "correction",
+        "residual_normalization",
+        "portfolio_projection_repair",
+    }:
         repair_mode = str(preview.get("repair_mode") or "correction")
         assessment = dict(preview.get("position_authority_assessment") or {})
         target_trade_id = int(assessment.get("target_trade_id") or 0)
@@ -230,6 +274,50 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
                 (settings.PAIR, target_trade_id, settings.PAIR, int(row["fill_ts"]), int(row["fill_ts"]), target_trade_id),
             ).fetchall()
         ]
+        if repair_mode == "portfolio_projection_repair":
+            repair_basis = {
+                "event_type": "portfolio_anchored_authority_projection_repair",
+                "preview": preview,
+                "target_trade_id": target_trade_id,
+                "target_client_order_id": assessment.get("target_client_order_id"),
+                "target_fill_id": assessment.get("target_fill_id"),
+                "target_fill_ts": assessment.get("target_fill_ts"),
+                "target_price": assessment.get("target_price"),
+                "target_qty": assessment.get("target_qty"),
+                "portfolio_qty": preview.get("portfolio_qty"),
+                "broker_qty": preview.get("broker_qty"),
+                "other_active_qty": assessment.get("other_active_qty"),
+                "projected_total_qty": assessment.get("projected_total_qty"),
+                "projected_qty_excess": assessment.get("projected_qty_excess"),
+                "target_remainder_qty": assessment.get("portfolio_target_remainder_qty"),
+                "canonical_internal_lot_size": assessment.get("canonical_internal_lot_size"),
+                "canonical_executable_lot_count": assessment.get("canonical_executable_lot_count"),
+                "canonical_executable_qty": assessment.get("canonical_executable_qty"),
+                "old_lot_rows": before_rows,
+                "old_trade_lifecycle_rows": before_lifecycles,
+                "lot_snapshot_before": before,
+            }
+            apply_portfolio_anchored_projection_repair_basis(
+                conn,
+                pair=settings.PAIR,
+                repair_basis=repair_basis,
+            )
+            after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+            repair_basis["lot_snapshot_after"] = after
+            repair = record_position_authority_repair(
+                conn,
+                event_ts=int(time.time() * 1000),
+                source="manual_portfolio_anchored_authority_projection_repair",
+                reason=PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON,
+                repair_basis=repair_basis,
+                note=note,
+            )
+            return {
+                "preview": preview,
+                "repair": repair,
+                "lot_snapshot_before": before,
+                "lot_snapshot_after": after,
+            }
         conn.execute(
             "DELETE FROM open_position_lots WHERE pair=? AND entry_trade_id=?",
             (settings.PAIR, target_trade_id),

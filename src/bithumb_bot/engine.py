@@ -170,6 +170,11 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
             "POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",
             "lot authority needs post-partial-close residual normalization",
         )
+    if "position_authority_projection_repair_required=" in reason:
+        return (
+            "POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED",
+            "lot projection conflicts with broker/portfolio evidence; projection repair required",
+        )
     if "fee_gap_recovery_required=" in reason:
         return (
             "FEE_GAP_RECOVERY_REQUIRED",
@@ -802,6 +807,12 @@ def evaluate_startup_safety_gate() -> str | None:
             "position_authority_correction_required="
             f"{assessment.get('reason') or 'authority conflict'}"
         )
+    if readiness_snapshot.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING":
+        assessment = readiness_snapshot.position_authority_assessment
+        reasons.append(
+            "position_authority_projection_repair_required="
+            f"{assessment.get('reason') or 'projection/portfolio divergence'}"
+        )
     if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
         reasons.append(
             "position_authority_gap="
@@ -1162,6 +1173,13 @@ def build_resume_guidance(
             "Do not resume trading. Normalize the post-partial-close residual authority from accounted BUY/SELL evidence, then rerun recovery-report."
         )
         resume_blocked_reason = "resume blocked by unnormalized partial-close residual authority"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED" for b in blocker_list):
+        operator_next_action = "position_authority_projection_repair_required"
+        recommended_command = "uv run python bot.py rebuild-position-authority"
+        recommended_next_action = (
+            "Do not resume trading. Review the broker/portfolio evidence gates and apply the projection repair only if the preview is safe."
+        )
+        resume_blocked_reason = "resume blocked by projection/portfolio divergence"
     elif "MANUAL_FLAT_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
         operator_next_action = "manual_flat_accounting_repair_required"
         recommended_command = "uv run python bot.py manual-flat-accounting-repair"

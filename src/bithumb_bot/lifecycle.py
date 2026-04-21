@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 
 from .config import settings
+from .db_core import normalize_asset_qty
 from .dust import (
     DUST_TRACKING_LOT_STATE,
     OPEN_EXPOSURE_LOT_STATE,
@@ -18,6 +19,7 @@ from .dust import (
 )
 from .lot_model import build_market_lot_rules, lot_count_to_qty, qty_to_executable_lot_count
 from .markets import parse_user_market_input
+from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
 OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
 DUST_TRACKING_STATE = DUST_TRACKING_LOT_STATE
@@ -1114,6 +1116,8 @@ def rebuild_lifecycle_projections_from_trades(
             allow_entry_decision_fallback=allow_entry_decision_fallback,
         )
 
+    _apply_portfolio_anchored_projection_repairs(conn, pair=pair_text)
+
     after = summarize_position_lots(conn, pair=pair_text)
     return ProjectionReplayResult(
         pair=pair_text,
@@ -1125,6 +1129,176 @@ def rebuild_lifecycle_projections_from_trades(
         lot_snapshot_before=before,
         lot_snapshot_after=after,
     )
+
+
+def apply_portfolio_anchored_projection_repair_basis(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    repair_basis: dict[str, object],
+) -> None:
+    """Apply an explicit projection-only repair backed by broker/portfolio evidence.
+
+    This does not create accounting trades. It removes false executable
+    authority for one target BUY and, when the verified portfolio still leaves
+    a sub-lot remainder attributable to that target, persists that remainder as
+    dust-tracking evidence.
+    """
+
+    target_trade_id = int(repair_basis.get("target_trade_id") or 0)
+    if target_trade_id <= 0:
+        raise RuntimeError("portfolio projection repair target_trade_id missing")
+    target_remainder_qty = normalize_asset_qty(float(repair_basis.get("target_remainder_qty") or 0.0))
+    internal_lot_size = float(repair_basis.get("canonical_internal_lot_size") or 0.0)
+    if internal_lot_size <= 1e-12:
+        raise RuntimeError("portfolio projection repair canonical lot size missing")
+    if target_remainder_qty >= internal_lot_size - 1e-12:
+        raise RuntimeError("portfolio projection repair remainder is still executable")
+
+    row = conn.execute(
+        """
+        SELECT
+            t.id AS trade_id,
+            t.client_order_id,
+            t.ts AS fill_ts,
+            t.price,
+            t.fee,
+            t.strategy_name,
+            t.entry_decision_id,
+            f.fill_id,
+            COALESCE(o.effective_min_trade_qty, ?) AS effective_min_trade_qty,
+            COALESCE(o.qty_step, ?) AS qty_step,
+            COALESCE(o.min_notional_krw, 0.0) AS min_notional_krw
+        FROM trades t
+        LEFT JOIN fills f
+          ON f.client_order_id=t.client_order_id
+         AND f.fill_ts=t.ts
+         AND ABS(f.price-t.price) < 1e-12
+        LEFT JOIN orders o
+          ON o.client_order_id=t.client_order_id
+        WHERE t.id=? AND t.pair=? AND t.side='BUY'
+        LIMIT 1
+        """,
+        (
+            float(internal_lot_size),
+            float(internal_lot_size),
+            int(target_trade_id),
+            str(pair),
+        ),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("portfolio projection repair target BUY disappeared")
+
+    conn.execute(
+        "DELETE FROM open_position_lots WHERE pair=? AND entry_trade_id=?",
+        (str(pair), int(target_trade_id)),
+    )
+    conn.execute(
+        """
+        DELETE FROM trade_lifecycles
+        WHERE pair=?
+          AND (
+                entry_trade_id=?
+                OR exit_trade_id IN (
+                    SELECT id FROM trades
+                    WHERE pair=? AND side='SELL' AND (ts > ? OR (ts=? AND id>?))
+                )
+              )
+        """,
+        (
+            str(pair),
+            int(target_trade_id),
+            str(pair),
+            int(row["fill_ts"]),
+            int(row["fill_ts"]),
+            int(target_trade_id),
+        ),
+    )
+    if target_remainder_qty <= 1e-12:
+        return
+
+    total_qty = normalize_asset_qty(float(repair_basis.get("target_qty") or 0.0))
+    fee_total = float(row["fee"] or 0.0)
+    dust_fee = fee_total * (target_remainder_qty / total_qty) if total_qty > 1e-12 else 0.0
+    conn.execute(
+        """
+        INSERT INTO open_position_lots(
+            pair,
+            entry_trade_id,
+            entry_client_order_id,
+            entry_fill_id,
+            entry_ts,
+            entry_price,
+            qty_open,
+            executable_lot_count,
+            dust_tracking_lot_count,
+            lot_semantic_version,
+            internal_lot_size,
+            lot_min_qty,
+            lot_qty_step,
+            lot_min_notional_krw,
+            lot_max_qty_decimals,
+            lot_rule_source_mode,
+            position_semantic_basis,
+            position_state,
+            entry_fee_total,
+            strategy_name,
+            entry_decision_id,
+            entry_decision_linkage
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(pair),
+            int(target_trade_id),
+            str(row["client_order_id"]),
+            (str(row["fill_id"]) if row["fill_id"] is not None else None),
+            int(row["fill_ts"]),
+            float(row["price"]),
+            float(target_remainder_qty),
+            0,
+            1,
+            LOT_SEMANTIC_VERSION_V1,
+            float(internal_lot_size),
+            float(row["effective_min_trade_qty"] or internal_lot_size),
+            float(row["qty_step"] or internal_lot_size),
+            float(row["min_notional_krw"] or 0.0),
+            int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+            "portfolio_anchored_repair",
+            "lot-native",
+            DUST_TRACKING_LOT_STATE,
+            float(dust_fee),
+            (str(row["strategy_name"]) if row["strategy_name"] is not None else None),
+            (int(row["entry_decision_id"]) if row["entry_decision_id"] is not None else None),
+            ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
+        ),
+    )
+
+
+def _apply_portfolio_anchored_projection_repairs(conn: sqlite3.Connection, *, pair: str) -> int:
+    try:
+        rows = conn.execute(
+            """
+            SELECT repair_basis
+            FROM position_authority_repairs
+            WHERE reason=?
+            ORDER BY event_ts ASC, id ASC
+            """,
+            (PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+
+    applied = 0
+    for row in rows:
+        try:
+            basis = json.loads(str(_row_value(row, "repair_basis", 0) or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(basis, dict):
+            continue
+        apply_portfolio_anchored_projection_repair_basis(conn, pair=pair, repair_basis=basis)
+        applied += 1
+    return applied
 
 
 def mark_harmless_dust_positions(

@@ -37,6 +37,8 @@ from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
 FILL_QTY = 0.00059996
 LOT_SIZE = 0.0004
 PRICE = 7_050_000.0
+PORTFOLIO_DIVERGENCE_BUY_QTY = 0.00059992
+PORTFOLIO_DIVERGENCE_QTY = 0.00039988
 
 
 @pytest.fixture
@@ -193,6 +195,44 @@ def _record_historical_sell_history(conn) -> None:
         fee=1.0,
     )
     set_status("historical_sell", "FILLED", conn=conn)
+    conn.commit()
+
+
+def _create_portfolio_projection_divergence(conn) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id="live_1776745440000_buy_ae9d0d6e",
+        side="BUY",
+        qty_req=PORTFOLIO_DIVERGENCE_BUY_QTY,
+        price=PRICE,
+        ts_ms=1_776_745_440_000,
+        status="NEW",
+        internal_lot_size=LOT_SIZE,
+        effective_min_trade_qty=0.0002,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id="live_1776745440000_buy_ae9d0d6e",
+        side="BUY",
+        fill_id="live-fill-1776745440000",
+        fill_ts=1_776_745_440_050,
+        price=PRICE,
+        qty=PORTFOLIO_DIVERGENCE_BUY_QTY,
+        fee=4.23,
+        allow_entry_decision_fallback=False,
+    )
+    set_status("live_1776745440000_buy_ae9d0d6e", "FILLED", conn=conn)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=PORTFOLIO_DIVERGENCE_QTY,
+        asset_locked=0.0,
+    )
     conn.commit()
 
 
@@ -568,6 +608,111 @@ def test_authority_correction_repairs_incident_dust_row_with_historical_sell_his
     assert rows[1]["qty_open"] == pytest.approx(FILL_QTY - LOT_SIZE)
     assert rows[1]["dust_tracking_lot_count"] == 1
     assert rows[1]["internal_lot_size"] == pytest.approx(LOT_SIZE)
+
+
+def test_portfolio_projection_divergence_classifies_dead_end_without_broker_evidence(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_portfolio_projection_divergence(conn)
+
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        preview = build_position_authority_rebuild_preview(conn)
+    finally:
+        conn.close()
+
+    assert assessment["incident_class"] == "PROJECTION_PORTFOLIO_DIVERGENCE"
+    assert assessment["needs_portfolio_projection_repair"] is True
+    assert assessment["sell_after_target_buy_count"] == 0
+    assert assessment["target_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_BUY_QTY)
+    assert assessment["portfolio_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    assert readiness.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
+    assert readiness.resume_blockers == ("POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED",)
+    assert preview["repair_mode"] == "portfolio_projection_repair"
+    assert preview["safe_to_apply"] is False
+    assert "broker_position_qty_evidence_missing" in preview["eligibility_reason"]
+
+
+def test_portfolio_anchored_projection_repair_removes_false_executable_authority(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_portfolio_projection_divergence(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "balance_observed_ts_ms": 1_776_745_500_000,
+                "remote_open_order_found": 0,
+                "unresolved_open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 1,
+                "dust_effective_flat": 1,
+                "dust_state": "harmless_dust",
+                "dust_broker_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "dust_local_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "dust_delta_qty": 0.0,
+                "dust_qty_gap_tolerance": 0.000001,
+                "dust_qty_gap_small": 1,
+                "dust_min_qty": LOT_SIZE,
+            },
+            now_epoch_sec=1.0,
+        )
+
+        before = compute_runtime_readiness_snapshot(conn)
+        preview = build_position_authority_rebuild_preview(conn)
+        result = apply_position_authority_rebuild(conn)
+        conn.commit()
+        after = compute_runtime_readiness_snapshot(conn)
+        rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size
+            FROM open_position_lots
+            WHERE entry_client_order_id='live_1776745440000_buy_ae9d0d6e'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        repair = conn.execute(
+            "SELECT reason, repair_basis FROM position_authority_repairs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+        replay = rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
+        conn.commit()
+        replay_rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, internal_lot_size
+            FROM open_position_lots
+            WHERE entry_client_order_id='live_1776745440000_buy_ae9d0d6e'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert before.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
+    assert preview["safe_to_apply"] is True
+    assert preview["eligibility_reason"] == "portfolio-anchored projection repair applicable"
+    assert result["repair"]["reason"] == "portfolio_anchored_authority_projection_repair"
+    assert repair["reason"] == "portfolio_anchored_authority_projection_repair"
+    basis = json.loads(repair["repair_basis"])
+    assert basis["event_type"] == "portfolio_anchored_authority_projection_repair"
+    assert basis["target_remainder_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    assert len(rows) == 1
+    assert rows[0]["position_state"] == "dust_tracking"
+    assert rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    assert rows[0]["executable_lot_count"] == 0
+    assert rows[0]["dust_tracking_lot_count"] == 1
+    assert rows[0]["internal_lot_size"] == pytest.approx(LOT_SIZE)
+    assert after.recovery_stage == "RESUME_READY"
+    assert after.resume_ready is True
+    assert after.canonical_state == "DUST_ONLY_TRACKED"
+    assert after.position_state.normalized_exposure.sellable_executable_lot_count == 0
+    assert replay.replayed_buy_count == 1
+    assert len(replay_rows) == 1
+    assert replay_rows[0]["position_state"] == "dust_tracking"
+    assert replay_rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    assert replay_rows[0]["executable_lot_count"] == 0
 
 
 def test_fee_gap_deadlock_reports_authority_correction_as_next_stage(recovery_db):

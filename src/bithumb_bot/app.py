@@ -2836,6 +2836,7 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"safe_to_apply={1 if bool(position_rebuild_preview.get('safe_to_apply')) else 0} "
         f"repair_count={int(position_repair_summary.get('repair_count') or 0)} "
         f"stage={position_rebuild_preview.get('recovery_stage') or 'none'} "
+        f"repair_mode={position_rebuild_preview.get('repair_mode') or 'none'} "
         f"reason={position_rebuild_preview.get('eligibility_reason') or 'none'}"
     )
     print(f"    command={position_rebuild_preview.get('recommended_command') or 'none'}")
@@ -3346,6 +3347,7 @@ def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False
             f"needs_rebuild={1 if bool(preview['needs_rebuild']) else 0} "
             f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
             f"stage={preview['recovery_stage']} "
+            f"repair_mode={preview.get('repair_mode') or 'unknown'} "
             f"eligibility_reason={preview['eligibility_reason']}"
         )
         print(
@@ -3361,6 +3363,14 @@ def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False
             f"dust_tracking_lot_count={int(preview['dust_tracking_lot_count'])} "
             f"existing_lot_rows={int(preview['existing_lot_rows'])} "
             f"existing_position_authority_repairs={int(repair_summary.get('repair_count') or 0)}"
+        )
+        assessment = preview.get("position_authority_assessment") or {}
+        print(
+            "  "
+            f"incident_class={assessment.get('incident_class') or 'NONE'} "
+            f"broker_qty_known={1 if bool(preview.get('broker_qty_known')) else 0} "
+            f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f} "
+            f"remote_open_order_count={int(preview.get('remote_open_order_count') or 0)}"
         )
         print(f"  next_required_action={preview['next_required_action']}")
         print(f"  recommended_command={preview['recommended_command']}")
