@@ -292,7 +292,7 @@ def test_private_request_uses_fresh_nonce_per_retry(monkeypatch):
     assert auth_headers[0] != auth_headers[1]
 
 
-def test_private_order_submit_uses_utf8_json_content_type(monkeypatch):
+def test_private_submit_order_uses_utf8_json_content_type(monkeypatch):
     _configure_live()
     _SequencedClient.actions = [_mk_response(200, {"uuid": "order-1"})]
     _SequencedClient.calls = 0
@@ -301,16 +301,17 @@ def test_private_order_submit_uses_utf8_json_content_type(monkeypatch):
     monkeypatch.setattr("bithumb_bot.broker.bithumb._REQUEST_THROTTLER.acquire", lambda **_kwargs: 0.0)
 
     api = BithumbPrivateAPI(api_key="k", api_secret="s", base_url="https://api.bithumb.com", dry_run=False)
-    api.request(
-        "POST",
-        "/v2/orders",
-        json_body={
-            "market": "KRW-BTC",
-            "side": "bid",
-            "order_type": "price",
-            "price": "1000",
-            "client_order_id": "cid-json-1",
-        },
+    api.submit_order(
+        signed_request=_signed_order_request(
+            {
+                "market": "KRW-BTC",
+                "side": "bid",
+                "order_type": "price",
+                "price": "1000",
+                "client_order_id": "cid-json-1",
+            }
+        ),
+        retry_safe=False,
     )
 
     assert str(_SequencedClient.requests[0]["headers"]["Content-Type"]).startswith("application/json")
