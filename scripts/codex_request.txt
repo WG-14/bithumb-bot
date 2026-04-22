@@ -1,1 +1,4 @@
-Replace this text with the Codex task request to run through scripts/run_codex_pipeline.sh.
+# Pipeline test request file.
+Add a short comment line near the top of scripts/codex_request.txt saying:
+"Pipeline test request file."
+Do not modify any other files.

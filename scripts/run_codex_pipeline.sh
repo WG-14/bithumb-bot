@@ -75,6 +75,11 @@ dirty_paths_except_request() {
   done
 }
 
+dirty_paths_excluding_request_file() {
+  local request_rel="$1"
+  dirty_paths_except_request "${request_rel}"
+}
+
 cd "${PROJECT_ROOT}"
 
 if [[ ! -f "${REQUEST_FILE}" ]]; then
@@ -106,7 +111,6 @@ if [[ ! -f "${SSH_KEY}" ]]; then
 fi
 
 request_rel="$(realpath --relative-to="${PROJECT_ROOT}" "${REQUEST_FILE}")"
-pre_codex_status="$(git_status_porcelain)"
 pre_existing_non_request="$(dirty_paths_except_request "${request_rel}")"
 
 if [[ -n "${pre_existing_non_request}" ]]; then
@@ -117,11 +121,12 @@ fi
 
 run_stage "run Codex request from ${request_rel}" "${CODEX_BIN}" exec --full-auto --cd "${PROJECT_ROOT}" - < "${REQUEST_FILE}"
 
-post_codex_status="$(git_status_porcelain)"
-if [[ "${post_codex_status}" == "${pre_codex_status}" ]]; then
+post_codex_non_request="$(dirty_paths_excluding_request_file "${request_rel}")"
+if [[ -z "${post_codex_non_request}" ]]; then
   stage="check Codex modifications"
-  echo "[PIPELINE] Codex completed but made no git-visible changes." >&2
-  notify "bithumb-bot pipeline failed" "high" "Codex made no git-visible changes for ${request_rel}; no commit was created."
+  echo "[PIPELINE] Codex completed but did not modify any file other than the request file." >&2
+  notify "bithumb-bot pipeline failed" "high" \
+    "Codex did not modify any file other than ${request_rel}; no commit was created."
   exit 1
 fi
 
