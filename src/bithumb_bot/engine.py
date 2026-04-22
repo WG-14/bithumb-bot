@@ -340,6 +340,8 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
         conn.close()
     if not bool(fee_gap_preview.get("needs_repair")):
         return None
+    if not bool(fee_gap_preview.get("resume_blocking", True)):
+        return None
 
     return _resume_blocker(
         code="FEE_GAP_RECOVERY_REQUIRED",

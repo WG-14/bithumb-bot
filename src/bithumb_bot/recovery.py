@@ -1678,6 +1678,12 @@ def _fill_fee_accounting_status(fill: BrokerFill) -> str:
 
 
 def _fill_fee_is_accounting_complete(fill: BrokerFill) -> bool:
+    fee_status = str(getattr(fill, "fee_status", "complete") or "").strip()
+    if fee_status in {"complete", "operator_confirmed"} and fill.fee is not None:
+        try:
+            return float(fill.fee) >= 0.0
+        except (TypeError, ValueError):
+            return False
     return _fill_fee_accounting_status(fill) == "accounting_complete"
 
 
