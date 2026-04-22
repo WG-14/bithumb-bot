@@ -100,7 +100,9 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
     order_type = _clean_text(payload.get("ord_type") or payload.get("order_type") or payload.get("kind"))
     qty = _optional_float(payload.get("executed_volume") or payload.get("volume") or payload.get("qty"))
     price = _optional_float(payload.get("price") or payload.get("trade_price") or payload.get("avg_price"))
-    fee_keys = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+    trade_level_fee_keys = ("fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+    order_level_fee_keys = ("paid_fee", "reserved_fee", "remaining_fee")
+    fee_keys = trade_level_fee_keys + order_level_fee_keys
     fee = None
     fee_status = "missing"
     fee_warning = "missing_fee_field"
@@ -121,6 +123,9 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         if fee == 0.0:
             fee_status = "zero_reported"
             fee_warning = f"zero_fee_field:{key}"
+        elif key in order_level_fee_keys:
+            fee_status = "order_level_candidate"
+            fee_warning = f"order_level_fee_candidate:{key}"
         else:
             fee_status = "complete"
             fee_warning = None

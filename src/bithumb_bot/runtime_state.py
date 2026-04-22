@@ -15,7 +15,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .lifecycle import summarize_position_lots
 
 HALT_POLICY_STAGE = "SAFE_HALT_REVIEW_ONLY"
-_HEALTH_SUMMARY_MAX_LEN = 1400
+_HEALTH_SUMMARY_MAX_LEN = 2400
 
 
 def _clip(v: str | None, max_len: int = 500) -> str | None:
@@ -579,6 +579,12 @@ def record_reconcile_result(
             "fee_pending_latest_fee_status",
             "fee_pending_latest_fill_id",
             "fee_pending_operator_next_action",
+            "unaccounted_fee_pending_observation_count",
+            "unaccounted_fee_pending_latest_event_ts",
+            "unaccounted_fee_pending_latest_fill_ts",
+            "unaccounted_fee_pending_latest_fill_id",
+            "unaccounted_fee_pending_latest_fee_status",
+            "portfolio_projection_update_deferred_reason",
             "fee_gap_adjustment_count",
             "fee_gap_adjustment_total_krw",
             "fee_gap_adjustment_latest_event_ts",
@@ -731,6 +737,19 @@ def set_startup_gate_reason(reason: str | None) -> None:
                     "material_zero_fee_fill_notional_krw",
                     "material_zero_fee_fill_latest_ts",
                     "fee_gap_recovery_required",
+                    "observed_fill_count",
+                    "fee_pending_fill_count",
+                    "fee_pending_recovery_required",
+                    "fee_pending_latest_fill_ts",
+                    "fee_pending_latest_fee_status",
+                    "fee_pending_latest_fill_id",
+                    "fee_pending_operator_next_action",
+                    "unaccounted_fee_pending_observation_count",
+                    "unaccounted_fee_pending_latest_event_ts",
+                    "unaccounted_fee_pending_latest_fill_ts",
+                    "unaccounted_fee_pending_latest_fill_id",
+                    "unaccounted_fee_pending_latest_fee_status",
+                    "portfolio_projection_update_deferred_reason",
                     "fee_gap_adjustment_count",
                     "fee_gap_adjustment_total_krw",
                     "fee_gap_adjustment_latest_event_ts",

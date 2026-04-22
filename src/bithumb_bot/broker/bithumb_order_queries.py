@@ -14,6 +14,7 @@ from .order_lookup_v1 import (
 
 
 _ORDER_LEVEL_FEE_KEYS = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+_ORDER_LEVEL_AGGREGATE_FEE_KEYS = ("paid_fee", "reserved_fee", "remaining_fee", "fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
 
 
 def _order_level_fee_candidate(
@@ -359,6 +360,12 @@ def get_fills(
             price=price,
             strict=False,
         )
+        aggregate_fee_status = fee_observation.status
+        aggregate_warnings = [fee_observation.warning] if fee_observation.warning else []
+        aggregate_fee_keys = [key for key in _ORDER_LEVEL_AGGREGATE_FEE_KEYS if key in row]
+        if fee_observation.fee is not None and fee_observation.status == "complete" and aggregate_fee_keys:
+            aggregate_fee_status = "order_level_candidate"
+            aggregate_warnings.append(f"order_level_fee_candidate:{aggregate_fee_keys[0]}")
         aggregate_client_order_id, aggregate_exchange_order_id = broker._resolve_order_identifiers(
             row,
             fallback_client_order_id=requested.client_order_id or "",
@@ -373,8 +380,8 @@ def get_fills(
                 qty=qty_filled,
                 fee=fee_observation.fee,
                 exchange_order_id=aggregate_exchange_order_id,
-                fee_status=fee_observation.status,
-                parse_warnings=((fee_observation.warning,) if fee_observation.warning else ()),
+                fee_status=aggregate_fee_status,
+                parse_warnings=tuple(aggregate_warnings),
                 raw=broker._sanitize_debug_value(row),
             )
         )

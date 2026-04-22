@@ -12,6 +12,7 @@ from bithumb_bot.db_core import (
     ensure_db,
     get_external_cash_adjustment_summary,
     init_portfolio,
+    record_broker_fill_observation,
     record_external_cash_adjustment,
     set_portfolio_breakdown,
 )
@@ -73,6 +74,7 @@ def _restore_settings_state():
     original_start_cash = settings.START_CASH_KRW
     original_db_path = settings.DB_PATH
     original_live_dry_run = settings.LIVE_DRY_RUN
+    original_min_notional = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
 
     try:
         yield
@@ -81,6 +83,7 @@ def _restore_settings_state():
         object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
         object.__setattr__(settings, "DB_PATH", original_db_path)
         object.__setattr__(settings, "LIVE_DRY_RUN", original_live_dry_run)
+        object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_min_notional)
 
 
 @pytest.fixture
@@ -356,6 +359,66 @@ def test_reconcile_marks_fee_related_cash_drift_and_blocks_recovery_state(tmp_pa
     assert metadata["external_cash_adjustment_residual_krw"] == pytest.approx(0.0)
     assert startup_reason is not None
     assert "fee_gap_recovery_required=1" in startup_reason
+
+
+def test_reconcile_does_not_absorb_cash_drift_with_unaccounted_fee_pending_observation(tmp_path) -> None:
+    db_path = tmp_path / "fee_pending_blocks_cash_adjustment.sqlite"
+    object.__setattr__(settings, "DB_PATH", str(db_path))
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 1_000.0)
+
+    conn = ensure_db(str(db_path))
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_700_000_000_000,
+            client_order_id="fee-pending-cid",
+            exchange_order_id="fee-pending-ex",
+            fill_id="fee-pending-fill",
+            fill_ts=1_700_000_000_000,
+            side="BUY",
+            price=100_000_000.0,
+            qty=0.001,
+            fee=50.0,
+            fee_status="order_level_candidate",
+            accounting_status="fee_pending",
+            source="test_fee_pending_observation",
+            parse_warnings=("order_level_fee_candidate:paid_fee",),
+            raw_payload={"paid_fee": "50.0"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(success=True, reason_code=None, metadata=None, now_epoch_sec=0.0)
+    reconcile_with_broker(_VariableCashDriftBroker(cash_available=1_000_050.0))
+
+    conn = ensure_db(str(db_path))
+    try:
+        adjustment_count = conn.execute("SELECT COUNT(*) AS cnt FROM external_cash_adjustments").fetchone()["cnt"]
+        portfolio = conn.execute("SELECT cash_krw, cash_available FROM portfolio WHERE id=1").fetchone()
+    finally:
+        conn.close()
+    state = runtime_state.snapshot()
+    metadata = json.loads(str(state.last_reconcile_metadata))
+
+    assert adjustment_count == 0
+    assert portfolio["cash_krw"] == pytest.approx(1_000_000.0)
+    assert portfolio["cash_available"] == pytest.approx(1_000_000.0)
+    assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
+    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["unaccounted_fee_pending_observation_count"] == 1
+    assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
+    assert metadata["fee_pending_operator_next_action"].startswith("resolve unaccounted")
 
 
 def test_reconcile_cash_adjustment_clears_prior_cash_mismatch_blocker(tmp_path):

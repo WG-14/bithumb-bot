@@ -215,6 +215,61 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
     assert stream_row["applied_status"] == "recovery_required_fee_pending"
 
 
+def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete(tmp_path) -> None:
+    conn = ensure_db(str(tmp_path / "myorder_paid_fee_candidate.sqlite"))
+    try:
+        create_order(
+            conn=conn,
+            client_order_id="cid-entry-paid-fee",
+            side="BUY",
+            qty_req=0.2,
+            price=100_000_000.0,
+            status="NEW",
+        )
+        result = BithumbBroker.ingest_myorder_event_runtime(
+            conn,
+            payload={
+                "type": "myOrder",
+                "order_id": "ex-paid-fee",
+                "client_order_id": "cid-entry-paid-fee",
+                "status": "partial",
+                "trade_id": "fill-paid-fee",
+                "price": "100000000",
+                "executed_volume": "0.1",
+                "paid_fee": "50.0",
+                "timestamp": 1710000003500,
+            },
+        )
+        conn.commit()
+
+        order_row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-entry-paid-fee'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='cid-entry-paid-fee'"
+        ).fetchone()["cnt"]
+        observation = conn.execute(
+            """
+            SELECT fee, fee_status, accounting_status, source, parse_warnings
+            FROM broker_fill_observations
+            WHERE client_order_id='cid-entry-paid-fee'
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert result.action == "recovery_required_fee_pending"
+    assert order_row["status"] == "RECOVERY_REQUIRED"
+    assert order_row["qty_filled"] == pytest.approx(0.0)
+    assert "fee_status=order_level_candidate" in str(order_row["last_error"])
+    assert fill_count == 0
+    assert observation["fee"] == pytest.approx(50.0)
+    assert observation["fee_status"] == "order_level_candidate"
+    assert observation["accounting_status"] == "fee_pending"
+    assert observation["source"] == "myorder_private_stream_fee_pending"
+    assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
+
+
 def test_myorder_runtime_ingestion_material_zero_fee_marks_recovery_required(tmp_path) -> None:
     object.__setattr__(settings, "MODE", "live")
     conn = ensure_db(str(tmp_path / "myorder_recovery_required.sqlite"))

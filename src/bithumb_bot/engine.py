@@ -338,7 +338,7 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
         fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
     finally:
         conn.close()
-    if not bool(fee_gap_preview.get("needs_repair")) or not bool(fee_gap_preview.get("resume_blocking", True)):
+    if not bool(fee_gap_preview.get("needs_repair")):
         return None
 
     return _resume_blocker(

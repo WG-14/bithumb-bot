@@ -51,6 +51,23 @@ def test_normalize_myorder_event_marks_missing_fee_as_uncertain() -> None:
     assert normalized.fee_warning == "missing_fee_field"
 
 
+def test_normalize_myorder_event_marks_paid_fee_as_order_level_candidate() -> None:
+    normalized = normalize_myorder_event_payload(
+        {
+            "uuid": "remote-paid-fee",
+            "client_order_id": "cid-paid-fee",
+            "state": "done",
+            "executed_volume": "0.1",
+            "price": "100000000",
+            "paid_fee": "50.0",
+        }
+    )
+
+    assert normalized.fee == 50.0
+    assert normalized.fee_status == "order_level_candidate"
+    assert normalized.fee_warning == "order_level_fee_candidate:paid_fee"
+
+
 def test_bithumb_broker_exposes_myorder_normalizer() -> None:
     payload = {
         "uuid": "remote-456",

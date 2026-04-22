@@ -32,6 +32,7 @@ from .db_core import (
 )
 from .dust import build_dust_display_context, build_position_state_model, classify_dust_residual, dust_qty_gap_tolerance
 from .execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .fee_observation import fee_accounting_status
 from .fill_reading import FillReadPolicy, get_broker_fills
 from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
 from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
@@ -1602,11 +1603,78 @@ def _fee_gap_adjustment_history_summary(conn) -> dict[str, int | float]:
     }
 
 
+def _unaccounted_fee_pending_observation_summary(conn) -> dict[str, int | str]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS pending_count,
+            COALESCE(MAX(b.event_ts), 0) AS latest_event_ts,
+            COALESCE(MAX(b.fill_ts), 0) AS latest_fill_ts
+        FROM broker_fill_observations b
+        WHERE b.accounting_status='fee_pending'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM fills f
+              WHERE f.client_order_id=b.client_order_id
+                AND f.fee IS NOT NULL
+                AND f.fee > 1e-12
+                AND (
+                     (b.fill_id IS NOT NULL AND f.fill_id=b.fill_id)
+                     OR (
+                          f.fill_ts=b.fill_ts
+                      AND ABS(f.price-b.price) < 1e-12
+                      AND ABS(f.qty-b.qty) < 1e-12
+                     )
+                )
+          )
+        """
+    ).fetchone()
+    latest = conn.execute(
+        """
+        SELECT b.fill_id, b.fee_status
+        FROM broker_fill_observations b
+        WHERE b.accounting_status='fee_pending'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM fills f
+              WHERE f.client_order_id=b.client_order_id
+                AND f.fee IS NOT NULL
+                AND f.fee > 1e-12
+                AND (
+                     (b.fill_id IS NOT NULL AND f.fill_id=b.fill_id)
+                     OR (
+                          f.fill_ts=b.fill_ts
+                      AND ABS(f.price-b.price) < 1e-12
+                      AND ABS(f.qty-b.qty) < 1e-12
+                     )
+                )
+          )
+        ORDER BY b.event_ts DESC, b.id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return {
+        "unaccounted_fee_pending_observation_count": int(row["pending_count"] or 0),
+        "unaccounted_fee_pending_latest_event_ts": int(row["latest_event_ts"] or 0),
+        "unaccounted_fee_pending_latest_fill_ts": int(row["latest_fill_ts"] or 0),
+        "unaccounted_fee_pending_latest_fill_id": (
+            str(latest["fill_id"]) if latest is not None and latest["fill_id"] is not None else "none"
+        ),
+        "unaccounted_fee_pending_latest_fee_status": (
+            str(latest["fee_status"]) if latest is not None and latest["fee_status"] is not None else "none"
+        ),
+    }
+
+
 def _fill_fee_accounting_status(fill: BrokerFill) -> str:
     """Classify whether an observed broker fill is safe for canonical accounting."""
-    if getattr(fill, "fee_status", "complete") == "complete" and fill.fee is not None:
-        return "accounting_complete"
-    return "fee_pending"
+    return fee_accounting_status(
+        fee=fill.fee,
+        fee_status=getattr(fill, "fee_status", "complete"),
+        price=fill.price,
+        qty=fill.qty,
+        material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+    )
 
 
 def _fill_fee_is_accounting_complete(fill: BrokerFill) -> bool:
@@ -2119,6 +2187,8 @@ def reconcile_with_broker(broker: Broker) -> None:
             cash_locked=broker_cash_locked,
         )
         portfolio_cash_available = broker_cash_available
+        portfolio_asset_available = float(bal.asset_available)
+        portfolio_asset_locked = asset_locked
         cash_delta = broker_cash_total - local_cash_total
         cash_locked = broker_cash_locked
         # Accounts snapshot source can briefly report locked=0 around in-flight open orders.
@@ -2143,6 +2213,29 @@ def reconcile_with_broker(broker: Broker) -> None:
         metadata["material_zero_fee_fill_count"] = int(zero_fee_fill_summary["material_zero_fee_fill_count"])
         metadata["material_zero_fee_fill_notional_krw"] = float(zero_fee_fill_summary["material_zero_fee_fill_notional_krw"])
         metadata["material_zero_fee_fill_latest_ts"] = int(zero_fee_fill_summary["material_zero_fee_fill_latest_ts"])
+        pending_observation_summary = _unaccounted_fee_pending_observation_summary(conn)
+        metadata.update(pending_observation_summary)
+        if int(pending_observation_summary["unaccounted_fee_pending_observation_count"]) > 0:
+            metadata["fee_pending_recovery_required"] = 1
+            metadata["fee_pending_fill_count"] = max(
+                int(metadata.get("fee_pending_fill_count", 0) or 0),
+                int(pending_observation_summary["unaccounted_fee_pending_observation_count"]),
+            )
+            metadata["fee_pending_latest_fill_ts"] = int(
+                pending_observation_summary["unaccounted_fee_pending_latest_fill_ts"]
+            )
+            metadata["fee_pending_latest_fee_status"] = str(
+                pending_observation_summary["unaccounted_fee_pending_latest_fee_status"]
+            )
+            metadata["fee_pending_latest_fill_id"] = str(
+                pending_observation_summary["unaccounted_fee_pending_latest_fill_id"]
+            )
+            if str(metadata.get("fee_pending_operator_next_action") or "none") == "none":
+                metadata["fee_pending_operator_next_action"] = (
+                    "resolve unaccounted broker_fill_observations before cash-drift adjustment or resume"
+                )
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED
         external_cash_adjustment = None
         should_record_external_cash_adjustment = (
             abs(cash_delta) > CASH_SPLIT_ABS_TOL
@@ -2249,6 +2342,13 @@ def reconcile_with_broker(broker: Broker) -> None:
                 reason_code = REASON_FEE_GAP_RECOVERY_REQUIRED
         if has_open_orders and asset_locked <= 1e-12 and local_asset_locked > 1e-12:
             asset_locked = local_asset_locked
+            portfolio_asset_locked = asset_locked
+        if int(metadata.get("unaccounted_fee_pending_observation_count", 0) or 0) > 0:
+            portfolio_cash_available = local_cash_available
+            cash_locked = local_cash_locked
+            portfolio_asset_available = local_asset_available
+            portfolio_asset_locked = local_asset_locked
+            metadata["portfolio_projection_update_deferred_reason"] = "unaccounted_fee_pending_observation"
 
         mismatch_count, mismatch_summary = _balance_split_mismatch_summary(
             broker_cash_available=broker_cash_available,
@@ -2283,8 +2383,8 @@ def reconcile_with_broker(broker: Broker) -> None:
             conn,
             cash_available=portfolio_cash_available,
             cash_locked=cash_locked,
-            asset_available=bal.asset_available,
-            asset_locked=asset_locked,
+            asset_available=portfolio_asset_available,
+            asset_locked=portfolio_asset_locked,
         )
         conn.commit()
     except Exception as e:

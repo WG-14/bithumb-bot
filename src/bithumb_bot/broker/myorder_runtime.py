@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 import sqlite3
 
 from ..config import settings
 from ..db_core import mark_private_stream_event_applied, record_broker_fill_observation, record_private_stream_event
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
+from ..fee_observation import fee_accounting_status
 from ..oms import record_status_transition, set_exchange_order_id, set_status
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
 
@@ -51,22 +51,16 @@ def _find_local_order(conn: sqlite3.Connection, event: NormalizedMyOrderEvent):
 
 
 def _myorder_fee_accounting_complete(event: NormalizedMyOrderEvent) -> bool:
-    if event.fee is None:
-        return False
-    try:
-        fee = float(event.fee)
-    except (TypeError, ValueError):
-        return False
-    if not math.isfinite(fee) or fee < 0.0:
-        return False
-
-    notional = 0.0
-    if event.qty is not None and event.price is not None:
-        notional = max(0.0, float(event.qty)) * max(0.0, float(event.price))
-    material_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
-    if fee <= 1e-12 and material_threshold > 0.0 and notional >= material_threshold:
-        return False
-    return str(event.fee_status or "") == "complete" or fee > 0.0
+    return (
+        fee_accounting_status(
+            fee=event.fee,
+            fee_status=event.fee_status,
+            price=event.price,
+            qty=event.qty,
+            material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+        )
+        == "accounting_complete"
+    )
 
 
 def _record_fee_pending_stream_observation(

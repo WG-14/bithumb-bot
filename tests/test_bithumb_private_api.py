@@ -3997,6 +3997,31 @@ def test_get_fills_v1_order_handles_missing_or_empty_trades_with_aggregate_fill(
     assert fills[0].qty == pytest.approx(0.05)
 
 
+def test_get_fills_aggregate_paid_fee_remains_order_level_candidate(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "filled-agg-paid-fee",
+        "client_order_id": "cid-agg-paid-fee",
+        "price": "100000000",
+        "volume": "0.01",
+        "executed_volume": "0.01",
+        "state": "done",
+        "paid_fee": "50.0",
+        "created_at": "2026-04-21T00:24:00+09:00",
+        "updated_at": "2026-04-21T00:24:01+09:00",
+        "trades": [],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    fills = broker.get_fills(client_order_id="cid-agg-paid-fee", exchange_order_id="filled-agg-paid-fee")
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(50.0)
+    assert fills[0].fee_status == "order_level_candidate"
+    assert fills[0].parse_warnings == ("order_level_fee_candidate:paid_fee",)
+
+
 def test_get_fills_rejects_when_direct_lookup_has_no_usable_fill_and_scan_is_disabled(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
