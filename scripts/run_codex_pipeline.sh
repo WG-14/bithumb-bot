@@ -6,7 +6,7 @@ set -euo pipefail
 # 2. run Codex against this repository
 # 3. commit and push Codex changes
 # 4. run EC2 verification with live.verify.env
-# 5. notify success or the exact failed stage through ntfy
+# 5. notify the final EC2 verification result through ntfy
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
@@ -136,14 +136,30 @@ run_stage "git add ." git add .
 run_stage "git commit -m apply" git commit -m "apply"
 run_stage "git push" git push
 
-run_stage "remote EC2 verification" ssh \
-  -i "${SSH_KEY}" \
-  -o BatchMode=yes \
-  -o StrictHostKeyChecking=accept-new \
-  "${EC2_TARGET}" \
-  "bash -s" < "${REMOTE_VERIFY_SCRIPT}"
+stage="remote EC2 verification"
+echo
+echo "[PIPELINE] ${stage}"
+if ssh \
+    -i "${SSH_KEY}" \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    "${EC2_TARGET}" \
+    "bash -s" < "${REMOTE_VERIFY_SCRIPT}"; then
+  remote_verify_exit=0
+else
+  remote_verify_exit=$?
+fi
 
 stage="complete"
-notify "bithumb-bot pipeline succeeded" "default" "Codex changes were committed, pushed, and verified on EC2."
+if [[ "${remote_verify_exit}" -eq 0 ]]; then
+  notify "bithumb-bot pipeline succeeded" "default" "Codex changes were committed, pushed, and verified on EC2."
+  echo
+  echo "[PIPELINE] success"
+  exit 0
+fi
+
+notify "bithumb-bot pipeline failed" "high" \
+  "Codex changes were committed and pushed, but EC2 verification completed with one or more failed stages."
 echo
-echo "[PIPELINE] success"
+echo "[PIPELINE] EC2 verification completed with failed stages" >&2
+exit "${remote_verify_exit}"
