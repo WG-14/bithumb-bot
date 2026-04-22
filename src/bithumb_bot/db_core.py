@@ -29,6 +29,19 @@ FEE_GAP_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_gap_accounting_repair"
 FEE_PENDING_ACCOUNTING_REPAIR_EVENT_TYPE = "fee_pending_accounting_repair"
 POSITION_AUTHORITY_REPAIR_EVENT_TYPE = "position_authority_repair"
 BROKER_FILL_OBSERVATION_EVENT_TYPE = "broker_fill_observation"
+ACCOUNTING_PROJECTION_MODEL = "authoritative_accounting_projection_v1"
+AUTHORITATIVE_ACCOUNTING_EVENT_FAMILIES = (
+    "fills",
+    "external_cash_adjustments",
+    "manual_flat_accounting_repairs",
+    "external_position_adjustments",
+)
+DIAGNOSTIC_ACCOUNTING_EVENT_FAMILIES = (
+    "broker_fill_observations",
+    "position_authority_repairs",
+    "fee_gap_accounting_repairs",
+    "fee_pending_accounting_repairs",
+)
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
 
@@ -2001,7 +2014,7 @@ def _position_authority_repair_key(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int]:
+def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, object]:
     init_portfolio(conn)
     total_fee = 0.0
     external_cash_adjustment_total = 0.0
@@ -2020,6 +2033,10 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
     broker_fill_missing_fee_count = 0
     broker_fill_zero_reported_fee_count = 0
     broker_fill_invalid_fee_count = 0
+    broker_fill_latest_unresolved_fee_pending_count = 0
+    broker_fill_latest_accounting_complete_count = 0
+    fee_pending_repair_count = 0
+    position_authority_repair_count = 0
     dup_fill_count = 0
 
     seen_fill_keys: set[tuple[str, int, float, float]] = set()
@@ -2162,6 +2179,43 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
         broker_fill_zero_reported_fee_count = int(observation_summary["zero_reported_fee_count"] or 0)
         broker_fill_invalid_fee_count = int(observation_summary["invalid_fee_count"] or 0)
 
+    latest_observations = conn.execute(
+        """
+        SELECT client_order_id, COALESCE(fill_id, '') AS fill_id, fill_ts, price, qty,
+               fee_status, accounting_status
+        FROM broker_fill_observations
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    latest_by_fill: dict[tuple[str, str, int, float, float], sqlite3.Row] = {}
+    for row in latest_observations:
+        latest_by_fill[
+            (
+                str(row["client_order_id"]),
+                str(row["fill_id"] or ""),
+                int(row["fill_ts"]),
+                float(row["price"]),
+                float(row["qty"]),
+            )
+        ] = row
+    for row in latest_by_fill.values():
+        if str(row["accounting_status"]) == "fee_pending":
+            broker_fill_latest_unresolved_fee_pending_count += 1
+        elif str(row["accounting_status"]) == "accounting_complete":
+            broker_fill_latest_accounting_complete_count += 1
+
+    fee_pending_repair_summary = conn.execute(
+        "SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs"
+    ).fetchone()
+    if fee_pending_repair_summary is not None:
+        fee_pending_repair_count = int(fee_pending_repair_summary["repair_count"] or 0)
+
+    position_authority_repair_summary = conn.execute(
+        "SELECT COUNT(*) AS repair_count FROM position_authority_repairs"
+    ).fetchone()
+    if position_authority_repair_summary is not None:
+        position_authority_repair_count = int(position_authority_repair_summary["repair_count"] or 0)
+
     return {
         "replay_cash": cash,
         "replay_qty": qty,
@@ -2186,18 +2240,17 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
         "broker_fill_missing_fee_count": broker_fill_missing_fee_count,
         "broker_fill_zero_reported_fee_count": broker_fill_zero_reported_fee_count,
         "broker_fill_invalid_fee_count": broker_fill_invalid_fee_count,
+        "broker_fill_latest_unresolved_fee_pending_count": broker_fill_latest_unresolved_fee_pending_count,
+        "broker_fill_latest_accounting_complete_count": broker_fill_latest_accounting_complete_count,
+        "unresolved_fee_state": broker_fill_latest_unresolved_fee_pending_count > 0,
+        "fee_pending_accounting_repair_count": fee_pending_repair_count,
+        "position_authority_repair_count": position_authority_repair_count,
         "dup_fill_count": dup_fill_count,
-        "included_event_families": (
-            "fills",
-            "external_cash_adjustments",
-            "manual_flat_accounting_repairs",
-            "external_position_adjustments",
-        ),
-        "omitted_event_families": (
-            "broker_fill_observations",
-            "position_authority_repairs",
-            "fee_gap_accounting_repairs",
-        ),
+        "projection_model": ACCOUNTING_PROJECTION_MODEL,
+        "projection_kind": "authoritative_accounting_projection",
+        "included_event_families": AUTHORITATIVE_ACCOUNTING_EVENT_FAMILIES,
+        "diagnostic_event_families": DIAGNOSTIC_ACCOUNTING_EVENT_FAMILIES,
+        "omitted_event_families": DIAGNOSTIC_ACCOUNTING_EVENT_FAMILIES,
     }
 
 

@@ -34,6 +34,7 @@ from .reason_codes import (
     sell_failure_detail_from_category,
 )
 from .db_core import (
+    compute_accounting_replay,
     ensure_db,
     get_external_cash_adjustment_summary,
     init_portfolio,
@@ -380,6 +381,7 @@ def fetch_cash_drift_report(
 ) -> dict[str, object]:
     generated_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     trade_replay = _replay_trade_only_cash(conn)
+    accounting_projection = compute_accounting_replay(conn)
     portfolio_row = conn.execute(
         """
         SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
@@ -399,15 +401,19 @@ def fetch_cash_drift_report(
         asset_locked=float(portfolio_row["asset_locked"]),
     )
     trade_cash_krw = float(trade_replay["trade_cash_krw"])
+    projection_cash_krw = float(accounting_projection["replay_cash"])
+    projection_asset_qty = float(accounting_projection["replay_qty"])
     adjustment_summary = get_external_cash_adjustment_summary(conn)
     recent_adjustments = _fetch_recent_external_cash_adjustments(conn, limit=recent_limit)
     external_cash_adjustment_total_krw = float(adjustment_summary["adjustment_total"])
     explained_local_cash_krw = normalize_cash_amount(trade_cash_krw + external_cash_adjustment_total_krw)
     explained_delta_krw = normalize_cash_amount(local_cash_krw - trade_cash_krw)
-    local_ledger_consistent = math.isclose(local_cash_krw, explained_local_cash_krw, abs_tol=1e-6)
+    projection_delta_krw = normalize_cash_amount(local_cash_krw - projection_cash_krw)
+    projection_asset_delta_qty = normalize_asset_qty(local_asset_qty - projection_asset_qty)
+    local_ledger_consistent = math.isclose(local_cash_krw, projection_cash_krw, abs_tol=1e-6)
     local_asset_consistent = math.isclose(
         local_asset_qty,
-        float(trade_replay["trade_asset_qty"]),
+        projection_asset_qty,
         abs_tol=1e-12,
     )
     broker = _broker_cash_snapshot()
@@ -418,7 +424,7 @@ def fetch_cash_drift_report(
         else None
     )
     broker_vs_explained_delta_krw = (
-        normalize_cash_amount(float(broker_cash_krw) - explained_local_cash_krw)
+        normalize_cash_amount(float(broker_cash_krw) - projection_cash_krw)
         if broker_cash_krw is not None
         else None
     )
@@ -438,9 +444,38 @@ def fetch_cash_drift_report(
             "consistent": bool(local_ledger_consistent and local_asset_consistent),
             "dup_fill_count": int(trade_replay["dup_fill_count"]),
         },
+        "authoritative_projection": {
+            "projection_model": str(accounting_projection["projection_model"]),
+            "projection_kind": str(accounting_projection["projection_kind"]),
+            "cash_krw": projection_cash_krw,
+            "asset_qty": projection_asset_qty,
+            "cash_available": float(accounting_projection["replay_cash_available"]),
+            "cash_locked": float(accounting_projection["replay_cash_locked"]),
+            "asset_available": float(accounting_projection["replay_asset_available"]),
+            "asset_locked": float(accounting_projection["replay_asset_locked"]),
+            "portfolio_cash_delta_krw": projection_delta_krw,
+            "portfolio_asset_delta_qty": projection_asset_delta_qty,
+            "included_event_families": list(accounting_projection["included_event_families"]),
+            "diagnostic_event_families": list(accounting_projection["diagnostic_event_families"]),
+            "omitted_event_families": list(accounting_projection["omitted_event_families"]),
+            "unresolved_fee_state": bool(accounting_projection["unresolved_fee_state"]),
+            "broker_fill_latest_unresolved_fee_pending_count": int(
+                accounting_projection["broker_fill_latest_unresolved_fee_pending_count"]
+            ),
+            "fee_gap_accounting_repair_count": int(accounting_projection["fee_gap_accounting_repair_count"]),
+            "fee_pending_accounting_repair_count": int(accounting_projection["fee_pending_accounting_repair_count"]),
+            "position_authority_repair_count": int(accounting_projection["position_authority_repair_count"]),
+        },
+        "diagnostic_execution_snapshot": {
+            "cash_krw": trade_cash_krw,
+            "asset_qty": float(trade_replay["trade_asset_qty"]),
+            "cash_delta_to_portfolio_krw": explained_delta_krw,
+            "external_cash_adjustment_only_explained_cash_krw": explained_local_cash_krw,
+        },
         "cash_drift": {
             "explained_delta_krw": explained_delta_krw,
-            "explained_local_cash_krw": explained_local_cash_krw,
+            "explained_local_cash_krw": projection_cash_krw,
+            "projection_delta_krw": projection_delta_krw,
             "external_cash_adjustment_total_krw": external_cash_adjustment_total_krw,
             "external_cash_adjustment_count": int(adjustment_summary["adjustment_count"]),
             "broker_local_delta_krw": broker_local_delta_krw,
@@ -465,6 +500,7 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
 
     broker = report.get("broker") or {}
     local = report.get("local") or {}
+    projection = report.get("authoritative_projection") or {}
     cash_drift = report.get("cash_drift") or {}
     recent_adjustments = report.get("recent_adjustments") or []
     broker_error = broker.get("error")
@@ -483,6 +519,13 @@ def cmd_cash_drift_report(*, recent_limit: int = 5, as_json: bool = False) -> No
         f"ledger_cash_without_adjustments={float(local.get('cash_without_external_adjustments_krw') or 0.0):,.3f}"
     )
     print(f"{broker_cash_line} {local_cash_line}")
+    print(
+        "  "
+        f"projection_model={projection.get('projection_model') or 'unknown'} "
+        f"included_event_families={','.join(projection.get('included_event_families') or [])} "
+        f"diagnostic_event_families={','.join(projection.get('diagnostic_event_families') or [])} "
+        f"unresolved_fee_state={1 if bool(projection.get('unresolved_fee_state')) else 0}"
+    )
     if broker_error:
         print(f"  broker_error={broker_error}")
     broker_local_delta_text = (

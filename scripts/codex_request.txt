@@ -1,11 +1,290 @@
-Create exactly one test text file only.
+You are working directly against the GitHub repository `WG-14/bithumb-bot`.
 
-Requirements:
-- Create a single plain text file named `test.txt`.
-- Put any short English test sentence inside it.
-- Do not create, modify, rename, or delete any other files.
-- Do not run tests.
-- Do not change any code.
-- Do not perform any additional actions.
+Your task is **not** to suppress a symptom with a narrow patch. Treat this as a **repository-hardening and accounting-model correction task**. Work from the current implementation, verify hypotheses against the repo itself, and make changes that improve correctness, determinism, recoverability, and observability for a live/paper automated trading experiment system.
 
-Your entire task is limited to creating that one file only.
+## Mission
+
+Investigate and fix the structural cause behind the current class of failures where:
+
+* `portfolio` can be correct,
+* `audit-ledger` / replay-based views can be correct,
+* but `audit` still fails because the latest `trades.cash_after` / `trades.asset_after` diverge from the current portfolio after later repair/adjustment events.
+
+Do **not** assume that the initial diagnosis is true. Treat it as a leading hypothesis and verify or falsify it against the repo.
+
+The likely issue is not a single bad compare. The likely issue class is that the repo currently has **split accounting truth sources** across:
+
+* execution facts (`fills`, `trades`)
+* repair/adjustment events (`external_cash_adjustments`, `external_position_adjustments`, `manual_flat_accounting_repairs`, `fee_gap_accounting_repairs`, `position_authority_repairs`)
+* mutable snapshot state (`portfolio`)
+* reporting/audit code paths that do not all use the same replay rules
+
+Your job is to verify that, then implement the smallest safe design change that moves the repo toward a **single authoritative accounting projection model**.
+
+## Known repo-specific context you must verify in code
+
+Before changing anything, inspect the relevant implementation and explicitly verify these repo-specific observations:
+
+1. `db_core.compute_accounting_replay()` currently replays from `fills`, then applies:
+
+   * `external_cash_adjustments`
+   * `manual_flat_accounting_repairs`
+   * `external_position_adjustments`
+
+   and does **not** replay:
+
+   * `broker_fill_observations`
+   * `position_authority_repairs`
+   * `fee_gap_accounting_repairs`
+
+2. `record_external_cash_adjustment()` appears to mutate `portfolio` immediately, while several other repair recorders only append events.
+
+3. `external_position_repair.py` and `manual_flat_repair.py` appear to compute delta between replay and portfolio, then record event rows rather than rewriting historical trade after-state.
+
+4. `reporting.fetch_cash_drift_report()` appears to use a different replay model than `compute_accounting_replay()`.
+
+5. The current repo may be implicitly treating `trades.cash_after` / `trades.asset_after` as authoritative in some code paths, even though post-trade repairs can make those fields stale.
+
+Do not trust these statements blindly. Confirm them from the codebase and adjust your plan if the code differs.
+
+## Working hypotheses to test
+
+Keep these as hypotheses unless verified:
+
+### H1 — Most likely immediate failure mechanism
+
+`audit` is using the wrong truth source. It is directly or indirectly comparing the latest trade after-state to the current portfolio, even when later repair/adjustment events have changed the projected authoritative state.
+
+### H2 — Higher-level structural cause
+
+The repository does not currently have one unambiguous accounting source of truth. Different commands and reports derive state from different event families and different replay rules.
+
+### H3 — Fee lifecycle nondeterminism is forcing downstream accounting repairs
+
+Fee data may arrive incomplete first (`missing`, `fee_pending`, `order_level_candidate`, operator-confirmed later), which can cause delayed accounting convergence and event-layer repairs.
+
+### H4 — `trades.cash_after` / `trades.asset_after` are structurally fragile as an authority source
+
+These fields may be valid only as execution-local snapshots, not as final authoritative portfolio state after later repairs.
+
+### H5 — Recovery/resume readiness is ahead of accounting reproducibility
+
+The system may be operationally resumable while still lacking a single deterministic, replayable accounting projection.
+
+For each hypothesis:
+
+* verify or falsify it with direct code inspection and tests
+* document the evidence precisely
+* do not overclaim
+
+## Required outcome
+
+Produce a fix that prioritizes **design correction over symptom masking**.
+
+Minimum acceptable outcome:
+
+1. `audit`, `audit-ledger`, and reporting paths that claim accounting truth must converge on the same replay/projection rules.
+2. The repo must stop relying on latest-trade after-state as authoritative whenever later repair events exist.
+3. Tests must cover the exact failure class: portfolio correct, replay correct, latest trade stale, old audit fails, new logic passes.
+4. The resulting behavior must be deterministic and idempotent.
+
+Preferred outcome:
+
+* introduce a clearer accounting projection boundary that makes it obvious which events define authoritative state
+* move the codebase toward a single append-only accounting event model, without requiring a risky full rewrite in one patch
+
+## Scope and implementation guidance
+
+### Phase 1 — Verify current architecture and failure path
+
+Inspect all relevant code paths used by:
+
+* audit
+* audit-ledger
+* cash-drift-report
+* recovery-report
+* health / readiness / reconcile paths
+* repair commands
+
+Build a concise internal map of:
+
+* which functions compute portfolio/accounting state
+* which tables/event families each command includes
+* where latest `trades.cash_after` / `asset_after` are treated as authority
+* where `portfolio` is directly mutated instead of projected
+
+If the repo already has a reusable projection/replay abstraction, use it. If not, create one.
+
+### Phase 2 — Unify authoritative accounting replay
+
+Implement a single reusable accounting projection/replay function or module that:
+
+* clearly defines included event families
+* clearly defines omitted diagnostic-only event families
+* can be used by audit/reporting/recovery code paths
+* produces authoritative projected state from canonical inputs
+
+At minimum, the code should make the following distinction explicit:
+
+* **authoritative accounting projection**
+* **diagnostic execution-local snapshots**
+* **non-authoritative observations**
+
+Do not leave this implicit.
+
+### Phase 3 — Fix audit semantics
+
+Change `audit` so it does **not** fail just because the latest `trades.cash_after` / `asset_after` are stale after later repairs.
+
+Instead, `audit` should validate the right invariants, e.g.:
+
+* projected portfolio state equals authoritative replay state
+* projection freshness / metadata are valid
+* unresolved fee/repair states are surfaced explicitly
+* latest trade after-state mismatch is treated as a non-authoritative stale-snapshot condition if later repairs explain the delta
+
+Do **not** silently discard useful diagnostics. If stale trade after-state exists, preserve that as an explicit warning / detail, not as the primary authoritative failure.
+
+### Phase 4 — Improve recoverability and observability
+
+Add or improve observability so operators can understand:
+
+* which event families were included in projection
+* whether post-trade repairs exist
+* whether latest trade after-state is stale
+* whether fee lifecycle is unresolved
+* whether projection is deterministic / converged
+
+Prefer structured outputs or explicit metadata over ambiguous logging.
+
+### Phase 5 — Add deterministic tests and fixtures
+
+Add tests that directly reproduce this problem family.
+
+You must add repo-local tests that cover at least:
+
+1. **Latest trade stale but projection correct**
+
+   * trades last after-state differs from portfolio
+   * external/manual repair events explain the delta
+   * authoritative replay matches portfolio
+   * old failure class is reproduced
+   * new audit logic passes or downgrades to explicit stale-snapshot warning
+
+2. **Cross-command consistency**
+
+   * `audit`, `audit-ledger`, and accounting-related reporting use the same authoritative projection semantics
+   * no silent divergence in included event families
+
+3. **Repair idempotency**
+
+   * repeated repair-related logic does not double-apply deltas
+
+4. **Deterministic rebuild / replay**
+
+   * same DB state replayed twice yields identical projection
+   * if you add projection checksum/hash support, test it
+
+5. **Fee lifecycle edge case**
+
+   * incomplete fee first, later confirmed/applyable
+   * system converges deterministically
+   * unresolved fee state is visible
+
+If there is no existing suitable fixture DB, create a minimal sanitized fixture or builder that reproduces the problem.
+
+## Design preference order
+
+When choosing among fixes, use this priority order:
+
+1. **Unify the accounting source of truth**
+2. **Make repair events first-class accounting inputs**
+3. **Make reporting/audit consume the same projection**
+4. **Preserve backward compatibility where practical**
+5. **Do not do a broad schema rewrite unless needed for safety/correctness**
+
+If a full `accounting_events` append-only model is too large for one patch, implement an incremental architecture that clearly moves in that direction:
+
+* central projection abstraction
+* explicit event-family registry
+* authoritative vs diagnostic state separation
+* de-authoritize `trades.cash_after` / `asset_after` where appropriate
+
+## Important constraints
+
+* Do not generalize away from this repo’s actual code.
+* Do not write a generic architecture essay.
+* Do not apply a one-line patch and call it done.
+* Do not rewrite large parts of the system unless you can keep the change safe and testable.
+* Preserve existing system intent and operational safeguards.
+* Keep token/time use efficient, but do not skip necessary verification.
+* Run tests only after the requested patch set is complete, and continue iterating until `uv run pytest -q` is clean pass.
+* If you add warnings or status fields, make them machine-parseable where possible.
+* Prefer explicit naming: authoritative projection, stale execution snapshot, included event families, omitted event families, unresolved fee state, etc.
+
+## Files/modules likely relevant
+
+Investigate at least:
+
+* `src/bithumb_bot/db_core.py`
+* `src/bithumb_bot/external_position_repair.py`
+* `src/bithumb_bot/manual_flat_repair.py`
+* `src/bithumb_bot/fee_gap_repair.py`
+* `src/bithumb_bot/reporting.py`
+* audit / reconcile / recovery / health command implementations
+* any CLI command wiring that exposes `audit`, `audit-ledger`, recovery, or drift reports
+
+Also search for all reads of:
+
+* `cash_after`
+* `asset_after`
+* `compute_accounting_replay`
+* `portfolio`
+* `external_*adjustment*`
+* `manual_*repair*`
+* `fee_*repair*`
+* `broker_fill_observations`
+
+## Deliverables
+
+Make the code changes directly in the repo and provide a final report with these exact sections:
+
+1. **Verified findings**
+
+   * Which hypotheses were confirmed, which were weakened, which were falsified
+   * Exact repo evidence
+
+2. **Root cause**
+
+   * Immediate failure mechanism
+   * Higher-level structural cause
+
+3. **Changes made**
+
+   * File-by-file summary
+   * Why each change was necessary
+   * Any behavior changes
+
+4. **Tests added/updated**
+
+   * What exact failure class each test covers
+
+5. **Validation results**
+
+   * Output summary of `uv run pytest -q`
+   * Any additional targeted validation commands you ran
+
+6. **Operational impact**
+
+   * What gets better now
+   * What still remains as technical debt
+
+7. **Recommended next steps**
+
+   * Short list only
+   * Focus on long-term move toward a single authoritative accounting event model
+
+If you encounter a larger architectural issue that should not be fully solved in this patch, say so clearly and leave the codebase in a better, more explicit state than before.
+
+Use the repo itself as ground truth. Do not rely on assumptions where the code can verify them. 
+

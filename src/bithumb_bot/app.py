@@ -465,6 +465,7 @@ def cmd_audit():
     init_portfolio(conn)
 
     errors: list[str] = []
+    warnings: list[str] = []
 
     portfolio = conn.execute("SELECT cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked FROM portfolio WHERE id=1").fetchone()
     if portfolio is None:
@@ -557,22 +558,79 @@ def cmd_audit():
             )
         )
 
+    replay = compute_accounting_replay(conn)
+    projection_cash = float(replay["replay_cash"])
+    projection_qty = float(replay["replay_qty"])
+    projection_cash_available = float(replay["replay_cash_available"])
+    projection_cash_locked = float(replay["replay_cash_locked"])
+    projection_asset_available = float(replay["replay_asset_available"])
+    projection_asset_locked = float(replay["replay_asset_locked"])
+    if portfolio is not None:
+        portfolio_cash = portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)
+        portfolio_asset = portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)
+        if not math.isclose(projection_cash, portfolio_cash, abs_tol=1e-6):
+            errors.append(
+                "authoritative accounting projection cash mismatch: "
+                f"projection_cash={projection_cash} portfolio_cash={portfolio_cash} "
+                f"projection_model={replay['projection_model']}"
+            )
+        if not math.isclose(projection_qty, portfolio_asset, abs_tol=1e-10):
+            errors.append(
+                "authoritative accounting projection asset mismatch: "
+                f"projection_qty={projection_qty} portfolio_asset={portfolio_asset} "
+                f"projection_model={replay['projection_model']}"
+            )
+        if not math.isclose(projection_cash_available, cash_available, abs_tol=1e-6):
+            errors.append(
+                "authoritative accounting projection cash_available mismatch: "
+                f"projection_cash_available={projection_cash_available} portfolio_cash_available={cash_available}"
+            )
+        if not math.isclose(projection_cash_locked, cash_locked, abs_tol=1e-6):
+            errors.append(
+                "authoritative accounting projection cash_locked mismatch: "
+                f"projection_cash_locked={projection_cash_locked} portfolio_cash_locked={cash_locked}"
+            )
+        if not math.isclose(projection_asset_available, asset_available, abs_tol=1e-10):
+            errors.append(
+                "authoritative accounting projection asset_available mismatch: "
+                f"projection_asset_available={projection_asset_available} portfolio_asset_available={asset_available}"
+            )
+        if not math.isclose(projection_asset_locked, asset_locked, abs_tol=1e-10):
+            errors.append(
+                "authoritative accounting projection asset_locked mismatch: "
+                f"projection_asset_locked={projection_asset_locked} portfolio_asset_locked={asset_locked}"
+            )
+
     last_trade = conn.execute(
-        "SELECT cash_after, asset_after FROM trades ORDER BY id DESC LIMIT 1"
+        "SELECT id, ts, cash_after, asset_after FROM trades ORDER BY id DESC LIMIT 1"
     ).fetchone()
     if last_trade is not None and portfolio is not None:
-        if abs(float(last_trade["cash_after"]) - portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)) > 1e-8:
-            errors.append(
-                "latest trade cash_after="
-                f"{float(last_trade['cash_after'])} != portfolio.cash_total="
-                f"{portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)}"
+        post_trade_event_count = conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM external_cash_adjustments WHERE event_ts >= ?) +
+                (SELECT COUNT(*) FROM manual_flat_accounting_repairs WHERE event_ts >= ?) +
+                (SELECT COUNT(*) FROM external_position_adjustments WHERE event_ts >= ?) AS count
+            """,
+            (int(last_trade["ts"]), int(last_trade["ts"]), int(last_trade["ts"])),
+        ).fetchone()
+        post_trade_accounting_events = int(post_trade_event_count["count"] if post_trade_event_count else 0)
+        latest_cash_mismatch = abs(float(last_trade["cash_after"]) - portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)) > 1e-8
+        latest_asset_mismatch = abs(float(last_trade["asset_after"]) - portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)) > 1e-12
+        if latest_cash_mismatch or latest_asset_mismatch:
+            detail = (
+                "stale execution snapshot: "
+                f"trade_id={int(last_trade['id'])} "
+                f"trade_cash_after={float(last_trade['cash_after'])} "
+                f"trade_asset_after={float(last_trade['asset_after'])} "
+                f"portfolio_cash={portfolio_cash_total(cash_available=cash_available, cash_locked=cash_locked)} "
+                f"portfolio_asset={portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)} "
+                f"post_trade_accounting_event_count={post_trade_accounting_events}"
             )
-        if abs(float(last_trade["asset_after"]) - portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)) > 1e-12:
-            errors.append(
-                "latest trade asset_after="
-                f"{float(last_trade['asset_after'])} != portfolio.asset_total="
-                f"{portfolio_asset_total(asset_available=asset_available, asset_locked=asset_locked)}"
-            )
+            if post_trade_accounting_events > 0 and not errors:
+                warnings.append(detail)
+            else:
+                errors.append(detail)
 
     conn.close()
 
@@ -582,6 +640,15 @@ def cmd_audit():
             print(f"  - {err}")
         raise SystemExit(1)
 
+    for warning in warnings:
+        print(f"[AUDIT] WARN {warning}")
+    print(
+        "[AUDIT] projection "
+        f"model={replay['projection_model']} "
+        f"included_event_families={','.join(replay['included_event_families'])} "
+        f"diagnostic_event_families={','.join(replay['diagnostic_event_families'])} "
+        f"unresolved_fee_state={1 if bool(replay['unresolved_fee_state']) else 0}"
+    )
     print("[AUDIT] OK")
 
 
@@ -1246,7 +1313,7 @@ def _eod_price_for_day(conn: sqlite3.Connection, day: str) -> float | None:
     return float(row["close"])
 
 
-def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
+def _ledger_replay(conn: sqlite3.Connection) -> dict[str, object]:
     init_portfolio(conn)
     replay = compute_accounting_replay(conn)
 
@@ -1300,8 +1367,16 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         "broker_fill_missing_fee_count": int(replay["broker_fill_missing_fee_count"]),
         "broker_fill_zero_reported_fee_count": int(replay["broker_fill_zero_reported_fee_count"]),
         "broker_fill_invalid_fee_count": int(replay["broker_fill_invalid_fee_count"]),
+        "broker_fill_latest_unresolved_fee_pending_count": int(replay["broker_fill_latest_unresolved_fee_pending_count"]),
+        "broker_fill_latest_accounting_complete_count": int(replay["broker_fill_latest_accounting_complete_count"]),
+        "unresolved_fee_state": bool(replay["unresolved_fee_state"]),
+        "fee_pending_accounting_repair_count": int(replay["fee_pending_accounting_repair_count"]),
+        "position_authority_repair_count": int(replay["position_authority_repair_count"]),
         "dup_fill_count": int(replay["dup_fill_count"]),
+        "projection_model": str(replay["projection_model"]),
+        "projection_kind": str(replay["projection_kind"]),
         "included_event_families": tuple(replay["included_event_families"]),
+        "diagnostic_event_families": tuple(replay["diagnostic_event_families"]),
         "omitted_event_families": tuple(replay["omitted_event_families"]),
         "consistent": consistent,
     }
@@ -1336,8 +1411,16 @@ def cmd_audit_ledger() -> None:
     print(f"  broker_fill_missing_fee_count={int(replay['broker_fill_missing_fee_count'])}")
     print(f"  broker_fill_zero_reported_fee_count={int(replay['broker_fill_zero_reported_fee_count'])}")
     print(f"  broker_fill_invalid_fee_count={int(replay['broker_fill_invalid_fee_count'])}")
+    print(f"  broker_fill_latest_unresolved_fee_pending_count={int(replay['broker_fill_latest_unresolved_fee_pending_count'])}")
+    print(f"  broker_fill_latest_accounting_complete_count={int(replay['broker_fill_latest_accounting_complete_count'])}")
+    print(f"  unresolved_fee_state={1 if bool(replay['unresolved_fee_state']) else 0}")
+    print(f"  fee_pending_accounting_repair_count={int(replay['fee_pending_accounting_repair_count'])}")
+    print(f"  position_authority_repair_count={int(replay['position_authority_repair_count'])}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
+    print(f"  projection_model={replay['projection_model']}")
+    print(f"  projection_kind={replay['projection_kind']}")
     print(f"  included_event_families={','.join(replay['included_event_families'])}")
+    print(f"  diagnostic_event_families={','.join(replay['diagnostic_event_families'])}")
     print(f"  omitted_event_families={','.join(replay['omitted_event_families'])}")
 
     if not bool(replay["consistent"]):
