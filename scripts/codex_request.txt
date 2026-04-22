@@ -1,19 +1,11 @@
-Your task is strictly limited to creating a single test text file. Do not modify any source code, scripts, configs, documentation, git settings, or existing files in the repository.
+Create exactly one test text file only.
 
-Instructions:
+Requirements:
+- Create a single plain text file named `test.txt`.
+- Put any short English test sentence inside it.
+- Do not create, modify, rename, or delete any other files.
+- Do not run tests.
+- Do not change any code.
+- Do not perform any additional actions.
 
-1. Create exactly one file: `test1.txt`
-2. Place it in the repository root
-3. Write the following line into it:
-   `This is a test file created for verification purposes.`
-4. Make no other changes of any kind
-
-Important constraints:
-
-* No edits to existing files
-* No commits
-* No dependency changes
-* No cleanup or formatting changes
-* No additional files or folders
-
-When finished, report only that `test1.txt` was created.
+Your entire task is limited to creating that one file only.
