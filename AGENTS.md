@@ -43,6 +43,8 @@ If the change touches live execution, restart recovery, order lifecycle, or oper
 - Task prompts should contain only task-specific scope, execution steps, validation, and reporting.
 - Prefer direct, execution-oriented, sequential instructions over explanatory wording.
 - When a prompt would restate a repository rule, refer to AGENTS.md instead.
+- Preserve the system’s intended operational meaning when following task prompts.
+- Minimize unnecessary time use, token use, and avoid wasteful reruns.
 
 ## Change Planning
 
@@ -385,14 +387,38 @@ After a patch, run targeted tests for changed areas and enough broader tests to 
 uv run pytest -q
 ```
 
+This is the project’s intended full-suite validation command.
+
 ### Test execution discipline
 
-- Run focused tests for the changed area before broader tests.
-- Use `pytest --collect-only -q` first when collection or import stability is uncertain.
+- `uv run pytest -q` must be treated as the final validation command.
+- Run `uv run pytest -q` only after all requested patches are complete.
+- The first full baseline command for a task that requires full validation must be `uv run pytest -q`.
+- The final validation command for a task that requires full validation must be `uv run pytest -q`.
+- During debugging, do not use full-suite reruns as the default loop.
+- Use only narrower pytest invocations derived from actual failures from the most recent full run.
+- Prefer the narrowest verification scope in this order:
+  1. failing test function
+  2. failing test file
+  3. failure-specific `-k` expression
+  4. closely related failure cluster
+- Stay inside the current failure cluster until it is resolved or clearly blocked.
+- Do not broaden scope without a concrete reason.
+- Do not repeat the same command without a new hypothesis or a code change.
 - Do not repeat the same full test command only by extending timeout.
 - If the same verification runs longer than 90 seconds, stop repeating it and report the likely bottleneck, alternative validation commands, and residual risk.
-- Run the full suite only when it is actually needed, and only once at the end.
-- Localized changes such as small interface adjustments, logging improvements, report or output improvements, helper CLI additions or changes, and healthcheck-only changes may be validated with focused tests only if there is no broader regression risk. In those cases, the full suite may be skipped.
+- Minimize unnecessary time use, token use, and test reruns throughout the task.
+- Preserve the system’s intended operational meaning when fixing failing tests.
+- Do not change behavior just to satisfy tests if that would weaken safety, fail-close behavior, recovery correctness, exposure authority, reconciliation, or operator-facing reporting.
+- If full completion remains possible, continue iterating with targeted tests and narrow fixes until the full suite reaches a clean pass under `uv run pytest -q`.
+- Codex should continue the test-fix loop until `uv run pytest -q` passes cleanly, or until an external blocker makes further safe progress impossible.
+- After resolving any of the following, rerun `uv run pytest -q`:
+  - a full failing file
+  - a shared helper used by multiple failing tests
+  - an import, configuration, or path issue
+  - a cross-cutting failure cluster
+- Run the full suite only when it is actually needed, and only at the baseline and final validation points unless a shared failure cluster resolution justifies another full rerun.
+- Localized changes such as small interface adjustments, logging improvements, report or output improvements, helper CLI additions or changes, and healthcheck-only changes may be validated with focused tests only if there is no broader regression risk. In those cases, the full suite may be skipped unless the task explicitly requires a clean pass under `uv run pytest -q`.
 
 ### Relevant focused tests
 
@@ -497,6 +523,8 @@ Do not:
 - log secrets
 - make broad formatting-only changes during safety patches
 - trade safety for convenience
+- stop after partial debugging progress if a clean full-suite pass is still safely achievable
+- use repeated full-suite reruns as a substitute for targeted diagnosis
 
 ## In Case of Ambiguity
 
@@ -512,4 +540,3 @@ Default preference order:
 6. improve profitability
 
 If a requested change appears to conflict with `docs/storage-layout.md` or `docs/runtime-data-policy.md`, follow the docs and keep the storage contract intact unless those docs are explicitly updated as part of the same task.
-

@@ -7,6 +7,7 @@ set -uo pipefail
 
 APP_DIR="${BITHUMB_REMOTE_APP_DIR:-${HOME}/apps/bithumb-bot}"
 LIVE_VERIFY_ENV="${BITHUMB_LIVE_VERIFY_ENV:-/home/ec2-user/bithumb-runtime/env/live.verify.env}"
+PYTEST_TMPDIR="${BITHUMB_PYTEST_TMPDIR:-${HOME}/tmp/pytest-tmp}"
 
 passed_stages=()
 failed_stages=()
@@ -76,8 +77,10 @@ run_stage_collect "git switch main" git switch main
 run_stage_collect "git pull --ff-only origin main" git pull --ff-only origin main
 run_stage_collect "git status" git status
 run_stage_collect "git log --oneline -n 3" git log --oneline -n 3
-run_stage_collect "uv sync --locked" uv sync --locked
-run_stage_collect "uv run pytest -q" uv run pytest -q
+run_stage_collect "mkdir -p ${PYTEST_TMPDIR}" mkdir -p "${PYTEST_TMPDIR}"
+run_stage_collect "clear ${PYTEST_TMPDIR}" bash -lc "find \"${PYTEST_TMPDIR}\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +"
+run_stage_collect "TMPDIR=${PYTEST_TMPDIR} uv sync --locked" env TMPDIR="${PYTEST_TMPDIR}" uv sync --locked
+run_stage_collect "TMPDIR=${PYTEST_TMPDIR} uv run pytest -q" env TMPDIR="${PYTEST_TMPDIR}" uv run pytest -q
 
 echo
 echo "[REMOTE-VERIFY] load ${LIVE_VERIFY_ENV}"
