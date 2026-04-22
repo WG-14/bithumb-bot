@@ -10,7 +10,7 @@ from .config import settings
 from .db_core import ensure_db, get_fee_gap_accounting_repair_summary, portfolio_asset_total
 from .dust import build_dust_display_context, build_position_state_model
 from .external_position_repair import build_external_position_accounting_repair_preview
-from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
+from .fee_gap_policy import classify_fee_gap_incident_verdict, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_state import build_position_authority_assessment
 from .recovery_policy import (
@@ -38,6 +38,7 @@ class RuntimeReadinessSnapshot:
     fee_gap_closeout_blocking: bool
     fee_gap_adjustment_count: int
     material_zero_fee_fill_count: int
+    fee_gap_incident: Any
     open_order_count: int
     recovery_required_count: int
     position_authority_assessment: dict[str, object]
@@ -72,6 +73,7 @@ class RuntimeReadinessSnapshot:
             "fee_gap_closeout_blocking": bool(self.fee_gap_closeout_blocking),
             "fee_gap_adjustment_count": int(self.fee_gap_adjustment_count),
             "material_zero_fee_fill_count": int(self.material_zero_fee_fill_count),
+            "fee_gap_incident": self.fee_gap_incident.as_dict(),
             "open_order_count": int(self.open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
@@ -248,12 +250,6 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             material_zero_fee_fill_count=material_zero_fee_fill_count,
             material_zero_fee_fill_latest_ts=material_zero_fee_fill_latest_ts,
         )
-        fee_gap_needs_repair = bool(
-            fee_gap_required
-            and material_zero_fee_fill_count > 0
-            and fee_gap_adjustment_count > 0
-            and not already_repaired_fee_gap
-        )
         fee_gap_reasons: list[str] = []
         external_cash_adjustment_reason = str(metadata.get("external_cash_adjustment_reason") or "none")
         if fee_gap_required and material_zero_fee_fill_count <= 0:
@@ -283,8 +279,14 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             or str(position_state.normalized_exposure.authority_gap_reason or "")
             == "authority_missing_recovery_required"
         )
-        fee_gap_policy = classify_fee_gap_debt_policy(
-            needs_repair=fee_gap_needs_repair,
+        fee_gap_incident = classify_fee_gap_incident_verdict(
+            raw_recovery_required=fee_gap_required,
+            material_zero_fee_fill_count=material_zero_fee_fill_count,
+            material_zero_fee_fill_latest_ts=material_zero_fee_fill_latest_ts,
+            fee_gap_adjustment_count=fee_gap_adjustment_count,
+            fee_gap_adjustment_total_krw=fee_gap_adjustment_total_krw,
+            fee_gap_adjustment_latest_event_ts=fee_gap_adjustment_latest_event_ts,
+            external_cash_adjustment_reason=external_cash_adjustment_reason,
             already_repaired=already_repaired_fee_gap,
             repair_blocker_reasons=fee_gap_reasons,
             blocked_by_authority_rebuild=blocked_by_authority_rebuild,
@@ -300,6 +302,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             execution_flat=canonical_recovery.execution_flat,
             accounting_flat=canonical_recovery.accounting_flat,
         )
+        fee_gap_policy = fee_gap_incident.policy
         replay_mismatch_preview = build_external_position_accounting_repair_preview(conn)
 
         blockers: list[str] = []
@@ -426,6 +429,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             fee_gap_closeout_blocking=fee_gap_policy.closeout_blocking,
             fee_gap_adjustment_count=fee_gap_adjustment_count,
             material_zero_fee_fill_count=material_zero_fee_fill_count,
+            fee_gap_incident=fee_gap_incident,
             open_order_count=open_order_count,
             recovery_required_count=recovery_required_count,
             position_authority_assessment=authority_assessment,

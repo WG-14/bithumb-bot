@@ -646,6 +646,24 @@ def test_fee_gap_accounting_repair_converges_recovery_surfaces(tmp_path, monkeyp
     assert "[FEE-GAP-ACCOUNTING-REPAIR] applied" in apply_out
     assert "remaining_needs_repair=0" in apply_out
 
+    conn = ensure_db()
+    try:
+        readiness_after_repair = compute_runtime_readiness_snapshot(conn)
+        preview_after_repair = app_module.build_fee_gap_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+    assert readiness_after_repair.fee_gap_recovery_required is True
+    assert readiness_after_repair.fee_gap_incident.incident_kind == "historical_fee_gap_repaired"
+    assert readiness_after_repair.fee_gap_incident.incident_scope == "historical_context"
+    assert readiness_after_repair.fee_gap_incident.resolution_state == "repaired"
+    assert readiness_after_repair.fee_gap_incident.active_issue is False
+    assert readiness_after_repair.fee_gap_incident.policy.resume_blocking is False
+    assert preview_after_repair["fee_gap_recovery_required"] == 1
+    assert preview_after_repair["incident_kind"] == "historical_fee_gap_repaired"
+    assert preview_after_repair["incident_scope"] == "historical_context"
+    assert preview_after_repair["resolution_state"] == "repaired"
+    assert preview_after_repair["active_issue"] is False
+
     app_main(["audit-ledger"])
     audit_out = capsys.readouterr().out
     assert "fee_gap_accounting_repair_count=1" in audit_out
@@ -654,21 +672,40 @@ def test_fee_gap_accounting_repair_converges_recovery_surfaces(tmp_path, monkeyp
     cmd_health()
     health_out = capsys.readouterr().out
     assert "fee_gap_accounting_repair_needed=0" in health_out
+    assert "fee_gap_accounting_repair_incident=kind=historical_fee_gap_repaired scope=historical_context resolution=repaired active_issue=0" in health_out
     assert "fee_gap_accounting_repair_safe_to_apply=0" in health_out
     assert "blocker_reason_codes=none" in health_out
     assert "blockers=none" in health_out
 
+    report_json_after = _load_recovery_report()
+    assert report_json_after["runtime_readiness"]["fee_gap_incident"]["incident_kind"] == "historical_fee_gap_repaired"
+    assert report_json_after["runtime_readiness"]["fee_gap_incident"]["active_issue"] is False
+    assert report_json_after["fee_gap_accounting_repair_preview"]["incident_scope"] == "historical_context"
+    assert report_json_after["operator_next_action"] == "resume_now"
+
     cmd_recovery_report()
     report_after = capsys.readouterr().out
     assert "[P3.0d] fee_gap_accounting_repair" in report_after
+    assert "incident_kind=historical_fee_gap_repaired" in report_after
+    assert "incident_scope=historical_context" in report_after
+    assert "active_issue=0" in report_after
     assert "needed=0" in report_after
     assert "repair_count=1" in report_after
     assert "blocker_reason_codes=none" in report_after
     assert "blockers=none" in report_after
 
+    app_module.cmd_ops_report(limit=1)
+    ops_out = capsys.readouterr().out
+    assert "fee_gap_incident_kind=historical_fee_gap_repaired" in ops_out
+    assert "fee_gap_incident_scope=historical_context" in ops_out
+    assert "fee_gap_resolution_state=repaired" in ops_out
+    assert "fee_gap_active_issue=0" in ops_out
+
     cmd_restart_checklist()
     checklist_out = capsys.readouterr().out
     assert "PASS    fee-gap accounting repair:" in checklist_out
+    assert "incident_kind=historical_fee_gap_repaired" in checklist_out
+    assert "active_issue=0" in checklist_out
     assert "safe_to_resume=1" in checklist_out
 
     conn = ensure_db()
@@ -4866,6 +4903,9 @@ def test_recovery_report_and_restart_checklist_distinguish_harmless_dust_only_fr
 
     assert report["can_resume"] is True
     assert report["resume_blockers"] == []
+    assert report["runtime_readiness"]["fee_gap_incident"]["incident_kind"] == "none"
+    assert report["runtime_readiness"]["fee_gap_incident"]["active_issue"] is False
+    assert report["fee_gap_accounting_repair_preview"]["incident_kind"] == "none"
     assert report["dust_state"] == "harmless_dust"
     assert normalized_position_item[1] is True
     assert "terminal_state=dust_only" in normalized_position_item[2]
@@ -4985,6 +5025,11 @@ def test_recovery_report_surfaces_fee_gap_contamination_as_distinct_blocker(tmp_
     assert report["primary_blocker_reason_code"] == "FEE_GAP_RECOVERY_REQUIRED"
     assert report["operator_next_action"] == "manual_fee_gap_recovery_required"
     assert report["resume_blocked_reason"] == "resume blocked by fee-related accounting inconsistency"
+    assert report["runtime_readiness"]["fee_gap_incident"]["incident_kind"] == "active_fee_gap_unrepaired"
+    assert report["runtime_readiness"]["fee_gap_incident"]["incident_scope"] == "active_blocking"
+    assert report["runtime_readiness"]["fee_gap_incident"]["resolution_state"] == "unresolved"
+    assert report["runtime_readiness"]["fee_gap_incident"]["active_issue"] is True
+    assert report["fee_gap_accounting_repair_preview"]["incident_kind"] == "active_fee_gap_unrepaired"
 
 
 def test_recovery_report_surfaces_position_authority_gap_as_distinct_blocker(tmp_path):
@@ -5036,6 +5081,8 @@ def test_recovery_report_surfaces_position_authority_gap_as_distinct_blocker(tmp
     assert report["operator_next_action"] == "manual_position_authority_recovery_required"
     assert report["resume_blocked_reason"] == "resume blocked by missing lot authority"
     assert report["runtime_readiness"]["recovery_stage"] == "AUTHORITY_REBUILD_PENDING"
+    assert report["runtime_readiness"]["fee_gap_incident"]["incident_kind"] == "none"
+    assert report["runtime_readiness"]["fee_gap_incident"]["active_issue"] is False
     assert report["position_authority_rebuild_preview"]["needs_rebuild"] is True
 
 
@@ -5121,7 +5168,12 @@ def test_authority_rebuild_then_fee_gap_progression_is_staged_not_deadlocked(tmp
     assert post_snapshot.resume_ready is True
     assert post_snapshot.resume_blockers == ()
     assert post_snapshot.blocker_categories == ("advisory_historical_debt",)
+    assert post_snapshot.fee_gap_incident.incident_kind == "active_fee_gap_unrepaired"
+    assert post_snapshot.fee_gap_incident.incident_scope == "active_advisory"
+    assert post_snapshot.fee_gap_incident.resolution_state == "unresolved"
+    assert post_snapshot.fee_gap_incident.policy.resume_blocking is False
     assert post_fee_gap_preview["blocked_by_authority_rebuild"] is False
+    assert post_fee_gap_preview["incident_scope"] == "active_advisory"
     assert post_fee_gap_preview["repair_eligibility_state"] == "blocked_until_flattened"
     assert post_fee_gap_preview["resume_policy"] == "defer_for_open_position_management"
     assert post_fee_gap_preview["resume_blocking"] is False

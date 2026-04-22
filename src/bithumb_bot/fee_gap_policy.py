@@ -44,6 +44,34 @@ class FeeGapDebtPolicy:
         }
 
 
+@dataclass(frozen=True)
+class FeeGapIncidentVerdict:
+    incident_kind: str
+    incident_scope: str
+    resolution_state: str
+    active_issue: bool
+    historical_context: bool
+    needs_repair: bool
+    already_repaired: bool
+    raw_recovery_required: bool
+    policy: FeeGapDebtPolicy
+    evidence: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "incident_kind": self.incident_kind,
+            "incident_scope": self.incident_scope,
+            "resolution_state": self.resolution_state,
+            "active_issue": bool(self.active_issue),
+            "historical_context": bool(self.historical_context),
+            "needs_repair": bool(self.needs_repair),
+            "already_repaired": bool(self.already_repaired),
+            "raw_recovery_required": bool(self.raw_recovery_required),
+            "policy": self.policy.as_dict(),
+            "evidence": dict(self.evidence),
+        }
+
+
 def matching_fee_gap_repair_present(
     *,
     repair_summary: dict[str, Any],
@@ -67,6 +95,93 @@ def matching_fee_gap_repair_present(
         and int(basis.get("fee_gap_adjustment_latest_event_ts", 0) or 0) == fee_gap_adjustment_latest_event_ts
         and int(basis.get("material_zero_fee_fill_count", 0) or 0) == material_zero_fee_fill_count
         and int(basis.get("material_zero_fee_fill_latest_ts", 0) or 0) == material_zero_fee_fill_latest_ts
+    )
+
+
+def classify_fee_gap_incident_verdict(
+    *,
+    raw_recovery_required: bool,
+    material_zero_fee_fill_count: int,
+    material_zero_fee_fill_latest_ts: int,
+    fee_gap_adjustment_count: int,
+    fee_gap_adjustment_total_krw: float,
+    fee_gap_adjustment_latest_event_ts: int,
+    external_cash_adjustment_reason: str,
+    already_repaired: bool,
+    repair_blocker_reasons: list[str],
+    blocked_by_authority_rebuild: bool,
+    blocked_by_open_exposure: bool,
+    blocked_by_dust_residue: bool,
+    has_executable_open_exposure: bool,
+    canonical_state: str,
+    execution_flat: bool,
+    accounting_flat: bool,
+) -> FeeGapIncidentVerdict:
+    needs_repair = bool(
+        raw_recovery_required
+        and int(material_zero_fee_fill_count) > 0
+        and int(fee_gap_adjustment_count) > 0
+        and not already_repaired
+    )
+    policy = classify_fee_gap_debt_policy(
+        needs_repair=needs_repair,
+        already_repaired=already_repaired,
+        repair_blocker_reasons=repair_blocker_reasons,
+        blocked_by_authority_rebuild=blocked_by_authority_rebuild,
+        blocked_by_open_exposure=blocked_by_open_exposure,
+        blocked_by_dust_residue=blocked_by_dust_residue,
+        has_executable_open_exposure=has_executable_open_exposure,
+        canonical_state=canonical_state,
+        execution_flat=execution_flat,
+        accounting_flat=accounting_flat,
+    )
+
+    has_fee_gap_evidence = bool(
+        raw_recovery_required
+        or int(material_zero_fee_fill_count) > 0
+        or int(fee_gap_adjustment_count) > 0
+        or already_repaired
+    )
+    if already_repaired and not needs_repair:
+        incident_kind = "historical_fee_gap_repaired"
+        incident_scope = "historical_context"
+        resolution_state = "repaired"
+    elif needs_repair:
+        incident_kind = "active_fee_gap_unrepaired"
+        incident_scope = "active_blocking" if policy.resume_blocking else "active_advisory"
+        resolution_state = "unresolved"
+    elif has_fee_gap_evidence:
+        incident_kind = "historical_fee_gap_evidence"
+        incident_scope = "historical_context"
+        resolution_state = "not_applicable"
+    else:
+        incident_kind = "none"
+        incident_scope = "none"
+        resolution_state = "not_applicable"
+
+    return FeeGapIncidentVerdict(
+        incident_kind=incident_kind,
+        incident_scope=incident_scope,
+        resolution_state=resolution_state,
+        active_issue=bool(needs_repair),
+        historical_context=bool(incident_scope == "historical_context"),
+        needs_repair=needs_repair,
+        already_repaired=already_repaired,
+        raw_recovery_required=bool(raw_recovery_required),
+        policy=policy,
+        evidence={
+            "raw_fee_gap_recovery_required": bool(raw_recovery_required),
+            "material_zero_fee_fill_count": int(material_zero_fee_fill_count),
+            "material_zero_fee_fill_latest_ts": int(material_zero_fee_fill_latest_ts),
+            "fee_gap_adjustment_count": int(fee_gap_adjustment_count),
+            "fee_gap_adjustment_total_krw": normalize_cash_amount(fee_gap_adjustment_total_krw),
+            "fee_gap_adjustment_latest_event_ts": int(fee_gap_adjustment_latest_event_ts),
+            "external_cash_adjustment_reason": str(external_cash_adjustment_reason or "none"),
+            "repair_blocker_reasons": list(policy.repair_blocker_reasons),
+            "canonical_state": str(canonical_state),
+            "execution_flat": bool(execution_flat),
+            "accounting_flat": bool(accounting_flat),
+        },
     )
 
 

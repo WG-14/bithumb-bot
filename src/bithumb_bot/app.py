@@ -1061,6 +1061,10 @@ def cmd_health() -> None:
     print(
         "    "
         "fee_gap_accounting_repair="
+        f"incident_kind={fee_gap_repair_preview.get('incident_kind') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"incident_scope={fee_gap_repair_preview.get('incident_scope') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"resolution_state={fee_gap_repair_preview.get('resolution_state') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"active_issue={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('active_issue')) else 0} "
         f"needed={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('needs_repair')) else 0} "
         f"resume_blocking={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('resume_blocking')) else 0} "
         f"closeout_blocking={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('closeout_blocking')) else 0} "
@@ -1278,6 +1282,13 @@ def cmd_health() -> None:
     print(
         "  fee_gap_accounting_repair_needed="
         f"{1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('needs_repair')) else 0}"
+    )
+    print(
+        "  fee_gap_accounting_repair_incident="
+        f"kind={fee_gap_repair_preview.get('incident_kind') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"scope={fee_gap_repair_preview.get('incident_scope') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"resolution={fee_gap_repair_preview.get('resolution_state') if isinstance(fee_gap_repair_preview, dict) else 'unknown'} "
+        f"active_issue={1 if bool(fee_gap_repair_preview and fee_gap_repair_preview.get('active_issue')) else 0}"
     )
     print(
         "  fee_gap_accounting_repair_safe_to_apply="
@@ -2978,6 +2989,10 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P3.0d] fee_gap_accounting_repair")
     print(
         "    "
+        f"incident_kind={fee_gap_repair_preview.get('incident_kind') or 'unknown'} "
+        f"incident_scope={fee_gap_repair_preview.get('incident_scope') or 'unknown'} "
+        f"resolution_state={fee_gap_repair_preview.get('resolution_state') or 'unknown'} "
+        f"active_issue={1 if bool(fee_gap_repair_preview.get('active_issue')) else 0} "
         f"needed={1 if bool(fee_gap_repair_preview.get('needs_repair')) else 0} "
         f"canonical_state={fee_gap_repair_preview.get('canonical_state') or 'unknown'} "
         f"execution_flat={1 if bool(fee_gap_repair_preview.get('execution_flat')) else 0} "
@@ -3411,6 +3426,10 @@ def cmd_fee_gap_accounting_repair(*, apply: bool = False, confirm: bool = False,
             f"needs_repair={1 if bool(preview['needs_repair']) else 0} "
             f"safe_to_apply={1 if bool(preview['safe_to_apply']) else 0} "
             f"already_repaired={1 if bool(preview['already_repaired']) else 0} "
+            f"incident_kind={preview.get('incident_kind') or 'unknown'} "
+            f"incident_scope={preview.get('incident_scope') or 'unknown'} "
+            f"resolution_state={preview.get('resolution_state') or 'unknown'} "
+            f"active_issue={1 if bool(preview.get('active_issue')) else 0} "
             f"canonical_state={preview.get('canonical_state') or 'unknown'} "
             f"execution_flat={1 if bool(preview.get('execution_flat')) else 0} "
             f"accounting_flat={1 if bool(preview.get('accounting_flat')) else 0} "

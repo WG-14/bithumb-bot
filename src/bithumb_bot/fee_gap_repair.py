@@ -12,11 +12,16 @@ from .db_core import (
     normalize_cash_amount,
     record_fee_gap_accounting_repair,
 )
-from .fee_gap_policy import classify_fee_gap_debt_policy, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .recovery_policy import classify_canonical_recovery_state
 from .runtime_readiness import compute_runtime_readiness_snapshot
+
+_POSITION_RESIDUE_REPAIR_BLOCKERS = {
+    "portfolio_not_flat",
+    "lot_residue_present",
+    "reserved_exit_qty",
+}
 
 
 def _metadata_int(metadata: dict[str, object], key: str) -> int:
@@ -31,6 +36,10 @@ def _metadata_float(metadata: dict[str, object], key: str) -> float:
         return float(metadata.get(key, 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _reason_prefix(reason: str) -> str:
+    return str(reason).split("=", 1)[0]
 
 
 def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
@@ -79,20 +88,12 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     cash_available = normalize_cash_amount(portfolio_row["cash_available"] if portfolio_row is not None else cash_krw)
     cash_locked = normalize_cash_amount(portfolio_row["cash_locked"] if portfolio_row is not None else 0.0)
 
-    already_repaired = matching_fee_gap_repair_present(
-        repair_summary=repair_summary,
-        fee_gap_adjustment_count=fee_gap_adjustment_count,
-        fee_gap_adjustment_total_krw=fee_gap_adjustment_total_krw,
-        fee_gap_adjustment_latest_event_ts=fee_gap_adjustment_latest_event_ts,
-        material_zero_fee_fill_count=material_zero_fee_fill_count,
-        material_zero_fee_fill_latest_ts=material_zero_fee_fill_latest_ts,
-    )
-    needs_repair = bool(
-        fee_gap_recovery_required > 0
-        and material_zero_fee_fill_count > 0
-        and fee_gap_adjustment_count > 0
-        and not already_repaired
-    )
+    # Runtime readiness owns the current operator verdict. This preview may add
+    # mutation-specific safety checks, but it must not reinterpret the incident.
+    incident = readiness.fee_gap_incident
+    policy = incident.policy
+    already_repaired = bool(incident.already_repaired)
+    needs_repair = bool(incident.needs_repair)
 
     reasons: list[str] = []
     if fee_gap_recovery_required <= 0:
@@ -152,19 +153,6 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         portfolio_asset_qty=portfolio_asset_qty,
         reserved_exit_qty=reserved_exit_qty,
     )
-    policy = classify_fee_gap_debt_policy(
-        needs_repair=needs_repair,
-        already_repaired=already_repaired,
-        repair_blocker_reasons=reasons,
-        blocked_by_authority_rebuild=blocked_by_authority_rebuild,
-        blocked_by_open_exposure=blocked_by_open_exposure,
-        blocked_by_dust_residue=blocked_by_dust_residue,
-        has_executable_open_exposure=has_executable_open_exposure,
-        canonical_state=canonical_recovery.canonical_state,
-        execution_flat=canonical_recovery.execution_flat,
-        accounting_flat=canonical_recovery.accounting_flat,
-    )
-
     if already_repaired and not needs_repair:
         eligibility_reason = "matching fee-gap accounting repair already recorded"
     elif not needs_repair and not reasons:
@@ -172,11 +160,16 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     else:
         eligibility_reason = ", ".join(reasons or ["fee-gap accounting repair not applicable"])
 
+    reason_prefixes = {_reason_prefix(reason) for reason in reasons if str(reason)}
+    mutation_reasons_allow_tracked_dust = bool(reason_prefixes) and reason_prefixes <= _POSITION_RESIDUE_REPAIR_BLOCKERS
     safe_to_apply = bool(
         needs_repair
         and (
             not reasons
-            or str(policy.repair_eligibility_state) == "safe_to_apply_with_tracked_dust"
+            or (
+                str(policy.repair_eligibility_state) == "safe_to_apply_with_tracked_dust"
+                and mutation_reasons_allow_tracked_dust
+            )
         )
     )
     if safe_to_apply:
@@ -201,6 +194,12 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "resume_blocking": bool(policy.resume_blocking),
         "closeout_blocking": bool(policy.closeout_blocking),
         "fee_gap_policy_reason": policy.policy_reason,
+        "fee_gap_incident": incident.as_dict(),
+        "incident_kind": incident.incident_kind,
+        "incident_scope": incident.incident_scope,
+        "resolution_state": incident.resolution_state,
+        "active_issue": bool(incident.active_issue),
+        "historical_context": bool(incident.historical_context),
         "already_repaired": already_repaired,
         "open_order_count": open_order_count,
         "recovery_required_count": recovery_required_count,
@@ -238,6 +237,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         ),
         "blocked_by_open_exposure": blocked_by_open_exposure,
         "blocked_by_dust_residue": blocked_by_dust_residue,
+        "repair_safety_reasons": list(dict.fromkeys(reasons)),
         "next_required_action": policy.next_required_action,
         "recommended_command": policy.recommended_command,
     }

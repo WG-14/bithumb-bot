@@ -347,6 +347,10 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
         code="FEE_GAP_RECOVERY_REQUIRED",
         detail=(
             "fee-related cash drift detected during reconcile: "
+            f"incident_kind={fee_gap_preview.get('incident_kind') or 'unknown'} "
+            f"incident_scope={fee_gap_preview.get('incident_scope') or 'unknown'} "
+            f"resolution_state={fee_gap_preview.get('resolution_state') or 'unknown'} "
+            f"active_issue={1 if bool(fee_gap_preview.get('active_issue')) else 0} "
             f"material_zero_fee_fill_count={zero_fee_fill_count} "
             f"fee_gap_adjustment_count={fee_gap_adjustment_count} "
             f"fee_gap_accounting_repair_count={int(fee_gap_preview.get('fee_gap_accounting_repair_count') or 0)} "
@@ -831,26 +835,18 @@ def evaluate_startup_safety_gate() -> str | None:
             f"(terminal_state={normalized_position.terminal_state})"
         )
 
+    fee_gap_incident = readiness_snapshot.fee_gap_incident
     try:
         fee_gap_recovery_required = int(reconcile_metadata.get("fee_gap_recovery_required", 0) or 0)
     except (TypeError, ValueError):
         fee_gap_recovery_required = 0
-    if fee_gap_recovery_required > 0:
-        try:
-            fee_gap_adjustment_count = max(0, int(reconcile_metadata.get("fee_gap_adjustment_count", 0) or 0))
-        except (TypeError, ValueError):
-            fee_gap_adjustment_count = 0
-        conn = ensure_db()
-        try:
-            fee_gap_preview = build_fee_gap_accounting_repair_preview(conn)
-        finally:
-            conn.close()
-        if bool(fee_gap_preview.get("needs_repair")) and bool(fee_gap_preview.get("resume_blocking", True)):
-            reasons.append(
-                "fee_gap_recovery_required="
-                f"{fee_gap_recovery_required}"
-                f"(adjustments={fee_gap_adjustment_count})"
-            )
+    if bool(fee_gap_incident.active_issue) and bool(fee_gap_incident.policy.resume_blocking):
+        reasons.append(
+            "fee_gap_recovery_required="
+            f"{fee_gap_recovery_required}"
+            f"(incident_kind={fee_gap_incident.incident_kind},"
+            f"resolution_state={fee_gap_incident.resolution_state})"
+        )
 
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])
     if submit_unknown_without_exchange_count > 0:
@@ -1490,6 +1486,10 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
         fee_gap_preview.get("needs_repair") and fee_gap_preview.get("resume_blocking", True)
     )
     fee_gap_repair_detail = (
+        f"incident_kind={fee_gap_preview.get('incident_kind') or 'unknown'} "
+        f"incident_scope={fee_gap_preview.get('incident_scope') or 'unknown'} "
+        f"resolution_state={fee_gap_preview.get('resolution_state') or 'unknown'} "
+        f"active_issue={1 if bool(fee_gap_preview.get('active_issue')) else 0} "
         f"needed={1 if bool(fee_gap_preview.get('needs_repair')) else 0} "
         f"resume_blocking={1 if bool(fee_gap_preview.get('resume_blocking')) else 0} "
         f"closeout_blocking={1 if bool(fee_gap_preview.get('closeout_blocking')) else 0} "

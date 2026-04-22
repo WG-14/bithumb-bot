@@ -3662,6 +3662,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         "recovery_stage": readiness_snapshot.recovery_stage,
         "recovery_blocker_categories": list(readiness_snapshot.blocker_categories),
         "canonical_next_action": readiness_snapshot.operator_next_action,
+        "fee_gap_incident": readiness_snapshot.fee_gap_incident.as_dict(),
+        "fee_gap_incident_kind": readiness_snapshot.fee_gap_incident.incident_kind,
+        "fee_gap_incident_scope": readiness_snapshot.fee_gap_incident.incident_scope,
+        "fee_gap_resolution_state": readiness_snapshot.fee_gap_incident.resolution_state,
+        "fee_gap_active_issue": bool(readiness_snapshot.fee_gap_incident.active_issue),
         "canonical_state": readiness_snapshot.canonical_state,
         "residual_class": readiness_snapshot.residual_class,
         "run_loop_allowed": bool(readiness_snapshot.run_loop_allowed),
@@ -3750,6 +3755,10 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         "recovery_blocker_categories="
         f"{','.join(str(x) for x in operator_recovery['recovery_blocker_categories']) or 'none'} "
         f"canonical_next_action={operator_recovery['canonical_next_action']} "
+        f"fee_gap_incident_kind={operator_recovery['fee_gap_incident_kind']} "
+        f"fee_gap_incident_scope={operator_recovery['fee_gap_incident_scope']} "
+        f"fee_gap_resolution_state={operator_recovery['fee_gap_resolution_state']} "
+        f"fee_gap_active_issue={1 if operator_recovery['fee_gap_active_issue'] else 0} "
         f"canonical_state={operator_recovery['canonical_state']} "
         f"residual_class={operator_recovery['residual_class']} "
         f"strategy_tradeability_state={operator_recovery['strategy_tradeability_state']} "
