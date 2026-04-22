@@ -74,6 +74,9 @@ class NormalizedMyOrderEvent:
     status: str
     qty: float | None
     price: float | None
+    fee: float | None
+    fee_status: str
+    fee_warning: str | None
     fill_id: str
     dedupe_key: str
 
@@ -97,6 +100,31 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
     order_type = _clean_text(payload.get("ord_type") or payload.get("order_type") or payload.get("kind"))
     qty = _optional_float(payload.get("executed_volume") or payload.get("volume") or payload.get("qty"))
     price = _optional_float(payload.get("price") or payload.get("trade_price") or payload.get("avg_price"))
+    fee_keys = ("fee", "paid_fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
+    fee = None
+    fee_status = "missing"
+    fee_warning = "missing_fee_field"
+    for key in fee_keys:
+        if key not in payload:
+            continue
+        raw_fee = payload.get(key)
+        if raw_fee in (None, ""):
+            fee_status = "empty"
+            fee_warning = f"empty_fee_field:{key}"
+            break
+        parsed_fee = _optional_float(raw_fee)
+        if parsed_fee is None or parsed_fee < 0.0:
+            fee_status = "invalid"
+            fee_warning = f"invalid_fee_field:{key}"
+            break
+        fee = float(parsed_fee)
+        if fee == 0.0:
+            fee_status = "zero_reported"
+            fee_warning = f"zero_fee_field:{key}"
+        else:
+            fee_status = "complete"
+            fee_warning = None
+        break
     fill_id = _clean_text(payload.get("trade_id") or payload.get("fill_id") or payload.get("uuid") or payload.get("order_id"))
     event_ts_ms = _optional_int(
         payload.get("timestamp")
@@ -114,6 +142,8 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         "order_type": order_type,
         "qty": qty,
         "price": price,
+        "fee": fee,
+        "fee_status": fee_status,
         "fill_id": fill_id,
         "event_ts_ms": event_ts_ms,
     }
@@ -133,6 +163,9 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         status=status,
         qty=qty,
         price=price,
+        fee=fee,
+        fee_status=fee_status,
+        fee_warning=fee_warning,
         fill_id=fill_id,
         dedupe_key=dedupe_key,
     )

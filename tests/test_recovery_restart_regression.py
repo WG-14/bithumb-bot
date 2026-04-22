@@ -13,7 +13,7 @@ from bithumb_bot.broker.base import (
     BrokerOrder,
 )
 from bithumb_bot.config import settings
-from bithumb_bot.db_core import ensure_db, get_portfolio_breakdown
+from bithumb_bot.db_core import compute_accounting_replay, ensure_db, get_portfolio_breakdown
 from bithumb_bot.dust import build_dust_display_context, build_position_state_model
 from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
@@ -316,6 +316,39 @@ class _SubmitUnknownMissingFeeRecentFillBroker(_NoopBroker):
                 fee_status="missing",
                 parse_warnings=("missing_fee_field",),
                 raw={"uuid": "submit_unknown_missing_fee_fill", "price": "100", "volume": "1"},
+            )
+        ]
+
+
+class _KnownOrderLevelFeeCandidateRecentFillBroker(_NoopBroker):
+    def __init__(self) -> None:
+        self.parse_modes: list[str] = []
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
+        self.parse_modes.append(parse_mode)
+        if parse_mode == "strict":
+            raise RuntimeError("strict fill parsing should not be used for restart observation")
+        return [
+            BrokerFill(
+                client_order_id="known_fee_candidate",
+                fill_id="known_order_level_fee_candidate_fill",
+                fill_ts=300,
+                price=100_000_000.0,
+                qty=0.001,
+                fee=50.0,
+                exchange_order_id="ex-known-fee-candidate",
+                fee_status="order_level_candidate",
+                parse_warnings=("missing_fee_field", "order_level_fee_candidate:paid_fee"),
+                raw={
+                    "trade": {"uuid": "known_order_level_fee_candidate_fill", "price": "100000000", "volume": "0.001"},
+                    "order_fee_fields": {"paid_fee": "50.0"},
+                },
             )
         ]
 
@@ -1874,7 +1907,8 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     metadata = json.loads(str(state.last_reconcile_metadata))
     gate_reason = evaluate_startup_safety_gate()
 
-    assert broker.parse_modes == ["salvage"]
+    assert broker.parse_modes
+    assert set(broker.parse_modes) == {"salvage"}
     assert row is not None
     assert row["status"] == "RECOVERY_REQUIRED"
     assert row["exchange_order_id"] == "ex-submit-unknown-missing-fee-fill"
@@ -1893,6 +1927,83 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert metadata["fee_pending_fill_count"] == 1
     assert metadata["fee_pending_recovery_required"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
+    assert "recovery_required_orders=1" in str(gate_reason)
+
+
+def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee_confirmed(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="known_fee_candidate",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=100,
+            status="NEW",
+        )
+        set_exchange_order_id("known_fee_candidate", "ex-known-fee-candidate", conn=conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    broker = _KnownOrderLevelFeeCandidateRecentFillBroker()
+    reconcile_with_broker(broker)
+
+    conn = ensure_db(str(isolated_db))
+    try:
+        order = conn.execute(
+            "SELECT status, last_error, qty_filled FROM orders WHERE client_order_id='known_fee_candidate'"
+        ).fetchone()
+        fill_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='known_fee_candidate'"
+        ).fetchone()
+        trade_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM trades WHERE client_order_id='known_fee_candidate'"
+        ).fetchone()
+        adjustment_count = conn.execute("SELECT COUNT(*) AS cnt FROM external_cash_adjustments").fetchone()
+        observation = conn.execute(
+            """
+            SELECT fill_id, fee, fee_status, accounting_status, source, parse_warnings, raw_payload
+            FROM broker_fill_observations
+            WHERE client_order_id='known_fee_candidate'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        replay = compute_accounting_replay(conn)
+    finally:
+        conn.close()
+
+    state = runtime_state.snapshot()
+    metadata = json.loads(str(state.last_reconcile_metadata))
+    gate_reason = evaluate_startup_safety_gate()
+
+    assert broker.parse_modes
+    assert set(broker.parse_modes) == {"salvage"}
+    assert order is not None
+    assert order["status"] == "RECOVERY_REQUIRED"
+    assert float(order["qty_filled"]) == pytest.approx(0.0)
+    assert "accounting is fee-pending" in str(order["last_error"])
+    assert fill_count["cnt"] == 0
+    assert trade_count["cnt"] == 0
+    assert adjustment_count["cnt"] == 0
+    assert observation is not None
+    assert observation["fill_id"] == "known_order_level_fee_candidate_fill"
+    assert observation["fee"] == pytest.approx(50.0)
+    assert observation["fee_status"] == "order_level_candidate"
+    assert observation["accounting_status"] == "fee_pending"
+    assert observation["source"] == "reconcile_recent_activity_fee_pending"
+    assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
+    assert "paid_fee" in str(observation["raw_payload"])
+    assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
+    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
+    assert replay["broker_fill_observation_count"] >= 1
+    assert replay["broker_fill_fee_pending_count"] >= 1
+    assert replay["broker_fill_fee_candidate_order_level_count"] >= 1
+    assert replay["broker_fill_missing_fee_count"] == 0
+    assert "broker_fill_observations" in replay["omitted_event_families"]
     assert "recovery_required_orders=1" in str(gate_reason)
 
 

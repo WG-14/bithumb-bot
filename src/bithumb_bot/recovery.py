@@ -829,7 +829,7 @@ def _apply_recent_fills(
     recent_fills: list[BrokerFill],
     *,
     trusted_open_exchange_ids: set[str],
-) -> tuple[bool, list[str], int]:
+) -> tuple[bool, list[str], int, dict[str, int | str] | None]:
     local_rows = conn.execute(
         "SELECT client_order_id, exchange_order_id, side, status, qty_req, qty_filled FROM orders"
     ).fetchall()
@@ -839,6 +839,7 @@ def _apply_recent_fills(
     applied = False
     conflicts: list[str] = []
     blocked_invalid_price = 0
+    fee_pending_updates: dict[str, int | str] | None = None
 
     for fill in recent_fills:
         remote_exchange_id = str(fill.exchange_order_id or "")
@@ -912,6 +913,36 @@ def _apply_recent_fills(
             blocked_invalid_price += 1
             continue
 
+        if not _fill_fee_is_accounting_complete(fill):
+            observation_summary = _record_fee_pending_observations(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                exchange_order_id=(remote_exchange_id or None),
+                fills=[fill],
+                source="reconcile_recent_activity_fee_pending",
+            )
+            _mark_recovery_required_with_reason(
+                conn,
+                client_order_id=local_id,
+                side=str(local["side"]),
+                from_status=str(local["status"]),
+                reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
+                reason=(
+                    "recent broker fill observed but accounting is fee-pending; "
+                    f"exchange_order_id={remote_exchange_id or '<none>'}; "
+                    f"fill_id={fill.fill_id}; "
+                    f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
+                    "manual fee resolution required before ledger apply"
+                ),
+            )
+            updates = _fee_pending_metadata_updates(observation_summary)
+            if fee_pending_updates is None:
+                fee_pending_updates = updates
+            else:
+                _merge_fee_pending_metadata(fee_pending_updates, updates)
+            continue
+
         try:
             apply_fill_and_trade(
                 conn,
@@ -951,7 +982,7 @@ def _apply_recent_fills(
         if next_status is not None:
             set_status(local_id, next_status, conn=conn)
 
-    return applied, conflicts, blocked_invalid_price
+    return applied, conflicts, blocked_invalid_price, fee_pending_updates
 
 
 def _halt_on_source_conflict(conflicts: list[str]) -> None:
@@ -1571,8 +1602,15 @@ def _fee_gap_adjustment_history_summary(conn) -> dict[str, int | float]:
     }
 
 
+def _fill_fee_accounting_status(fill: BrokerFill) -> str:
+    """Classify whether an observed broker fill is safe for canonical accounting."""
+    if getattr(fill, "fee_status", "complete") == "complete" and fill.fee is not None:
+        return "accounting_complete"
+    return "fee_pending"
+
+
 def _fill_fee_is_accounting_complete(fill: BrokerFill) -> bool:
-    return bool(getattr(fill, "fee_status", "complete") == "complete" and fill.fee is not None)
+    return _fill_fee_accounting_status(fill) == "accounting_complete"
 
 
 def _get_salvage_fills(
@@ -1610,8 +1648,8 @@ def _record_fee_pending_observations(
         latest_fill_ts = max(latest_fill_ts, int(fill.fill_ts))
         latest_fee_status = str(getattr(fill, "fee_status", "unknown") or "unknown")
         latest_fill_id = str(fill.fill_id or "none")
-        accounting_complete = _fill_fee_is_accounting_complete(fill)
-        if not accounting_complete:
+        accounting_status = _fill_fee_accounting_status(fill)
+        if accounting_status != "accounting_complete":
             fee_pending_count += 1
         record_broker_fill_observation(
             conn,
@@ -1625,7 +1663,7 @@ def _record_fee_pending_observations(
             qty=fill.qty,
             fee=fill.fee,
             fee_status=str(getattr(fill, "fee_status", "unknown") or "unknown"),
-            accounting_status=("accounting_complete" if accounting_complete else "fee_pending"),
+            accounting_status=accounting_status,
             source=source,
             parse_warnings=getattr(fill, "parse_warnings", ()) or (),
             raw_payload=getattr(fill, "raw", None),
@@ -2032,13 +2070,22 @@ def reconcile_with_broker(broker: Broker) -> None:
             filtered_recent_orders,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
-        applied_recent_fill, fill_conflicts, blocked_recent_fill_price = _apply_recent_fills(
+        (
+            applied_recent_fill,
+            fill_conflicts,
+            blocked_recent_fill_price,
+            recent_fill_fee_pending_updates,
+        ) = _apply_recent_fills(
             conn,
             filtered_recent_fills,
             trusted_open_exchange_ids=trusted_open_exchange_ids,
         )
         conflicts.extend(fill_conflicts)
         metadata["invalid_fill_price_blocked"] += int(blocked_recent_fill_price)
+        if recent_fill_fee_pending_updates is not None:
+            _merge_fee_pending_metadata(metadata, recent_fill_fee_pending_updates)
+            if reason_code == REASON_RECONCILE_OK:
+                reason_code = REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED
 
         if applied_recent_fill:
             metadata["recent_fill_applied"] += 1

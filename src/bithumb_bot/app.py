@@ -1293,6 +1293,13 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, float | int | bool]:
         "external_position_adjustment_cash_total": float(replay["external_position_adjustment_cash_total"]),
         "external_position_adjustment_asset_total": float(replay["external_position_adjustment_asset_total"]),
         "fee_gap_accounting_repair_count": int(replay["fee_gap_accounting_repair_count"]),
+        "broker_fill_observation_count": int(replay["broker_fill_observation_count"]),
+        "broker_fill_fee_pending_count": int(replay["broker_fill_fee_pending_count"]),
+        "broker_fill_accounting_complete_count": int(replay["broker_fill_accounting_complete_count"]),
+        "broker_fill_fee_candidate_order_level_count": int(replay["broker_fill_fee_candidate_order_level_count"]),
+        "broker_fill_missing_fee_count": int(replay["broker_fill_missing_fee_count"]),
+        "broker_fill_zero_reported_fee_count": int(replay["broker_fill_zero_reported_fee_count"]),
+        "broker_fill_invalid_fee_count": int(replay["broker_fill_invalid_fee_count"]),
         "dup_fill_count": int(replay["dup_fill_count"]),
         "included_event_families": tuple(replay["included_event_families"]),
         "omitted_event_families": tuple(replay["omitted_event_families"]),
@@ -1322,6 +1329,13 @@ def cmd_audit_ledger() -> None:
     print(f"  external_position_adjustment_cash_total={float(replay['external_position_adjustment_cash_total']):,.3f}")
     print(f"  external_position_adjustment_asset_total={float(replay['external_position_adjustment_asset_total']):.10f}")
     print(f"  fee_gap_accounting_repair_count={int(replay['fee_gap_accounting_repair_count'])}")
+    print(f"  broker_fill_observation_count={int(replay['broker_fill_observation_count'])}")
+    print(f"  broker_fill_fee_pending_count={int(replay['broker_fill_fee_pending_count'])}")
+    print(f"  broker_fill_accounting_complete_count={int(replay['broker_fill_accounting_complete_count'])}")
+    print(f"  broker_fill_fee_candidate_order_level_count={int(replay['broker_fill_fee_candidate_order_level_count'])}")
+    print(f"  broker_fill_missing_fee_count={int(replay['broker_fill_missing_fee_count'])}")
+    print(f"  broker_fill_zero_reported_fee_count={int(replay['broker_fill_zero_reported_fee_count'])}")
+    print(f"  broker_fill_invalid_fee_count={int(replay['broker_fill_invalid_fee_count'])}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
     print(f"  included_event_families={','.join(replay['included_event_families'])}")
     print(f"  omitted_event_families={','.join(replay['omitted_event_families'])}")
@@ -2454,6 +2468,10 @@ def _load_recovery_report(
         "observation_count": 0,
         "fee_pending_count": 0,
         "accounting_complete_count": 0,
+        "fee_candidate_order_level_count": 0,
+        "missing_fee_count": 0,
+        "zero_reported_fee_count": 0,
+        "invalid_fee_count": 0,
         "last_event_ts": None,
         "last_client_order_id": None,
         "last_exchange_order_id": None,
@@ -2919,7 +2937,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         "    "
         f"observation_count={int(broker_fill_observation_summary.get('observation_count') or 0)} "
         f"fee_pending_count={int(broker_fill_observation_summary.get('fee_pending_count') or 0)} "
-        f"accounting_complete_count={int(broker_fill_observation_summary.get('accounting_complete_count') or 0)}"
+        f"accounting_complete_count={int(broker_fill_observation_summary.get('accounting_complete_count') or 0)} "
+        f"order_level_candidate_count={int(broker_fill_observation_summary.get('fee_candidate_order_level_count') or 0)} "
+        f"missing_fee_count={int(broker_fill_observation_summary.get('missing_fee_count') or 0)} "
+        f"zero_reported_fee_count={int(broker_fill_observation_summary.get('zero_reported_fee_count') or 0)} "
+        f"invalid_fee_count={int(broker_fill_observation_summary.get('invalid_fee_count') or 0)}"
     )
     print(
         "    "

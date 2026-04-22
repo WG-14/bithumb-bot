@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import sqlite3
 
-from ..db_core import mark_private_stream_event_applied, record_private_stream_event
+from ..config import settings
+from ..db_core import mark_private_stream_event_applied, record_broker_fill_observation, record_private_stream_event
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
 from ..oms import record_status_transition, set_exchange_order_id, set_status
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
@@ -46,6 +48,54 @@ def _find_local_order(conn: sqlite3.Connection, event: NormalizedMyOrderEvent):
         if row is not None:
             return row
     return None
+
+
+def _myorder_fee_accounting_complete(event: NormalizedMyOrderEvent) -> bool:
+    if event.fee is None:
+        return False
+    try:
+        fee = float(event.fee)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(fee) or fee < 0.0:
+        return False
+
+    notional = 0.0
+    if event.qty is not None and event.price is not None:
+        notional = max(0.0, float(event.qty)) * max(0.0, float(event.price))
+    material_threshold = max(0.0, float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW))
+    if fee <= 1e-12 and material_threshold > 0.0 and notional >= material_threshold:
+        return False
+    return str(event.fee_status or "") == "complete" or fee > 0.0
+
+
+def _record_fee_pending_stream_observation(
+    conn: sqlite3.Connection,
+    *,
+    event: NormalizedMyOrderEvent,
+    client_order_id: str,
+    exchange_order_id: str,
+    side: str,
+) -> None:
+    if event.qty is None or event.price is None or not event.fill_id:
+        return
+    record_broker_fill_observation(
+        conn,
+        event_ts=int(event.event_ts_ms),
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id or None,
+        fill_id=event.fill_id,
+        fill_ts=int(event.event_ts_ms),
+        side=side,
+        price=float(event.price),
+        qty=float(event.qty),
+        fee=event.fee,
+        fee_status=str(event.fee_status or "unknown"),
+        accounting_status="fee_pending",
+        source="myorder_private_stream_fee_pending",
+        parse_warnings=((event.fee_warning,) if event.fee_warning else ()),
+        raw_payload=event.raw_payload,
+    )
 
 
 def ingest_myorder_event(
@@ -109,6 +159,49 @@ def ingest_myorder_event(
         applied = True
 
     if event.status in {"PARTIAL", "FILLED"} and event.qty is not None and event.price is not None and event.fill_id:
+        if not _myorder_fee_accounting_complete(event):
+            _record_fee_pending_stream_observation(
+                conn,
+                event=event,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                side=side,
+            )
+            reason = (
+                "myorder fill accounting is fee-pending; "
+                f"exchange_order_id={exchange_order_id or '<none>'}; "
+                f"fill_id={event.fill_id}; fee_status={event.fee_status}; "
+                "manual fee resolution required before ledger apply"
+            )
+            current_status = str(row["status"] or "")
+            record_status_transition(
+                client_order_id,
+                from_status=current_status,
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(
+                client_order_id,
+                "RECOVERY_REQUIRED",
+                last_error=reason,
+                conn=conn,
+            )
+            mark_private_stream_event_applied(
+                conn,
+                dedupe_key=event.dedupe_key,
+                applied=True,
+                applied_status="recovery_required_fee_pending",
+            )
+            return MyOrderIngestResult(
+                dedupe_key=event.dedupe_key,
+                accepted=True,
+                applied=True,
+                action="recovery_required_fee_pending",
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                status="RECOVERY_REQUIRED",
+            )
         try:
             trade = apply_fill_and_trade(
                 conn,
@@ -118,7 +211,7 @@ def ingest_myorder_event(
                 fill_ts=int(event.event_ts_ms),
                 price=float(event.price),
                 qty=float(event.qty),
-                fee=0.0,
+                fee=float(event.fee),
                 strategy_name=strategy_name,
                 note="myorder private stream",
                 allow_entry_decision_fallback=False,

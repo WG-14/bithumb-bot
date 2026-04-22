@@ -2013,6 +2013,13 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
     external_position_adjustment_asset_total = 0.0
     external_position_adjustment_count = 0
     fee_gap_repair_count = 0
+    broker_fill_observation_count = 0
+    broker_fill_fee_pending_count = 0
+    broker_fill_accounting_complete_count = 0
+    broker_fill_fee_candidate_order_level_count = 0
+    broker_fill_missing_fee_count = 0
+    broker_fill_zero_reported_fee_count = 0
+    broker_fill_invalid_fee_count = 0
     dup_fill_count = 0
 
     seen_fill_keys: set[tuple[str, int, float, float]] = set()
@@ -2133,6 +2140,28 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
         seen_fee_gap_repair_keys.add(key)
         fee_gap_repair_count += 1
 
+    observation_summary = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS observation_count,
+            COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
+            COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count,
+            COALESCE(SUM(CASE WHEN fee_status='order_level_candidate' THEN 1 ELSE 0 END), 0) AS fee_candidate_order_level_count,
+            COALESCE(SUM(CASE WHEN fee_status='missing' THEN 1 ELSE 0 END), 0) AS missing_fee_count,
+            COALESCE(SUM(CASE WHEN fee_status='zero_reported' THEN 1 ELSE 0 END), 0) AS zero_reported_fee_count,
+            COALESCE(SUM(CASE WHEN fee_status IN ('empty', 'invalid', 'unparseable') THEN 1 ELSE 0 END), 0) AS invalid_fee_count
+        FROM broker_fill_observations
+        """
+    ).fetchone()
+    if observation_summary is not None:
+        broker_fill_observation_count = int(observation_summary["observation_count"] or 0)
+        broker_fill_fee_pending_count = int(observation_summary["fee_pending_count"] or 0)
+        broker_fill_accounting_complete_count = int(observation_summary["accounting_complete_count"] or 0)
+        broker_fill_fee_candidate_order_level_count = int(observation_summary["fee_candidate_order_level_count"] or 0)
+        broker_fill_missing_fee_count = int(observation_summary["missing_fee_count"] or 0)
+        broker_fill_zero_reported_fee_count = int(observation_summary["zero_reported_fee_count"] or 0)
+        broker_fill_invalid_fee_count = int(observation_summary["invalid_fee_count"] or 0)
+
     return {
         "replay_cash": cash,
         "replay_qty": qty,
@@ -2150,6 +2179,13 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
         "external_position_adjustment_cash_total": external_position_adjustment_cash_total,
         "external_position_adjustment_asset_total": external_position_adjustment_asset_total,
         "fee_gap_accounting_repair_count": fee_gap_repair_count,
+        "broker_fill_observation_count": broker_fill_observation_count,
+        "broker_fill_fee_pending_count": broker_fill_fee_pending_count,
+        "broker_fill_accounting_complete_count": broker_fill_accounting_complete_count,
+        "broker_fill_fee_candidate_order_level_count": broker_fill_fee_candidate_order_level_count,
+        "broker_fill_missing_fee_count": broker_fill_missing_fee_count,
+        "broker_fill_zero_reported_fee_count": broker_fill_zero_reported_fee_count,
+        "broker_fill_invalid_fee_count": broker_fill_invalid_fee_count,
         "dup_fill_count": dup_fill_count,
         "included_event_families": (
             "fills",
@@ -2158,6 +2194,7 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, float | int
             "external_position_adjustments",
         ),
         "omitted_event_families": (
+            "broker_fill_observations",
             "position_authority_repairs",
             "fee_gap_accounting_repairs",
         ),
@@ -2682,7 +2719,11 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         SELECT
             COUNT(*) AS observation_count,
             COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
-            COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count
+            COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count,
+            COALESCE(SUM(CASE WHEN fee_status='order_level_candidate' THEN 1 ELSE 0 END), 0) AS fee_candidate_order_level_count,
+            COALESCE(SUM(CASE WHEN fee_status='missing' THEN 1 ELSE 0 END), 0) AS missing_fee_count,
+            COALESCE(SUM(CASE WHEN fee_status='zero_reported' THEN 1 ELSE 0 END), 0) AS zero_reported_fee_count,
+            COALESCE(SUM(CASE WHEN fee_status IN ('empty', 'invalid', 'unparseable') THEN 1 ELSE 0 END), 0) AS invalid_fee_count
         FROM broker_fill_observations
         """
     ).fetchone()
@@ -2699,6 +2740,10 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         "observation_count": int(row["observation_count"] if row else 0),
         "fee_pending_count": int(row["fee_pending_count"] if row else 0),
         "accounting_complete_count": int(row["accounting_complete_count"] if row else 0),
+        "fee_candidate_order_level_count": int(row["fee_candidate_order_level_count"] if row else 0),
+        "missing_fee_count": int(row["missing_fee_count"] if row else 0),
+        "zero_reported_fee_count": int(row["zero_reported_fee_count"] if row else 0),
+        "invalid_fee_count": int(row["invalid_fee_count"] if row else 0),
         "last_event_ts": int(last["event_ts"]) if last is not None else None,
         "last_client_order_id": str(last["client_order_id"]) if last is not None else None,
         "last_exchange_order_id": str(last["exchange_order_id"]) if last is not None and last["exchange_order_id"] is not None else None,

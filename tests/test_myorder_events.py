@@ -15,6 +15,7 @@ def test_normalize_myorder_event_tolerates_unknown_fields_and_preserves_correlat
         "ord_type": "market",
         "executed_volume": "0.1",
         "price": "12345",
+        "fee": "1.23",
         "extra_future_field": "ignored",
         "nested_future_payload": {"surprise": True},
     }
@@ -27,8 +28,27 @@ def test_normalize_myorder_event_tolerates_unknown_fields_and_preserves_correlat
     assert normalized.event_type == "trade"
     assert normalized.qty == 0.1
     assert normalized.price == 12345.0
+    assert normalized.fee == 1.23
+    assert normalized.fee_status == "complete"
+    assert normalized.fee_warning is None
     assert normalized.raw_payload["extra_future_field"] == "ignored"
     assert normalized.dedupe_key
+
+
+def test_normalize_myorder_event_marks_missing_fee_as_uncertain() -> None:
+    normalized = normalize_myorder_event_payload(
+        {
+            "uuid": "remote-missing-fee",
+            "client_order_id": "cid-missing-fee",
+            "state": "done",
+            "executed_volume": "0.1",
+            "price": "100000000",
+        }
+    )
+
+    assert normalized.fee is None
+    assert normalized.fee_status == "missing"
+    assert normalized.fee_warning == "missing_fee_field"
 
 
 def test_bithumb_broker_exposes_myorder_normalizer() -> None:

@@ -173,7 +173,7 @@ def test_apply_recent_fills_allows_client_id_linkage_for_non_submit_unknown_when
         )
         conn.commit()
 
-        applied, conflicts, blocked_invalid_price = _apply_recent_fills(
+        applied, conflicts, blocked_invalid_price, fee_pending_updates = _apply_recent_fills(
             conn,
             [
                 BrokerFill(
@@ -197,6 +197,7 @@ def test_apply_recent_fills_allows_client_id_linkage_for_non_submit_unknown_when
     assert applied is True
     assert conflicts == []
     assert blocked_invalid_price == 0
+    assert fee_pending_updates is None
     assert row is not None
     assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == 1.0
