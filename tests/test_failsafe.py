@@ -121,7 +121,12 @@ class _LoopConn:
             return _Rows({"open_count": 1, "oldest_created_ts": self.open_order_created_ts})
 
         if "COUNT(*) AS open_order_count" in q:
-            return _Rows({"open_order_count": 0 if self.open_order_created_ts is None else 1})
+            return _Rows(
+                {
+                    "open_order_count": 0 if self.open_order_created_ts is None else 1,
+                    "recovery_required_count": 0,
+                }
+            )
 
         if "FROM portfolio" in q:
             return _Rows({"cash_krw": 100000.0, "asset_qty": self.asset_qty})
@@ -217,7 +222,16 @@ class _LoopConn:
         if "COUNT(*) AS repair_count" in q and "FROM fee_gap_accounting_repairs" in q:
             return _Rows({"repair_count": 0})
 
+        if "COUNT(*) AS repair_count" in q and "FROM position_authority_repairs" in q:
+            return _Rows({"repair_count": 0})
+
         if "FROM fee_gap_accounting_repairs" in q and "ORDER BY event_ts DESC" in q:
+            return _Rows(None)
+
+        if "FROM external_position_adjustments" in q and "COUNT(*) AS adjustment_count" in q:
+            return _Rows({"adjustment_count": 0, "asset_qty_total": 0.0, "cash_total": 0.0})
+
+        if "FROM external_position_adjustments" in q and "ORDER BY event_ts DESC" in q:
             return _Rows(None)
 
         if "SET status='RECOVERY_REQUIRED'" in q:

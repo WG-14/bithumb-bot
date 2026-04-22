@@ -17,6 +17,13 @@ from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def _read_portfolio_snapshot(conn) -> tuple[float, float, float, float]:
     row = conn.execute(
         """
@@ -28,10 +35,10 @@ def _read_portfolio_snapshot(conn) -> tuple[float, float, float, float]:
     if row is None:
         return (0.0, 0.0, 0.0, 0.0)
     return (
-        normalize_cash_amount(row["cash_available"]),
-        normalize_cash_amount(row["cash_locked"]),
-        normalize_asset_qty(row["asset_available"]),
-        normalize_asset_qty(row["asset_locked"]),
+        normalize_cash_amount(_row_value(row, "cash_available", _row_value(row, "cash_krw", 0.0))),
+        normalize_cash_amount(_row_value(row, "cash_locked", 0.0)),
+        normalize_asset_qty(_row_value(row, "asset_available", _row_value(row, "asset_qty", 0.0))),
+        normalize_asset_qty(_row_value(row, "asset_locked", 0.0)),
     )
 
 
@@ -91,6 +98,8 @@ def build_external_position_accounting_repair_preview(conn) -> dict[str, Any]:
         metadata = parsed if isinstance(parsed, dict) else {}
     else:
         metadata = {}
+    last_reconcile_status = getattr(state, "last_reconcile_status", None)
+    last_reconcile_reason_code = getattr(state, "last_reconcile_reason_code", None)
     balance_observed_ts_ms = int(metadata.get("balance_observed_ts_ms", 0) or 0)
 
     reasons: list[str] = []
@@ -98,8 +107,8 @@ def build_external_position_accounting_repair_preview(conn) -> dict[str, Any]:
         reasons.append(f"open_or_unresolved_orders={open_order_count}")
     if recovery_required_count > 0:
         reasons.append(f"recovery_required_orders={recovery_required_count}")
-    if str(state.last_reconcile_status or "").lower() != "ok":
-        reasons.append(f"last_reconcile_status={state.last_reconcile_status or 'none'}")
+    if str(last_reconcile_status or "").lower() != "ok":
+        reasons.append(f"last_reconcile_status={last_reconcile_status or 'none'}")
     if balance_observed_ts_ms <= 0:
         reasons.append("balance_snapshot_evidence_missing")
     if projection_repair_count <= 0:
@@ -138,8 +147,8 @@ def build_external_position_accounting_repair_preview(conn) -> dict[str, Any]:
         "open_lot_count": int(lot_snapshot.open_lot_count),
         "dust_tracking_lot_count": int(lot_snapshot.dust_tracking_lot_count),
         "reserved_exit_qty": float(reserved_exit_qty),
-        "last_reconcile_status": state.last_reconcile_status or "none",
-        "last_reconcile_reason_code": state.last_reconcile_reason_code or "none",
+        "last_reconcile_status": last_reconcile_status or "none",
+        "last_reconcile_reason_code": last_reconcile_reason_code or "none",
         "balance_observed_ts_ms": balance_observed_ts_ms,
         "projection_repair_count": projection_repair_count,
         "external_position_adjustment_count": int(adjustment_summary["adjustment_count"] or 0),

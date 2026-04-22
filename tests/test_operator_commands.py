@@ -5602,6 +5602,17 @@ def test_recover_order_success_for_known_exchange_order_id(monkeypatch, tmp_path
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db()
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+    finally:
+        conn.close()
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoverSuccessBroker(),
@@ -5956,6 +5967,17 @@ def test_recover_order_does_not_auto_resume_trading(monkeypatch, tmp_path):
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db()
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+    finally:
+        conn.close()
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoverSuccessBroker(),
@@ -5991,6 +6013,17 @@ def test_resume_succeeds_after_manual_recovery_clears_recovery_required(
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db()
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+    finally:
+        conn.close()
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoverSuccessBroker(),
@@ -6044,6 +6077,17 @@ def test_halt_resume_flow_requires_manual_recover_order_before_resume(
     original_cash = settings.START_CASH_KRW
     object.__setattr__(settings, "MODE", "live")
     object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    conn = ensure_db()
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+    finally:
+        conn.close()
     monkeypatch.setattr(
         "bithumb_bot.broker.bithumb.BithumbBroker",
         lambda: _RecoverSuccessBroker(),

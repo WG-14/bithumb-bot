@@ -426,20 +426,23 @@ def _build_current_snapshot(
 ) -> dict[str, Any] | DailyLossEvaluation:
     local_snapshot = _portfolio_snapshot(conn)
     state = runtime_state.snapshot()
+    last_reconcile_epoch_sec = getattr(state, "last_reconcile_epoch_sec", None)
+    last_reconcile_reason_code = getattr(state, "last_reconcile_reason_code", None)
+    last_reconcile_status = getattr(state, "last_reconcile_status", None)
     details: dict[str, Any] = {
         "evaluation_origin": evaluation_origin,
         "current_source": "local_portfolio",
         "local_cash_krw": float(local_snapshot["cash_total"]),
         "local_asset_qty": float(local_snapshot["asset_total"]),
-        "current_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
-        "current_reconcile_reason_code": state.last_reconcile_reason_code,
-        "last_reconcile_status": state.last_reconcile_status,
+        "current_reconcile_epoch_sec": last_reconcile_epoch_sec,
+        "current_reconcile_reason_code": last_reconcile_reason_code,
+        "last_reconcile_status": last_reconcile_status,
         "mark_price": float(mark_price),
         "mark_price_source": str(mark_price_source),
     }
 
     if settings.MODE == "live":
-        if str(state.last_reconcile_status or "").lower() != "ok" or state.last_reconcile_epoch_sec is None:
+        if str(last_reconcile_status or "").lower() != "ok" or last_reconcile_epoch_sec is None:
             details["mismatch_summary"] = "latest reconcile state is not ok"
             return _mismatch_evaluation(
                 evaluation_ts_ms=ts_ms,
@@ -449,7 +452,7 @@ def _build_current_snapshot(
                 mark_price_source=mark_price_source,
                 reason_detail=(
                     "latest reconcile is not verified "
-                    f"(status={state.last_reconcile_status or 'none'} reason_code={state.last_reconcile_reason_code or 'none'})"
+                    f"(status={last_reconcile_status or 'none'} reason_code={last_reconcile_reason_code or 'none'})"
                 ),
                 details=details,
             )
@@ -525,8 +528,8 @@ def _build_current_snapshot(
             "current_source": "broker_balance_snapshot",
             "current_balance_source": str(balance_snapshot.source_id or "unknown"),
             "current_balance_observed_ts_ms": int(balance_snapshot.observed_ts_ms),
-            "current_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
-            "current_reconcile_reason_code": state.last_reconcile_reason_code,
+            "current_reconcile_epoch_sec": last_reconcile_epoch_sec,
+            "current_reconcile_reason_code": last_reconcile_reason_code,
             "local_cash_krw": float(local_snapshot["cash_total"]),
             "local_asset_qty": float(local_snapshot["asset_total"]),
             "broker_cash_krw": float(broker_cash_total),
@@ -542,8 +545,8 @@ def _build_current_snapshot(
         "current_source": "local_portfolio",
         "current_balance_source": "local_portfolio",
         "current_balance_observed_ts_ms": int(ts_ms),
-        "current_reconcile_epoch_sec": state.last_reconcile_epoch_sec,
-        "current_reconcile_reason_code": state.last_reconcile_reason_code,
+        "current_reconcile_epoch_sec": last_reconcile_epoch_sec,
+        "current_reconcile_reason_code": last_reconcile_reason_code,
         "local_cash_krw": float(local_snapshot["cash_total"]),
         "local_asset_qty": float(local_snapshot["asset_total"]),
         "broker_cash_krw": None,
@@ -913,7 +916,7 @@ def evaluate_order_submission_halt(
     evaluation_origin: str = "submission_halt",
 ) -> tuple[bool, str]:
     """Shared hard-stop checks before placing any new order."""
-    del cash, qty
+    del cash
     if settings.KILL_SWITCH:
         return True, "KILL_SWITCH=ON"
 
