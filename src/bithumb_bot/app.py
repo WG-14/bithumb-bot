@@ -99,6 +99,7 @@ from .reporting import (
     cmd_fee_diagnostics,
     _format_external_cash_adjustment_summary,
     cmd_ops_report,
+    cmd_risk_report,
     cmd_strategy_report,
     fetch_attribution_quality_summary,
     fetch_recovery_attribution_signal_summary,
@@ -4408,6 +4409,13 @@ def main(argv: list[str] | None = None) -> int:
     ops = sub.add_parser("ops-report", help="operator observability report")
     ops.add_argument("--limit", type=int, default=20)
 
+    risk_report = sub.add_parser(
+        "risk-report",
+        help="show daily-loss baseline and recent risk evaluations",
+    )
+    risk_report.add_argument("--limit", type=int, default=20)
+    risk_report.add_argument("--json", action="store_true")
+
     decision_telemetry = sub.add_parser(
         "decision-telemetry",
         help="summary of HOLD/blocked decision telemetry",
@@ -4595,6 +4603,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_fills(args.limit)
     elif args.cmd == "ops-report":
         cmd_ops_report(limit=max(1, int(args.limit)))
+    elif args.cmd == "risk-report":
+        cmd_risk_report(limit=max(1, int(args.limit)), as_json=bool(args.json))
     elif args.cmd == "decision-telemetry":
         cmd_decision_telemetry(limit=max(1, int(args.limit)))
     elif args.cmd == "fee-diagnostics":

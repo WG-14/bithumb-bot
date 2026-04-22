@@ -22,6 +22,7 @@ from bithumb_bot.app import (
     cmd_reconcile,
     cmd_recover_order,
     cmd_recovery_report,
+    cmd_risk_report,
     cmd_restart_checklist,
     cmd_resume,
 )
@@ -56,6 +57,7 @@ from bithumb_bot.public_api_orderbook import BestQuote
 from bithumb_bot.reason_codes import DUST_RESIDUAL_UNSELLABLE
 from bithumb_bot.recovery import reconcile_with_broker
 from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
+from bithumb_bot.risk import evaluate_daily_loss_state
 from bithumb_bot.utils_time import kst_str
 
 
@@ -3897,6 +3899,58 @@ def test_health_reports_order_rule_fallback_risk_when_autosync_degrades(monkeypa
     assert "order_rules_autosync=FALLBACK" in out
     assert "reason_code=AUTH_QUERY_HASH_MISMATCH" in out
     assert "risk=order-rule auto-sync unavailable" in out
+
+
+def test_risk_report_prints_recent_evaluation_with_provenance(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "paper")
+    object.__setattr__(app_module.settings, "MODE", "paper")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(app_module.settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "MAX_DAILY_LOSS_KRW", 30_000.0)
+    object.__setattr__(app_module.settings, "MAX_DAILY_LOSS_KRW", 30_000.0)
+
+    conn = ensure_db()
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=1_000_000.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        now_ms = int(time.time() * 1000)
+        evaluate_daily_loss_state(
+            conn,
+            ts_ms=now_ms,
+            price=100_000_000.0,
+            mark_price_source="test_seed",
+            evaluation_origin="test_seed",
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=954_734.0,
+            cash_locked=0.0,
+            asset_available=0.0,
+            asset_locked=0.0,
+        )
+        evaluate_daily_loss_state(
+            conn,
+            ts_ms=now_ms + 1,
+            price=100_000_000.0,
+            mark_price_source="test_mark",
+            evaluation_origin="test_breach",
+        )
+    finally:
+        conn.close()
+
+    cmd_risk_report(limit=5)
+    out = capsys.readouterr().out
+
+    assert "[RISK-REPORT]" in out
+    assert "baseline_origin=seeded_on_first_verified_eval" in out
+    assert "reason_code=DAILY_LOSS_LIMIT" in out
+    assert "current_source=local_portfolio" in out
 
 
 def test_health_surfaces_supported_buy_price_none_resolution(monkeypatch, capsys, tmp_path):

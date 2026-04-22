@@ -364,6 +364,9 @@ def execute_live_submission_and_application(
         cash=float(position_state.cash),
         qty=float(position_state.portfolio_qty),
         price=float(market_price),
+        broker=broker,
+        mark_price_source="live_market_reference",
+        evaluation_origin="submission_halt",
     )
     if blocked:
         gate_blocked, reason_code, gate_reason = evaluate_unresolved_order_gate(

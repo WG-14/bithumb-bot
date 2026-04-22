@@ -2181,6 +2181,9 @@ def _determine_live_execution_intent(
             cash=position_state.cash,
             qty=guardrail_qty,
             price=market_price,
+            broker=broker,
+            mark_price_source="live_market_reference",
+            evaluation_origin="buy_guardrails",
         )
         if blocked:
             RUN_LOG.info(

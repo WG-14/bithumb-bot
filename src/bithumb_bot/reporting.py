@@ -45,6 +45,7 @@ from .db_core import (
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .lifecycle import summarize_reserved_exit_qty
 from .markets import canonical_market_with_raw
+from .risk import fetch_daily_risk_baseline, fetch_recent_risk_evaluations
 from .storage_io import write_json_atomic
 from .utils_time import kst_str, parse_interval_sec
 from .run_lock import read_run_lock_status
@@ -4015,6 +4016,113 @@ def cmd_ops_report(*, limit: int = 20) -> None:
         f"pnl_before_fee={_fmt_float(fee_summary.pnl_before_fee_total, 2)} "
         f"pnl_after_fee={_fmt_float(fee_summary.pnl_after_fee_total, 2)}"
     )
+
+
+def cmd_risk_report(*, limit: int = 20, as_json: bool = False) -> None:
+    conn = ensure_db()
+    try:
+        baseline = fetch_daily_risk_baseline(conn)
+        evaluations = fetch_recent_risk_evaluations(conn, limit=max(1, int(limit)))
+        health_row = conn.execute(
+            """
+            SELECT
+                last_reconcile_epoch_sec,
+                last_reconcile_status,
+                last_reconcile_reason_code,
+                last_disable_reason,
+                halt_reason_code
+            FROM bot_health
+            WHERE id=1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    payload = {
+        "mode": settings.MODE,
+        "pair": settings.PAIR,
+        "max_daily_loss_krw": float(settings.MAX_DAILY_LOSS_KRW),
+        "today_baseline": baseline,
+        "recent_evaluations": evaluations,
+        "runtime_state": {
+            "last_reconcile_epoch_sec": (
+                float(health_row["last_reconcile_epoch_sec"])
+                if health_row and health_row["last_reconcile_epoch_sec"] is not None
+                else None
+            ),
+            "last_reconcile_status": (
+                str(health_row["last_reconcile_status"])
+                if health_row and health_row["last_reconcile_status"] is not None
+                else None
+            ),
+            "last_reconcile_reason_code": (
+                str(health_row["last_reconcile_reason_code"])
+                if health_row and health_row["last_reconcile_reason_code"] is not None
+                else None
+            ),
+            "halt_reason_code": (
+                str(health_row["halt_reason_code"])
+                if health_row and health_row["halt_reason_code"] is not None
+                else None
+            ),
+            "last_disable_reason": (
+                str(health_row["last_disable_reason"])
+                if health_row and health_row["last_disable_reason"] is not None
+                else None
+            ),
+        },
+    }
+    write_json_atomic(PATH_MANAGER.report_path("risk_report"), payload)
+
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+
+    print("[RISK-REPORT]")
+    print(f"  mode={settings.MODE} pair={settings.PAIR} max_daily_loss_krw={float(settings.MAX_DAILY_LOSS_KRW):,.3f}")
+    if baseline is None:
+        print("  baseline=none")
+    else:
+        print(
+            "  "
+            f"baseline_day={baseline.get('day_kst')} "
+            f"start_equity={float(baseline.get('start_equity') or 0.0):,.3f} "
+            f"baseline_cash_krw={float(baseline.get('baseline_cash_krw') or 0.0):,.3f} "
+            f"baseline_asset_qty={float(baseline.get('baseline_asset_qty') or 0.0):.10f} "
+            f"baseline_mark_price={float(baseline.get('baseline_mark_price') or 0.0):,.3f} "
+            f"baseline_origin={baseline.get('baseline_origin') or '-'} "
+            f"baseline_balance_source={baseline.get('baseline_balance_source') or '-'} "
+            f"baseline_balance_observed_ts_ms={baseline.get('baseline_balance_observed_ts_ms') or '-'}"
+        )
+    runtime_state_snapshot = payload["runtime_state"]
+    print(
+        "  "
+        f"last_reconcile_status={runtime_state_snapshot['last_reconcile_status'] or '-'} "
+        f"last_reconcile_reason_code={runtime_state_snapshot['last_reconcile_reason_code'] or '-'} "
+        f"halt_reason_code={runtime_state_snapshot['halt_reason_code'] or '-'}"
+    )
+    print(f"  report_path={PATH_MANAGER.report_path('risk_report')}")
+    print(f"[P1] recent_evaluations(top {len(evaluations)}):")
+    if not evaluations:
+        print("  none")
+        return
+    for row in evaluations:
+        print(
+            "  "
+            f"evaluation_ts={kst_str(int(row['evaluation_ts_ms']))} "
+            f"origin={row['evaluation_origin']} "
+            f"decision={row['decision']} "
+            f"reason_code={row['reason_code']} "
+            f"loss_today={float(row['loss_today'] or 0.0):,.3f} "
+            f"start_equity={float(row['start_equity'] or 0.0):,.3f} "
+            f"current_equity={float(row['current_equity'] or 0.0):,.3f} "
+            f"current_cash_krw={float(row['current_cash_krw'] or 0.0):,.3f} "
+            f"current_asset_qty={float(row['current_asset_qty'] or 0.0):.10f} "
+            f"mark_price={float(row['mark_price'] or 0.0):,.3f} "
+            f"current_source={row['current_source'] or '-'} "
+            f"balance_source={row['current_balance_source'] or '-'} "
+            f"mismatch_summary={row['mismatch_summary'] or '-'}"
+        )
 
 
 def cmd_decision_telemetry(*, limit: int = 200) -> None:

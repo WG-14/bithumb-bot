@@ -792,8 +792,90 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS daily_risk (
             day_kst TEXT PRIMARY KEY,
-            start_equity REAL NOT NULL
+            start_equity REAL NOT NULL,
+            baseline_cash_krw REAL,
+            baseline_asset_qty REAL,
+            baseline_mark_price REAL,
+            baseline_mark_price_source TEXT,
+            baseline_origin TEXT,
+            baseline_balance_source TEXT,
+            baseline_balance_observed_ts_ms INTEGER,
+            baseline_reconcile_epoch_sec REAL,
+            baseline_reconcile_reason_code TEXT,
+            baseline_context TEXT,
+            created_ts_ms INTEGER
         )
+        """
+    )
+    _ensure_column(conn, "daily_risk", "baseline_cash_krw", "baseline_cash_krw REAL")
+    _ensure_column(conn, "daily_risk", "baseline_asset_qty", "baseline_asset_qty REAL")
+    _ensure_column(conn, "daily_risk", "baseline_mark_price", "baseline_mark_price REAL")
+    _ensure_column(conn, "daily_risk", "baseline_mark_price_source", "baseline_mark_price_source TEXT")
+    _ensure_column(conn, "daily_risk", "baseline_origin", "baseline_origin TEXT")
+    _ensure_column(conn, "daily_risk", "baseline_balance_source", "baseline_balance_source TEXT")
+    _ensure_column(
+        conn,
+        "daily_risk",
+        "baseline_balance_observed_ts_ms",
+        "baseline_balance_observed_ts_ms INTEGER",
+    )
+    _ensure_column(conn, "daily_risk", "baseline_reconcile_epoch_sec", "baseline_reconcile_epoch_sec REAL")
+    _ensure_column(
+        conn,
+        "daily_risk",
+        "baseline_reconcile_reason_code",
+        "baseline_reconcile_reason_code TEXT",
+    )
+    _ensure_column(conn, "daily_risk", "baseline_context", "baseline_context TEXT")
+    _ensure_column(conn, "daily_risk", "created_ts_ms", "created_ts_ms INTEGER")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            evaluation_ts_ms INTEGER NOT NULL,
+            day_kst TEXT NOT NULL,
+            evaluation_origin TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            max_daily_loss_krw REAL NOT NULL,
+            start_equity REAL,
+            current_equity REAL,
+            loss_today REAL,
+            current_cash_krw REAL,
+            current_asset_qty REAL,
+            mark_price REAL NOT NULL,
+            mark_price_source TEXT NOT NULL,
+            baseline_cash_krw REAL,
+            baseline_asset_qty REAL,
+            baseline_mark_price REAL,
+            baseline_origin TEXT,
+            baseline_balance_source TEXT,
+            baseline_balance_observed_ts_ms INTEGER,
+            current_source TEXT,
+            current_balance_source TEXT,
+            current_balance_observed_ts_ms INTEGER,
+            current_reconcile_epoch_sec REAL,
+            current_reconcile_reason_code TEXT,
+            local_cash_krw REAL,
+            local_asset_qty REAL,
+            broker_cash_krw REAL,
+            broker_asset_qty REAL,
+            mismatch_summary TEXT,
+            details_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_evaluations_day_eval_ts
+        ON risk_evaluations(day_kst, evaluation_ts_ms, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_evaluations_reason_code
+        ON risk_evaluations(reason_code, evaluation_ts_ms, id)
         """
     )
 

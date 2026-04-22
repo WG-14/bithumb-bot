@@ -35,7 +35,7 @@ def _infer_severity(*, event: str, reason_code: str | None, state_to: str | None
         return AlertSeverity.CRITICAL
     if next_state in {"HALTED", "RECOVERY_REQUIRED", "SUBMIT_UNKNOWN"}:
         return AlertSeverity.CRITICAL
-    if reason in {"KILL_SWITCH", "DAILY_LOSS_LIMIT", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}:
+    if reason in {"KILL_SWITCH", "DAILY_LOSS_LIMIT", "RISK_STATE_MISMATCH", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED"}:
         return AlertSeverity.CRITICAL
     if kind in {"halt", "kill_switch", "risk_breach", "recovery_required"}:
         return AlertSeverity.CRITICAL

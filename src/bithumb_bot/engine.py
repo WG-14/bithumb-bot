@@ -49,7 +49,12 @@ from .reason_codes import (
     STARTUP_BLOCKED,
 )
 from . import runtime_state
-from .risk import evaluate_daily_loss_breach, evaluate_position_loss_breach
+from .risk import (
+    RISK_STATE_MISMATCH,
+    daily_loss_reason_code_from_reason,
+    evaluate_daily_loss_breach,
+    evaluate_position_loss_breach,
+)
 from .oms import collect_risky_order_state
 from .flatten import flatten_btc_position
 from .execution_service import (
@@ -1620,6 +1625,8 @@ def _halt_trading(reason: HaltReason, *, unresolved: bool = False, attempt_flatt
 def _format_operator_next_action(*, reason_code: str, unresolved: bool, operator_action_required: bool, open_orders_present: bool, position_present: bool) -> str:
     if reason_code in {"DAILY_LOSS_LIMIT", POSITION_LOSS_LIMIT}:
         return "review risk breach details, verify exposure, then run recovery-report"
+    if reason_code == RISK_STATE_MISMATCH:
+        return "review risk-report, verify reconcile and portfolio state, then run recovery-report"
     if "RECONCILE" in reason_code:
         return "run reconcile, validate order state, then run recovery-report before resume"
     if operator_action_required or unresolved:
@@ -1630,6 +1637,8 @@ def _format_operator_next_action(*, reason_code: str, unresolved: bool, operator
 
 
 def _operator_hint_command(reason_code: str) -> str:
+    if reason_code == RISK_STATE_MISMATCH:
+        return "uv run bithumb-bot risk-report && uv run python bot.py recovery-report"
     if "RECONCILE" in reason_code:
         return "uv run python bot.py reconcile && uv run python bot.py recovery-report"
     return "uv run python bot.py recovery-report"
@@ -2374,19 +2383,29 @@ def run_loop(short_n: int, long_n: int) -> None:
                             cash=portfolio_cash,
                             qty=portfolio_qty,
                             price=float(last_close),
+                            broker=broker,
+                            mark_price_source="closed_candle",
+                            evaluation_origin="run_loop_daily_halt",
                         )
                         if blocked:
-                            halt_reason, canceled_ok, cleanup_unresolved = _attempt_risk_breach_flatten(
-                                broker,
-                                reason_code="DAILY_LOSS_LIMIT",
-                                reason_detail=reason,
-                                cancel_trigger="daily-loss-halt",
-                                flatten_trigger="daily-loss-halt",
-                            )
-                            _halt_trading(
-                                halt_reason,
-                                unresolved=cleanup_unresolved,
-                            )
+                            reason_code = daily_loss_reason_code_from_reason(reason)
+                            if reason_code == RISK_STATE_MISMATCH:
+                                _halt_trading(
+                                    _halt_reason(RISK_STATE_MISMATCH, reason),
+                                    unresolved=True,
+                                )
+                            else:
+                                halt_reason, canceled_ok, cleanup_unresolved = _attempt_risk_breach_flatten(
+                                    broker,
+                                    reason_code="DAILY_LOSS_LIMIT",
+                                    reason_detail=reason,
+                                    cancel_trigger="daily-loss-halt",
+                                    flatten_trigger="daily-loss-halt",
+                                )
+                                _halt_trading(
+                                    halt_reason,
+                                    unresolved=cleanup_unresolved,
+                                )
                             continue
 
                         position_loss_qty = float(position_state.normalized_exposure.open_exposure_qty)
