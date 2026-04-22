@@ -1,4 +1,19 @@
-# Pipeline test request file.
-Add a short comment line near the top of scripts/codex_request.txt saying:
-"Pipeline test request file."
-Do not modify any other files.
+Your task is strictly limited to creating a single test text file. Do not modify any source code, scripts, configs, documentation, git settings, or existing files in the repository.
+
+Instructions:
+
+1. Create exactly one file: `test.txt`
+2. Place it in the repository root
+3. Write the following line into it:
+   `This is a test file created for verification purposes.`
+4. Make no other changes of any kind
+
+Important constraints:
+
+* No edits to existing files
+* No commits
+* No dependency changes
+* No cleanup or formatting changes
+* No additional files or folders
+
+When finished, report only that `test.txt` was created.
