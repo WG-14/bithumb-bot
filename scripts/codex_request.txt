@@ -2,7 +2,7 @@ Your task is strictly limited to creating a single test text file. Do not modify
 
 Instructions:
 
-1. Create exactly one file: `test.txt`
+1. Create exactly one file: `test1.txt`
 2. Place it in the repository root
 3. Write the following line into it:
    `This is a test file created for verification purposes.`
@@ -16,4 +16,4 @@ Important constraints:
 * No cleanup or formatting changes
 * No additional files or folders
 
-When finished, report only that `test.txt` was created.
+When finished, report only that `test1.txt` was created.
