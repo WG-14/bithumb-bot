@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
 from . import runtime_state
 from .config import settings
-from .db_core import ensure_db, get_fee_gap_accounting_repair_summary, portfolio_asset_total
+from .db_core import (
+    ensure_db,
+    get_fee_gap_accounting_repair_summary,
+    portfolio_asset_total,
+    summarize_fill_accounting_incident_projection,
+)
 from .dust import build_dust_display_context, build_position_state_model
 from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_policy import classify_fee_gap_incident_verdict, matching_fee_gap_repair_present
@@ -32,6 +36,7 @@ class RuntimeReadinessSnapshot:
     lot_snapshot: Any
     reconcile_metadata: dict[str, object]
     fee_pending_count: int
+    fill_accounting_incident_summary: dict[str, object]
     fee_gap_recovery_required: bool
     fee_gap_resume_blocking: bool
     fee_gap_resume_policy: str
@@ -67,6 +72,7 @@ class RuntimeReadinessSnapshot:
             "normalized_exposure": self.position_state.normalized_exposure.as_dict(),
             "lot_snapshot": self.lot_snapshot.as_dict(),
             "fee_pending_count": int(self.fee_pending_count),
+            "fill_accounting_incident_summary": dict(self.fill_accounting_incident_summary),
             "fee_gap_recovery_required": bool(self.fee_gap_recovery_required),
             "fee_gap_resume_blocking": bool(self.fee_gap_resume_blocking),
             "fee_gap_resume_policy": self.fee_gap_resume_policy,
@@ -124,35 +130,6 @@ def _row_int(row: Any, key: str, default: int = 0) -> int:
         return int(row[key] or 0)
     except (TypeError, ValueError, KeyError):
         return default
-
-
-def _unaccounted_fee_pending_observation_count(conn: Any) -> int:
-    try:
-        row = conn.execute(
-            """
-            SELECT COUNT(*) AS cnt
-            FROM broker_fill_observations b
-            WHERE b.accounting_status='fee_pending'
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM fills f
-                  WHERE f.client_order_id=b.client_order_id
-                    AND f.fee IS NOT NULL
-                    AND f.fee > 1e-12
-                    AND (
-                         (b.fill_id IS NOT NULL AND f.fill_id=b.fill_id)
-                         OR (
-                              f.fill_ts=b.fill_ts
-                          AND ABS(f.price-b.price) < 1e-12
-                          AND ABS(f.qty-b.qty) < 1e-12
-                         )
-                    )
-              )
-            """
-        ).fetchone()
-    except (AssertionError, sqlite3.OperationalError):
-        return 0
-    return _row_int(row, "cnt")
 
 
 def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
@@ -223,7 +200,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             min_notional_krw=(None if lot_definition is None else lot_definition.min_notional_krw),
             max_qty_decimals=(None if lot_definition is None else lot_definition.max_qty_decimals),
         )
-        fee_pending_count = _unaccounted_fee_pending_observation_count(conn)
+        fill_accounting_incident_summary = summarize_fill_accounting_incident_projection(conn)
+        fee_pending_count = int(fill_accounting_incident_summary.get("active_issue_count") or 0)
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
         fee_gap_adjustment_count = _metadata_int(metadata, "fee_gap_adjustment_count")
         fee_gap_adjustment_latest_event_ts = _metadata_int(metadata, "fee_gap_adjustment_latest_event_ts")
@@ -423,6 +401,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             lot_snapshot=lot_snapshot,
             reconcile_metadata=metadata,
             fee_pending_count=fee_pending_count,
+            fill_accounting_incident_summary=fill_accounting_incident_summary,
             fee_gap_recovery_required=fee_gap_required,
             fee_gap_resume_blocking=fee_gap_policy.resume_blocking,
             fee_gap_resume_policy=fee_gap_policy.resume_policy,

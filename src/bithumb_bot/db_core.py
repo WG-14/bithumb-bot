@@ -44,6 +44,65 @@ DIAGNOSTIC_ACCOUNTING_EVENT_FAMILIES = (
 )
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
+FEE_ACCOUNTING_COMPLETE_EPS = 1e-12
+
+
+@dataclass(frozen=True)
+class FillAccountingIncidentVerdict:
+    fill_key: str
+    client_order_id: str
+    fill_id: str | None
+    fill_ts: int
+    price: float
+    qty: float
+    authoritative_fill_present: bool
+    final_fee_applied: bool
+    authoritative_fill_row_id: int | None
+    authoritative_fill_fee: float | None
+    latest_observation_id: int | None
+    latest_observation_event_ts: int | None
+    latest_observation_fee_status: str | None
+    latest_observation_accounting_status: str | None
+    latest_observation_source: str | None
+    repair_present: bool
+    repair_count: int
+    latest_repair_id: int | None
+    canonical_incident_state: str
+    incident_scope: str
+    active_issue: bool
+    raw_observation_count: int
+    fee_pending_observation_count: int
+    accounting_complete_observation_count: int
+    evidence: dict[str, object]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "fill_key": self.fill_key,
+            "client_order_id": self.client_order_id,
+            "fill_id": self.fill_id,
+            "fill_ts": self.fill_ts,
+            "price": self.price,
+            "qty": self.qty,
+            "authoritative_fill_present": bool(self.authoritative_fill_present),
+            "final_fee_applied": bool(self.final_fee_applied),
+            "authoritative_fill_row_id": self.authoritative_fill_row_id,
+            "authoritative_fill_fee": self.authoritative_fill_fee,
+            "latest_observation_id": self.latest_observation_id,
+            "latest_observation_event_ts": self.latest_observation_event_ts,
+            "latest_observation_fee_status": self.latest_observation_fee_status,
+            "latest_observation_accounting_status": self.latest_observation_accounting_status,
+            "latest_observation_source": self.latest_observation_source,
+            "repair_present": bool(self.repair_present),
+            "repair_count": int(self.repair_count),
+            "latest_repair_id": self.latest_repair_id,
+            "canonical_incident_state": self.canonical_incident_state,
+            "incident_scope": self.incident_scope,
+            "active_issue": bool(self.active_issue),
+            "raw_observation_count": int(self.raw_observation_count),
+            "fee_pending_observation_count": int(self.fee_pending_observation_count),
+            "accounting_complete_observation_count": int(self.accounting_complete_observation_count),
+            "evidence": dict(self.evidence),
+        }
 
 
 def _as_finite_decimal(value: float | int | str, *, field: str) -> Decimal:
@@ -2014,6 +2073,263 @@ def _position_authority_repair_key(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def existing_fill_fee_complete(existing_fill: Any | None) -> bool:
+    if existing_fill is None:
+        return False
+    try:
+        fee = existing_fill["fee"]
+    except (KeyError, IndexError, TypeError):
+        fee = None
+    if fee is None:
+        return False
+    try:
+        return float(fee) > FEE_ACCOUNTING_COMPLETE_EPS
+    except (TypeError, ValueError):
+        return False
+
+
+def load_matching_accounted_fill(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+) -> sqlite3.Row | None:
+    client_order_id_text = str(client_order_id or "").strip()
+    fill_id_text = str(fill_id or "").strip()
+    if fill_id_text:
+        row = conn.execute(
+            """
+            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
+            FROM fills
+            WHERE client_order_id=? AND fill_id=?
+            LIMIT 1
+            """,
+            (client_order_id_text, fill_id_text),
+        ).fetchone()
+        if row is not None:
+            return row
+    return conn.execute(
+        """
+        SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
+        FROM fills
+        WHERE client_order_id=? AND fill_ts=? AND ABS(price-?) < 1e-12 AND ABS(qty-?) < 1e-12
+        LIMIT 1
+        """,
+        (client_order_id_text, int(fill_ts), float(price), float(qty)),
+    ).fetchone()
+
+
+def _fill_incident_identity(
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+) -> tuple[str, object, object, object, object]:
+    client_order_id_text = str(client_order_id or "").strip()
+    fill_id_text = str(fill_id or "").strip()
+    if fill_id_text:
+        return ("fill_id", client_order_id_text, fill_id_text, None, None)
+    return ("fill_terms", client_order_id_text, int(fill_ts), float(price), float(qty))
+
+
+def _fill_incident_key(identity: tuple[str, object, object, object, object]) -> str:
+    if identity[0] == "fill_id":
+        return f"client_order_id={identity[1]}|fill_id={identity[2]}"
+    return f"client_order_id={identity[1]}|fill_ts={identity[2]}|price={identity[3]}|qty={identity[4]}"
+
+
+def _matching_fee_pending_repairs(
+    conn: sqlite3.Connection,
+    *,
+    client_order_id: str,
+    fill_id: str | None,
+    fill_ts: int,
+    price: float,
+    qty: float,
+) -> list[sqlite3.Row]:
+    client_order_id_text = str(client_order_id or "").strip()
+    fill_id_text = str(fill_id or "").strip()
+    if fill_id_text:
+        rows = conn.execute(
+            """
+            SELECT id, repair_key, event_ts, client_order_id, exchange_order_id,
+                   fill_id, fill_ts, price, qty, fee, source, reason
+            FROM fee_pending_accounting_repairs
+            WHERE client_order_id=? AND fill_id=?
+            ORDER BY event_ts ASC, id ASC
+            """,
+            (client_order_id_text, fill_id_text),
+        ).fetchall()
+        if rows:
+            return list(rows)
+    return list(
+        conn.execute(
+            """
+            SELECT id, repair_key, event_ts, client_order_id, exchange_order_id,
+                   fill_id, fill_ts, price, qty, fee, source, reason
+            FROM fee_pending_accounting_repairs
+            WHERE client_order_id=?
+              AND fill_ts=?
+              AND ABS(price-?) < 1e-12
+              AND ABS(qty-?) < 1e-12
+            ORDER BY event_ts ASC, id ASC
+            """,
+            (client_order_id_text, int(fill_ts), float(price), float(qty)),
+        ).fetchall()
+    )
+
+
+def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[FillAccountingIncidentVerdict]:
+    observations = conn.execute(
+        """
+        SELECT id, event_ts, client_order_id, exchange_order_id, fill_id, fill_ts,
+               side, price, qty, fee, fee_status, accounting_status, source,
+               parse_warnings
+        FROM broker_fill_observations
+        ORDER BY event_ts ASC, id ASC
+        """
+    ).fetchall()
+    grouped: dict[tuple[str, object, object, object, object], list[sqlite3.Row]] = {}
+    for row in observations:
+        identity = _fill_incident_identity(
+            client_order_id=str(row["client_order_id"]),
+            fill_id=(str(row["fill_id"]) if row["fill_id"] is not None else None),
+            fill_ts=int(row["fill_ts"] or 0),
+            price=float(row["price"] or 0.0),
+            qty=float(row["qty"] or 0.0),
+        )
+        grouped.setdefault(identity, []).append(row)
+
+    verdicts: list[FillAccountingIncidentVerdict] = []
+    for identity, rows in grouped.items():
+        latest = rows[-1]
+        fill_id = str(latest["fill_id"]) if latest["fill_id"] is not None and str(latest["fill_id"]).strip() else None
+        fill_ts = int(latest["fill_ts"] or 0)
+        price = float(latest["price"] or 0.0)
+        qty = float(latest["qty"] or 0.0)
+        client_order_id = str(latest["client_order_id"])
+        existing_fill = load_matching_accounted_fill(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            fill_ts=fill_ts,
+            price=price,
+            qty=qty,
+        )
+        final_fee_applied = existing_fill_fee_complete(existing_fill)
+        repairs = _matching_fee_pending_repairs(
+            conn,
+            client_order_id=client_order_id,
+            fill_id=fill_id,
+            fill_ts=fill_ts,
+            price=price,
+            qty=qty,
+        )
+        repair_present = bool(repairs)
+        latest_accounting_status = str(latest["accounting_status"] or "").strip()
+        latest_fee_status = str(latest["fee_status"] or "").strip()
+        fee_pending_count = sum(1 for row in rows if str(row["accounting_status"] or "") == "fee_pending")
+        accounting_complete_count = sum(
+            1 for row in rows if str(row["accounting_status"] or "") == "accounting_complete"
+        )
+
+        if latest_accounting_status == "fee_pending" and not final_fee_applied and not repair_present:
+            canonical_state = "active_fee_pending"
+            incident_scope = "active_blocking"
+            active_issue = True
+        elif latest_accounting_status == "fee_pending" and final_fee_applied:
+            canonical_state = "already_accounted_observation_stale"
+            incident_scope = "historical_context"
+            active_issue = False
+        elif latest_accounting_status == "fee_pending" and repair_present:
+            canonical_state = "repaired" if final_fee_applied else "ambiguous"
+            incident_scope = "historical_context" if final_fee_applied else "active_blocking"
+            active_issue = not final_fee_applied
+        elif latest_accounting_status == "accounting_complete" and repair_present:
+            canonical_state = "repaired"
+            incident_scope = "historical_context"
+            active_issue = False
+        elif latest_accounting_status == "accounting_complete":
+            canonical_state = "none"
+            incident_scope = "historical_context"
+            active_issue = False
+        else:
+            canonical_state = "none"
+            incident_scope = "historical_context"
+            active_issue = False
+
+        latest_repair = repairs[-1] if repairs else None
+        verdicts.append(
+            FillAccountingIncidentVerdict(
+                fill_key=_fill_incident_key(identity),
+                client_order_id=client_order_id,
+                fill_id=fill_id,
+                fill_ts=fill_ts,
+                price=price,
+                qty=qty,
+                authoritative_fill_present=existing_fill is not None,
+                final_fee_applied=final_fee_applied,
+                authoritative_fill_row_id=(int(existing_fill["id"]) if existing_fill is not None else None),
+                authoritative_fill_fee=(
+                    float(existing_fill["fee"]) if existing_fill is not None and existing_fill["fee"] is not None else None
+                ),
+                latest_observation_id=int(latest["id"]),
+                latest_observation_event_ts=int(latest["event_ts"] or 0),
+                latest_observation_fee_status=latest_fee_status or None,
+                latest_observation_accounting_status=latest_accounting_status or None,
+                latest_observation_source=str(latest["source"] or "").strip() or None,
+                repair_present=repair_present,
+                repair_count=len(repairs),
+                latest_repair_id=(int(latest_repair["id"]) if latest_repair is not None else None),
+                canonical_incident_state=canonical_state,
+                incident_scope=incident_scope,
+                active_issue=active_issue,
+                raw_observation_count=len(rows),
+                fee_pending_observation_count=fee_pending_count,
+                accounting_complete_observation_count=accounting_complete_count,
+                evidence={
+                    "matching_logic": "fill_id_or_client_order_id_fill_ts_price_qty",
+                    "latest_observation_status": latest_accounting_status,
+                    "raw_observation_ids": [int(row["id"]) for row in rows],
+                    "fee_pending_observation_ids": [
+                        int(row["id"]) for row in rows if str(row["accounting_status"] or "") == "fee_pending"
+                    ],
+                    "accounting_complete_observation_ids": [
+                        int(row["id"])
+                        for row in rows
+                        if str(row["accounting_status"] or "") == "accounting_complete"
+                    ],
+                },
+            )
+        )
+    return verdicts
+
+
+def summarize_fill_accounting_incident_projection(conn: sqlite3.Connection) -> dict[str, object]:
+    verdicts = build_fill_accounting_incident_projection(conn)
+    active = [v for v in verdicts if v.active_issue]
+    stale = [v for v in verdicts if v.canonical_incident_state == "already_accounted_observation_stale"]
+    repaired = [v for v in verdicts if v.canonical_incident_state == "repaired"]
+    complete = [
+        v for v in verdicts if v.latest_observation_accounting_status == "accounting_complete" and not v.active_issue
+    ]
+    return {
+        "projection_kind": "fill_accounting_incident_projection",
+        "incident_count": len(verdicts),
+        "active_fee_pending_count": sum(1 for v in active if v.canonical_incident_state == "active_fee_pending"),
+        "active_issue_count": len(active),
+        "already_accounted_observation_stale_count": len(stale),
+        "repaired_count": len(repaired),
+        "latest_accounting_complete_count": len(complete),
+        "verdicts": [v.as_dict() for v in verdicts],
+    }
+
+
 def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, object]:
     init_portfolio(conn)
     total_fee = 0.0
@@ -2179,30 +2495,9 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, object]:
         broker_fill_zero_reported_fee_count = int(observation_summary["zero_reported_fee_count"] or 0)
         broker_fill_invalid_fee_count = int(observation_summary["invalid_fee_count"] or 0)
 
-    latest_observations = conn.execute(
-        """
-        SELECT client_order_id, COALESCE(fill_id, '') AS fill_id, fill_ts, price, qty,
-               fee_status, accounting_status
-        FROM broker_fill_observations
-        ORDER BY event_ts ASC, id ASC
-        """
-    ).fetchall()
-    latest_by_fill: dict[tuple[str, str, int, float, float], sqlite3.Row] = {}
-    for row in latest_observations:
-        latest_by_fill[
-            (
-                str(row["client_order_id"]),
-                str(row["fill_id"] or ""),
-                int(row["fill_ts"]),
-                float(row["price"]),
-                float(row["qty"]),
-            )
-        ] = row
-    for row in latest_by_fill.values():
-        if str(row["accounting_status"]) == "fee_pending":
-            broker_fill_latest_unresolved_fee_pending_count += 1
-        elif str(row["accounting_status"]) == "accounting_complete":
-            broker_fill_latest_accounting_complete_count += 1
+    incident_projection = summarize_fill_accounting_incident_projection(conn)
+    broker_fill_latest_unresolved_fee_pending_count = int(incident_projection["active_issue_count"])
+    broker_fill_latest_accounting_complete_count = int(incident_projection["latest_accounting_complete_count"])
 
     fee_pending_repair_summary = conn.execute(
         "SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs"
@@ -2243,6 +2538,12 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, object]:
         "broker_fill_latest_unresolved_fee_pending_count": broker_fill_latest_unresolved_fee_pending_count,
         "broker_fill_latest_accounting_complete_count": broker_fill_latest_accounting_complete_count,
         "unresolved_fee_state": broker_fill_latest_unresolved_fee_pending_count > 0,
+        "fill_accounting_incident_projection": incident_projection,
+        "fill_accounting_active_issue_count": int(incident_projection["active_issue_count"]),
+        "fill_accounting_already_accounted_observation_stale_count": int(
+            incident_projection["already_accounted_observation_stale_count"]
+        ),
+        "fill_accounting_repaired_incident_count": int(incident_projection["repaired_count"]),
         "fee_pending_accounting_repair_count": fee_pending_repair_count,
         "position_authority_repair_count": position_authority_repair_count,
         "dup_fill_count": dup_fill_count,

@@ -462,6 +462,14 @@ def fetch_cash_drift_report(
             "broker_fill_latest_unresolved_fee_pending_count": int(
                 accounting_projection["broker_fill_latest_unresolved_fee_pending_count"]
             ),
+            "fill_accounting_incident_projection": accounting_projection["fill_accounting_incident_projection"],
+            "fill_accounting_active_issue_count": int(accounting_projection["fill_accounting_active_issue_count"]),
+            "fill_accounting_already_accounted_observation_stale_count": int(
+                accounting_projection["fill_accounting_already_accounted_observation_stale_count"]
+            ),
+            "fill_accounting_repaired_incident_count": int(
+                accounting_projection["fill_accounting_repaired_incident_count"]
+            ),
             "fee_gap_accounting_repair_count": int(accounting_projection["fee_gap_accounting_repair_count"]),
             "fee_pending_accounting_repair_count": int(accounting_projection["fee_pending_accounting_repair_count"]),
             "position_authority_repair_count": int(accounting_projection["position_authority_repair_count"]),

@@ -4522,6 +4522,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_gap_accounting_repair_preview",
         "fee_gap_accounting_repair_summary",
         "fee_pending_accounting_repair_summary",
+        "fill_accounting_incident_projection",
         "position_authority_rebuild_preview",
         "position_authority_repair_summary",
         "broker_fill_observation_summary",

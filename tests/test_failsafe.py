@@ -234,6 +234,9 @@ class _LoopConn:
         if "FROM external_position_adjustments" in q and "ORDER BY event_ts DESC" in q:
             return _Rows(None)
 
+        if "FROM broker_fill_observations" in q:
+            return _Rows([])
+
         if "SET status='RECOVERY_REQUIRED'" in q:
             if self.open_order_created_ts is None:
                 self.marked_recovery_required = 0

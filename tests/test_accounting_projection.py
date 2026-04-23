@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from bithumb_bot.app import main as app_main
+from bithumb_bot.app import _ledger_replay, _load_recovery_report, main as app_main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
     ACCOUNTING_PROJECTION_MODEL,
@@ -13,9 +13,15 @@ from bithumb_bot.db_core import (
     init_portfolio,
     record_broker_fill_observation,
     record_external_cash_adjustment,
+    summarize_fill_accounting_incident_projection,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.fee_pending_repair import (
+    apply_fee_pending_accounting_repair,
+    build_fee_pending_accounting_repair_preview,
+)
 from bithumb_bot.reporting import fetch_cash_drift_report
+from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
 
 
 @pytest.fixture
@@ -248,3 +254,211 @@ def test_fee_observation_lifecycle_is_visible_without_becoming_projection_author
     assert completed["broker_fill_latest_accounting_complete_count"] == 1
     assert completed["replay_cash"] == pytest.approx(pending["replay_cash"])
     assert completed["replay_qty"] == pytest.approx(pending["replay_qty"])
+
+
+def _record_fee_pending_order_and_observation(
+    conn,
+    *,
+    client_order_id: str = "canonical_fee_pending",
+    fill_id: str = "canonical-fill-1",
+    event_ts: int = 1_700_000_010_100,
+) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side="BUY",
+        qty_req=0.001,
+        price=100_000_000.0,
+        ts_ms=event_ts - 100,
+        status="NEW",
+    )
+    record_broker_fill_observation(
+        conn,
+        event_ts=event_ts,
+        client_order_id=client_order_id,
+        exchange_order_id=f"ex-{client_order_id}",
+        fill_id=fill_id,
+        fill_ts=event_ts - 10,
+        side="BUY",
+        price=100_000_000.0,
+        qty=0.001,
+        fee=26.86,
+        fee_status="order_level_candidate",
+        accounting_status="fee_pending",
+        source="test_fee_pending_incident",
+        parse_warnings="order_level_fee_candidate",
+        raw_payload={"fixture": "canonical_fee_pending"},
+    )
+
+
+def _incident_summary(conn) -> dict[str, object]:
+    return summarize_fill_accounting_incident_projection(conn)
+
+
+def test_fee_pending_observation_without_fill_remains_active_incident(projection_db):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        _record_fee_pending_order_and_observation(conn)
+        conn.commit()
+        replay = compute_accounting_replay(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id="canonical_fee_pending",
+            fill_id="canonical-fill-1",
+            fee=26.86,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        summary = _incident_summary(conn)
+    finally:
+        conn.close()
+
+    verdict = summary["verdicts"][0]
+    assert verdict["canonical_incident_state"] == "active_fee_pending"
+    assert verdict["incident_scope"] == "active_blocking"
+    assert summary["active_issue_count"] == 1
+    assert replay["unresolved_fee_state"] is True
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 1
+    assert readiness.fee_pending_count == 1
+    assert readiness.recovery_stage == "ACCOUNTING_PENDING_FEE"
+    assert preview["needs_repair"] is True
+    assert preview["safe_to_apply"] is True
+
+
+def test_already_accounted_fill_reclassifies_stale_fee_pending_observation(projection_db, capsys):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        _record_fee_pending_order_and_observation(
+            conn,
+            client_order_id="already_accounted",
+            fill_id="already-accounted-fill",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="already_accounted",
+            side="BUY",
+            fill_id="already-accounted-fill",
+            fill_ts=1_700_000_010_090,
+            price=100_000_000.0,
+            qty=0.001,
+            fee=26.86,
+            note="authoritative fill already contains final fee",
+        )
+        conn.commit()
+        replay = compute_accounting_replay(conn)
+        ledger = _ledger_replay(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        preview = build_fee_pending_accounting_repair_preview(
+            conn,
+            client_order_id="already_accounted",
+            fill_id="already-accounted-fill",
+            fee=26.86,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        recovery_report = _load_recovery_report()
+        app_main(["audit-ledger"])
+        audit_out = capsys.readouterr().out
+        summary = _incident_summary(conn)
+    finally:
+        conn.close()
+
+    verdict = summary["verdicts"][0]
+    assert verdict["canonical_incident_state"] == "already_accounted_observation_stale"
+    assert verdict["incident_scope"] == "historical_context"
+    assert verdict["active_issue"] is False
+    assert summary["active_issue_count"] == 0
+    assert summary["already_accounted_observation_stale_count"] == 1
+    assert replay["broker_fill_fee_pending_count"] == 1
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert replay["unresolved_fee_state"] is False
+    assert ledger["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert ledger["fill_accounting_already_accounted_observation_stale_count"] == 1
+    assert "broker_fill_latest_unresolved_fee_pending_count=0" in audit_out
+    assert "fill_accounting_already_accounted_observation_stale_count=1" in audit_out
+    assert readiness.fee_pending_count == 0
+    assert readiness.fill_accounting_incident_summary["already_accounted_observation_stale_count"] == 1
+    assert recovery_report["runtime_readiness"]["fee_pending_count"] == 0
+    assert recovery_report["fill_accounting_incident_projection"]["active_issue_count"] == 0
+    assert preview["needs_repair"] is False
+    assert preview["safe_to_apply"] is False
+    assert "fill_already_accounted" in preview["eligibility_reason"]
+
+
+def test_later_accounting_complete_observation_resolves_fee_pending_without_fill(projection_db):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        _record_fee_pending_order_and_observation(
+            conn,
+            client_order_id="later_complete",
+            fill_id="later-complete-fill",
+        )
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_700_000_010_200,
+            client_order_id="later_complete",
+            exchange_order_id="ex-later_complete",
+            fill_id="later-complete-fill",
+            fill_ts=1_700_000_010_090,
+            side="BUY",
+            price=100_000_000.0,
+            qty=0.001,
+            fee=26.86,
+            fee_status="operator_confirmed",
+            accounting_status="accounting_complete",
+            source="test_later_complete",
+            raw_payload={"fixture": "later_complete"},
+        )
+        conn.commit()
+        replay = compute_accounting_replay(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        summary = _incident_summary(conn)
+    finally:
+        conn.close()
+
+    verdict = summary["verdicts"][0]
+    assert verdict["canonical_incident_state"] == "none"
+    assert verdict["latest_observation_accounting_status"] == "accounting_complete"
+    assert summary["active_issue_count"] == 0
+    assert replay["broker_fill_fee_pending_count"] == 1
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert replay["unresolved_fee_state"] is False
+    assert readiness.fee_pending_count == 0
+
+
+def test_fee_pending_repair_complete_incident_is_historical_not_active(projection_db):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        _record_fee_pending_order_and_observation(
+            conn,
+            client_order_id="repaired_pending",
+            fill_id="repaired-fill",
+        )
+        apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="repaired_pending",
+            fill_id="repaired-fill",
+            fee=26.86,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        conn.commit()
+        replay = compute_accounting_replay(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        summary = _incident_summary(conn)
+    finally:
+        conn.close()
+
+    verdict = summary["verdicts"][0]
+    assert verdict["canonical_incident_state"] == "repaired"
+    assert verdict["incident_scope"] == "historical_context"
+    assert verdict["repair_present"] is True
+    assert verdict["active_issue"] is False
+    assert summary["active_issue_count"] == 0
+    assert summary["repaired_count"] == 1
+    assert replay["fee_pending_accounting_repair_count"] == 1
+    assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
+    assert replay["fill_accounting_repaired_incident_count"] == 1
+    assert readiness.fee_pending_count == 0

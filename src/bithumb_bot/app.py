@@ -37,6 +37,7 @@ from .db_core import (
     replay_fill_portfolio_snapshot,
     record_manual_flat_accounting_repair,
     record_external_cash_adjustment,
+    summarize_fill_accounting_incident_projection,
 )
 from .utils_time import kst_str, parse_interval_sec
 from .engine import (
@@ -1381,6 +1382,12 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, object]:
         "broker_fill_latest_unresolved_fee_pending_count": int(replay["broker_fill_latest_unresolved_fee_pending_count"]),
         "broker_fill_latest_accounting_complete_count": int(replay["broker_fill_latest_accounting_complete_count"]),
         "unresolved_fee_state": bool(replay["unresolved_fee_state"]),
+        "fill_accounting_incident_projection": replay["fill_accounting_incident_projection"],
+        "fill_accounting_active_issue_count": int(replay["fill_accounting_active_issue_count"]),
+        "fill_accounting_already_accounted_observation_stale_count": int(
+            replay["fill_accounting_already_accounted_observation_stale_count"]
+        ),
+        "fill_accounting_repaired_incident_count": int(replay["fill_accounting_repaired_incident_count"]),
         "fee_pending_accounting_repair_count": int(replay["fee_pending_accounting_repair_count"]),
         "position_authority_repair_count": int(replay["position_authority_repair_count"]),
         "dup_fill_count": int(replay["dup_fill_count"]),
@@ -1425,6 +1432,13 @@ def cmd_audit_ledger() -> None:
     print(f"  broker_fill_latest_unresolved_fee_pending_count={int(replay['broker_fill_latest_unresolved_fee_pending_count'])}")
     print(f"  broker_fill_latest_accounting_complete_count={int(replay['broker_fill_latest_accounting_complete_count'])}")
     print(f"  unresolved_fee_state={1 if bool(replay['unresolved_fee_state']) else 0}")
+    print(f"  fill_accounting_active_issue_count={int(replay['fill_accounting_active_issue_count'])}")
+    print(
+        "  "
+        f"fill_accounting_already_accounted_observation_stale_count="
+        f"{int(replay['fill_accounting_already_accounted_observation_stale_count'])}"
+    )
+    print(f"  fill_accounting_repaired_incident_count={int(replay['fill_accounting_repaired_incident_count'])}")
     print(f"  fee_pending_accounting_repair_count={int(replay['fee_pending_accounting_repair_count'])}")
     print(f"  position_authority_repair_count={int(replay['position_authority_repair_count'])}")
     print(f"  dup_fill_count={int(replay['dup_fill_count'])}")
@@ -2574,6 +2588,16 @@ def _load_recovery_report(
         "last_accounting_status": None,
         "last_source": None,
     }
+    fill_accounting_incident_projection = {
+        "projection_kind": "fill_accounting_incident_projection",
+        "incident_count": 0,
+        "active_fee_pending_count": 0,
+        "active_issue_count": 0,
+        "already_accounted_observation_stale_count": 0,
+        "repaired_count": 0,
+        "latest_accounting_complete_count": 0,
+        "verdicts": [],
+    }
     conn = ensure_db()
     try:
         recent_dust_unsellable_event = conn.execute(
@@ -2607,6 +2631,7 @@ def _load_recovery_report(
         position_authority_rebuild_preview = build_position_authority_rebuild_preview(conn)
         runtime_readiness_snapshot = compute_runtime_readiness_snapshot(conn).as_dict()
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
+        fill_accounting_incident_projection = summarize_fill_accounting_incident_projection(conn)
     finally:
         conn.close()
     candidate_report: list[dict[str, object]] = []
@@ -2754,6 +2779,7 @@ def _load_recovery_report(
         "recovery_stage": runtime_readiness_snapshot.get("recovery_stage"),
         "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
+        "fill_accounting_incident_projection": fill_accounting_incident_projection,
         "trading_enabled": bool(state.trading_enabled),
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
@@ -3049,6 +3075,16 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"last_fee_status={broker_fill_observation_summary.get('last_fee_status') or 'none'} "
         f"last_accounting_status={broker_fill_observation_summary.get('last_accounting_status') or 'none'} "
         f"last_source={broker_fill_observation_summary.get('last_source') or 'none'}"
+    )
+    fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
+    print("  [P3.0e2] fill_accounting_incidents")
+    print(
+        "    "
+        f"active_issue_count={int(fill_accounting_incident_projection.get('active_issue_count') or 0)} "
+        f"active_fee_pending_count={int(fill_accounting_incident_projection.get('active_fee_pending_count') or 0)} "
+        f"already_accounted_stale_count="
+        f"{int(fill_accounting_incident_projection.get('already_accounted_observation_stale_count') or 0)} "
+        f"repaired_count={int(fill_accounting_incident_projection.get('repaired_count') or 0)}"
     )
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")

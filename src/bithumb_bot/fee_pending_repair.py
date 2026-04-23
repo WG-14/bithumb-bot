@@ -7,7 +7,9 @@ from typing import Any
 from .config import settings
 from .db_core import (
     compute_accounting_replay,
+    existing_fill_fee_complete,
     get_fee_pending_accounting_repair_summary,
+    load_matching_accounted_fill,
     normalize_cash_amount,
     normalize_asset_qty,
     record_broker_fill_observation,
@@ -50,45 +52,6 @@ def _load_pending_observations(
         """,
         tuple(params),
     ).fetchall()
-
-
-def _load_existing_fill(conn, *, client_order_id: str, fill_id: str | None, fill_ts: int, price: float, qty: float):
-    if fill_id:
-        row = conn.execute(
-            """
-            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
-            FROM fills
-            WHERE client_order_id=? AND fill_id=?
-            LIMIT 1
-            """,
-            (client_order_id, fill_id),
-        ).fetchone()
-        if row is not None:
-            return row
-    return conn.execute(
-        """
-        SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
-        FROM fills
-        WHERE client_order_id=? AND fill_ts=? AND ABS(price-?) < 1e-12 AND ABS(qty-?) < 1e-12
-        LIMIT 1
-        """,
-        (client_order_id, int(fill_ts), float(price), float(qty)),
-    ).fetchone()
-
-
-def _existing_fill_fee_complete(existing_fill: Any | None) -> bool:
-    if existing_fill is None:
-        return False
-    try:
-        fee = existing_fill["fee"]
-    except (KeyError, IndexError, TypeError):
-        fee = None
-    if fee is None:
-        return False
-    try:
-        return float(fee) > 1e-12
-    except (TypeError, ValueError):
-        return False
 
 
 def build_fee_pending_accounting_repair_preview(
@@ -148,7 +111,7 @@ def build_fee_pending_accounting_repair_preview(
     notional = price * qty if math.isfinite(price) and math.isfinite(qty) else 0.0
 
     if observation is not None:
-        existing_fill = _load_existing_fill(
+        existing_fill = load_matching_accounted_fill(
             conn,
             client_order_id=client_order_id_text,
             fill_id=observation_fill_id or None,
@@ -162,7 +125,7 @@ def build_fee_pending_accounting_repair_preview(
             reasons.append("invalid_observed_price")
         if qty <= 0.0:
             reasons.append("invalid_observed_qty")
-        if _existing_fill_fee_complete(existing_fill):
+        if existing_fill_fee_complete(existing_fill):
             reasons.append("fill_already_accounted")
     else:
         existing_fill = None
@@ -205,7 +168,7 @@ def build_fee_pending_accounting_repair_preview(
             observation is not None
             and (
                 existing_fill is None
-                or not _existing_fill_fee_complete(existing_fill)
+                or not existing_fill_fee_complete(existing_fill)
             )
         ),
         "safe_to_apply": safe_to_apply,
