@@ -19,6 +19,7 @@ from .lifecycle import (
 from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 from .position_authority_state import (
     PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON,
+    build_lot_projection_convergence,
     build_position_authority_assessment,
 )
 from .runtime_readiness import compute_runtime_readiness_snapshot
@@ -171,6 +172,25 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     }
 
 
+def _assert_post_repair_projection_converged(
+    conn,
+    *,
+    repair_basis: dict[str, Any],
+    repair_mode: str,
+) -> dict[str, Any]:
+    convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    repair_basis["post_repair_projection_convergence"] = convergence
+    if not bool(convergence.get("converged")):
+        raise RuntimeError(
+            "position authority repair postcondition failed: "
+            f"repair_mode={repair_mode}; projection_converged=0; "
+            f"reason={convergence.get('reason')}; "
+            f"projected_total_qty={float(convergence.get('projected_total_qty') or 0.0):.12f}; "
+            f"portfolio_qty={float(convergence.get('portfolio_qty') or 0.0):.12f}"
+        )
+    return convergence
+
+
 def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[str, Any]:
     preview = build_position_authority_rebuild_preview(conn)
     if not bool(preview["safe_to_apply"]):
@@ -309,6 +329,11 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             )
             after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
             repair_basis["lot_snapshot_after"] = after
+            convergence = _assert_post_repair_projection_converged(
+                conn,
+                repair_basis=repair_basis,
+                repair_mode=repair_mode,
+            )
             portfolio_row = conn.execute(
                 """
                 SELECT cash_available, cash_locked, asset_available, asset_locked
@@ -372,6 +397,7 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
                 "external_position_adjustment": adjustment,
                 "lot_snapshot_before": before,
                 "lot_snapshot_after": after,
+                "post_repair_projection_convergence": convergence,
             }
         conn.execute(
             "DELETE FROM open_position_lots WHERE pair=? AND entry_trade_id=?",
@@ -444,6 +470,11 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             "lot_snapshot_before": before,
             "lot_snapshot_after": after,
         }
+        convergence = _assert_post_repair_projection_converged(
+            conn,
+            repair_basis=repair_basis,
+            repair_mode=repair_mode,
+        )
         repair = record_position_authority_repair(
             conn,
             event_ts=int(time.time() * 1000),
@@ -465,6 +496,7 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             "repair": repair,
             "lot_snapshot_before": before,
             "lot_snapshot_after": after,
+            "post_repair_projection_convergence": convergence,
         }
 
     projection_replay = rebuild_lifecycle_projections_from_trades(
@@ -480,6 +512,11 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
         "lot_snapshot_after": after,
         "projection_replay": projection_replay.as_dict(),
     }
+    convergence = _assert_post_repair_projection_converged(
+        conn,
+        repair_basis=repair_basis,
+        repair_mode="rebuild",
+    )
     repair = record_position_authority_repair(
         conn,
         event_ts=int(time.time() * 1000),
@@ -493,4 +530,5 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
         "repair": repair,
         "lot_snapshot_before": before,
         "lot_snapshot_after": after,
+        "post_repair_projection_convergence": convergence,
     }

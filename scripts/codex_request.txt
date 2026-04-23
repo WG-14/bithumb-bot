@@ -1,248 +1,285 @@
-You are working directly in the `WG-14/bithumb-bot` repository.
+You are working in the `WG-14/bithumb-bot` repository. Treat this as a safety-critical, state-integrity-critical task. Read and follow `AGENTS.md`, `README.md`, and `docs/lot_native_contract.md` before changing code.
 
-Your task is not to apply a superficial fee patch. Treat the recurring fee problem as a starting signal, not as a proven root cause. Verify the repository against the attached Bithumb WebSocket `myOrder` reference and determine whether the current implementation is aligned with the documented contract. Prioritize design corrections that make the bot more robust, reproducible, recoverable, and operable as an automated trading experiment system.
+Your objective is **not** to suppress the current symptom with a narrow patch. Your objective is to verify or falsify a set of concrete hypotheses about a live incident, then implement the smallest safe design change that improves **state convergence, replayability, recoverability, and operator clarity** across this whole incident class.
 
-## Primary objective
+## Incident context to anchor the work
 
-Audit, validate, and then fix the `myOrder` ingestion / normalization / accounting / recovery path in a way that addresses the full problem family, not only the visible fee symptom.
+Use the following observed live-state facts as the starting point, but do **not** assume any single explanation is already proven:
+
+* A live incident started with a broker `/v1/order.trade` payload missing fee information for a materially sized fill.
+* `fee_pending_accounting_repair` was applied for the latest BUY fill.
+* `resume` later succeeded in the sense that the process loop was re-enabled.
+* However the system remained effectively non-tradable because `new_entry_allowed=0`, `closeout_allowed=0`, and `residual_class=TRACKED_DUST_BLOCK_NEW_ENTRY`.
+* In the affected DB:
+
+  * `portfolio.asset_qty = 0.00099986`
+  * `open_position_lots` row count = 14
+  * `SUM(open_position_lots.qty_open) = 0.001788`
+  * all rows are `position_state='dust_tracking'`
+  * `open_exposure_sum = 0`
+  * delta between lot sum and portfolio qty = `0.00078814`
+* A recent `position_authority_repair` recorded a post-repair snapshot with:
+
+  * `dust_tracking_lot_count=14`
+  * `dust_tracking_qty=0.001788`
+  * `open_lot_count=0`
+* Recovery/readiness surfaces reported:
+
+  * `portfolio_projection_state_converged = false`
+  * `projected_total_qty = 0.001788`
+  * `projected_qty_excess = 0.00078814`
+  * `safe_to_correct = false`
+  * `safe_to_normalize_residual = false`
+  * process loop could run, but tradeability remained blocked
+
+Repository contract that must remain intact:
+
+* `open_exposure` is canonical executable exposure.
+* `dust_tracking` is operator-tracking residue and must remain separate from executable exposure.
+* Qty must not regain semantic authority over SELL authority or lot-native state.
+* Do not “fix” this by summing qty and reintroducing qty-first executable authority.
+* Do not weaken fail-closed safety behavior.
 
 ## Required framing
 
-* Do **not** assume “the fee field is wrong” is the root cause.
-* Treat all candidate root causes as **hypotheses** until validated.
-* Prefer **design changes** over symptom-specific patches.
-* Keep scope tight to repository-verifiable work. Do not speculate beyond what can be checked in code, tests, and existing behavior.
-* Use the repository itself as the source of truth for implementation behavior, and the attached `myOrder` reference as the source of truth for the expected external contract.
+Treat the current explanation as a **set of hypotheses**, not as settled fact.
 
-## Background problem statement to preserve
+You must explicitly investigate whether the real root cause is:
 
-The current repository likely does **not** treat Bithumb `myOrder` as a strict exchange-truth event contract. It appears to normalize it into a loose internal event shape first, which may be causing broader operational failures, including but not limited to fee issues.
+1. only a local bug in a specific repair path, or
+2. a higher-level design flaw involving the interaction between:
 
-The attached `myOrder` reference indicates that the important official fields include at least:
+   * accounting truth
+   * position authority / lot projection
+   * readiness / resume / tradeability
+   * event-sourced recovery vs persisted projection state
 
-* `ask_bid`
-* `order_type`
-* `state`
-* `uuid`
-* `trade_uuid`
-* `price`
-* `volume`
-* `executed_volume`
-* `remaining_volume`
-* `paid_fee`
-* `reserved_fee`
-* `remaining_fee`
-* `executed_funds`
-* `trade_timestamp`
-* `order_timestamp`
-* `timestamp`
+Prefer structural fixes over symptom patches.
 
-The repository may currently be misaligned in ways such as:
+## Hypotheses to verify or falsify
 
-* using `side` / `order_side` / `type` instead of official `ask_bid`
-* using `trade_id` / `fill_id` / `uuid` / `order_id` instead of official `trade_uuid`
-* not treating official `state=trade` as a fill-producing event
-* preferring `executed_volume` over `volume` for per-trade fill quantity
-* preferring general `timestamp` over `trade_timestamp` for fill event time
-* collapsing order-state semantics and fill-event semantics into one loose internal status model
-* treating order-level fee fields as if they were always safely usable at trade level
-* making stream-path and REST/recovery-path parse and reason about fills using different contracts
+Keep these as hypotheses unless and until you prove them in code/tests:
 
-You must verify these concerns directly in repo code before changing anything.
+### Hypothesis A — triggering cause only
 
-## Concrete work to perform
+The missing-fee incident was the trigger, but not the deepest structural cause.
 
-### 1. Inspect and map the current implementation
+### Hypothesis B — repair path lacks convergence guarantees
 
-Find and analyze all code paths related to:
+`portfolio_anchored_projection_repair` or the broader `apply_position_authority_rebuild()` flow can mark a repair as safe/applicable and persist a repaired state **without proving post-repair convergence** between:
 
-* `myOrder` payload normalization
-* runtime ingestion of `myOrder`
-* fill identity / dedupe
-* fee evidence classification
-* ledger application of fills
-* recovery / reconciliation paths
-* any tests that currently define expected `myOrder` behavior
+* portfolio holdings
+* projected lot totals
+* executable vs residue classification
 
-At minimum, inspect the relevant files and any connected code they call.
+### Hypothesis C — canonical state and event residue are mixed
 
-Build a concise internal map of:
+`open_position_lots` is acting partly as canonical current state and partly as accumulated event residue/history fragments, which allows stale or duplicated residue to survive as current authority-bearing state.
 
-* where external `myOrder` enters the system
-* how it is normalized
-* how fill identity is derived
-* how side/status/qty/timestamp/fee are derived
-* when ledger application is allowed or blocked
-* how recovery code reconstructs the same fills from REST / order lookup paths
-* whether stream and recovery paths share the same canonical fill contract or not
+### Hypothesis D — policy is not the main bug, materialization is
 
-### 2. Evaluate the following hypotheses as hypotheses
+The tracked-dust / reentry boundary policy may be correct in isolation, but it is being fed a wrongly materialized lot state, so the policy is blocking on corrupted inputs rather than on a real canonical residue state.
 
-Do not present them as facts unless validated.
+### Hypothesis E — missing end-to-end incident contract
 
-#### Hypothesis A
+The repository has contract tests for parts of lot-native behavior, but lacks a strong end-to-end replay contract for the real incident chain:
+`missing fee -> fee pending repair -> position authority repair -> resume -> running but not tradable`
 
-Official `state=trade` events do not reliably enter the fill-application path.
+## What to inspect
 
-Validate whether the current implementation maps official `trade` to a fill-producing internal status or whether it can remain a non-actionable status.
+At minimum inspect these areas before deciding on a fix:
 
-#### Hypothesis B
+* `src/bithumb_bot/position_authority_repair.py`
+* `src/bithumb_bot/lifecycle.py`
+* `src/bithumb_bot/position_authority_state.py`
+* `src/bithumb_bot/runtime_readiness.py`
+* any readiness/tradeability/resume code involved in:
 
-Partial fills may be double-counted or over-counted because the code uses `executed_volume` as the per-fill quantity instead of documented per-trade `volume`.
+  * `TRACKED_DUST_BLOCK_NEW_ENTRY`
+  * `portfolio_anchored_authority_projection_repair`
+  * `partial_close_residual_authority_normalization`
+  * `apply_fill_lifecycle`
+  * lot summarization / rebuild / replay
+* docs:
 
-Validate with realistic official-payload tests.
+  * `README.md`
+  * `AGENTS.md`
+  * `docs/lot_native_contract.md`
+* tests:
 
-#### Hypothesis C
+  * `tests/test_position_authority_recovery_state.py`
+  * `tests/test_recovery_restart_regression.py`
+  * `tests/test_trade_lifecycle.py`
+  * `tests/test_live_broker.py`
+  * any other focused tests directly touched by the change
 
-Fill identity / dedupe may be broken because the code can derive fill identity from order-level IDs instead of official `trade_uuid`.
+## Required deliverables
 
-Validate whether multiple partial fills on the same order can collapse into one fill or mis-dedupe.
+You must produce code and tests that do all of the following:
 
-#### Hypothesis D
+### 1. Reproduce the incident class deterministically
 
-Part of the recurring “fee issue” may actually be caused by classifying order-level fee fields as insufficient trade-level fee evidence, then immediately escalating to a hard recovery state instead of modeling a safe intermediate accounting-pending state.
+Add or extend tests so this incident family is replayable from repository-controlled fixtures. Do not rely on vague synthetic approximations if you can encode the specific observed structure.
 
-Validate whether this is intentional, correct, and operationally appropriate.
+At minimum add an incident-style test that captures:
 
-#### Hypothesis E
+* a missing-fee BUY incident
+* fee-pending accounting repair
+* subsequent authority rebuild / portfolio-anchored repair
+* a case where portfolio qty and persisted lot projection diverge
+* the exact dangerous state where process resume is allowed but tradability is blocked because canonical state did not converge
 
-The deeper structural issue may be that the stream ingestion path and the REST/recovery path use different data contracts for the same fill truth, causing inconsistencies after restart or reconciliation.
+The test should prove whether the current code:
 
-Validate whether both paths converge to the same canonical fill representation for side, fill ID, fill timestamp, quantity, fee status, and accounting eligibility.
+* wrongly persists a non-converged projection, or
+* correctly blocks earlier and fails closed
 
-### 3. Make design-first corrections
+### 2. Add explicit post-repair convergence invariants
 
-If the hypotheses are confirmed, do not merely patch the local symptom. Refactor toward a clearer architecture.
+If a repair path mutates persisted lot/projection state, add postconditions that verify the resulting state is semantically coherent.
 
-Prioritize the following changes if repo evidence supports them:
+At minimum verify, with safe tolerances where appropriate:
 
-#### A. Introduce a strict `myOrder`-specific canonical contract
+* `sum(open_position_lots.qty_open)` vs portfolio asset qty
+* consistency between executable lots, dust lots, and projected total qty
+* that “repair applied” is not treated as equivalent to “state converged”
+* that a post-repair non-converged state fails closed and is surfaced as unresolved, not silently normalized into an apparently valid projection
 
-Do not keep using a loose generic normalizer if that is what the repo is doing now.
+Do not add a superficial assertion in tests only. Put the protection in the relevant runtime repair path or projector boundary where it belongs.
 
-Create a documented, typed, exchange-contract-aware representation for Bithumb `myOrder`, separating at least:
+### 3. Prefer deterministic projection rebuild over ad hoc mutation
 
-* order lifecycle updates
-* trade/fill events
+If the current architecture allows repair code to mutate lot rows directly in a way that can preserve stale projection residue, redesign the touched path toward:
 
-This model must explicitly preserve official fields and distinguish:
+* source-of-truth inputs: trades, fills, trade lifecycles, portfolio, and explicit repair/evidence records
+* deterministic projection rebuild from truth
+* replacement of persisted projection only after invariants pass
 
-* order UUID vs trade UUID
-* per-trade quantity vs cumulative executed quantity
-* trade timestamp vs delivery/event timestamp
-* trade-level fee evidence vs order-level fee evidence
+Do not rewrite the whole system if it is not necessary, but do move the changed path in this direction. The resulting design should reduce future drift, not just patch this one case.
 
-#### B. Separate fill observation from fill accounting
+### 4. Keep lot-native authority intact
 
-If current code blocks ledger application whenever fee evidence is incomplete, preserve safety, but do not lose the observed fill fact.
+The fix must **not**:
 
-Refactor so the system can represent:
+* restore qty-first executable authority
+* merge `open_exposure` and `dust_tracking` into one executable inventory
+* allow SELL or tradability authority to be recovered merely from aggregate qty
+* weaken fail-closed semantics
 
-* fill observed
-* fill accounted
-* fee pending
-* reconciliation pending
-* manual recovery required
+Any compatibility/reporting fields may remain derived only.
 
-Do not let incomplete fee evidence erase or collapse the raw trade event truth.
+### 5. Improve operator observability
 
-#### C. Unify stream and recovery contracts
+If the code currently allows `resume` / process-running state to look healthy while tradeability is still blocked for projection-convergence reasons, improve the operator surface so that this distinction is explicit and unambiguous.
 
-Ensure `myOrder` stream ingestion and REST/recovery lookup paths produce the same canonical fill evidence shape and apply the same reasoning rules.
+You do not need a large observability refactor, but the resulting state should clearly distinguish:
 
-Avoid having two different parsers with two different truth models for the same broker event family.
+* process loop running/stopped
+* resume/recovery gate blocked/unblocked
+* tradability allowed/blocked
+* projection converged/non-converged
 
-#### D. Make status semantics explicit
+Prefer changes to existing reporting/health/readiness surfaces over adding random new outputs.
 
-Do not force exchange `wait/trade/done/cancel` into an overly lossy internal model if it destroys meaning.
+## Strong design preference
 
-In particular, preserve that:
+If the investigation confirms it, prefer the following architectural direction:
 
-* `trade` means a fill event occurred
-* `done` is an order terminal state, not necessarily a new fill
-* order status and fill occurrence are related but not interchangeable
+* keep `open_position_lots` as canonical current lot-state projection
+* keep event residue / incident evidence / repair evidence distinct from canonical current state
+* add deterministic rebuild/projector behavior where needed
+* add repair postcondition validation before persisting or accepting a repaired state
+* add end-to-end incident replay coverage for this class of failures
 
-#### E. Improve observability and replayability
+You do **not** need to fully introduce a brand new schema or complete large migrations unless necessary, but your patch should move the repository materially in this direction.
 
-Preserve raw `myOrder` payloads and ensure the parsing/canonicalization layer is replayable.
+## Scope control
 
-If appropriate, introduce canonicalization versioning or equivalent replay-safe metadata so future parser corrections can be applied to historical event data.
+Do not broaden into unrelated cleanup.
 
-### 4. Rewrite or add tests based on the official contract
+Allowed scope:
 
-Do not rely on the current tests if they encode internal assumptions rather than the official external schema.
+* position authority rebuild / repair
+* lifecycle projection rebuild or summarization if directly needed
+* readiness / tradeability / resume state coupling if directly needed
+* focused docs updates required by behavior changes
+* focused tests required by the patch
 
-Add or update tests so they use realistic official-style `myOrder` payloads and verify repository behavior against the documented contract.
+Not allowed:
 
-At minimum, cover:
+* unrelated strategy tuning
+* unrelated path/storage refactors
+* broad formatting churn
+* “fixing” this by weakening safety checks
+* changing semantics purely to satisfy tests
 
-* one official `state=trade` event that should generate exactly one fill
-* two sequential partial `trade` events on the same order, using `volume` as per-trade quantity and `executed_volume` as cumulative quantity
-* two fills on the same order with different `trade_uuid` values
-* `done` arriving without a new fill
-* `paid_fee` / `reserved_fee` / `remaining_fee` present without confirmed trade-level fee evidence
-* `ask_bid` values for both buy and sell directions
-* `order_type` variants that matter to the repository
-* parity or golden tests showing stream-path and recovery-path canonical outputs match for the same economic event
+## Validation requirements
 
-Tests should fail before the fix and pass after the fix if the issue is real.
+Run focused tests for the changed areas first. Then run the relevant gate(s). If the change is materially cross-cutting in recovery/state authority, finish with the full suite.
 
-### 5. Preserve operational safety
+At minimum run the narrowest relevant set first, likely including some subset of:
 
-Do not relax live-safety checks casually.
+* `tests/test_position_authority_recovery_state.py`
+* `tests/test_recovery_restart_regression.py`
+* `tests/test_trade_lifecycle.py`
+* `tests/test_live_broker.py`
+* any new incident replay test file(s)
 
-If current fee validation intentionally blocks materially sized live fills from immediate accounting, preserve the safety goal. But redesign the state handling so that incomplete fee evidence produces an operationally recoverable intermediate state rather than forcing everything into one opaque hard-failure bucket.
+If your changes touch shared recovery/authority logic, also run:
 
-### 6. Keep changes scoped and reviewable
+* `uv run pytest -q -m lot_native_regression_gate`
 
-Do not perform unrelated cleanup.
-Do not rename large unrelated surfaces unless necessary.
-Do not rewrite the entire trading engine.
-Keep the work focused on:
+If the change becomes cross-cutting enough, finish with:
 
-* `myOrder` contract correctness
-* fill truth and fee evidence handling
-* recovery consistency
-* test realism
-* observability/replayability where directly relevant
+* `uv run pytest -q`
 
-## Expected deliverables
+Do not spam full-suite reruns. Use focused runs until the fix stabilizes.
 
-Make code changes directly in the repo as needed, and produce a final written report in the PR or final response with this exact structure:
+## Final report format
 
-### 1. What I verified
+At the end, provide a concise but complete report with these sections:
 
-List the concrete repository findings about current behavior, with file-level references.
+1. **Root-cause assessment**
 
-### 2. Which hypotheses were confirmed, rejected, or still uncertain
+   * State which hypotheses were supported, unsupported, or still partially unresolved.
+   * Distinguish triggering cause from deeper structural cause.
 
-For each hypothesis A–E:
+2. **What changed**
 
-* status: confirmed / rejected / still uncertain
-* evidence from code/tests
-* why
+   * File-by-file summary.
+   * Call out any behavioral or contract changes.
 
-### 3. What I changed
+3. **Why this design**
 
-Describe the actual implementation changes, focusing on design changes first, not just patches.
+   * Explain how the patch improves robustness, replayability, recoverability, and operator clarity.
+   * Explain why it is not just a symptom patch.
 
-### 4. Why this is a structural fix rather than a symptom patch
+4. **Safety / contract check**
 
-Explain how the changes reduce recurrence across the whole problem family.
+   * Confirm that lot-native authority remains intact.
+   * Confirm that qty did not regain semantic authority.
+   * Confirm that `open_exposure` and `dust_tracking` remain semantically separate.
 
-### 5. Tests added or changed
+5. **Tests run**
 
-List new/updated tests and what each proves.
+   * Exact commands.
+   * Exact results.
 
-### 6. Remaining risks or open questions
+6. **Residual risks / follow-ups**
 
-Be explicit about anything that cannot be fully proven from repository-only work.
+   * What remains intentionally deferred.
+   * Any larger architectural follow-up that should be a separate batch.
 
-## Quality bar
+## Important implementation attitude
 
-Do not submit a vague answer.
-Do not flatten the issue into “fee parsing bug”.
-Do not generalize into architecture advice without repo-backed implementation work.
-Use the repository to verify, modify, and test.
-Prefer precise, minimal, high-leverage structural corrections over broad speculative rewrites.
+Do not assume the current incident explanation is already proven. Prove or falsify it with repository tests and code inspection.
+
+The target is a repository that is more:
+
+* deterministic under incident replay
+* explicit about non-converged repaired state
+* resistant to projection drift
+* understandable to operators during live recovery
+
+Fail closed when uncertain.
 

@@ -49,6 +49,118 @@ def _row_text(row: Any, key: str, default: str = "") -> str:
     return str(value or default)
 
 
+def build_lot_projection_convergence(conn, *, pair: str | None = None) -> dict[str, Any]:
+    """Summarize whether the persisted lot projection matches portfolio holdings.
+
+    This is a convergence guard only. It must not be used to recover SELL
+    authority from aggregate qty; executable authority remains the
+    open_exposure lot-count path.
+    """
+
+    pair_text = str(pair or settings.PAIR)
+    portfolio_row = conn.execute(
+        "SELECT asset_qty, asset_available, asset_locked FROM portfolio WHERE id=1"
+    ).fetchone()
+    portfolio_qty = 0.0
+    if portfolio_row is not None:
+        try:
+            keys = portfolio_row.keys()
+        except AttributeError:
+            keys = ()
+        if "asset_available" in keys:
+            portfolio_qty = normalize_asset_qty(
+                _row_float(portfolio_row, "asset_available") + _row_float(portfolio_row, "asset_locked")
+            )
+        else:
+            portfolio_qty = normalize_asset_qty(_row_float(portfolio_row, "asset_qty"))
+
+    try:
+        lot_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS lot_row_count,
+                COALESCE(SUM(qty_open), 0.0) AS projected_total_qty,
+                COALESCE(SUM(CASE WHEN position_state='open_exposure' THEN qty_open ELSE 0.0 END), 0.0)
+                    AS open_exposure_qty,
+                COALESCE(SUM(CASE WHEN position_state='dust_tracking' THEN qty_open ELSE 0.0 END), 0.0)
+                    AS dust_tracking_qty,
+                COALESCE(SUM(executable_lot_count), 0) AS executable_lot_count,
+                COALESCE(SUM(dust_tracking_lot_count), 0) AS dust_tracking_lot_count
+            FROM open_position_lots
+            WHERE pair=? AND qty_open > 1e-12
+            """,
+            (pair_text,),
+        ).fetchone()
+    except AssertionError:
+        return {
+            "pair": pair_text,
+            "available": False,
+            "converged": True,
+            "reason": "projection_convergence_unavailable",
+            "portfolio_qty": portfolio_qty,
+            "projected_total_qty": 0.0,
+            "portfolio_delta_qty": 0.0,
+            "projected_qty_excess": 0.0,
+            "projected_qty_shortfall": 0.0,
+            "open_exposure_qty": 0.0,
+            "dust_tracking_qty": 0.0,
+            "decomposed_total_qty": 0.0,
+            "lot_row_count": 0,
+            "executable_lot_count": 0,
+            "dust_tracking_lot_count": 0,
+        }
+
+    lot_row_count = _row_int(lot_row, "lot_row_count")
+    projected_total_qty = normalize_asset_qty(_row_float(lot_row, "projected_total_qty"))
+    open_exposure_qty = normalize_asset_qty(_row_float(lot_row, "open_exposure_qty"))
+    dust_tracking_qty = normalize_asset_qty(_row_float(lot_row, "dust_tracking_qty"))
+    executable_lot_count = _row_int(lot_row, "executable_lot_count")
+    dust_tracking_lot_count = _row_int(lot_row, "dust_tracking_lot_count")
+    decomposed_total_qty = normalize_asset_qty(open_exposure_qty + dust_tracking_qty)
+    portfolio_delta_qty = normalize_asset_qty(projected_total_qty - portfolio_qty)
+    projected_qty_excess = normalize_asset_qty(max(0.0, portfolio_delta_qty))
+    projected_qty_shortfall = normalize_asset_qty(max(0.0, -portfolio_delta_qty))
+
+    reasons: list[str] = []
+    if abs(portfolio_delta_qty) > _EPS:
+        reasons.append(
+            "portfolio_projection_qty_mismatch="
+            f"projected_total_qty={projected_total_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+        )
+    if abs(projected_total_qty - decomposed_total_qty) > _EPS:
+        reasons.append(
+            "projection_decomposition_mismatch="
+            f"projected_total_qty={projected_total_qty:.12f},"
+            f"open_plus_dust_qty={decomposed_total_qty:.12f}"
+        )
+    if open_exposure_qty > _EPS and executable_lot_count <= 0:
+        reasons.append("open_exposure_qty_without_executable_lots")
+    if open_exposure_qty <= _EPS and executable_lot_count > 0:
+        reasons.append("executable_lots_without_open_exposure_qty")
+    if dust_tracking_qty > _EPS and dust_tracking_lot_count <= 0:
+        reasons.append("dust_tracking_qty_without_dust_lots")
+    if dust_tracking_qty <= _EPS and dust_tracking_lot_count > 0:
+        reasons.append("dust_lots_without_dust_tracking_qty")
+
+    return {
+        "pair": pair_text,
+        "available": True,
+        "converged": not reasons,
+        "reason": "none" if not reasons else ";".join(reasons),
+        "portfolio_qty": portfolio_qty,
+        "projected_total_qty": projected_total_qty,
+        "portfolio_delta_qty": portfolio_delta_qty,
+        "projected_qty_excess": projected_qty_excess,
+        "projected_qty_shortfall": projected_qty_shortfall,
+        "open_exposure_qty": open_exposure_qty,
+        "dust_tracking_qty": dust_tracking_qty,
+        "decomposed_total_qty": decomposed_total_qty,
+        "lot_row_count": lot_row_count,
+        "executable_lot_count": executable_lot_count,
+        "dust_tracking_lot_count": dust_tracking_lot_count,
+    }
+
+
 def _matching_partial_close_residual_repair_present(
     conn,
     *,
@@ -348,6 +460,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     sell_trade_ids = [_row_int(row, "id") for row in sell_after_rows]
     other_active_lot_count = _row_int(other_active_row, "cnt")
     other_active_qty = normalize_asset_qty(_row_float(other_active_row, "qty"))
+    projection_convergence = build_lot_projection_convergence(conn, pair=pair_text)
     canonical_executable_qty = normalize_asset_qty(
         float(canonical_lot_size) * float(max(0, canonical_executable_lot_count))
     )
@@ -530,6 +643,9 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,
         "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
         "portfolio_projection_state_converged": portfolio_projection_state_converged,
+        "projection_convergence": projection_convergence,
+        "projection_state_converged": bool(projection_convergence.get("converged")),
+        "projection_non_convergence_reason": str(projection_convergence.get("reason") or "none"),
         "residual_normalization_recorded": residual_normalization_recorded,
         "residual_repair_event_present": residual_normalization_recorded,
         "residual_state_converged": residual_state_converged,

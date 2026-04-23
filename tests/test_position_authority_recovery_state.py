@@ -43,6 +43,8 @@ LOT_SIZE = 0.0004
 PRICE = 7_050_000.0
 PORTFOLIO_DIVERGENCE_BUY_QTY = 0.00059992
 PORTFOLIO_DIVERGENCE_QTY = 0.00039988
+LIVE_INCIDENT_PORTFOLIO_QTY = 0.00099986
+LIVE_INCIDENT_STALE_DUST_QTY = 0.001788
 
 
 @pytest.fixture
@@ -238,6 +240,69 @@ def _create_portfolio_projection_divergence(conn) -> None:
         asset_locked=0.0,
     )
     conn.commit()
+
+
+def _record_portfolio_projection_broker_evidence(*, broker_qty: float) -> None:
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_observed_ts_ms": 1_776_745_500_000,
+            "remote_open_order_found": 0,
+            "unresolved_open_order_count": 0,
+            "submit_unknown_count": 0,
+            "recovery_required_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_state": "harmless_dust",
+            "dust_broker_qty": broker_qty,
+            "dust_local_qty": broker_qty,
+            "dust_delta_qty": 0.0,
+            "dust_qty_gap_tolerance": 0.000001,
+            "dust_qty_gap_small": 1,
+            "dust_min_qty": LOT_SIZE,
+        },
+        now_epoch_sec=1.0,
+    )
+
+
+def _insert_live_incident_stale_dust_projection(conn) -> None:
+    dust_quantities = [0.000128] * 13 + [0.000124]
+    assert sum(dust_quantities) == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    for idx, qty_open in enumerate(dust_quantities):
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                50_000 + idx,
+                f"stale_dust_buy_{idx}",
+                f"stale-dust-fill-{idx}",
+                1_699_000_000_000 + idx,
+                PRICE,
+                qty_open,
+                0,
+                1,
+                1,
+                qty_open,
+                LOT_SIZE,
+                0.0001,
+                0.0,
+                8,
+                "legacy_projection_residue",
+                "lot-native",
+                "dust_tracking",
+                0.0,
+            ),
+        )
 
 
 def _replace_with_tracked_dust_row(
@@ -985,6 +1050,133 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert replay_rows[0]["position_state"] == "dust_tracking"
     assert replay_rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
     assert replay_rows[0]["executable_lot_count"] == 0
+
+
+def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust_projection(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        _insert_live_incident_stale_dust_projection(conn)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        preview = build_position_authority_rebuild_preview(conn)
+        before = compute_runtime_readiness_snapshot(conn)
+        with pytest.raises(RuntimeError, match="projection_converged=0"):
+            apply_position_authority_rebuild(conn)
+        repair_count_before_rollback = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_repairs"
+        ).fetchone()
+        conn.rollback()
+        repair_count_after_rollback = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_repairs"
+        ).fetchone()
+        rows_after_rollback = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS row_count,
+                COALESCE(SUM(qty_open), 0.0) AS lot_qty,
+                COALESCE(SUM(CASE WHEN position_state='dust_tracking' THEN qty_open ELSE 0.0 END), 0.0)
+                    AS dust_qty,
+                COALESCE(SUM(CASE WHEN position_state='open_exposure' THEN qty_open ELSE 0.0 END), 0.0)
+                    AS open_qty
+            FROM open_position_lots
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert preview["repair_mode"] == "portfolio_projection_repair"
+    assert preview["safe_to_apply"] is True
+    assert before.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
+    assert repair_count_before_rollback["cnt"] == 0
+    assert repair_count_after_rollback["cnt"] == 0
+    assert rows_after_rollback["row_count"] == 16
+    assert rows_after_rollback["lot_qty"] == pytest.approx(FILL_QTY + LIVE_INCIDENT_STALE_DUST_QTY)
+    assert rows_after_rollback["dust_qty"] == pytest.approx(
+        (FILL_QTY - LOT_SIZE) + LIVE_INCIDENT_STALE_DUST_QTY
+    )
+    assert rows_after_rollback["open_qty"] == pytest.approx(LOT_SIZE)
+
+
+def test_recorded_projection_repair_event_does_not_replace_aggregate_projection_convergence(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        target_trade = conn.execute(
+            "SELECT id, client_order_id FROM trades WHERE client_order_id='incident_buy' AND side='BUY'"
+        ).fetchone()
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        _insert_live_incident_stale_dust_projection(conn)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.execute("DELETE FROM open_position_lots WHERE entry_trade_id=?", (int(target_trade["id"]),))
+        record_position_authority_repair(
+            conn,
+            event_ts=1_776_745_600_000,
+            source="test_stale_portfolio_projection_repair",
+            reason="portfolio_anchored_authority_projection_repair",
+            repair_basis={
+                "event_type": "portfolio_anchored_authority_projection_repair",
+                "target_trade_id": int(target_trade["id"]),
+                "target_client_order_id": str(target_trade["client_order_id"]),
+                "target_remainder_qty": 0.0,
+                "portfolio_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "projected_total_qty": LIVE_INCIDENT_STALE_DUST_QTY,
+                "projected_qty_excess": LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY,
+            },
+        )
+        conn.commit()
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+        projection = readiness.as_dict()["projection_convergence"]
+        lot_row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS row_count,
+                COALESCE(SUM(qty_open), 0.0) AS lot_qty,
+                COALESCE(SUM(CASE WHEN position_state='open_exposure' THEN qty_open ELSE 0.0 END), 0.0)
+                    AS open_qty
+            FROM open_position_lots
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert lot_row["row_count"] == 14
+    assert lot_row["lot_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert lot_row["open_qty"] == pytest.approx(0.0)
+    assert projection["converged"] is False
+    assert projection["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert projection["portfolio_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert projection["projected_qty_excess"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert readiness.recovery_stage == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+    assert readiness.resume_ready is False
+    assert readiness.resume_blockers == ("POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",)
+    assert readiness.run_loop_allowed is False
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "run_loop_blocked"
+    assert readiness.tradeability_operator_fields["trading_allowed"] is False
 
 
 def test_external_position_accounting_repair_blocks_resume_until_recorded_for_historical_split(recovery_db):

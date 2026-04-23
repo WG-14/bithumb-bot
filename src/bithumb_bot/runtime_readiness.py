@@ -16,7 +16,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_policy import classify_fee_gap_incident_verdict, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
-from .position_authority_state import build_position_authority_assessment
+from .position_authority_state import build_lot_projection_convergence, build_position_authority_assessment
 from .recovery_policy import (
     build_tradeability_operator_fields,
     classify_canonical_recovery_state,
@@ -47,6 +47,7 @@ class RuntimeReadinessSnapshot:
     open_order_count: int
     recovery_required_count: int
     position_authority_assessment: dict[str, object]
+    projection_convergence: dict[str, object]
     canonical_state: str
     residual_class: str
     run_loop_allowed: bool
@@ -83,6 +84,9 @@ class RuntimeReadinessSnapshot:
             "open_order_count": int(self.open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
+            "projection_convergence": dict(self.projection_convergence),
+            "projection_converged": bool(self.projection_convergence.get("converged")),
+            "projection_non_convergence_reason": str(self.projection_convergence.get("reason") or "none"),
             "canonical_state": self.canonical_state,
             "residual_class": self.residual_class,
             "run_loop_allowed": bool(self.run_loop_allowed),
@@ -213,6 +217,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         material_zero_fee_fill_count = _metadata_int(metadata, "material_zero_fee_fill_count")
         material_zero_fee_fill_latest_ts = _metadata_int(metadata, "material_zero_fee_fill_latest_ts")
         authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        projection_convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
         canonical_recovery = classify_canonical_recovery_state(
             position_state=position_state,
             lot_snapshot=lot_snapshot,
@@ -254,6 +259,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         blocked_by_authority_rebuild = bool(
             bool(authority_assessment.get("needs_correction"))
             or bool(authority_assessment.get("needs_residual_normalization"))
+            or bool(authority_assessment.get("needs_portfolio_projection_repair"))
+            or not bool(projection_convergence.get("converged"))
             or str(position_state.normalized_exposure.authority_gap_reason or "")
             == "authority_missing_recovery_required"
         )
@@ -339,6 +346,12 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             categories.append("executable_authority")
             operator_next_action = "rebuild_position_authority"
             recommended_command = "uv run python bot.py rebuild-position-authority --apply --yes"
+        elif not bool(projection_convergence.get("converged")):
+            stage = "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+            blockers.append("POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED")
+            categories.append("executable_authority")
+            operator_next_action = "review_position_authority_evidence"
+            recommended_command = "uv run python bot.py rebuild-position-authority"
         elif fee_gap_policy.closeout_blocking and not fee_gap_policy.resume_blocking:
             stage = fee_gap_policy.readiness_stage
             categories.append(fee_gap_policy.blocker_category)
@@ -412,6 +425,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             open_order_count=open_order_count,
             recovery_required_count=recovery_required_count,
             position_authority_assessment=authority_assessment,
+            projection_convergence=projection_convergence,
             canonical_state=canonical_recovery.canonical_state,
             residual_class=tradeability.residual_class,
             run_loop_allowed=tradeability.run_loop_allowed,
