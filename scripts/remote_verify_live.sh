@@ -6,6 +6,11 @@ set -uo pipefail
 
 APP_DIR="${BITHUMB_REMOTE_APP_DIR:-${HOME}/apps/bithumb-bot}"
 PYTEST_TMPDIR="${BITHUMB_PYTEST_TMPDIR:-${HOME}/tmp/pytest-tmp}"
+
+# REMOTE_VERIFY_MODE controls which EC2-side checks run.
+# Default smoke mode still verifies repository synchronization and status
+# stages, then records the full pytest stage as skipped. Full mode also runs
+# `uv run pytest -q`. Unsupported values fail fast with a summary.
 REMOTE_VERIFY_MODE="${REMOTE_VERIFY_MODE:-smoke}"
 
 passed_stages=()

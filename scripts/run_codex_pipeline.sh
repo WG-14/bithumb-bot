@@ -17,6 +17,11 @@ NOTIFY_SCRIPT="${NOTIFY_SCRIPT:-${SCRIPT_DIR}/notify_ntfy.sh}"
 CODEX_BIN="${CODEX_BIN:-codex}"
 SSH_KEY="${BITHUMB_EC2_SSH_KEY:-${HOME}/.ssh/bithumb-bot-paper.pem}"
 EC2_TARGET="${BITHUMB_EC2_TARGET:-ec2-user@3.39.93.137}"
+
+# REMOTE_VERIFY_MODE controls the EC2 verification depth for this automation.
+# Default smoke mode runs the remote pull/sync/status-style checks and summary,
+# while full mode also opts into the remote `uv run pytest -q` stage.
+# Unsupported values fail fast before Codex or Git side effects.
 REMOTE_VERIFY_MODE="${REMOTE_VERIFY_MODE:-smoke}"
 
 stage="preflight"
