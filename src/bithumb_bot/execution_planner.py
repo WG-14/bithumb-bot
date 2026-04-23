@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_FLOOR
 
 from .config import settings
 from .execution_models import OrderIntent, SubmitPlan, SubmitPriceTickPolicy
+from .fee_authority import build_fee_authority_snapshot
 from .lot_model import DUST_POSITION_EPS, build_market_lot_rules, lot_count_to_qty
 from .broker.base import BrokerRejectError, BrokerTemporaryError
 
@@ -97,9 +98,13 @@ def build_submit_plan(
     trace_id = str(intent.trace_id or intent.client_order_id)
     try:
         resolved_rules = rules
+        order_rules_resolution = None
         if resolved_rules is None:
             order_rules_resolution = fetch_order_rules(intent.market)
             resolved_rules = order_rules_resolution.rules
+        fee_authority = build_fee_authority_snapshot(
+            order_rules_resolution if order_rules_resolution is not None else resolved_rules
+        )
         order_side = intent.order_side
         buy_submit_contract = None
         provided_submit_contract = intent.submit_contract
@@ -217,7 +222,7 @@ def build_submit_plan(
             market_id=intent.market,
             market_price=effective_market_price,
             rules=resolved_rules,
-            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
             exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
             source_mode="exchange",

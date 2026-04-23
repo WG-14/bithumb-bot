@@ -121,6 +121,21 @@ def test_parse_order_chance_response_transforms_raw_payload(valid_doc_shaped_res
     assert parsed.maker_ask_fee == 0.0025
 
 
+def test_parse_order_chance_response_allows_documented_zero_fee_state(valid_doc_shaped_response):
+    payload = valid_doc_shaped_response.copy()
+    payload["bid_fee"] = "0"
+    payload["ask_fee"] = "0"
+    payload["maker_bid_fee"] = "0"
+    payload["maker_ask_fee"] = "0"
+
+    parsed = order_rules.parse_order_chance_response(payload, requested_market="KRW-BTC")
+
+    assert parsed.bid_fee == 0.0
+    assert parsed.ask_fee == 0.0
+    assert parsed.maker_bid_fee == 0.0
+    assert parsed.maker_ask_fee == 0.0
+
+
 def test_parse_order_chance_response_allows_missing_price_unit(valid_doc_shaped_response):
     payload = valid_doc_shaped_response.copy()
     market = dict(payload["market"])

@@ -22,6 +22,11 @@ from ..lifecycle import (
     summarize_position_lots,
 )
 from ..broker.order_rules import get_effective_order_rules
+from ..fee_authority import (
+    FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
+    FeeAuthoritySnapshot,
+    build_fee_authority_snapshot,
+)
 from ..utils_time import parse_interval_sec
 from .base import PositionContext, StrategyDecision
 from .exit_rules import ExitRule, create_exit_rules
@@ -112,6 +117,21 @@ def _compute_required_entry_edge_ratio(
 
 def _pair_order_rules(pair: str):
     return get_effective_order_rules(pair).rules
+
+
+def _resolve_strategy_fee_authority(
+    *,
+    pair: str,
+    config_fallback_fee_rate: float,
+) -> FeeAuthoritySnapshot:
+    return build_fee_authority_snapshot(
+        get_effective_order_rules(pair),
+        config_fallback_fee_rate=float(config_fallback_fee_rate),
+    )
+
+
+def _fee_authority_context(fee_authority: FeeAuthoritySnapshot) -> dict[str, object]:
+    return fee_authority.as_dict()
 
 
 def _build_entry_intent_context(*, pair: str) -> dict[str, Any]:
@@ -248,6 +268,15 @@ def _evaluate_entry_edge_filter(
     }
 
 
+def _live_armed_entry_fee_authority_blocks(fee_authority: FeeAuthoritySnapshot) -> bool:
+    return bool(
+        settings.MODE == "live"
+        and not bool(settings.LIVE_DRY_RUN)
+        and bool(settings.LIVE_REAL_ORDER_ARMED)
+        and not fee_authority.live_entry_allowed()
+    )
+
+
 def _resolve_signal_strength_label(
     *,
     base_signal: str,
@@ -270,7 +299,9 @@ def _load_position_context(
     signal_context: dict[str, Any],
 ) -> tuple[PositionContext, NormalizedExposure, PositionStateModel]:
     dust_context = build_dust_display_context(_load_last_reconcile_metadata(conn))
-    rules = _pair_order_rules(pair)
+    resolution = get_effective_order_rules(pair)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=pair)
     try:
         if mark_harmless_dust_positions(
@@ -343,7 +374,7 @@ def _load_position_context(
                 if lot_definition is None or lot_definition.max_qty_decimals is None
                 else lot_definition.max_qty_decimals
             ),
-            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
             exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
         )
@@ -369,7 +400,7 @@ def _load_position_context(
         qty_step=float(rules.qty_step),
         min_notional_krw=float(rules.min_notional_krw),
         max_qty_decimals=int(rules.max_qty_decimals),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -416,7 +447,7 @@ def _load_position_context(
             if lot_definition is None or lot_definition.max_qty_decimals is None
             else lot_definition.max_qty_decimals
         ),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -675,11 +706,16 @@ class SmaCrossStrategy:
 
         base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
         gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
+        fee_authority = _resolve_strategy_fee_authority(
+            pair=self.pair,
+            config_fallback_fee_rate=float(self.live_fee_rate_estimate),
+        )
+        fee_rate_for_decision = float(fee_authority.taker_roundtrip_fee_rate / 2)
         edge_filter_triggered, edge_filter_details = _evaluate_entry_edge_filter(
             base_signal=base_signal,
             gap_ratio=gap_ratio,
             slippage_bps=float(self.slippage_bps),
-            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            live_fee_rate_estimate=fee_rate_for_decision,
             edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
             strategy_min_expected_edge_ratio=float(self.strategy_min_expected_edge_ratio),
         )
@@ -688,6 +724,9 @@ class SmaCrossStrategy:
         if edge_filter_triggered:
             entry_signal = "HOLD"
             entry_reason = "filtered entry: cost_edge"
+        if base_signal == "BUY" and _live_armed_entry_fee_authority_blocks(fee_authority):
+            entry_signal = "HOLD"
+            entry_reason = FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON
         signal_strength_label = _resolve_signal_strength_label(
             base_signal=base_signal,
             expected_edge_ratio=float(edge_filter_details["expected_edge_ratio"]),
@@ -715,7 +754,7 @@ class SmaCrossStrategy:
             rule_names=self.exit_rule_names,
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
             min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
-            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            live_fee_rate_estimate=fee_rate_for_decision,
             small_loss_tolerance_ratio=float(self.exit_small_loss_tolerance_ratio),
         )
         base_context = {
@@ -729,6 +768,8 @@ class SmaCrossStrategy:
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
             "blocked_by_cost_filter": bool(edge_filter_triggered),
+            "blocked_by_fee_authority": bool(entry_reason == FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON),
+            "fee_authority": _fee_authority_context(fee_authority),
             "signal_strength_label": signal_strength_label,
             "signal_strength": {
                 "label": signal_strength_label,
@@ -758,6 +799,8 @@ class SmaCrossStrategy:
                     "slippage_ratio": float(edge_filter_details["slippage_ratio"]),
                     "buffer_ratio": float(edge_filter_details["buffer_ratio"]),
                     "min_expected_edge_ratio": float(edge_filter_details["min_expected_edge_ratio"]),
+                    "fee_authority_source": fee_authority.fee_source,
+                    "fee_authority_degraded": bool(fee_authority.degraded),
                 }
             },
         }
@@ -841,6 +884,11 @@ class SmaWithFilterStrategy:
         base_signal, base_reason = _base_signal(prev_s=prev_s, prev_l=prev_l, curr_s=curr_s, curr_l=curr_l)
 
         gap_ratio = _compute_gap_ratio(curr_s=curr_s, curr_l=curr_l)
+        fee_authority = _resolve_strategy_fee_authority(
+            pair=self.pair,
+            config_fallback_fee_rate=float(self.live_fee_rate_estimate),
+        )
+        fee_rate_for_decision = float(fee_authority.taker_roundtrip_fee_rate / 2)
 
         vol_window = max(1, int(self.volatility_window))
         vol_closes = closes[-vol_window:]
@@ -867,7 +915,7 @@ class SmaWithFilterStrategy:
             base_signal=base_signal,
             gap_ratio=gap_ratio,
             slippage_bps=float(self.slippage_bps),
-            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            live_fee_rate_estimate=fee_rate_for_decision,
             edge_buffer_ratio=float(self.entry_edge_buffer_ratio),
             strategy_min_expected_edge_ratio=float(self.cost_edge_min_ratio),
             filter_enabled=bool(self.cost_edge_enabled),
@@ -882,13 +930,19 @@ class SmaWithFilterStrategy:
             blocked_filters.append("overextended")
         if edge_filter_triggered:
             blocked_filters.append("cost_edge")
+        if base_signal == "BUY" and _live_armed_entry_fee_authority_blocks(fee_authority):
+            blocked_filters.append("fee_authority_degraded")
 
         should_filter_entry = base_signal in ("BUY", "SELL")
         entry_signal = base_signal
         entry_reason = base_reason
         if should_filter_entry and blocked_filters:
             entry_signal = "HOLD"
-            entry_reason = f"filtered entry: {', '.join(blocked_filters)}"
+            entry_reason = (
+                FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON
+                if "fee_authority_degraded" in blocked_filters
+                else f"filtered entry: {', '.join(blocked_filters)}"
+            )
 
         signal_context = {
             "strategy": self.name,
@@ -912,7 +966,7 @@ class SmaWithFilterStrategy:
             rule_names=self.exit_rule_names,
             max_holding_sec=float(self.exit_max_holding_min) * 60.0,
             min_take_profit_ratio=float(self.exit_min_take_profit_ratio),
-            live_fee_rate_estimate=float(self.live_fee_rate_estimate),
+            live_fee_rate_estimate=fee_rate_for_decision,
             small_loss_tolerance_ratio=float(self.exit_small_loss_tolerance_ratio),
         )
 
@@ -937,6 +991,7 @@ class SmaWithFilterStrategy:
             },
             "position_gate": _build_position_gate_context(position_state.normalized_exposure),
             "position_state": _build_position_state_context(position_state),
+            "fee_authority": _fee_authority_context(fee_authority),
             "filters": {
                 "gap": {
                     "enabled": gap_filter_enabled,
@@ -970,6 +1025,8 @@ class SmaWithFilterStrategy:
                     "slippage_ratio": float(edge_filter_details["slippage_ratio"]),
                     "buffer_ratio": float(edge_filter_details["buffer_ratio"]),
                     "min_expected_edge_ratio": float(edge_filter_details["min_expected_edge_ratio"]),
+                    "fee_authority_source": fee_authority.fee_source,
+                    "fee_authority_degraded": bool(fee_authority.degraded),
                 },
             },
             "filter_blocked": bool(should_filter_entry and blocked_filters),
@@ -977,6 +1034,7 @@ class SmaWithFilterStrategy:
             "gap_ratio": gap_ratio,
             "cost_floor_ratio": float(edge_filter_details["cost_floor_ratio"]),
             "blocked_by_cost_filter": bool(should_filter_entry and edge_filter_triggered),
+            "blocked_by_fee_authority": bool("fee_authority_degraded" in blocked_filters),
             "entry": {
                 **_build_entry_decision_context(
                     pair=self.pair,

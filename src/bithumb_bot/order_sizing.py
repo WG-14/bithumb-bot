@@ -8,6 +8,11 @@ from typing import Any
 from .config import settings
 from .dust import DUST_POSITION_EPS
 from .dust import build_executable_lot
+from .fee_authority import (
+    FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
+    FeeAuthoritySnapshot,
+    build_fee_authority_snapshot,
+)
 from .broker.order_rules import get_effective_order_rules
 from .lifecycle import LotDefinitionSnapshot
 from .lot_model import build_market_lot_rules, lot_count_to_qty
@@ -69,6 +74,10 @@ class ExecutionSizingPlan:
     buy_authority: BuyExecutionAuthority | None = None
     internal_lot_is_exchange_inflated: bool = False
     internal_lot_would_block_buy: bool = False
+    fee_authority: FeeAuthoritySnapshot | None = None
+    fee_authority_source: str = "unresolved"
+    fee_authority_degraded: bool = False
+    fee_rate_used: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -299,12 +308,43 @@ def build_buy_execution_sizing(
             non_executable_reason="invalid_market_price",
             buy_authority=resolved_authority,
         )
-    rules = get_effective_order_rules(pair).rules
+    resolution = get_effective_order_rules(pair)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution, config_fallback_fee_rate=fee_rate)
+    if settings.MODE == "live" and not bool(settings.LIVE_DRY_RUN) and bool(settings.LIVE_REAL_ORDER_ARMED):
+        if not fee_authority.live_entry_allowed():
+            return ExecutionSizingPlan(
+                side="BUY",
+                allowed=False,
+                block_reason=FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
+                decision_reason_code=FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
+                budget_krw=float(gross_budget),
+                requested_qty=0.0,
+                exchange_constrained_qty=0.0,
+                lifecycle_executable_qty=0.0,
+                executable_qty=0.0,
+                rejected_qty_remainder=0.0,
+                unused_budget_krw=0.0,
+                internal_lot_size=0.0,
+                intended_lot_count=0,
+                executable_lot_count=0,
+                qty_source="entry.intent_budget_krw",
+                effective_min_trade_qty=0.0,
+                min_qty=float(rules.min_qty),
+                qty_step=float(rules.qty_step),
+                min_notional_krw=float(rules.min_notional_krw),
+                non_executable_reason=FEE_AUTHORITY_LIVE_ENTRY_BLOCK_REASON,
+                buy_authority=resolved_authority,
+                fee_authority=fee_authority,
+                fee_authority_source=fee_authority.fee_source,
+                fee_authority_degraded=True,
+                fee_rate_used=float(fee_authority.taker_bid_fee_rate),
+            )
     lot_rules = build_market_lot_rules(
         market_id=pair,
         market_price=float(market_price),
         rules=rules,
-        exit_fee_ratio=0.0,
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -326,7 +366,7 @@ def build_buy_execution_sizing(
         qty_step=float(rules.qty_step),
         min_notional_krw=float(rules.min_notional_krw),
         max_qty_decimals=int(rules.max_qty_decimals),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -381,6 +421,10 @@ def build_buy_execution_sizing(
         buy_authority=resolved_authority,
         internal_lot_is_exchange_inflated=internal_lot_is_exchange_inflated,
         internal_lot_would_block_buy=internal_lot_would_block_buy,
+        fee_authority=fee_authority,
+        fee_authority_source=fee_authority.fee_source,
+        fee_authority_degraded=fee_authority.degraded,
+        fee_rate_used=float(fee_authority.taker_bid_fee_rate),
     )
 
 
@@ -398,12 +442,14 @@ def build_sell_execution_sizing(
         qty_step = float(lot_definition.qty_step or 0.0)
         min_notional_krw = float(lot_definition.min_notional_krw or 0.0)
     else:
-        rules = get_effective_order_rules(pair).rules
+        resolution = get_effective_order_rules(pair)
+        rules = resolution.rules
+        fee_authority = build_fee_authority_snapshot(resolution)
         lot_rules = build_market_lot_rules(
             market_id=pair,
             market_price=float(market_price),
             rules=rules,
-            exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+            exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
             exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
             exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
         )
@@ -412,6 +458,8 @@ def build_sell_execution_sizing(
         min_qty = float(lot_rules.min_qty)
         qty_step = float(lot_rules.qty_step)
         min_notional_krw = float(lot_rules.min_notional_krw)
+    if lot_definition is not None and lot_definition.is_authoritative:
+        fee_authority = None
     intended_lot_count = max(0, int(authority.sellable_executable_lot_count))
     requested_qty = lot_count_to_qty(
         lot_count=intended_lot_count,
@@ -443,4 +491,8 @@ def build_sell_execution_sizing(
         qty_step=float(qty_step),
         min_notional_krw=float(min_notional_krw),
         non_executable_reason="executable" if allowed else block_reason,
+        fee_authority=fee_authority,
+        fee_authority_source="lot_definition" if fee_authority is None else fee_authority.fee_source,
+        fee_authority_degraded=False if fee_authority is None else fee_authority.degraded,
+        fee_rate_used=0.0 if fee_authority is None else float(fee_authority.taker_ask_fee_rate),
     )

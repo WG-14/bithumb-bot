@@ -17,6 +17,7 @@ from .db_core import (
     set_portfolio_breakdown,
 )
 from .execution import apply_fill_and_trade, order_fill_tolerance
+from .fee_authority import resolve_fee_authority_snapshot
 from .lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from .oms import set_status
 
@@ -68,6 +69,13 @@ def build_fee_pending_accounting_repair_preview(
     exchange_order_id_text = _clean_text(exchange_order_id) or None
     fee_value = None if fee is None else normalize_cash_amount(fee)
     fee_provenance_text = _clean_text(fee_provenance)
+    try:
+        fee_authority_evidence = resolve_fee_authority_snapshot(settings.PAIR).as_dict()
+    except Exception as exc:
+        fee_authority_evidence = {
+            "unavailable": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     observations = _load_pending_observations(
         conn,
@@ -196,6 +204,7 @@ def build_fee_pending_accounting_repair_preview(
         "observation_fee_status": _clean_text(observation["fee_status"]) if observation is not None else None,
         "observation_parse_warnings": _clean_text(observation["parse_warnings"]) if observation is not None else None,
         "raw_payload_present": bool(observation is not None and observation["raw_payload"] is not None),
+        "fee_authority": fee_authority_evidence,
         "order_status": _clean_text(order["status"]) if order is not None else None,
         "projected_status": projected_status,
         "projected_qty_filled": projected_qty_filled,
@@ -257,6 +266,7 @@ def apply_fee_pending_accounting_repair(
         "notional": preview["notional"],
         "fee": preview["fee"],
         "fee_provenance": preview["fee_provenance"],
+        "fee_authority": preview["fee_authority"],
         "order_status_before": preview["order_status"],
         "projected_status": preview["projected_status"],
         "lot_snapshot_before": before_lot_snapshot,

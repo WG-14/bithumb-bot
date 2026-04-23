@@ -86,6 +86,17 @@ def _require_positive_number(payload: dict[str, Any], key: str, *, where: str) -
     return value
 
 
+def _require_non_negative_number(payload: dict[str, Any], key: str, *, where: str) -> float:
+    raw = payload.get(key)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be numeric") from None
+    if not math.isfinite(value) or value < 0:
+        raise OrderChanceSchemaError(f"/v1/orders/chance {where}.{key} must be >= 0")
+    return value
+
+
 def _optional_positive_number(payload: dict[str, Any], key: str, *, where: str) -> float | None:
     if key not in payload or payload.get(key) is None:
         return None
@@ -94,7 +105,7 @@ def _optional_positive_number(payload: dict[str, Any], key: str, *, where: str) 
 
 def parse_order_chance_response(payload: dict[str, Any], *, requested_market: str) -> OrderChanceResponse:
     fee_values = {
-        fee_field: _require_positive_number(payload, fee_field, where="response")
+        fee_field: _require_non_negative_number(payload, fee_field, where="response")
         for fee_field in ("bid_fee", "ask_fee", "maker_bid_fee", "maker_ask_fee")
     }
 

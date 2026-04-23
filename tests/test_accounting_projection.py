@@ -324,6 +324,8 @@ def test_fee_pending_observation_without_fill_remains_active_incident(projection
     assert readiness.recovery_stage == "ACCOUNTING_PENDING_FEE"
     assert preview["needs_repair"] is True
     assert preview["safe_to_apply"] is True
+    assert "fee_authority" in preview
+    assert preview["fee_authority"]
 
 
 def test_already_accounted_fill_reclassifies_stale_fee_pending_observation(projection_db, capsys):

@@ -219,7 +219,24 @@ def _stub_live_effective_order_rules(monkeypatch) -> None:
                 qty_step=0.0001,
                 min_notional_krw=5000.0,
                 max_qty_decimals=8,
-            )
+                bid_fee=0.0025,
+                ask_fee=0.0025,
+                maker_bid_fee=0.0020,
+                maker_ask_fee=0.0020,
+            ),
+            source={
+                "bid_fee": "chance_doc",
+                "ask_fee": "chance_doc",
+                "maker_bid_fee": "chance_doc",
+                "maker_ask_fee": "chance_doc",
+            },
+            source_mode="merged",
+            fallback_used=False,
+            retrieved_at_sec=100.0,
+            expires_at_sec=400.0,
+            stale=False,
+            snapshot_persisted=False,
+            is_stale=lambda *, now_sec=None: False,
         ),
     )
 
@@ -10894,32 +10911,50 @@ def test_live_submit_attempt_reason_codes_cover_ambiguous_paths(tmp_path, monkey
     monkeypatch.setattr(
         "bithumb_bot.order_sizing.get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
-            rules=order_rules.OrderRules(
-                bid_min_total_krw=0.0,
-                ask_min_total_krw=0.0,
-                min_notional_krw=0.0,
-                min_qty=0.0001,
-                qty_step=0.0001,
-                max_qty_decimals=8,
+                rules=order_rules.OrderRules(
+                    bid_min_total_krw=0.0,
+                    ask_min_total_krw=0.0,
+                    min_notional_krw=0.0,
+                    min_qty=0.0001,
+                    qty_step=0.0001,
+                    max_qty_decimals=8,
+                    bid_fee=0.0025,
+                    ask_fee=0.0025,
+                    maker_bid_fee=0.0020,
+                    maker_ask_fee=0.0020,
+                ),
+                source={
+                    "bid_fee": "chance_doc",
+                    "ask_fee": "chance_doc",
+                    "maker_bid_fee": "chance_doc",
+                    "maker_ask_fee": "chance_doc",
+                },
             ),
-            source={"source": "test"},
-        ),
-    )
+        )
     monkeypatch.setattr(
         order_sizing,
         "get_effective_order_rules",
         lambda _pair: order_rules.RuleResolution(
-            rules=order_rules.OrderRules(
-                bid_min_total_krw=0.0,
-                ask_min_total_krw=0.0,
-                min_notional_krw=0.0,
-                min_qty=0.0001,
-                qty_step=0.0001,
-                max_qty_decimals=8,
+                rules=order_rules.OrderRules(
+                    bid_min_total_krw=0.0,
+                    ask_min_total_krw=0.0,
+                    min_notional_krw=0.0,
+                    min_qty=0.0001,
+                    qty_step=0.0001,
+                    max_qty_decimals=8,
+                    bid_fee=0.0025,
+                    ask_fee=0.0025,
+                    maker_bid_fee=0.0020,
+                    maker_ask_fee=0.0020,
+                ),
+                source={
+                    "bid_fee": "chance_doc",
+                    "ask_fee": "chance_doc",
+                    "maker_bid_fee": "chance_doc",
+                    "maker_ask_fee": "chance_doc",
+                },
             ),
-            source={"source": "test"},
-        ),
-    )
+        )
     monkeypatch.setattr(
         live_module,
         "_load_live_reference_quote",

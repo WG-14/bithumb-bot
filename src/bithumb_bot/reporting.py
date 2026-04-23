@@ -16,6 +16,7 @@ from .analytics_context import (
 )
 from .config import PATH_MANAGER, settings
 from .decision_context import resolve_canonical_position_exposure_snapshot
+from .fee_authority import resolve_fee_authority_snapshot
 from .broker.order_rules import get_effective_order_rules, rule_source_for
 from .reason_codes import (
     DUST_RESIDUAL_SUPPRESSED,
@@ -2222,12 +2223,27 @@ def cmd_fee_diagnostics(
     as_json: bool = False,
 ) -> None:
     market, raw_symbol = canonical_market_with_raw(settings.PAIR)
+    fee_authority_payload: dict[str, object] | None = None
+    if estimated_fee_rate is None and settings.MODE == "live":
+        try:
+            fee_authority = resolve_fee_authority_snapshot(settings.PAIR)
+            estimate = float(fee_authority.taker_roundtrip_fee_rate / 2)
+            fee_authority_payload = fee_authority.as_dict()
+        except Exception as exc:
+            estimate = settings.LIVE_FEE_RATE_ESTIMATE
+            fee_authority_payload = {
+                "unavailable": True,
+                "fee_source": "config_estimate_degraded",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        estimate = (
+            settings.PAPER_FEE_RATE
+            if estimated_fee_rate is None
+            else float(estimated_fee_rate)
+        )
     estimate = (
-        settings.LIVE_FEE_RATE_ESTIMATE
-        if estimated_fee_rate is None and settings.MODE == "live"
-        else settings.PAPER_FEE_RATE
-        if estimated_fee_rate is None
-        else float(estimated_fee_rate)
+        float(estimate)
     )
     conn = ensure_db()
     try:
@@ -2260,6 +2276,7 @@ def cmd_fee_diagnostics(
         "fee_model_validation": {
             "estimated_fee_rate": summary.estimated_fee_rate,
             "estimated_minus_actual_bps": summary.estimated_minus_actual_bps,
+            "fee_authority": fee_authority_payload,
         },
         "roundtrip": {
             "total_fee": summary.roundtrip_fee_total,
@@ -2301,7 +2318,8 @@ def cmd_fee_diagnostics(
     print(
         "  "
         f"estimated_fee_rate={summary.estimated_fee_rate:.6f} "
-        f"estimated_minus_actual_bps={_fmt_rate(summary.estimated_minus_actual_bps, as_bps=True)}"
+        f"estimated_minus_actual_bps={_fmt_rate(summary.estimated_minus_actual_bps, as_bps=True)} "
+        f"fee_authority_source={str((fee_authority_payload or {}).get('fee_source') or 'manual_or_paper')}"
     )
     print("\n[ROUNDTRIP-FEE-AND-PNL]")
     print(

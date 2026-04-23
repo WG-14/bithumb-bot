@@ -12,6 +12,7 @@ from .db_core import (
     normalize_cash_amount,
     record_fee_gap_accounting_repair,
 )
+from .fee_authority import resolve_fee_authority_snapshot
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
 from .recovery_policy import classify_canonical_recovery_state
@@ -44,6 +45,13 @@ def _reason_prefix(reason: str) -> str:
 
 def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
     state = runtime_state.snapshot()
+    try:
+        fee_authority_evidence = resolve_fee_authority_snapshot(settings.PAIR).as_dict()
+    except Exception as exc:
+        fee_authority_evidence = {
+            "unavailable": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     try:
         metadata = json.loads(str(state.last_reconcile_metadata or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -194,6 +202,7 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         "resume_blocking": bool(policy.resume_blocking),
         "closeout_blocking": bool(policy.closeout_blocking),
         "fee_gap_policy_reason": policy.policy_reason,
+        "fee_authority": fee_authority_evidence,
         "fee_gap_incident": incident.as_dict(),
         "incident_kind": incident.incident_kind,
         "incident_scope": incident.incident_scope,
@@ -268,6 +277,7 @@ def apply_fee_gap_accounting_repair(conn, *, note: str | None = None) -> dict[st
         "reserved_exit_qty": preview["reserved_exit_qty"],
         "portfolio_cash_basis": preview["portfolio_cash"],
         "portfolio_qty_basis": preview["portfolio_qty"],
+        "fee_authority": preview["fee_authority"],
     }
     repair = record_fee_gap_accounting_repair(
         conn,

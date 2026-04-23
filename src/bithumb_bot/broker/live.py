@@ -12,6 +12,7 @@ from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
 from ..decision_context import resolve_canonical_position_exposure_snapshot
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, record_order_if_missing
+from ..fee_authority import build_fee_authority_snapshot
 from ..dust import (
     DustState,
     build_dust_display_context,
@@ -1099,7 +1100,9 @@ def _build_non_authoritative_qty_normalization_snapshot(*, qty: float) -> dict[s
     if normalized <= 0:
         raise ValueError(f"invalid order qty: {qty}")
 
-    rules = _effective_order_rules(settings.PAIR).rules
+    resolution = _effective_order_rules(settings.PAIR)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution)
 
     step = _decimal_from_number(getattr(rules, "qty_step", 0) or 0)
     if step > 0:
@@ -1140,7 +1143,9 @@ def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> 
             "dust-safe entry qty unavailable: "
             f"input_qty={input_qty:.12f}"
         )
-    rules = _effective_order_rules(settings.PAIR).rules
+    resolution = _effective_order_rules(settings.PAIR)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution)
     executable_lot = build_executable_lot(
         qty=input_qty,
         market_price=float(market_price),
@@ -1148,7 +1153,7 @@ def adjust_buy_order_qty_for_dust_safety(*, qty: float, market_price: float) -> 
         qty_step=float(rules.qty_step),
         min_notional_krw=float(rules.min_notional_krw),
         max_qty_decimals=int(rules.max_qty_decimals),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -1461,7 +1466,9 @@ def _build_sell_dust_unsellable_details(*, qty: float, market_price: float) -> d
     normalized_qty = float(snapshot["normalized_qty"])
     min_qty = float(snapshot["min_qty"])
     input_qty = float(snapshot["input_qty"])
-    rules = _effective_order_rules(settings.PAIR).rules
+    resolution = _effective_order_rules(settings.PAIR)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution)
     min_notional = float(side_min_total_krw(rules=rules, side="SELL"))
     notional = input_qty * float(market_price)
 
@@ -1768,7 +1775,9 @@ def validate_pretrade(
     if observed_ts_ms <= 0 and source_id not in {"dry_run_static", "legacy_balance_api"}:
         raise ValueError(f"invalid balance snapshot observed_ts_ms: source={source_id} observed_ts_ms={observed_ts_ms}")
 
-    rules = _effective_order_rules(settings.PAIR).rules
+    resolution = _effective_order_rules(settings.PAIR)
+    rules = resolution.rules
+    fee_authority = build_fee_authority_snapshot(resolution)
 
     notional = float(qty) * float(market_price)
     min_notional = side_min_total_krw(rules=rules, side=side)
@@ -1777,11 +1786,17 @@ def validate_pretrade(
 
     buffer_mult = 1.0 + max(0.0, float(settings.PRETRADE_BALANCE_BUFFER_BPS)) / 10_000.0
     if side == "BUY":
-        # NOTE:
-        # - LIVE_FEE_RATE_ESTIMATE: live pretrade ??ш낄猷????釉????怨뚮옖?????怨뚮옖??????⑤베毓??洹숇윦?
-        # - PAPER_FEE_RATE/FEE_RATE: paper 癲ル슪???????????源낇꼧??????れ삀??????쒓낮彛?嶺뚮ㅏ援??fee rate
-        # ????좊즴??????????됰슣維???live pretrade ??節뚮쳮雅????????ㅼ굣筌뤿뱶????貫????롰돯?釉먯뒭???? ??熬곣뫗踰???筌먲퐢??
-        fee_mult = 1.0 + max(0.0, float(settings.LIVE_FEE_RATE_ESTIMATE))
+        if (
+            settings.MODE == "live"
+            and not bool(settings.LIVE_DRY_RUN)
+            and bool(settings.LIVE_REAL_ORDER_ARMED)
+            and not fee_authority.live_entry_allowed()
+        ):
+            raise ValueError(
+                "fee authority degraded for live armed BUY: "
+                f"{fee_authority.diagnostic_summary}"
+            )
+        fee_mult = 1.0 + max(0.0, float(fee_authority.taker_bid_fee_rate))
         required_cash = notional * fee_mult * buffer_mult
         if float(balance.cash_available) + POSITION_EPSILON < required_cash:
             raise ValueError(
@@ -2001,7 +2016,9 @@ def _determine_live_execution_position_state(
     open_exposure_qty = float(position_snapshot.raw_open_exposure_qty)
     dust_tracking_qty = float(position_snapshot.dust_tracking_qty)
     reserved_exit_qty = summarize_reserved_exit_qty(conn, pair=settings.PAIR)
-    effective_rules = _effective_order_rules(settings.PAIR).rules
+    effective_resolution = _effective_order_rules(settings.PAIR)
+    effective_rules = effective_resolution.rules
+    fee_authority = build_fee_authority_snapshot(effective_resolution)
     normalized_exposure = build_normalized_exposure(
         raw_qty_open=float(open_exposure_qty),
         dust_context=state.last_reconcile_metadata,
@@ -2033,7 +2050,7 @@ def _determine_live_execution_position_state(
             if lot_definition is None or lot_definition.max_qty_decimals is None
             else lot_definition.max_qty_decimals
         ),
-        exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+        exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
         exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
         exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
     )
@@ -2046,6 +2063,7 @@ def _determine_live_execution_position_state(
         {
             "raw_total_asset_qty": raw_total_asset_qty,
             "raw_qty_open": float(open_exposure_qty),
+            "fee_authority": fee_authority.as_dict(),
             "open_exposure_qty": float(normalized_exposure.open_exposure_qty),
             "dust_tracking_qty": float(normalized_exposure.dust_tracking_qty),
             "reserved_exit_qty": float(normalized_exposure.reserved_exit_qty),
@@ -2238,7 +2256,6 @@ def _determine_live_execution_intent(
             pair=settings.PAIR,
             cash_krw=float(position_state.cash),
             market_price=float(market_price),
-            fee_rate=float(settings.LIVE_FEE_RATE_ESTIMATE),
             entry_intent=decision_observability.get("entry_intent"),
             authority=BuyExecutionAuthority(
                 entry_allowed=bool(decision_observability["entry_allowed"]),
@@ -2471,6 +2488,7 @@ def _determine_live_execution_intent(
                 )
                 return None
 
+            fee_authority = build_fee_authority_snapshot(_effective_order_rules(settings.PAIR))
             if reclassify_non_executable_open_exposure(
                 conn=conn,
                 pair=settings.PAIR,
@@ -2481,7 +2499,7 @@ def _determine_live_execution_intent(
                     qty_step=float(position_state.effective_rules.qty_step),
                     min_notional_krw=float(position_state.effective_rules.min_notional_krw),
                     max_qty_decimals=int(position_state.effective_rules.max_qty_decimals),
-                    exit_fee_ratio=float(settings.LIVE_FEE_RATE_ESTIMATE),
+                    exit_fee_ratio=float(fee_authority.taker_ask_fee_rate),
                     exit_slippage_bps=float(settings.STRATEGY_ENTRY_SLIPPAGE_BPS),
                     exit_buffer_ratio=float(settings.ENTRY_EDGE_BUFFER_RATIO),
                 ),
