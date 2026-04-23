@@ -5,7 +5,9 @@ import time
 from dataclasses import dataclass
 
 from ..config import settings
+from ..db_core import record_broker_fill_observation
 from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
+from ..fee_observation import fee_accounting_status
 from ..fill_reading import FillReadPolicy, get_broker_fills
 from ..notifier import format_event, notify
 from ..observability import format_log_kv, safety_event
@@ -178,6 +180,59 @@ def _record_application_phase(
     )
 
 
+def _fill_accounting_status(fill) -> str:
+    return fee_accounting_status(
+        fee=getattr(fill, "fee", None),
+        fee_status=getattr(fill, "fee_status", "complete"),
+        price=getattr(fill, "price", None),
+        qty=getattr(fill, "qty", None),
+        material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+    )
+
+
+def _record_application_fill_observations(
+    *,
+    conn,
+    client_order_id: str,
+    exchange_order_id: str | None,
+    side: str,
+    fills: list,
+    source: str,
+) -> dict[str, int | str]:
+    event_ts = int(time.time() * 1000)
+    latest_fee_status = "none"
+    fee_pending_count = 0
+    observation_count = 0
+    for fill in fills:
+        accounting_status = _fill_accounting_status(fill)
+        if accounting_status == "fee_pending":
+            fee_pending_count += 1
+            latest_fee_status = str(getattr(fill, "fee_status", "unknown") or "unknown")
+        record_broker_fill_observation(
+            conn,
+            event_ts=event_ts,
+            client_order_id=client_order_id,
+            exchange_order_id=(getattr(fill, "exchange_order_id", None) or exchange_order_id),
+            fill_id=getattr(fill, "fill_id", None),
+            fill_ts=int(getattr(fill, "fill_ts", 0) or 0),
+            side=side,
+            price=float(getattr(fill, "price", 0.0) or 0.0),
+            qty=float(getattr(fill, "qty", 0.0) or 0.0),
+            fee=getattr(fill, "fee", None),
+            fee_status=str(getattr(fill, "fee_status", "unknown") or "unknown"),
+            accounting_status=accounting_status,
+            source=source,
+            parse_warnings=getattr(fill, "parse_warnings", ()),
+            raw_payload=getattr(fill, "raw", None),
+        )
+        observation_count += 1
+    return {
+        "observation_count": observation_count,
+        "fee_pending_count": fee_pending_count,
+        "latest_fee_status": latest_fee_status,
+    }
+
+
 def reconcile_apply_fills_and_refresh(
     live_module,
     *,
@@ -195,8 +250,66 @@ def reconcile_apply_fills_and_refresh(
         broker,
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id,
-        policy=FillReadPolicy.ACCOUNTING_STRICT,
+        policy=FillReadPolicy.OBSERVATION_SALVAGE,
     )
+    fee_pending_fills = [fill for fill in fills if _fill_accounting_status(fill) == "fee_pending"]
+    if fee_pending_fills:
+        observation_summary = _record_application_fill_observations(
+            conn=conn,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side=side,
+            fills=fills,
+            source="live_application_fee_pending",
+        )
+        from_status = str(order.status or "NEW")
+        reason = (
+            "live application blocked: broker fill observed but accounting is fee-pending; "
+            f"exchange_order_id={exchange_order_id or live_module.UNSET_EVENT_FIELD}; "
+            f"fill_id={fee_pending_fills[0].fill_id}; "
+            f"fee_status={observation_summary['latest_fee_status']}; "
+            "manual fee resolution required before ledger apply"
+        )
+        live_module._mark_recovery_required(
+            conn=conn,
+            client_order_id=client_order_id,
+            side=side,
+            from_status=from_status,
+            reason=reason,
+        )
+        update_order_intent_dedup(
+            conn,
+            intent_key=submission.intent_key,
+            client_order_id=client_order_id,
+            order_status="RECOVERY_REQUIRED",
+        )
+        exc = LiveFillFeeValidationError(reason)
+        _record_application_phase(
+            submission=submission,
+            order_status="RECOVERY_REQUIRED",
+            execution_state="application_failed",
+            submission_reason_code="application_failed",
+            broker_response_summary=(
+                "application_exception=LiveFillFeeValidationError;"
+                f"error={reason};observed_fill_count={observation_summary['observation_count']};"
+                f"fee_pending_fill_count={observation_summary['fee_pending_count']}"
+            ),
+            error=exc,
+        )
+        conn.commit()
+        live_module.RUN_LOG.error(
+            format_log_kv(
+                "[FILL_OBSERVATION] fee-pending broker fill observed before accounting apply",
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id or live_module.UNSET_EVENT_FIELD,
+                side=side,
+                observed_fill_count=observation_summary["observation_count"],
+                fee_pending_fill_count=observation_summary["fee_pending_count"],
+                latest_fee_status=observation_summary["latest_fee_status"],
+            )
+        )
+        return None
+
     try:
         fills_to_apply = live_module._aggregate_fills_for_apply(
             fills=fills,

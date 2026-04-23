@@ -3546,7 +3546,7 @@ def test_live_submit_without_exchange_id_marks_submit_unknown(monkeypatch, tmp_p
     assert any("event=order_submit_unknown" in msg and "reason_code=SUBMIT_TIMEOUT" in msg for msg in notifications)
 
 
-def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks_aggregate(tmp_path, monkeypatch):
+def test_live_execute_signal_records_observation_when_fee_pending_blocks_apply(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", str(tmp_path / "strict_fee_block.sqlite"))
     object.__setattr__(settings, "START_CASH_KRW", 1000000.0)
     object.__setattr__(settings, "LIVE_FILL_FEE_STRICT_MODE", True)
@@ -3572,11 +3572,23 @@ def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks
         """,
         (row["client_order_id"],),
     ).fetchone()
+    observation_summary = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS observation_count,
+            COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
+            COALESCE(MAX(CASE WHEN accounting_status='fee_pending' THEN fee_status ELSE NULL END), 'none') AS fee_status,
+            COALESCE(MAX(source), 'none') AS source
+        FROM broker_fill_observations
+        WHERE client_order_id=?
+        """,
+        (row["client_order_id"],),
+    ).fetchone()
     conn.close()
 
     assert row is not None
     assert row["status"] == "RECOVERY_REQUIRED"
-    assert "material fee validation blocked fill aggregation" in str(row["last_error"])
+    assert "accounting is fee-pending" in str(row["last_error"])
     assert application_event is not None
     assert application_event["submit_phase"] == "application"
     assert application_event["order_status"] == "RECOVERY_REQUIRED"
@@ -3584,6 +3596,10 @@ def test_live_execute_signal_marks_recovery_required_when_strict_fill_fee_blocks
     application_evidence = json.loads(str(application_event["submit_evidence"]))
     assert application_evidence["submit_phase"] == "application"
     assert application_evidence["execution_state"] == "application_failed"
+    assert observation_summary["observation_count"] == 2
+    assert observation_summary["fee_pending_count"] == 1
+    assert observation_summary["fee_status"] == "complete"
+    assert observation_summary["source"] == "live_application_fee_pending"
     assert any("event=recovery_required_transition" in msg for msg in notifications)
 
 
@@ -3744,7 +3760,7 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     report = _load_recovery_report()
 
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
     assert fill_count["cnt"] == 0
@@ -3764,6 +3780,49 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert report["can_resume"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
+
+
+def test_reconcile_fee_pending_terminal_truth_is_idempotent(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "missing_fee_reconcile_idempotent.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1000010.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    conn = ensure_db(str(tmp_path / "missing_fee_reconcile_idempotent.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_missing_fee','ex_missing_fee','NEW','BUY',NULL,0.01,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_StrictMissingFeeRecoveryBroker())
+    reconcile_with_broker(_StrictMissingFeeRecoveryBroker())
+
+    conn = ensure_db(str(tmp_path / "missing_fee_reconcile_idempotent.sqlite"))
+    row = conn.execute(
+        "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_missing_fee'"
+    ).fetchone()
+    observation_count = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM broker_fill_observations WHERE client_order_id='live_missing_fee'"
+    ).fetchone()
+    blocked_transition_count = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM order_events
+        WHERE client_order_id='live_missing_fee'
+          AND event_type='status_transition_blocked'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.0)
+    assert "accounting is fee-pending" in str(row["last_error"])
+    assert observation_count["cnt"] == 1
+    assert blocked_transition_count["cnt"] == 0
 
 
 def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(tmp_path):
@@ -3802,7 +3861,7 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     metadata = json.loads(str(state.last_reconcile_metadata))
 
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
     assert fill_count["cnt"] == 0

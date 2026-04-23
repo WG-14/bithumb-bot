@@ -291,18 +291,37 @@ def get_fills(
                     context="trade",
                     qty=qty,
                     price=price,
-                    strict=strict_fee_parse,
+                    strict=False,
                 )
                 fee = fee_observation.fee
                 fee_status = fee_observation.status
                 warnings = [fee_observation.warning] if fee_observation.warning else []
-                if not strict_fee_parse and fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
+                if fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
                     candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
                     if candidate_warning:
                         warnings.append(candidate_warning)
                     if candidate_fee is not None:
                         fee = candidate_fee
                         fee_status = "order_level_candidate"
+                    elif strict_fee_parse:
+                        warning_suffix = ""
+                        if fee_observation.warning and ":" in fee_observation.warning:
+                            warning_suffix = f" '{fee_observation.warning.split(':', 1)[1]}'"
+                        if fee_status == "missing":
+                            raise BrokerRejectError(
+                                "/v1/order.trade schema mismatch: missing fee field for materially sized fill"
+                            )
+                        if fee_status == "empty":
+                            raise BrokerRejectError(
+                                f"/v1/order.trade schema mismatch: empty fee field{warning_suffix} for materially sized fill"
+                            )
+                        if fee_status == "zero_reported":
+                            raise BrokerRejectError(
+                                f"/v1/order.trade schema mismatch: zero fee field{warning_suffix} for materially sized fill"
+                            )
+                        raise BrokerRejectError(
+                            f"/v1/order.trade schema mismatch: {fee_status} fee field{warning_suffix} for materially sized fill"
+                        )
                 else:
                     warnings.extend(_trade_fee_warnings(broker, row, trade_fee=fee, trades=trades))
                 order_fee_fields = {key: row.get(key) for key in _ORDER_LEVEL_FEE_KEYS if key in row}

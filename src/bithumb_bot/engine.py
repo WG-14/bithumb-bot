@@ -840,12 +840,31 @@ def evaluate_startup_safety_gate() -> str | None:
         fee_gap_recovery_required = int(reconcile_metadata.get("fee_gap_recovery_required", 0) or 0)
     except (TypeError, ValueError):
         fee_gap_recovery_required = 0
+    try:
+        fee_gap_metadata_fill_count = int(reconcile_metadata.get("material_zero_fee_fill_count", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_metadata_fill_count = 0
+    try:
+        fee_gap_metadata_adjustment_count = int(reconcile_metadata.get("fee_gap_adjustment_count", 0) or 0)
+    except (TypeError, ValueError):
+        fee_gap_metadata_adjustment_count = 0
     if bool(fee_gap_incident.active_issue) and bool(fee_gap_incident.policy.resume_blocking):
         reasons.append(
             "fee_gap_recovery_required="
             f"{fee_gap_recovery_required}"
             f"(incident_kind={fee_gap_incident.incident_kind},"
             f"resolution_state={fee_gap_incident.resolution_state})"
+        )
+    elif (
+        fee_gap_recovery_required > 0
+        and fee_gap_metadata_fill_count <= 0
+        and fee_gap_metadata_adjustment_count <= 0
+    ):
+        reasons.append(
+            "fee_gap_recovery_required="
+            f"{fee_gap_recovery_required}"
+            "(incident_kind=reconcile_metadata,"
+            "resolution_state=manual_review_required)"
         )
 
     submit_unknown_without_exchange_count = int(risky_state["submit_unknown_without_exchange_id_count"])

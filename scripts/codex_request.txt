@@ -1,330 +1,220 @@
-You are working directly in the GitHub repository `WG-14/bithumb-bot` on the current branch state. Do not treat prior human analysis or EC2 observations as established fact. Use them only as starting hypotheses to verify, refine, or reject from the repository code and tests.
+You are working in the `WG-14/bithumb-bot` repository. Treat this as a repo-first engineering task, not a generic debugging exercise.
+
+Context from production investigation points to a likely but not yet fully proven failure mode:
+
+* A live Bithumb BUY order was actually filled on the exchange.
+* The local DB kept the order in `orders` as `NEW` with `qty_filled=0`.
+* No corresponding rows were created in `broker_fill_observations` or `fills`.
+* `order_events` stopped after `exchange_order_id_attached` / `status_changed NEW`.
+* Reconcile/health showed the run loop blocked by unresolved/open-order safety gates.
+* There was also a reconcile exception consistent with `FILLED -> RECOVERY_REQUIRED` being disallowed.
+* Current code suggests `fill_reading.py` maps `FillReadPolicy.ACCOUNTING_STRICT` to `parse_mode="strict"`, and `bithumb_order_queries.py:get_fills()` reads `/v1/order.trades` first.
+* `_extract_fill_fee_observation()` appears to raise on materially sized fills with missing trade-level fee keys in strict mode.
+* `recovery.py` appears to use `_mark_recovery_required_with_reason()` to directly downgrade order state to `RECOVERY_REQUIRED`.
+
+Do **not** assume that this is the full root cause. Treat it as a leading hypothesis and investigate whether there is a higher-level structural cause. Your goal is to make the system more robust, reproducible, and operable as an automated trading experiment platform — not just suppress this symptom.
 
 ## Mission
 
-Investigate and fix the EC2/live issue where fee/accounting diagnostics continue to report an unresolved fee-pending condition even though live evidence suggests the matching fill may already be fully accounted.
+Verify or falsify the likely root-cause hypotheses directly in the repo, then implement the smallest useful set of changes that moves the architecture in the right direction:
 
-Do **not** solve this as a narrow one-off patch against a single stale row. Treat this as a likely **state-model / incident-model architecture problem** involving:
+1. Prefer **design corrections over symptom patches**.
+2. Preserve or improve **recovery safety**.
+3. Improve **observability**, **reproducibility**, and **testability**.
+4. Avoid baking in assumptions that only fit this one incident.
 
-* authoritative accounting state (`fills`, accounting replay, portfolio projection),
-* diagnostic observation state (`broker_fill_observations`, fee-pending repair records),
-* operator-facing readiness / health / recovery surfaces,
-* and possibly the absence of a canonical incident/verdict layer.
+## Working hypotheses to evaluate
 
-Your goal is to verify the true root cause, then implement the smallest high-leverage structural fix that improves robustness, reproducibility, observability, and operability of this trading experiment system.
+Keep these as hypotheses until tested:
 
-## Starting live evidence to verify against the repo
+### H1. Broker contract assumption is too strong
 
-Use these as hypotheses, not facts:
+The code assumes trade-level fee keys are present for materially sized fills, but real `/v1/order` payloads may omit trade-level fee while still exposing fee elsewhere (for example at order level, or via another exchange surface). If true, strict accounting is rejecting a valid fill because the broker contract is modeled too narrowly.
 
-* `broker_fill_observations` contains a row for:
+### H2. Evidence collection and accounting are too tightly coupled
 
-  * `client_order_id=live_1776745440000_buy_ae9d0d6e`
-  * `fill_id=C0101000000983082448`
-  * `fee_status=order_level_candidate`
-  * `accounting_status=fee_pending`
-  * `fee=26.86`
-* `fills` already contains the matching fill with:
+A strict accounting failure may prevent even `broker_fill_observations` from being recorded, causing the system to lose evidence and making recovery harder. If true, the repo needs a cleaner separation between evidence ingestion and ledger application.
 
-  * `fill_id=C0101000000983082448`
-  * `fee=26.86`
-* `fee-pending-accounting-repair` refuses with `eligibility_reason=fill_already_accounted`
-* meanwhile `audit-ledger` still reports:
+### H3. Recovery state machine is non-monotonic / non-idempotent
 
-  * `broker_fill_latest_unresolved_fee_pending_count=1`
-  * `unresolved_fee_state=1`
+If reconcile can see an order as effectively filled but then attempt a `FILLED -> RECOVERY_REQUIRED` transition, the recovery state model is structurally unsafe. If true, order truth and recovery incidents need to be separated.
 
-This suggests that repair preview and audit/replay may disagree about whether the same incident is still unresolved.
+### H4. Config-policy drift exists
 
-## Required investigation scope
+The repo contains fee strictness-related settings (for example `LIVE_FILL_FEE_STRICT_MODE`, `LIVE_FILL_FEE_STRICT_MIN_NOTIONAL_KRW`, `LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW`), but the actual rejection path may be driven by different logic than operators would expect from those setting names. If true, configuration semantics need simplification or realignment.
 
-Inspect and reason from the actual code in the repository, including at minimum:
+## Required scope
 
-* `src/bithumb_bot/fee_pending_repair.py`
-* `src/bithumb_bot/db_core.py`
-* `src/bithumb_bot/app.py`
-* any accounting replay, broker fill observation summary, unresolved fee state, audit, health, recovery-report, and readiness-related paths
-* relevant tests under `tests/` touching:
+Inspect at minimum these areas and any directly connected paths:
 
-  * fee pending repair
-  * audit / audit-ledger
-  * health / recovery-report
-  * runtime readiness
-  * operator-facing semantics
-  * stale observation / already-accounted cases if they exist
+* `src/bithumb_bot/broker/bithumb.py`
+* `src/bithumb_bot/broker/bithumb_order_queries.py`
+* `src/bithumb_bot/fill_reading.py`
+* `src/bithumb_bot/recovery.py`
+* Any code that:
 
-Build a repo-grounded model before changing code.
+  * calls `get_fills()`
+  * applies fills to ledger/accounting
+  * records `broker_fill_observations`
+  * mutates order status during reconcile/recovery
+  * interprets fee strictness configuration
+* Existing tests covering fill parsing, reconcile, recovery, or live broker contracts
 
-## Hypotheses to evaluate explicitly
+## Deliverables
 
-Treat each as a hypothesis to confirm, weaken, or reject.
+### 1. Investigation
 
-### Hypothesis A — authoritative accounting and diagnostic observations are maintained as separate state machines
+Before changing code, identify and document:
 
-`fills` and replay/accounting projection may conclude a fill is fully accounted, while `broker_fill_observations` may still carry a stale `fee_pending` state that unresolved accounting summaries continue to count.
+* The exact call graph from reconcile/recovery to `get_fills()`
+* Where `ACCOUNTING_STRICT` is used and why
+* Whether observation can be skipped when strict accounting fails
+* All places where `RECOVERY_REQUIRED` is assigned or implied
+* The actual behavior of fee strictness settings in code
+* Any existing tests that should have caught this class of failure but do not
 
-**Verify by checking whether:**
+### 2. Design-first remediation
 
-* `build_fee_pending_accounting_repair_preview()` resolves the fill as already accounted by matching `fills`
-* unresolved fee state / audit replay uses a different path and still counts the observation as unresolved
+Implement changes that address the broader class of failures, not just this one payload.
 
-**Refute only if** the same canonical matcher is already shared and the disagreement is caused elsewhere.
+Prioritize the following design direction unless the repo proves it inappropriate:
 
-### Hypothesis B — unresolved fee-pending counts are computed from raw append-only observation rows without fill-level compaction
+#### A. Separate evidence ingestion from accounting application
 
-The repository may be treating `broker_fill_observations` as raw event history but then counting unresolved state directly from rows rather than from the latest canonical state per fill.
+A broker read that yields partial/ambiguous fill evidence should still produce a durable observation record, even if accounting must be deferred.
 
-**Verify by checking whether:**
+A good outcome is:
 
-* unresolved fee-pending logic is row-based rather than fill-incident-based
-* an older or raw `fee_pending` row can survive even when a matching authoritative fill already exists
-* a later `accounting_complete` observation would or would not suppress unresolved counts for that same fill
+* raw/normalized broker evidence is recorded
+* parse warnings / fee status / confidence are retained
+* ledger apply can be blocked without losing the evidence
 
-### Hypothesis C — operator surfaces and audit surfaces are intentionally separate, but the contract is under-specified
+#### B. Introduce explicit fill evidence quality states
 
-`health` / `recovery-report` may represent operational safety, while `audit` / `audit-ledger` may represent accounting diagnostics. If so, the repo may currently allow logically valid divergence, but the distinction is not formalized enough, making the outputs look contradictory.
+Instead of collapsing everything into success vs exception, represent cases like:
 
-**Verify by checking whether:**
+* `trade_fee_complete`
+* `order_level_fee_candidate`
+* `fee_missing_material`
+* `schema_variant_unknown`
 
-* this distinction is explicit in code, naming, schema, or tests
-* the current output contract makes it clear when “resume is safe” and “diagnostic evidence remains” can both be true
-* or whether the current outputs are unintentionally inconsistent
+These can be implemented with current types or modest type extensions, but the end state should allow policy decisions without destroying evidence.
 
-### Hypothesis D — the deeper structural problem is the lack of a canonical fill-level accounting incident model
+#### C. Make recovery incident-driven instead of status-downgrade-driven
 
-The same family of issue may have already appeared in fee-gap readiness work: raw evidence, historical repair evidence, active blocker state, and operator verdict are not cleanly separated and are recomputed differently across surfaces.
+If practical within the current repo shape, move toward a model where exchange/order truth stays in states like `NEW/PARTIAL/FILLED/CANCELED`, while recovery concerns are tracked separately as incidents or observation/accounting statuses.
 
-**Verify by checking whether:**
+If a full incident model is too large for this task, still eliminate unsafe downgrade behavior:
 
-* repair preview, audit replay, and health/recovery surfaces each infer incident state independently
-* no single canonical verdict object exists for fill-level accounting incidents
-* cross-surface consistency tests are missing or weak
+* no `FILLED -> RECOVERY_REQUIRED` downgrade
+* repeated reconcile should be idempotent
+* recovery should preserve terminal truth and attach incident context elsewhere
 
-## Non-negotiable design priority
+#### D. Clarify or simplify fee strictness configuration
 
-Prefer a **design-level fix** over a local symptom suppression.
+Either:
 
-Do **not** simply:
+* wire strictness settings so they clearly govern the actual strict rejection path,
+  or
+* remove/deprecate misleading config if it is not part of the effective behavior.
 
-* hard-code an exception for one row,
-* hide `fee_pending`,
-* or weaken safety gating.
+### 3. Tests
 
-Instead, if the evidence supports it, introduce or refactor toward a **canonical fill-level accounting incident projection** that all relevant surfaces share.
+Add or update tests so this class of problem becomes reproducible and hard to regress.
 
-A plausible target shape is something like:
+At minimum include:
 
-* `fill_key` or equivalent identity
-* `authoritative_fill_present`
-* `final_fee_applied`
-* `latest_observation_fee_status`
-* `latest_observation_accounting_status`
-* `repair_present`
-* `canonical_incident_state`: `none | active_fee_pending | already_accounted_observation_stale | repaired | ambiguous`
-* `incident_scope`: `active_blocking | active_advisory | historical_context`
-* `evidence`: raw observation counts, matching logic, repair lineage, timestamps
+#### Contract / parser tests
 
-Use repo-native naming if better, but preserve this separation of concerns.
+Use fixtures that model `/v1/order` variants for:
 
-## Required implementation goals
+* single trade with trade-level fee present
+* single trade with missing trade-level fee but order-level fee present
+* single trade with missing fee everywhere
+* multi-trade order with only order-level fee
+* zero fee vs missing fee
+* materially sized vs non-material fills
 
-### 1) Introduce a canonical fill-level incident verdict or equivalent shared projection
+#### Reconcile / recovery tests
 
-The same fill should not be classified differently by:
+Cover scenarios where:
 
-* fee-pending repair preview,
-* accounting replay / audit-ledger,
-* and operator surfaces.
+* exchange view is FILLED but local DB is NEW
+* fill evidence is incomplete but present
+* reconcile is run more than once on the same data
+* no invalid status downgrade occurs
+* evidence is recorded even when accounting is deferred
 
-If a fill already exists in `fills` with final fee applied, then a matching stale `broker_fill_observations.accounting_status='fee_pending'` must not continue to count as an unresolved active fee issue.
+#### Regression fixture
 
-### 2) Separate raw evidence from active unresolved incident state
+If possible, create a redacted fixture derived from the incident shape so that:
 
-Keep raw diagnostic events for traceability, but do not let raw append-only rows directly define active unresolved state.
+* `get_fills(strict)`
+* `get_fills(salvage)`
+* reconcile/recovery behavior
+  can be reproduced deterministically in tests
 
-In particular:
+Do not invent exchange payload fields casually. If you need to model a payload shape, make it minimal and clearly justified by current parser expectations.
 
-* append-only `broker_fill_observations` should remain available as evidence
-* unresolved fee-pending classification should come from canonical incident state, not raw row presence alone
-* “already accounted but stale observation exists” should become a first-class representable state if needed
+### 4. Operability / observability
 
-### 3) Reuse the same matching logic everywhere
+Improve operator ergonomics where it materially helps.
 
-The matcher currently used by repair preview (`fill_id`, or fallback on `client_order_id + fill_ts + price + qty`) should likely be promoted into shared logic and reused by:
+Strongly consider adding or improving a diagnostic command/path so an operator can inspect one order end-to-end without manual SQLite spelunking. A useful result would include:
 
-* unresolved fee-pending classification
-* audit/audit-ledger summaries
-* any fill-observation incident projection
-* possibly health/recovery surfaces if they surface related signals
+* raw broker payload or redacted raw evidence
+* normalized order
+* normalized fills
+* observation rows
+* accounting/incidents/recovery blockers
+* next safe operator action
 
-Do not let repair preview and audit replay use different notions of “same accounted fill.”
+If a new CLI command is too large, at least improve logging/diagnostics in the existing relevant paths.
 
-### 4) Preserve live safety while improving observability
+## Constraints
 
-Do not weaken resume gates.
+* Do not weaken safety just to “unstick” the bot.
+* Do not silently auto-apply ambiguous accounting.
+* Do not hide uncertainty: preserve it explicitly in code and tests.
+* Prefer monotonic, replay-safe behavior.
+* Keep changes focused, but bias toward structural correctness over minimal diff size.
+* If a full architectural step is too large, implement the best incremental version that clearly points in that direction.
 
-If the repo intentionally distinguishes:
+## Expected output format
 
-* operational readiness
-* versus accounting diagnostics
-
-then encode that distinction explicitly in surface outputs and tests, so operators and LLMs can tell:
-
-* “active blocker”
-* from “historical/stale evidence”
-* from “already-accounted observation mismatch”
-
-## Tests you must add or update
-
-Add tests that prove the behavior semantically, not just mechanically.
-
-### A. Fill-level canonical state / compaction regression tests
-
-At minimum cover these cases for the same logical fill:
-
-1. `fee_pending` observation exists, no fill exists yet
-
-   * should remain unresolved
-
-2. `fee_pending` observation exists, matching `fills` row exists with final fee applied
-
-   * should **not** remain unresolved as an active fee-pending issue
-
-3. `fee_pending` observation followed by a later `accounting_complete` observation
-
-   * unresolved state must resolve through canonical latest-state logic
-
-4. matching fee-pending repair record exists and accounting is complete
-
-   * unresolved state must not remain active
-
-### B. Cross-surface consistency tests
-
-Using the same DB fixture, assert consistent semantics across:
-
-* `build_fee_pending_accounting_repair_preview()`
-* accounting replay / `compute_accounting_replay()`
-* `audit-ledger`
-* `health`
-* `recovery-report` if affected
-
-It is acceptable for surfaces to present different levels of detail, but they must not disagree on whether the incident is:
-
-* active unresolved
-* already accounted but historically visible
-* safe for resume
-
-### C. Contract tests for operator vs audit meaning
-
-If you decide the repo should explicitly allow:
-
-* resume-safe
-* while still surfacing non-blocking diagnostic evidence
-
-then add tests that make that contract explicit and machine-readable.
-
-Do not leave this as an implicit convention.
-
-### D. Replay / lifecycle scenario
-
-Add an end-to-end or near-end-to-end fixture for:
-
-* observation arrives as fee-pending
-* fill becomes authoritative with final fee
-* repair preview says already accounted
-* unresolved fee state resolves or is reclassified as non-active stale evidence
-* health/recovery surfaces remain or become semantically consistent
-
-## Recoverability and observability requirements
-
-Your fix must improve the system along all of these axes:
-
-* reproducibility of diagnosis from DB fixtures
-* operator clarity
-* LLM readability of output
-* append-only evidence preservation
-* safe recovery semantics
-* resistance to future stale diagnostic rows of the same family
-
-If a new projection/helper/object is introduced, make it easy to inspect in tests and easy to serialize for reports.
-
-## Range and limits
-
-Keep the scope focused on:
-
-* fill-level fee-pending accounting incident classification
-* its interaction with audit/audit-ledger
-* repair preview
-* and any directly entangled health/recovery semantics needed for consistency
-
-Do **not** broaden into unrelated engine redesign.
-
-Do **not** redesign all accounting subsystems unless a very small shared abstraction clearly removes the inconsistency.
-
-## Required implementation discipline
-
-* Verify from the repo first
-* State which hypotheses were confirmed or rejected
-* Prefer shared logic over duplicated patches
-* Remove or reduce duplicate inference paths where justified
-* Keep naming aligned with the repo
-* Preserve safety
-* Add regression tests before considering the work complete
-
-## Required validation
-
-Run the relevant targeted tests during development, then the broadest justified validation pass before finalizing.
-
-At minimum include the exact commands you ran and their outcomes.
-
-You should strongly consider running targeted tests covering:
-
-* fee pending repair
-* audit / audit-ledger
-* runtime readiness / health / recovery-report
-* any new canonical fill-incident projection logic
-
-If the repo has a standard required validation command, run it before finalizing.
-
-## Final report format
-
-Return a concise but complete final report with these exact sections:
+At the end, provide a concise engineering report with these sections:
 
 1. **What I verified**
 
-   * repo-grounded findings
-   * which hypotheses were confirmed, weakened, or rejected
+   * Which hypotheses were supported, weakened, or falsified
+   * Exact code paths involved
 
-2. **Root cause**
+2. **Root cause model**
 
-   * the best-supported falsifiable conclusion
+   * Immediate cause
+   * Higher-level structural cause
+   * Remaining uncertainty
 
-3. **What I changed**
+3. **Changes made**
 
-   * files changed
-   * shared logic introduced or refactored
-   * why this is a structural fix rather than a symptom patch
+   * Files changed
+   * Why each change exists
+   * Which behavior changed intentionally
 
-4. **Behavior after the fix**
+4. **Tests added/updated**
 
-   * how the repo now treats:
+   * What each test proves
+   * Which incident class it prevents from regressing
 
-     * active fee-pending incident
-     * already-accounted stale observation
-     * repaired incident
-     * operator-facing readiness vs audit diagnostics
+5. **Operational impact**
 
-5. **Tests added or updated**
+   * How this changes failure handling in live mode
+   * What operators will now see/do differently
 
-   * especially cross-surface and compaction/canonical-state tests
+6. **Follow-up recommendations**
 
-6. **Commands run**
+   * Short-term next steps
+   * Longer-term structural work that should be done later
 
-   * exact test commands and results
-
-7. **Residual risks / follow-ups**
-
-   * anything intentionally deferred
-
-Do the work directly in `WG-14/bithumb-bot`. Do not answer with a generic essay. Verify, modify, test, and report in repository-specific terms. 
+Be explicit when something remains a hypothesis rather than a proven fact.
 

@@ -4266,7 +4266,7 @@ def test_get_order_observes_filled_order_when_trade_fee_is_missing_but_order_fee
     ("trade_fee_fields", "order_fee_fields", "strict_error", "expected_fee", "expected_status", "expected_warning"),
     [
         ({"fee": "1.23"}, {"paid_fee": "1.23"}, None, 1.23, "complete", ()),
-        ({}, {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"}, "missing fee field", 26.86, "order_level_candidate", ("missing_fee_field", "order_level_fee_candidate:paid_fee")),
+        ({}, {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"}, None, 26.86, "order_level_candidate", ("missing_fee_field", "order_level_fee_candidate:paid_fee")),
         ({}, {}, "missing fee field", None, "missing", ("missing_fee_field",)),
         ({"fee": ""}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
         ({"fee": None}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
@@ -4312,6 +4312,8 @@ def test_get_fills_fee_observation_modes_for_order_payload_schema_drift(
         strict_fills = broker.get_fills(client_order_id="cid-fee-schema", exchange_order_id="ex-fee-schema")
         assert len(strict_fills) == 1
         assert strict_fills[0].fee == pytest.approx(expected_fee)
+        assert strict_fills[0].fee_status == expected_status
+        assert strict_fills[0].parse_warnings == expected_warning
     else:
         with pytest.raises(BrokerRejectError, match=strict_error):
             broker.get_fills(client_order_id="cid-fee-schema", exchange_order_id="ex-fee-schema")

@@ -68,6 +68,7 @@ NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
 }
 CANCEL_REQUESTED_STATUS = "CANCEL_REQUESTED"
+TERMINAL_TRUTH_STATUSES = {"FILLED", "CANCELED", "FAILED"}
 
 
 class RecoveryDisposition(str, Enum):
@@ -404,6 +405,73 @@ def _mark_recovery_required_with_reason(
     reason_code: str,
     reason: str,
 ) -> None:
+    current = conn.execute(
+        "SELECT status FROM orders WHERE client_order_id=?",
+        (client_order_id,),
+    ).fetchone()
+    current_status = str(current["status"]) if current is not None else str(from_status)
+    incident_status = str(from_status or current_status)
+    if incident_status in TERMINAL_TRUTH_STATUSES:
+        if current is not None and current_status != incident_status:
+            allowed, blocked_reason = validate_status_transition(
+                from_status=current_status,
+                to_status=incident_status,
+            )
+            if allowed:
+                set_status(
+                    client_order_id,
+                    incident_status,
+                    last_error=reason,
+                    conn=conn,
+                )
+                current_status = incident_status
+            else:
+                record_status_transition(
+                    client_order_id,
+                    from_status=current_status,
+                    to_status=current_status,
+                    reason=(
+                        "recovery incident preserved current status after terminal truth update "
+                        f"was blocked: attempted={incident_status}; blocked_reason={blocked_reason}; "
+                        f"incident_reason={reason}"
+                    ),
+                    conn=conn,
+                )
+                conn.execute(
+                    "UPDATE orders SET last_error=? WHERE client_order_id=?",
+                    (reason[:500], client_order_id),
+                )
+        elif current is not None:
+            conn.execute(
+                "UPDATE orders SET last_error=? WHERE client_order_id=?",
+                (reason[:500], client_order_id),
+            )
+        record_status_transition(
+            client_order_id,
+            from_status=current_status,
+            to_status=current_status,
+            reason=(
+                "recovery incident recorded without terminal status downgrade; "
+                f"incident_status={incident_status}; reason={reason}"
+            ),
+            conn=conn,
+        )
+        notify(
+            safety_event(
+                "recovery_required_incident",
+                client_order_id=client_order_id,
+                exchange_order_id="-",
+                side=side,
+                status=current_status,
+                state_from=current_status,
+                state_to=current_status,
+                reason_code=reason_code,
+                reason=reason,
+                operator_next_action="review broker fill observations and resolve accounting incident before resume",
+                operator_hint_command="uv run python bot.py recovery-report --json",
+            )
+        )
+        return
     record_status_transition(
         client_order_id,
         from_status=from_status,

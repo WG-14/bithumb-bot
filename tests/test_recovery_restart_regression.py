@@ -2622,7 +2622,7 @@ def test_reconcile_recent_sell_zero_fee_blocks_ledger_and_sets_recovery_required
 
     state = runtime_state.snapshot()
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "fee validation" in str(row["last_error"])
     assert "manual recovery required" in str(row["last_error"])

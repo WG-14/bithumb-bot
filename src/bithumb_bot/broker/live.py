@@ -1854,6 +1854,36 @@ def validate_pretrade(
 
 
 def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_status: str, reason: str) -> None:
+    if str(from_status) in TERMINAL_ORDER_STATUSES:
+        conn.execute(
+            "UPDATE orders SET last_error=? WHERE client_order_id=?",
+            (reason[:500], client_order_id),
+        )
+        record_status_transition(
+            client_order_id,
+            from_status=from_status,
+            to_status=from_status,
+            reason=(
+                "recovery incident recorded without terminal status downgrade; "
+                f"reason={reason}"
+            ),
+            conn=conn,
+        )
+        notify(
+            safety_event(
+                "recovery_required_incident",
+                client_order_id=client_order_id,
+                submit_attempt_id=UNSET_EVENT_FIELD,
+                exchange_order_id=UNSET_EVENT_FIELD,
+                state_from=from_status,
+                state_to=from_status,
+                reason_code=AMBIGUOUS_SUBMIT,
+                side=side,
+                status=from_status,
+                reason=reason,
+            )
+        )
+        return
     record_status_transition(
         client_order_id,
         from_status=from_status,
