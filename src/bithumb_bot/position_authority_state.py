@@ -239,6 +239,14 @@ def _matching_portfolio_projection_repair_present(
     return False
 
 
+def _repair_event_status(*, recorded: bool, state_converged: bool) -> str:
+    if not recorded:
+        return "none"
+    if state_converged:
+        return "recorded_and_state_converged"
+    return "recorded_but_not_current_state_proof"
+
+
 def _partial_close_residual_state_converged(
     conn,
     *,
@@ -663,6 +671,32 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         reason = "position authority correction applicable"
     else:
         reason = ", ".join(blockers)
+    residual_repair_event_status = _repair_event_status(
+        recorded=residual_normalization_recorded,
+        state_converged=residual_state_converged,
+    )
+    portfolio_projection_repair_event_status = _repair_event_status(
+        recorded=portfolio_projection_repair_recorded,
+        state_converged=portfolio_projection_state_converged,
+    )
+    truth_model = {
+        "canonical_truth_source": "orders_fills_trades_plus_portfolio",
+        "projection_truth_source": "open_position_lots_materialized_projection",
+        "projection_role": "rebuildable_materialized_view",
+        "repair_event_role": "historical_evidence_not_current_state_proof",
+        "portfolio_asset_qty": float(portfolio_qty),
+        "projected_total_qty": float(projected_total_qty),
+        "projection_delta_qty": float(projected_total_qty - portfolio_qty),
+        "projected_qty_excess": float(projected_qty_excess),
+        "projected_qty_shortfall": float(max(0.0, portfolio_qty - projected_total_qty)),
+        "projection_converged": bool(projection_convergence.get("converged")),
+        "projection_non_convergence_reason": str(projection_convergence.get("reason") or "none"),
+        "alignment_state": alignment_state,
+        "repair_action_state": repair_action_state,
+        "inspect_only": bool(repair_action_state == "inspect_only"),
+        "residual_repair_event_status": residual_repair_event_status,
+        "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
+    }
     return {
         "incident_class": (
             "PROJECTION_PORTFOLIO_DIVERGENCE"
@@ -737,9 +771,12 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "projection_non_convergence_reason": str(projection_convergence.get("reason") or "none"),
         "residual_normalization_recorded": residual_normalization_recorded,
         "residual_repair_event_present": residual_normalization_recorded,
+        "residual_repair_event_status": residual_repair_event_status,
         "residual_state_converged": residual_state_converged,
+        "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
         "other_active_lot_count": other_active_lot_count,
         "other_active_qty": other_active_qty,
         "portfolio_qty": portfolio_qty,
         "blockers": blockers,
+        "truth_model": truth_model,
     }

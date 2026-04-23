@@ -171,6 +171,12 @@ Material live fills still require a positive fee; a zero-fee repair for a
 material live fill is refused.
 - `dust_broker_qty`, `dust_local_qty`, `dust_delta_qty`, and `dust_broker_local_match` should be read together.
 - `dust_min_qty` and `dust_min_notional_krw` are separate sellability gates.
+- `authority_truth_model` is the projection-drift diagnostic surface:
+  - `canonical_truth_source` identifies the authoritative chain.
+  - `projection_truth_source` identifies the rebuildable projection/cache surface.
+  - `portfolio_asset_qty`, `projected_total_qty`, and `projection_delta_qty` expose the current divergence numerically.
+  - `inspect_only=1` means diagnostics may explain the state, but auto-repair is intentionally refused for the current snapshot.
+- `structured_blockers` is the machine-testable blocker list. Prefer it over prose matching when you need to compare `health`, `recovery-report`, or `ops-report` outputs for the same DB snapshot.
 - For exit authority, check the lot-native fields first:
   - `sellable_executable_lot_count`
   - `reserved_exit_lot_count`

@@ -60,6 +60,9 @@ class RuntimeReadinessSnapshot:
     accounting_flat: bool
     tradeability: Any
     tradeability_operator_fields: dict[str, object]
+    structured_blockers: tuple[dict[str, object], ...]
+    authority_truth_model: dict[str, object]
+    inspect_only_mode: bool
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -96,6 +99,9 @@ class RuntimeReadinessSnapshot:
             "projection_convergence": dict(self.projection_convergence),
             "projection_converged": bool(self.projection_convergence.get("converged")),
             "projection_non_convergence_reason": str(self.projection_convergence.get("reason") or "none"),
+            "authority_truth_model": dict(self.authority_truth_model),
+            "structured_blockers": [dict(item) for item in self.structured_blockers],
+            "inspect_only_mode": bool(self.inspect_only_mode),
             "canonical_state": self.canonical_state,
             "residual_class": self.residual_class,
             "run_loop_allowed": bool(self.run_loop_allowed),
@@ -109,6 +115,67 @@ class RuntimeReadinessSnapshot:
             "tradeability": self.tradeability.as_dict(),
             **self.tradeability_operator_fields,
         }
+
+
+def _make_structured_blocker(
+    *,
+    code: str,
+    category: str,
+    stage: str,
+    detail: str,
+    operator_next_action: str,
+    recommended_command: str,
+    projection_convergence: dict[str, object],
+    authority_truth_model: dict[str, object],
+    authority_assessment: dict[str, object],
+) -> dict[str, object]:
+    inspect_only = bool(
+        authority_truth_model.get("inspect_only")
+        or str(authority_assessment.get("repair_action_state") or "") == "inspect_only"
+        or code == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
+    )
+    return {
+        "code": code,
+        "reason_code": code,
+        "category": category,
+        "stage": stage,
+        "detail": detail,
+        "operator_next_action": operator_next_action,
+        "recommended_command": recommended_command,
+        "inspect_only": inspect_only,
+        "canonical_asset_qty": float(authority_truth_model.get("portfolio_asset_qty") or 0.0),
+        "projected_lot_qty": float(projection_convergence.get("projected_total_qty") or 0.0),
+        "divergence_delta_qty": float(projection_convergence.get("portfolio_delta_qty") or 0.0),
+        "projection_converged": bool(projection_convergence.get("converged")),
+    }
+
+
+def _build_authority_truth_model(
+    *,
+    projection_convergence: dict[str, object],
+    authority_assessment: dict[str, object],
+) -> dict[str, object]:
+    truth_model = {
+        "canonical_truth_source": "orders_fills_trades_plus_portfolio",
+        "projection_truth_source": "open_position_lots_materialized_projection",
+        "projection_role": "rebuildable_materialized_view",
+        "repair_event_role": "historical_evidence_not_current_state_proof",
+        "portfolio_asset_qty": float(projection_convergence.get("portfolio_qty") or 0.0),
+        "projected_total_qty": float(projection_convergence.get("projected_total_qty") or 0.0),
+        "projection_delta_qty": float(projection_convergence.get("portfolio_delta_qty") or 0.0),
+        "projected_qty_excess": float(projection_convergence.get("projected_qty_excess") or 0.0),
+        "projected_qty_shortfall": float(projection_convergence.get("projected_qty_shortfall") or 0.0),
+        "projection_converged": bool(projection_convergence.get("converged")),
+        "projection_non_convergence_reason": str(projection_convergence.get("reason") or "none"),
+        "alignment_state": str(authority_assessment.get("alignment_state") or "projection_only"),
+        "repair_action_state": str(authority_assessment.get("repair_action_state") or "not_applicable"),
+        "inspect_only": bool(
+            str(authority_assessment.get("repair_action_state") or "") == "inspect_only"
+            or not bool(projection_convergence.get("converged"))
+        ),
+    }
+    truth_model.update(dict(authority_assessment.get("truth_model") or {}))
+    return truth_model
 
 
 def _metadata_dict(raw: object | None) -> dict[str, object]:
@@ -227,6 +294,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         material_zero_fee_fill_latest_ts = _metadata_int(metadata, "material_zero_fee_fill_latest_ts")
         authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
         projection_convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        authority_truth_model = _build_authority_truth_model(
+            projection_convergence=projection_convergence,
+            authority_assessment=authority_assessment,
+        )
+        projection_non_convergence_blocking = bool(
+            not bool(projection_convergence.get("converged"))
+            and int(projection_convergence.get("lot_row_count") or 0) > 0
+            and (
+                abs(float(portfolio_asset_qty)) > 1e-12
+                or _metadata_int(metadata, "balance_observed_ts_ms") > 0
+            )
+        )
         canonical_recovery = classify_canonical_recovery_state(
             position_state=position_state,
             lot_snapshot=lot_snapshot,
@@ -301,6 +380,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
 
         blockers: list[str] = []
         categories: list[str] = []
+        structured_blockers: list[dict[str, object]] = []
         stage = "RESUME_READY"
         operator_next_action = "resume_now"
         recommended_command = "uv run python bot.py resume"
@@ -314,6 +394,19 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 "uv run python bot.py fee-pending-accounting-repair "
                 "--client-order-id <id> --fill-id <fill_id> --fee <fee> "
                 "--fee-provenance <source> --apply --yes"
+            )
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="FEE_PENDING_ACCOUNTING_REQUIRED",
+                    category="incident_local",
+                    stage=stage,
+                    detail="fee-pending fill accounting must be finalized before resume",
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
             )
         elif bool(authority_assessment.get("needs_residual_normalization")):
             stage = "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
@@ -329,12 +422,38 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 if bool(authority_assessment.get("safe_to_normalize_residual"))
                 else "uv run python bot.py rebuild-position-authority"
             )
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=str(authority_assessment.get("reason") or "partial-close residual normalization required"),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
         elif bool(authority_assessment.get("needs_portfolio_projection_repair")):
             stage = "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
             blockers.append("POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED")
             categories.append("executable_authority")
             operator_next_action = "review_position_authority_evidence"
             recommended_command = "uv run python bot.py rebuild-position-authority"
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=str(authority_assessment.get("reason") or "projection/portfolio divergence requires review"),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
         elif bool(authority_assessment.get("needs_correction")):
             stage = "AUTHORITY_CORRECTION_PENDING"
             blockers.append("POSITION_AUTHORITY_CORRECTION_REQUIRED")
@@ -349,18 +468,62 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                 if bool(authority_assessment.get("safe_to_correct"))
                 else "uv run python bot.py rebuild-position-authority"
             )
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_CORRECTION_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=str(authority_assessment.get("reason") or "lot authority correction required"),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
         elif str(position_state.normalized_exposure.authority_gap_reason or "") == "authority_missing_recovery_required":
             stage = "AUTHORITY_REBUILD_PENDING"
             blockers.append("POSITION_AUTHORITY_RECOVERY_REQUIRED")
             categories.append("executable_authority")
             operator_next_action = "rebuild_position_authority"
             recommended_command = "uv run python bot.py rebuild-position-authority --apply --yes"
-        elif not bool(projection_convergence.get("converged")):
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_RECOVERY_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=str(position_state.normalized_exposure.authority_gap_reason or "authority missing"),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
+        elif projection_non_convergence_blocking:
             stage = "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
             blockers.append("POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED")
             categories.append("executable_authority")
             operator_next_action = "review_position_authority_evidence"
             recommended_command = "uv run python bot.py rebuild-position-authority"
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=(
+                        "projection_convergence_required="
+                        f"projected_total_qty={float(projection_convergence.get('projected_total_qty') or 0.0):.12f},"
+                        f"portfolio_qty={float(projection_convergence.get('portfolio_qty') or 0.0):.12f},"
+                        f"reason={projection_convergence.get('reason') or 'none'}"
+                    ),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
         elif fee_gap_policy.closeout_blocking and not fee_gap_policy.resume_blocking:
             stage = fee_gap_policy.readiness_stage
             categories.append(fee_gap_policy.blocker_category)
@@ -447,6 +610,9 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             accounting_flat=canonical_recovery.accounting_flat,
             tradeability=tradeability,
             tradeability_operator_fields=tradeability_operator_fields,
+            structured_blockers=tuple(structured_blockers),
+            authority_truth_model=authority_truth_model,
+            inspect_only_mode=any(bool(item.get("inspect_only")) for item in structured_blockers),
         )
     finally:
         if close_conn:

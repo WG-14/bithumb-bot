@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from bithumb_bot.app import _load_recovery_report
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
@@ -1218,6 +1219,73 @@ def test_recorded_projection_repair_event_does_not_replace_aggregate_projection_
     assert readiness.closeout_allowed is False
     assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "run_loop_blocked"
     assert readiness.tradeability_operator_fields["trading_allowed"] is False
+
+
+def test_projection_non_convergence_is_consistent_across_readiness_resume_and_reports(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        _insert_live_incident_stale_dust_projection(conn)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        readiness = compute_runtime_readiness_snapshot(conn)
+        startup_reason = evaluate_startup_safety_gate()
+        resume_allowed, resume_blockers = evaluate_resume_eligibility()
+        restart = evaluate_restart_readiness()
+        report = _load_recovery_report()
+    finally:
+        conn.close()
+
+    truth_model = readiness.as_dict()["authority_truth_model"]
+    structured_blocker = readiness.as_dict()["structured_blockers"][0]
+
+    assert readiness.recovery_stage == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+    assert readiness.inspect_only_mode is True
+    assert truth_model["projection_truth_source"] == "open_position_lots_materialized_projection"
+    assert truth_model["projection_role"] == "rebuildable_materialized_view"
+    assert truth_model["repair_event_role"] == "historical_evidence_not_current_state_proof"
+    assert truth_model["portfolio_asset_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert truth_model["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert truth_model["projection_delta_qty"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert truth_model["inspect_only"] is True
+    assert structured_blocker["reason_code"] == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
+    assert structured_blocker["inspect_only"] is True
+    assert structured_blocker["canonical_asset_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert structured_blocker["projected_lot_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert structured_blocker["divergence_delta_qty"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert "position_authority_projection_convergence_required=" in str(startup_reason)
+    assert resume_allowed is False
+    assert any(
+        blocker.reason_code == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
+        for blocker in resume_blockers
+    )
+    normalized_position_item = next(item for item in restart if item[0] == "normalized position state")
+    assert normalized_position_item[1] is False
+    assert report["runtime_readiness"]["recovery_stage"] == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+    assert report["runtime_readiness"]["inspect_only_mode"] is True
+    assert report["runtime_readiness"]["structured_blockers"][0]["reason_code"] == (
+        "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
+    )
+    assert report["runtime_readiness"]["authority_truth_model"]["projection_delta_qty"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert report["resume_allowed"] is False
+    assert report["can_resume"] is False
+    assert report["resume_blocked_reason"] == "resume blocked by non-converged lot projection"
+    assert report["operator_next_action"] == "position_authority_projection_convergence_required"
 
 
 def test_external_position_accounting_repair_blocks_resume_until_recorded_for_historical_split(recovery_db):

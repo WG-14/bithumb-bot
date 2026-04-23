@@ -180,6 +180,11 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
             "POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED",
             "lot projection conflicts with broker/portfolio evidence; projection repair required",
         )
+    if "position_authority_projection_convergence_required=" in reason:
+        return (
+            "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",
+            "aggregate lot projection does not converge to canonical holdings",
+        )
     if "fee_gap_recovery_required=" in reason:
         return (
             "FEE_GAP_RECOVERY_REQUIRED",
@@ -824,6 +829,14 @@ def evaluate_startup_safety_gate() -> str | None:
             "position_authority_projection_repair_required="
             f"{assessment.get('reason') or 'projection/portfolio divergence'}"
         )
+    if readiness_snapshot.recovery_stage == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING":
+        projection = readiness_snapshot.projection_convergence
+        reasons.append(
+            "position_authority_projection_convergence_required="
+            f"projected_total_qty={float(projection.get('projected_total_qty') or 0.0):.12f},"
+            f"portfolio_qty={float(projection.get('portfolio_qty') or 0.0):.12f},"
+            f"reason={projection.get('reason') or 'none'}"
+        )
     if readiness_snapshot.recovery_stage == "ACCOUNTING_EXTERNAL_POSITION_REPAIR_PENDING":
         reasons.append("external_position_accounting_repair_required=portfolio/replay mismatch after external position change")
     if readiness_snapshot.recovery_stage == "ACCOUNTING_REPLAY_MISMATCH_PENDING":
@@ -1206,6 +1219,13 @@ def build_resume_guidance(
             "Do not resume trading. Review the broker/portfolio evidence gates and apply the projection repair only if the preview is safe."
         )
         resume_blocked_reason = "resume blocked by projection/portfolio divergence"
+    elif any(str(b["reason_code"]) == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED" for b in blocker_list):
+        operator_next_action = "position_authority_projection_convergence_required"
+        recommended_command = "uv run python bot.py rebuild-position-authority"
+        recommended_next_action = (
+            "Do not resume trading. Canonical holdings and the persisted lot projection do not converge; inspect the projection truth model before any repair."
+        )
+        resume_blocked_reason = "resume blocked by non-converged lot projection"
     elif "EXTERNAL_POSITION_ACCOUNTING_REPAIR_REQUIRED" in blocker_codes:
         operator_next_action = "external_position_accounting_repair_required"
         recommended_command = "uv run python bot.py external-position-accounting-repair"
@@ -1304,6 +1324,8 @@ def build_resume_guidance(
             return "uv run python bot.py manual-flat-accounting-repair"
         if code == "FEE_GAP_RECOVERY_REQUIRED":
             return "uv run python bot.py fee-gap-accounting-repair"
+        if code == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED":
+            return "uv run python bot.py rebuild-position-authority"
         if code == "BALANCE_SPLIT_MISMATCH":
             if any(bool(b.get("recent_external_cash_adjustment_present")) for b in blocker_list):
                 return "uv run python bot.py reconcile"
@@ -1455,6 +1477,8 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             )
         )
     )
+    if str(readiness_snapshot.recovery_stage).startswith("AUTHORITY_") and not readiness_deferred_open_position:
+        position_state_clear = False
     display_terminal_state = (
         "open_exposure"
         if raw_qty_residue_without_resume_safe_dust
@@ -1539,7 +1563,8 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
                 f"terminal_state={display_terminal_state} "
                 f"has_executable_exposure={1 if display_has_executable_exposure else 0} "
                 f"has_dust_only_remainder={1 if display_has_dust_only_remainder else 0} "
-                f"dust_resume_allowed={1 if dust_resume_safe else 0}"
+                f"dust_resume_allowed={1 if dust_resume_safe else 0} "
+                f"recovery_stage={readiness_snapshot.recovery_stage}"
             ),
         ),
         (

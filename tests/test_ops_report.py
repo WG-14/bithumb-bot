@@ -13,6 +13,7 @@ from bithumb_bot.db_core import (
     init_portfolio,
     record_external_cash_adjustment,
     record_strategy_decision,
+    set_portfolio_breakdown,
 )
 from bithumb_bot.config import PATH_MANAGER
 from bithumb_bot.engine import evaluate_startup_safety_gate
@@ -27,6 +28,10 @@ from bithumb_bot.reason_codes import (
     SELL_FAILURE_CATEGORY_QTY_STEP_MISMATCH,
     SELL_FAILURE_CATEGORY_UNSAFE_DUST_MISMATCH,
 )
+
+
+LIVE_INCIDENT_PORTFOLIO_QTY = 0.00099986
+LIVE_INCIDENT_STALE_DUST_QTY = 0.001788
 
 
 def _collect_residue_paths(value, path: str = "") -> list[str]:
@@ -351,6 +356,106 @@ def test_ops_report_shows_recent_external_cash_adjustment_summary(tmp_path, monk
     assert "present=1" in out
     assert "source=legacy_balance_api" in out
     assert "reason=reconcile_cash_drift" in out
+
+
+def test_ops_report_emits_authority_truth_model_for_projection_non_convergence(
+    tmp_path, monkeypatch, capsys
+):
+    db_path = str(tmp_path / "ops-report-projection.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "paper")
+
+    conn = ensure_db()
+    try:
+        init_portfolio(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        dust_quantities = [0.000128] * 13 + [0.000124]
+        assert sum(dust_quantities) == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+        for idx, qty_open in enumerate(dust_quantities):
+            conn.execute(
+                """
+                INSERT INTO open_position_lots(
+                    pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                    qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                    internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                    lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                    position_state, entry_fee_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settings.PAIR,
+                    90_000 + idx,
+                    f"ops-stale-dust-{idx}",
+                    f"ops-stale-fill-{idx}",
+                    1_699_000_000_000 + idx,
+                    7_050_000.0,
+                    qty_open,
+                    0,
+                    1,
+                    1,
+                    qty_open,
+                    0.0004,
+                    0.0001,
+                    0.0,
+                    8,
+                    "legacy_projection_residue",
+                    "lot-native",
+                    "dust_tracking",
+                    0.0,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_observed_ts_ms": 1_776_745_500_000,
+            "remote_open_order_found": 0,
+            "unresolved_open_order_count": 0,
+            "submit_unknown_count": 0,
+            "recovery_required_count": 0,
+            "dust_residual_present": 1,
+            "dust_residual_allow_resume": 1,
+            "dust_effective_flat": 1,
+            "dust_state": "harmless_dust",
+            "dust_broker_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+            "dust_local_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+            "dust_delta_qty": 0.0,
+            "dust_qty_gap_tolerance": 0.000001,
+            "dust_qty_gap_small": 1,
+            "dust_min_qty": 0.0004,
+        },
+        now_epoch_sec=1.0,
+    )
+
+    cmd_ops_report(limit=1)
+    capsys.readouterr()
+    payload = json.loads(PATH_MANAGER.ops_report_path().read_text(encoding="utf-8"))
+
+    operator_recovery = payload["operator_recovery_summary"]
+    truth_model = operator_recovery["authority_truth_model"]
+    blocker = operator_recovery["structured_blockers"][0]
+
+    assert operator_recovery["recovery_stage"] == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+    assert operator_recovery["inspect_only_mode"] is True
+    assert truth_model["projection_role"] == "rebuildable_materialized_view"
+    assert truth_model["portfolio_asset_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert truth_model["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert truth_model["projection_delta_qty"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert blocker["reason_code"] == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
+    assert blocker["inspect_only"] is True
 
 
 def test_ops_report_uses_env_db_path_without_hardcoded_path(tmp_path, monkeypatch, capsys):
