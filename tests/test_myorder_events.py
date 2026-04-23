@@ -79,4 +79,4 @@ def test_bithumb_broker_exposes_myorder_normalizer() -> None:
 
     assert normalized.exchange_order_id == "remote-456"
     assert normalized.client_order_id == "cid-456"
-    assert normalized.status == "CANCEL_REQUESTED"
+    assert normalized.status == "CANCELED"

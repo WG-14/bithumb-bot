@@ -63,16 +63,25 @@ def _normalize_event_type(raw_event_type: str, status: str) -> str:
 
 @dataclass(frozen=True)
 class NormalizedMyOrderEvent:
+    canonicalization_version: str
     raw_payload: dict[str, Any]
     raw_event_type: str
     event_type: str
+    exchange_state: str
     event_ts_ms: int
+    trade_ts_ms: int | None
+    order_ts_ms: int | None
     client_order_id: str
     exchange_order_id: str
+    trade_uuid: str
     side: str
+    ask_bid: str
     order_type: str
     status: str
     qty: float | None
+    executed_volume: float | None
+    remaining_volume: float | None
+    executed_funds: float | None
     price: float | None
     fee: float | None
     fee_status: str
@@ -80,25 +89,53 @@ class NormalizedMyOrderEvent:
     fill_id: str
     dedupe_key: str
 
+    @property
+    def is_fill_event(self) -> bool:
+        return self.exchange_state == "trade"
+
+    @property
+    def fill_ts_ms(self) -> int:
+        return int(self.trade_ts_ms if self.trade_ts_ms is not None else self.event_ts_ms)
+
 
 def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrderEvent:
     if not isinstance(payload, dict):
         raise TypeError(f"myorder payload must be dict, got {type(payload).__name__}")
 
+    canonicalization_version = "bithumb_myorder_v1"
+    exchange_state = _clean_text(payload.get("state") or payload.get("status") or payload.get("order_state")).lower()
     raw_event_type = _clean_text(
         payload.get("event_type")
         or payload.get("type")
         or payload.get("event")
         or payload.get("action")
     )
-    raw_status = _clean_text(payload.get("state") or payload.get("status") or payload.get("order_state"))
-    status = _normalize_status(raw_status)
+    if exchange_state == "trade":
+        status = "PARTIAL"
+    elif exchange_state == "cancel":
+        status = "CANCELED"
+    else:
+        status = _normalize_status(exchange_state)
     event_type = _normalize_event_type(raw_event_type, status)
     client_order_id = _clean_text(payload.get("client_order_id") or payload.get("coid"))
     exchange_order_id = _clean_text(payload.get("uuid") or payload.get("order_id"))
-    side = _clean_text(payload.get("side") or payload.get("order_side") or payload.get("type") or "BUY").upper()
+    trade_uuid = _clean_text(payload.get("trade_uuid"))
+    ask_bid = _clean_text(payload.get("ask_bid")).lower()
+    if ask_bid == "bid":
+        side = "BUY"
+    elif ask_bid == "ask":
+        side = "SELL"
+    else:
+        side = _clean_text(payload.get("side") or payload.get("order_side") or "BUY").upper()
     order_type = _clean_text(payload.get("ord_type") or payload.get("order_type") or payload.get("kind"))
-    qty = _optional_float(payload.get("executed_volume") or payload.get("volume") or payload.get("qty"))
+    volume = _optional_float(payload.get("volume") or payload.get("qty"))
+    executed_volume = _optional_float(payload.get("executed_volume"))
+    remaining_volume = _optional_float(payload.get("remaining_volume"))
+    executed_funds = _optional_float(payload.get("executed_funds"))
+    if exchange_state == "trade":
+        qty = volume
+    else:
+        qty = executed_volume if executed_volume is not None else volume
     price = _optional_float(payload.get("price") or payload.get("trade_price") or payload.get("avg_price"))
     trade_level_fee_keys = ("fee", "commission", "trade_fee", "transaction_fee", "fee_amount")
     order_level_fee_keys = ("paid_fee", "reserved_fee", "remaining_fee")
@@ -130,7 +167,8 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
             fee_status = "complete"
             fee_warning = None
         break
-    fill_id = _clean_text(payload.get("trade_id") or payload.get("fill_id") or payload.get("uuid") or payload.get("order_id"))
+    legacy_fill_id = _clean_text(payload.get("trade_id") or payload.get("fill_id"))
+    fill_id = trade_uuid if trade_uuid else legacy_fill_id
     event_ts_ms = _optional_int(
         payload.get("timestamp")
         or payload.get("ts")
@@ -138,35 +176,55 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         or payload.get("created_at")
         or payload.get("updated_at")
     ) or int(time.time() * 1000)
+    trade_ts_ms = _optional_int(payload.get("trade_timestamp"))
+    order_ts_ms = _optional_int(payload.get("order_timestamp"))
     canonical_digest_payload = {
+        "canonicalization_version": canonicalization_version,
         "event_type": event_type,
+        "exchange_state": exchange_state,
         "client_order_id": client_order_id,
         "exchange_order_id": exchange_order_id,
+        "trade_uuid": trade_uuid,
         "status": status,
         "side": side,
+        "ask_bid": ask_bid,
         "order_type": order_type,
         "qty": qty,
+        "executed_volume": executed_volume,
+        "remaining_volume": remaining_volume,
+        "executed_funds": executed_funds,
         "price": price,
         "fee": fee,
         "fee_status": fee_status,
         "fill_id": fill_id,
         "event_ts_ms": event_ts_ms,
+        "trade_ts_ms": trade_ts_ms,
+        "order_ts_ms": order_ts_ms,
     }
     dedupe_key = hashlib.sha256(
         json.dumps(canonical_digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
     return NormalizedMyOrderEvent(
+        canonicalization_version=canonicalization_version,
         raw_payload=dict(payload),
         raw_event_type=raw_event_type,
         event_type=event_type,
+        exchange_state=exchange_state,
         event_ts_ms=event_ts_ms,
+        trade_ts_ms=trade_ts_ms,
+        order_ts_ms=order_ts_ms,
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id,
+        trade_uuid=trade_uuid,
         side=side,
+        ask_bid=ask_bid,
         order_type=order_type,
         status=status,
         qty=qty,
+        executed_volume=executed_volume,
+        remaining_volume=remaining_volume,
+        executed_funds=executed_funds,
         price=price,
         fee=fee,
         fee_status=fee_status,

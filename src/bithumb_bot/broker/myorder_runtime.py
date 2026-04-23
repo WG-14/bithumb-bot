@@ -5,7 +5,7 @@ import sqlite3
 
 from ..config import settings
 from ..db_core import mark_private_stream_event_applied, record_broker_fill_observation, record_private_stream_event
-from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
+from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance
 from ..fee_observation import fee_accounting_status
 from ..oms import record_status_transition, set_exchange_order_id, set_status
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
@@ -26,7 +26,7 @@ def _find_local_order(conn: sqlite3.Connection, event: NormalizedMyOrderEvent):
     if event.client_order_id:
         return conn.execute(
             """
-            SELECT client_order_id, exchange_order_id, side, status
+            SELECT client_order_id, exchange_order_id, side, status, qty_req, qty_filled
             FROM orders
             WHERE client_order_id=?
             ORDER BY updated_ts DESC
@@ -37,7 +37,7 @@ def _find_local_order(conn: sqlite3.Connection, event: NormalizedMyOrderEvent):
     if event.exchange_order_id:
         row = conn.execute(
             """
-            SELECT client_order_id, exchange_order_id, side, status
+            SELECT client_order_id, exchange_order_id, side, status, qty_req, qty_filled
             FROM orders
             WHERE exchange_order_id=?
             ORDER BY updated_ts DESC
@@ -79,7 +79,7 @@ def _record_fee_pending_stream_observation(
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id or None,
         fill_id=event.fill_id,
-        fill_ts=int(event.event_ts_ms),
+        fill_ts=int(event.fill_ts_ms),
         side=side,
         price=float(event.price),
         qty=float(event.qty),
@@ -152,7 +152,7 @@ def ingest_myorder_event(
         exchange_order_id = event.exchange_order_id
         applied = True
 
-    if event.status in {"PARTIAL", "FILLED"} and event.qty is not None and event.price is not None and event.fill_id:
+    if event.is_fill_event and event.qty is not None and event.price is not None and event.fill_id:
         if not _myorder_fee_accounting_complete(event):
             _record_fee_pending_stream_observation(
                 conn,
@@ -202,7 +202,7 @@ def ingest_myorder_event(
                 client_order_id=client_order_id,
                 side=side,
                 fill_id=event.fill_id,
-                fill_ts=int(event.event_ts_ms),
+                fill_ts=int(event.fill_ts_ms),
                 price=float(event.price),
                 qty=float(event.qty),
                 fee=float(event.fee),
@@ -243,7 +243,54 @@ def ingest_myorder_event(
             )
         applied = applied or trade is not None
 
-    if event.status in {"NEW", "PARTIAL", "FILLED", "CANCEL_REQUESTED", "FAILED"}:
+    if (
+        not event.is_fill_event
+        and event.status in {"FILLED", "CANCELED"}
+        and event.executed_volume is not None
+    ):
+        local_qty_filled = float(row["qty_filled"] or 0.0)
+        qty_req = float(row["qty_req"] or event.executed_volume or 0.0)
+        fill_tol = order_fill_tolerance(qty_req)
+        if float(event.executed_volume) > local_qty_filled + fill_tol:
+            reason = (
+                "myorder terminal state references unaccounted executed volume; "
+                f"exchange_order_id={exchange_order_id or '<none>'}; "
+                f"exchange_state={event.exchange_state}; "
+                f"executed_volume={float(event.executed_volume):.12g}; "
+                f"local_qty_filled={local_qty_filled:.12g}; "
+                "manual reconciliation required before terminal status apply"
+            )
+            current_status = str(row["status"] or "")
+            record_status_transition(
+                client_order_id,
+                from_status=current_status,
+                to_status="RECOVERY_REQUIRED",
+                reason=reason,
+                conn=conn,
+            )
+            set_status(
+                client_order_id,
+                "RECOVERY_REQUIRED",
+                last_error=reason,
+                conn=conn,
+            )
+            mark_private_stream_event_applied(
+                conn,
+                dedupe_key=event.dedupe_key,
+                applied=True,
+                applied_status="recovery_required_unaccounted_terminal_volume",
+            )
+            return MyOrderIngestResult(
+                dedupe_key=event.dedupe_key,
+                accepted=True,
+                applied=True,
+                action="recovery_required_unaccounted_terminal_volume",
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                status="RECOVERY_REQUIRED",
+            )
+
+    if event.status in {"NEW", "PARTIAL", "FILLED", "CANCELED", "CANCEL_REQUESTED", "FAILED"}:
         current_status = str(row["status"] or "")
         if event.status != current_status:
             set_status(client_order_id, event.status, conn=conn)

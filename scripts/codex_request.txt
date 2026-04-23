@@ -1,300 +1,248 @@
-You are working directly in the `WG-14/bithumb-bot` repository. Investigate and fix the recurring fee-related problems without assuming that “fee calculation bug” is the root cause. Treat that as a hypothesis only. Your job is to verify the repository’s current design against the attached `/v1/orders/chance` reference and evolve the repo toward a more robust, reproducible, and operationally safe trading experiment system.
+You are working directly in the `WG-14/bithumb-bot` repository.
 
-Do not respond with generic advice. Perform repository-grounded analysis, code changes, and tests that can be verified inside this repo.
+Your task is not to apply a superficial fee patch. Treat the recurring fee problem as a starting signal, not as a proven root cause. Verify the repository against the attached Bithumb WebSocket `myOrder` reference and determine whether the current implementation is aligned with the documented contract. Prioritize design corrections that make the bot more robust, reproducible, recoverable, and operable as an automated trading experiment system.
 
-## Primary problem statement
+## Primary objective
 
-The repo already appears to use `GET /v1/orders/chance` as the authority for order capability, side-specific min_total, and fee fields (`bid_fee`, `ask_fee`, `maker_bid_fee`, `maker_ask_fee`). However, there is a strong structural risk that fee handling is split across multiple truth sources:
+Audit, validate, and then fix the `myOrder` ingestion / normalization / accounting / recovery path in a way that addresses the full problem family, not only the visible fee symptom.
 
-* exchange-derived fee/rule sync from `/v1/orders/chance`
-* local fallback rule resolution
-* env/config-based estimated fee inputs such as `LIVE_FEE_RATE_ESTIMATE`
-* post-trade fee observation / fee-gap repair flows
+## Required framing
 
-Do **not** weaken this core problem framing. The likely higher-order issue is not “one wrong formula” but **distributed fee authority** across rule sync, execution sizing, strategy gating, accounting, and repair.
+* Do **not** assume “the fee field is wrong” is the root cause.
+* Treat all candidate root causes as **hypotheses** until validated.
+* Prefer **design changes** over symptom-specific patches.
+* Keep scope tight to repository-verifiable work. Do not speculate beyond what can be checked in code, tests, and existing behavior.
+* Use the repository itself as the source of truth for implementation behavior, and the attached `myOrder` reference as the source of truth for the expected external contract.
 
-## Non-negotiable working principles
+## Background problem statement to preserve
 
-1. **Do not assume the cause.** Every claimed root cause must remain a testable hypothesis until verified from code, tests, or reproducible evidence.
-2. **Prefer design changes over symptom patches.** Avoid one-off fixes that only suppress current manifestations.
-3. **Preserve safety-first behavior.** Do not weaken live safeguards, reconciliation, restart safety, or operator visibility.
-4. **Keep scope explicit.** If you do not change something, state why.
-5. **Tests, observability, and recoverability are part of the task**, not optional follow-ups.
-6. **Do not silently collapse degraded/fallback behavior into “normal” behavior.**
-7. **Do not remove repair/reporting paths unless you replace them with something clearly safer.**
+The current repository likely does **not** treat Bithumb `myOrder` as a strict exchange-truth event contract. It appears to normalize it into a loose internal event shape first, which may be causing broader operational failures, including but not limited to fee issues.
 
-## Required investigation targets
+The attached `myOrder` reference indicates that the important official fields include at least:
 
-Inspect and reason from the actual repo code, especially these areas if present:
+* `ask_bid`
+* `order_type`
+* `state`
+* `uuid`
+* `trade_uuid`
+* `price`
+* `volume`
+* `executed_volume`
+* `remaining_volume`
+* `paid_fee`
+* `reserved_fee`
+* `remaining_fee`
+* `executed_funds`
+* `trade_timestamp`
+* `order_timestamp`
+* `timestamp`
 
-* `/v1/orders/chance` auth, request construction, parsing, and rule resolution
-* `order_chance_source.py`
-* `order_rules.py`
-* `order_rule_resolution.py`
-* `bithumb.py`
-* `order_sizing.py`
-* strategy entry/exit cost-edge and fee-sensitive execution logic
-* `fee_observation.py`
-* `fee_gap_policy.py`
-* `fee_gap_repair.py`
-* config/env handling for `LIVE_FEE_RATE_ESTIMATE` and related fields
-* persisted rule snapshots / fallback behavior
-* tests around private API auth, order rules sync, fee diagnostics, execution sizing
+The repository may currently be misaligned in ways such as:
 
-Also verify alignment with the attached `/v1/orders/chance` doc summary:
+* using `side` / `order_side` / `type` instead of official `ask_bid`
+* using `trade_id` / `fill_id` / `uuid` / `order_id` instead of official `trade_uuid`
+* not treating official `state=trade` as a fill-producing event
+* preferring `executed_volume` over `volume` for per-trade fill quantity
+* preferring general `timestamp` over `trade_timestamp` for fill event time
+* collapsing order-state semantics and fill-event semantics into one loose internal status model
+* treating order-level fee fields as if they were always safely usable at trade level
+* making stream-path and REST/recovery-path parse and reason about fills using different contracts
 
-* `market` query string must match the transmitted request
-* `query_hash` must match the canonical transmitted query string
-* fee fields and side-specific market rules are part of the authoritative response
-* document alignment matters, but do **not** stop at document conformance if the larger architecture is still unsafe
+You must verify these concerns directly in repo code before changing anything.
 
-## Working hypotheses to verify or falsify
+## Concrete work to perform
 
-Treat these as explicit hypotheses, not conclusions:
+### 1. Inspect and map the current implementation
 
-### Hypothesis A — dual fee truth model
+Find and analyze all code paths related to:
 
-Exchange-derived fee from `/v1/orders/chance` is stored but not used consistently by runtime execution sizing / strategy / accounting, while `LIVE_FEE_RATE_ESTIMATE` or similar config values still act as an independent fee authority.
+* `myOrder` payload normalization
+* runtime ingestion of `myOrder`
+* fill identity / dedupe
+* fee evidence classification
+* ledger application of fills
+* recovery / reconciliation paths
+* any tests that currently define expected `myOrder` behavior
 
-**Verify by:**
+At minimum, inspect the relevant files and any connected code they call.
 
-* tracing all fee inputs consumed by:
+Build a concise internal map of:
 
-  * buy/sell sizing
-  * strategy cost-edge / expected edge logic
-  * accounting / fee observation
-  * repair/reporting
-* comparing whether exchange-derived fee and config-derived fee can diverge in normal runtime paths
-* adding tests that prove which source actually wins in each path
+* where external `myOrder` enters the system
+* how it is normalized
+* how fill identity is derived
+* how side/status/qty/timestamp/fee are derived
+* when ledger application is allowed or blocked
+* how recovery code reconstructs the same fills from REST / order lookup paths
+* whether stream and recovery paths share the same canonical fill contract or not
 
-**Falsify by:**
+### 2. Evaluate the following hypotheses as hypotheses
 
-* proving that runtime fee-sensitive paths consistently use one canonical source in normal operation
+Do not present them as facts unless validated.
 
-### Hypothesis B — fallback can mask stale or wrong fee authority
+#### Hypothesis A
 
-When `/v1/orders/chance` sync fails, persisted snapshots or local fallback may allow continued operation while fee authority becomes stale, degraded, or ambiguous.
+Official `state=trade` events do not reliably enter the fill-application path.
 
-**Verify by:**
+Validate whether the current implementation maps official `trade` to a fill-producing internal status or whether it can remain a non-actionable status.
 
-* tracing `source_mode`, `fallback_used`, snapshot age, and fee provenance through rule resolution
-* checking whether live armed mode can still admit new entry while fee authority is stale/fallback/unknown
-* adding tests for fallback vs merged snapshot behavior specifically for fee-sensitive execution paths
+#### Hypothesis B
 
-**Falsify by:**
+Partial fills may be double-counted or over-counted because the code uses `executed_volume` as the per-fill quantity instead of documented per-trade `volume`.
 
-* proving that degraded or fallback fee authority cannot drive normal entry decisions in armed live mode
+Validate with realistic official-payload tests.
 
-### Hypothesis C — current architecture is repair-heavy rather than prevention-first
+#### Hypothesis C
 
-Zero-fee or fee-pending observations are handled mainly through downstream classification and repair flows, meaning the system expects fee inconsistency rather than preventing it upstream.
+Fill identity / dedupe may be broken because the code can derive fill identity from order-level IDs instead of official `trade_uuid`.
 
-**Verify by:**
+Validate whether multiple partial fills on the same order can collapse into one fill or mis-dedupe.
 
-* tracing how fee_pending / zero-fee / fee-gap debt is created
-* identifying whether upstream execution/accounting could have avoided those states
-* adding scenario tests from rule sync → execution → fill accounting → fee observation → repair preview
+#### Hypothesis D
 
-**Falsify by:**
+Part of the recurring “fee issue” may actually be caused by classifying order-level fee fields as insufficient trade-level fee evidence, then immediately escalating to a hard recovery state instead of modeling a safe intermediate accounting-pending state.
 
-* proving the current architecture already guarantees upstream fee consistency and repair is only exceptional
+Validate whether this is intentional, correct, and operationally appropriate.
 
-### Hypothesis D — float/Decimal split creates boundary drift
+#### Hypothesis E
 
-Fee, min_total, and tick-related computations may mix `float` and `Decimal`, causing boundary drift at min notional, fee, and sizing thresholds.
+The deeper structural issue may be that the stream ingestion path and the REST/recovery path use different data contracts for the same fill truth, causing inconsistencies after restart or reconciliation.
 
-**Verify by:**
+Validate whether both paths converge to the same canonical fill representation for side, fill ID, fill timestamp, quantity, fee status, and accounting eligibility.
 
-* mapping numeric types used from rule parsing through execution/accounting
-* constructing regression tests around threshold edges:
+### 3. Make design-first corrections
 
-  * min_total just below/above
-  * tiny qty step
-  * fee-sensitive expected edge threshold
-  * fee-inclusive closeout/accounting boundaries
+If the hypotheses are confirmed, do not merely patch the local symptom. Refactor toward a clearer architecture.
 
-**Falsify by:**
+Prioritize the following changes if repo evidence supports them:
 
-* proving the mixed numeric system cannot change effective decisions at these boundaries
+#### A. Introduce a strict `myOrder`-specific canonical contract
 
-### Hypothesis E — fee parser is too strict for future/real-world fee states
+Do not keep using a loose generic normalizer if that is what the repo is doing now.
 
-The code may assume all fee fields from `/v1/orders/chance` must be strictly positive, which could be structurally brittle if zero-fee or exceptional maker cases ever appear.
+Create a documented, typed, exchange-contract-aware representation for Bithumb `myOrder`, separating at least:
 
-**Verify by:**
+* order lifecycle updates
+* trade/fill events
 
-* checking actual parser invariants
-* deciding whether strict positivity is a deliberate safety constraint or an unnecessary schema fragility
-* if changing behavior, preserve fail-closed semantics where appropriate and make the policy explicit
+This model must explicitly preserve official fields and distinguish:
 
-**Falsify by:**
+* order UUID vs trade UUID
+* per-trade quantity vs cumulative executed quantity
+* trade timestamp vs delivery/event timestamp
+* trade-level fee evidence vs order-level fee evidence
 
-* proving strict positivity is necessary and safe for this repo’s intended operating model
+#### B. Separate fill observation from fill accounting
 
-## Expected design direction
+If current code blocks ledger application whenever fee evidence is incomplete, preserve safety, but do not lose the observed fill fact.
 
-Prefer a repository-wide design change that establishes a **single canonical fee authority** and explicit degraded behavior.
+Refactor so the system can represent:
 
-### Target design goals
+* fill observed
+* fill accounted
+* fee pending
+* reconciliation pending
+* manual recovery required
 
-1. Introduce a canonical runtime fee authority object or equivalent abstraction, e.g. `FeeAuthoritySnapshot`, with at least:
+Do not let incomplete fee evidence erase or collapse the raw trade event truth.
 
-   * bid fee
-   * ask fee
-   * maker bid fee
-   * maker ask fee
-   * provenance/source mode
-   * freshness / staleness metadata
-   * degraded/fallback status
-   * operator-facing diagnostic summary
+#### C. Unify stream and recovery contracts
 
-2. Ensure that the same canonical fee authority flows through:
+Ensure `myOrder` stream ingestion and REST/recovery lookup paths produce the same canonical fill evidence shape and apply the same reasoning rules.
 
-   * rule resolution
-   * execution sizing
-   * strategy cost-edge / expected edge
-   * post-trade accounting
-   * fee observation
-   * operator reporting / diagnostics
+Avoid having two different parsers with two different truth models for the same broker event family.
 
-3. Redefine `LIVE_FEE_RATE_ESTIMATE` or equivalent:
+#### D. Make status semantics explicit
 
-   * it must **not** remain a silent parallel runtime authority in normal mode
-   * either remove it from normal runtime decision paths, or demote it to an explicitly labeled degraded-mode fallback only
-   * if retained, its precedence and allowable use must be explicit and test-covered
+Do not force exchange `wait/trade/done/cancel` into an overly lossy internal model if it destroys meaning.
 
-4. Make degraded mode explicit:
+In particular, preserve that:
 
-   * if fee authority is stale / fallback-only / unknown in live armed mode, new entry should be blocked or tightly restricted
-   * existing position management may be handled differently, but the mode must be explicit, testable, and operator-visible
+* `trade` means a fill event occurred
+* `done` is an order terminal state, not necessarily a new fill
+* order status and fill occurrence are related but not interchangeable
 
-5. Improve numeric consistency:
+#### E. Improve observability and replayability
 
-   * move fee/min_total/price_unit handling toward `Decimal`-safe behavior where this affects boundary correctness
-   * avoid partial conversion that leaves decision points still dependent on `float` drift
+Preserve raw `myOrder` payloads and ensure the parsing/canonicalization layer is replayable.
 
-6. Preserve and improve repair/reporting, but make them downstream safety nets rather than primary operating assumptions
+If appropriate, introduce canonicalization versioning or equivalent replay-safe metadata so future parser corrections can be applied to historical event data.
 
-7. Add raw evidence preservation for fee incidents where appropriate, e.g. an incident bundle containing:
+### 4. Rewrite or add tests based on the official contract
 
-   * raw `/v1/orders/chance` response or normalized authority snapshot
-   * submit payload details
-   * fill payload / normalized fill evidence
-   * fee observation status
-   * repair basis / rationale
-   * enough metadata to reproduce and audit the incident
+Do not rely on the current tests if they encode internal assumptions rather than the official external schema.
 
-## Scope constraints
+Add or update tests so they use realistic official-style `myOrder` payloads and verify repository behavior against the documented contract.
 
-* Do **not** broaden this into unrelated exchange refactors.
-* Do **not** redesign the whole OMS unless required by fee authority unification.
-* Do **not** remove existing safety gates.
-* Do **not** make live behavior more permissive unless explicitly justified by stronger invariants and tests.
-* Do **not** paper over uncertainty; keep hypotheses and evidence separate.
+At minimum, cover:
 
-## Implementation tasks
+* one official `state=trade` event that should generate exactly one fill
+* two sequential partial `trade` events on the same order, using `volume` as per-trade quantity and `executed_volume` as cumulative quantity
+* two fills on the same order with different `trade_uuid` values
+* `done` arriving without a new fill
+* `paid_fee` / `reserved_fee` / `remaining_fee` present without confirmed trade-level fee evidence
+* `ask_bid` values for both buy and sell directions
+* `order_type` variants that matter to the repository
+* parity or golden tests showing stream-path and recovery-path canonical outputs match for the same economic event
 
-1. **Analyze current fee authority flow**
+Tests should fail before the fix and pass after the fix if the issue is real.
 
-   * Produce a code-grounded map of where fee values originate, transform, and influence decisions.
-   * Identify all places where `/v1/orders/chance`-derived fees and config-derived fees can diverge.
+### 5. Preserve operational safety
 
-2. **Design and implement canonical fee authority**
+Do not relax live-safety checks casually.
 
-   * Add the minimal new abstraction needed to make one authoritative runtime fee source explicit.
-   * Thread it through the relevant code paths.
+If current fee validation intentionally blocks materially sized live fills from immediate accounting, preserve the safety goal. But redesign the state handling so that incomplete fee evidence produces an operationally recoverable intermediate state rather than forcing everything into one opaque hard-failure bucket.
 
-3. **Harden degraded/fallback semantics**
+### 6. Keep changes scoped and reviewable
 
-   * Make fee authority freshness/provenance visible.
-   * Prevent ambiguous fee authority from silently behaving like normal in live armed entry paths.
+Do not perform unrelated cleanup.
+Do not rename large unrelated surfaces unless necessary.
+Do not rewrite the entire trading engine.
+Keep the work focused on:
 
-4. **Reduce numeric ambiguity**
+* `myOrder` contract correctness
+* fill truth and fee evidence handling
+* recovery consistency
+* test realism
+* observability/replayability where directly relevant
 
-   * Change fee-sensitive and threshold-sensitive logic to use safer numeric handling where needed.
-   * Keep changes targeted and justified.
+## Expected deliverables
 
-5. **Improve observability**
+Make code changes directly in the repo as needed, and produce a final written report in the PR or final response with this exact structure:
 
-   * Add operator-safe logs / diagnostics / report fields that clearly show:
+### 1. What I verified
 
-     * current fee authority source
-     * whether fallback is in effect
-     * whether fee values are exchange-derived, snapshot-derived, or config-derived
-     * whether runtime is blocked from new entry because fee authority is degraded
+List the concrete repository findings about current behavior, with file-level references.
 
-6. **Improve reproducibility / recoverability**
-
-   * Add or improve fee incident evidence capture sufficient for later verification and repair decisions.
-
-7. **Add tests**
-
-   * Extend existing tests and add new ones.
-   * Cover both unit and scenario/integration-style flows where feasible inside this repo.
-
-## Minimum required tests
-
-Add tests that prove or refute the critical invariants. At minimum include:
-
-1. `/v1/orders/chance` auth/query-hash regression remains correct
-2. exchange-derived fee authority is preserved with provenance
-3. runtime fee-sensitive paths consume canonical fee authority rather than silently consulting config in normal mode
-4. degraded/fallback fee authority behavior is explicit and blocks or restricts new live entry as designed
-5. persisted snapshot vs local fallback behavior is deterministic and operator-visible
-6. fee observation / fee_pending / repair preview behavior is consistent with the new authority model
-7. threshold-edge regressions for min_total / fee / sizing do not drift because of numeric type issues
-8. end-to-end scenario test covering:
-
-   * rule sync
-   * execution sizing
-   * fill/accounting
-   * fee observation
-   * repair/readiness outcome
-
-## Deliverable format
-
-At the end, provide a final report in this exact structure:
-
-### 1. Verified findings
-
-* Facts established directly from repository code/tests
-* Clear separation from unverified assumptions
-
-### 2. Hypotheses status
+### 2. Which hypotheses were confirmed, rejected, or still uncertain
 
 For each hypothesis A–E:
 
-* `status: verified | falsified | partially verified | unresolved`
-* evidence
-* remaining uncertainty
+* status: confirmed / rejected / still uncertain
+* evidence from code/tests
+* why
 
-### 3. Design changes made
+### 3. What I changed
 
-* what changed
-* why it is a design improvement rather than a symptom patch
-* what safety properties are improved
+Describe the actual implementation changes, focusing on design changes first, not just patches.
 
-### 4. Files changed
+### 4. Why this is a structural fix rather than a symptom patch
 
-* one-line purpose for each changed file
+Explain how the changes reduce recurrence across the whole problem family.
 
 ### 5. Tests added or changed
 
-* what each test proves
+List new/updated tests and what each proves.
 
-### 6. Operational impact
+### 6. Remaining risks or open questions
 
-* effect on live armed mode
-* effect on dry run / fallback / snapshots / repair flows
-* any migration or operator action required
-
-### 7. Remaining risks
-
-* what is still unresolved
-* what evidence is still missing
-* what future work is recommended but intentionally out of scope now
+Be explicit about anything that cannot be fully proven from repository-only work.
 
 ## Quality bar
 
-The task is only complete if the repo ends in a state where fee handling is more unified, more explicit, more testable, and more operationally auditable than before. Avoid shallow “fix fee formula” work unless the repository evidence proves that a narrow bug is truly the main issue.
+Do not submit a vague answer.
+Do not flatten the issue into “fee parsing bug”.
+Do not generalize into architecture advice without repo-backed implementation work.
+Use the repository to verify, modify, and test.
+Prefer precise, minimal, high-leverage structural corrections over broad speculative rewrites.
 
