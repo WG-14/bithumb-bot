@@ -247,6 +247,12 @@ def _repair_event_status(*, recorded: bool, state_converged: bool) -> str:
     return "recorded_but_not_current_state_proof"
 
 
+def _projection_publication_status(*, published: bool) -> str:
+    if not published:
+        return "none"
+    return "published_current_state_attestation"
+
+
 def _partial_close_residual_state_converged(
     conn,
     *,
@@ -546,6 +552,37 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         target_remainder_qty=portfolio_target_remainder_qty,
         portfolio_qty=portfolio_qty,
     )
+    portfolio_projection_publication_present = False
+    try:
+        publication_rows = conn.execute(
+            """
+            SELECT publish_basis
+            FROM position_authority_projection_publications
+            WHERE pair=? AND target_trade_id=?
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 20
+            """,
+            (pair_text, target_trade_id),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        publication_rows = []
+    expected_remainder = normalize_asset_qty(portfolio_target_remainder_qty)
+    expected_portfolio = normalize_asset_qty(portfolio_qty)
+    for row in publication_rows:
+        try:
+            basis = json.loads(str(row["publish_basis"]))
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError, IndexError):
+            continue
+        if int(basis.get("target_trade_id") or 0) != int(target_trade_id):
+            continue
+        try:
+            basis_remainder = normalize_asset_qty(float(basis.get("target_remainder_qty") or 0.0))
+            basis_portfolio = normalize_asset_qty(float(basis.get("portfolio_qty") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if abs(basis_remainder - expected_remainder) <= _EPS and abs(basis_portfolio - expected_portfolio) <= _EPS:
+            portfolio_projection_publication_present = True
+            break
     portfolio_projection_state_converged = bool(
         portfolio_projection_repair_recorded
         and lot_row_count > 0
@@ -679,11 +716,15 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         recorded=portfolio_projection_repair_recorded,
         state_converged=portfolio_projection_state_converged,
     )
+    projection_publication_status = _projection_publication_status(
+        published=portfolio_projection_publication_present,
+    )
     truth_model = {
         "canonical_truth_source": "orders_fills_trades_plus_portfolio",
         "projection_truth_source": "open_position_lots_materialized_projection",
         "projection_role": "rebuildable_materialized_view",
         "repair_event_role": "historical_evidence_not_current_state_proof",
+        "projection_publication_role": "current_state_attestation",
         "portfolio_asset_qty": float(portfolio_qty),
         "projected_total_qty": float(projected_total_qty),
         "projection_delta_qty": float(projected_total_qty - portfolio_qty),
@@ -696,6 +737,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "inspect_only": bool(repair_action_state == "inspect_only"),
         "residual_repair_event_status": residual_repair_event_status,
         "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
+        "portfolio_projection_publication_status": projection_publication_status,
     }
     return {
         "incident_class": (
@@ -765,6 +807,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "partial_close_residual_candidate": partial_close_residual_candidate,
         "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,
         "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
+        "portfolio_projection_publication_present": portfolio_projection_publication_present,
         "portfolio_projection_state_converged": portfolio_projection_state_converged,
         "projection_convergence": projection_convergence,
         "projection_state_converged": bool(projection_convergence.get("converged")),
@@ -774,6 +817,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "residual_repair_event_status": residual_repair_event_status,
         "residual_state_converged": residual_state_converged,
         "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
+        "portfolio_projection_publication_status": projection_publication_status,
         "other_active_lot_count": other_active_lot_count,
         "other_active_qty": other_active_qty,
         "portfolio_qty": portfolio_qty,

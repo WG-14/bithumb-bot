@@ -160,6 +160,7 @@ def _build_authority_truth_model(
         "projection_truth_source": "open_position_lots_materialized_projection",
         "projection_role": "rebuildable_materialized_view",
         "repair_event_role": "historical_evidence_not_current_state_proof",
+        "projection_publication_role": "current_state_attestation",
         "portfolio_asset_qty": float(projection_convergence.get("portfolio_qty") or 0.0),
         "projected_total_qty": float(projection_convergence.get("projected_total_qty") or 0.0),
         "projection_delta_qty": float(projection_convergence.get("portfolio_delta_qty") or 0.0),

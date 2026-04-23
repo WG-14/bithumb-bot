@@ -1004,6 +1004,14 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
         repair = conn.execute(
             "SELECT reason, repair_basis FROM position_authority_repairs ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        publication = conn.execute(
+            """
+            SELECT pair, target_trade_id, source, publish_basis
+            FROM position_authority_projection_publications
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
         adjustment = conn.execute(
             "SELECT reason, adjustment_basis FROM external_position_adjustments ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -1026,12 +1034,18 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert preview["safe_to_apply"] is True
     assert preview["eligibility_reason"] == "portfolio-anchored projection repair applicable"
     assert result["repair"]["reason"] == "portfolio_anchored_authority_projection_repair"
+    assert result["projection_publication"]["publication_type"] == "portfolio_projection_publish"
     assert result["external_position_adjustment"]["reason"] == "portfolio_projection_external_position_adjustment"
     assert repair["reason"] == "portfolio_anchored_authority_projection_repair"
+    assert publication["pair"] == settings.PAIR
+    assert publication["source"] == "manual_portfolio_anchored_authority_projection_publish"
     assert adjustment["reason"] == "portfolio_projection_external_position_adjustment"
     basis = json.loads(repair["repair_basis"])
     assert basis["event_type"] == "portfolio_anchored_authority_projection_repair"
     assert basis["target_remainder_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
+    publication_basis = json.loads(publication["publish_basis"])
+    assert publication_basis["event_type"] == "portfolio_anchored_authority_projection_repair"
+    assert publication_basis["target_remainder_qty"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
     adjustment_basis = json.loads(adjustment["adjustment_basis"])
     assert adjustment_basis["event_type"] == "external_position_adjustment"
     assert adjustment_basis["source_event_type"] == "portfolio_anchored_authority_projection_repair"
@@ -1051,6 +1065,61 @@ def test_portfolio_anchored_projection_repair_removes_false_executable_authority
     assert replay_rows[0]["position_state"] == "dust_tracking"
     assert replay_rows[0]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_QTY)
     assert replay_rows[0]["executable_lot_count"] == 0
+
+
+def test_recorded_projection_repair_event_alone_is_not_replayed_as_current_projection(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_portfolio_projection_divergence(conn)
+        target_trade = conn.execute(
+            """
+            SELECT id, client_order_id
+            FROM trades
+            WHERE client_order_id='live_1776745440000_buy_ae9d0d6e' AND side='BUY'
+            """
+        ).fetchone()
+        record_position_authority_repair(
+            conn,
+            event_ts=1_776_745_600_000,
+            source="test_historical_projection_repair_only",
+            reason="portfolio_anchored_authority_projection_repair",
+            repair_basis={
+                "event_type": "portfolio_anchored_authority_projection_repair",
+                "target_trade_id": int(target_trade["id"]),
+                "target_client_order_id": str(target_trade["client_order_id"]),
+                "target_qty": PORTFOLIO_DIVERGENCE_BUY_QTY,
+                "target_remainder_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "portfolio_qty": PORTFOLIO_DIVERGENCE_QTY,
+                "canonical_internal_lot_size": LOT_SIZE,
+            },
+        )
+        conn.execute("DELETE FROM open_position_lots")
+        conn.commit()
+
+        replay = rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR)
+        rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count
+            FROM open_position_lots
+            WHERE entry_client_order_id='live_1776745440000_buy_ae9d0d6e'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        publication_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_projection_publications"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert replay.replayed_buy_count == 1
+    assert publication_count["cnt"] == 0
+    assert len(rows) == 2
+    assert rows[0]["position_state"] == "open_exposure"
+    assert rows[0]["qty_open"] == pytest.approx(LOT_SIZE)
+    assert rows[0]["executable_lot_count"] == 1
+    assert rows[1]["position_state"] == "dust_tracking"
+    assert rows[1]["qty_open"] == pytest.approx(PORTFOLIO_DIVERGENCE_BUY_QTY - LOT_SIZE)
+    assert rows[1]["dust_tracking_lot_count"] == 1
 
 
 def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust_projection(

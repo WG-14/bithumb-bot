@@ -1,234 +1,278 @@
-You are working inside the `WG-14/bithumb-bot` repository. Treat this as a live-incident hardening task, not a one-off bugfix.
+You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Context to verify inside the repo before changing anything:
+Your job is to investigate and fix a real recovery/readiness incident in a way that improves the repository’s architecture, reproducibility, and operability, not just its immediate symptom surface.
 
-* A live EC2 incident produced this state:
+Do **not** treat any single hypothesized cause as already proven. Start from the observed incident facts below, verify them directly in the repo and tests, and then drive the fix from the highest-leverage structural cause you can validate.
 
-  * `portfolio.asset_qty = 0.00099986`
-  * `open_position_lots` had 14 `dust_tracking` rows totaling `0.001788`
-  * runtime/readiness classified the system as `AUTHORITY_PROJECTION_NON_CONVERGED_PENDING`
-  * `rebuild-position-authority --apply --yes` was refused as unsafe
-* Do **not** assume that diagnosis is fully correct. Start from it as a working hypothesis and verify or falsify it from the repository, tests, and current code behavior.
-* Recent code appears to intentionally block unsafe auto-repair for projection divergence/stale dust incidents. Do not weaken that safety posture just to make the incident “go away.”
+## Incident facts to use as the starting point
 
-Mission:
-Analyze, verify, and improve the repository so that this problem is addressed as a **system-design weakness**, not as a narrow symptom patch. The end state should move `WG-14/bithumb-bot` toward a more robust, reproducible, and operable automated trading experiment system.
+There is an EC2 incident where:
 
-Working rules:
+* canonical holdings are observed as `0.00099986 BTC` and broker/local/app agree on that quantity
+* persisted lot projection is `0.001788 BTC`
+* the current `open_position_lots` total equals that projected quantity
+* startup gate blocks resume with `POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED`
+* the 14 `open_position_lots` rows were materialized together, not naturally accumulated over time
+* `position_authority_repairs` row 5 with source `manual_portfolio_anchored_authority_projection_repair` records `lot_snapshot_after` with:
 
-1. Prefer design changes over local condition hacks.
-2. Keep hypotheses as hypotheses until validated by code/tests.
-3. Scope the work explicitly. If a larger redesign is needed, implement the safest high-value slice and document the next slice.
-4. Include tests, recovery behavior, and observability in the solution.
-5. Do not “fix” the incident by merely relaxing `safe_to_apply`, bypassing safety gates, or changing operator-facing text without fixing the underlying model.
-6. Keep the system conservative under uncertainty: if truth sources disagree, the system must fail closed for trading, but diagnostics and recovery plans must become clearer and more deterministic.
+  * `dust_tracking_lot_count = 14`
+  * `raw_total_asset_qty = 0.001788`
+* current readiness logic treats that repair history as `historical_evidence_not_current_state_proof` / `recorded_but_not_current_state_proof`
 
-What to investigate first:
+Relevant repo areas already suspected:
 
-1. Verify whether the repo already models this incident class in tests or fixtures.
-2. Trace the full authority/readiness path, including at least:
+* `src/bithumb_bot/runtime_readiness.py`
+* `src/bithumb_bot/position_authority_repair.py`
+* `src/bithumb_bot/position_authority_state.py`
+* `src/bithumb_bot/lifecycle.py`
+* `src/bithumb_bot/db_core.py`
+* `tests/test_position_authority_recovery_state.py`
 
-   * `position_authority_repair.py`
-   * `position_authority_state.py`
-   * `runtime_readiness.py`
-   * lot/projection lifecycle code
-   * any quantity-contract / lot-contract code
-3. Determine whether the real issue is:
+## Core problem statement
 
-   * stale projection residue accumulation,
-   * replay/rebuild algorithm error,
-   * ambiguous authority truth model,
-   * stale repair evidence being treated like current remediation guidance,
-   * cross-surface inconsistency (`health` vs `recovery-report` vs `restart-checklist` vs `ops-report`),
-   * or a combination.
+The likely direct cause is that a historical portfolio-anchored repair materialized an invalid current projection, but the more important question is whether the repo has a deeper structural flaw:
 
-Primary hypotheses to test explicitly:
+* multiple truth layers may coexist (`orders/fills/trades/portfolio`, materialized `open_position_lots`, repair-event history)
+* read paths and write paths may not share the same invariants
+* repair events may be treated as historical evidence in readiness logic while simultaneously acting as effective state writers in repair logic
+* `open_position_lots` may be functioning like a long-lived source of truth instead of a disposable derived projection
+* tests may recognize this incident class but still fail to enforce production-grade convergence guarantees
 
-* H1: The immediate incident is caused by stale persisted projection residue in `open_position_lots`, not by broker balance or recent fill ingestion errors.
-* H2: A higher-level design problem exists because persisted projection state is treated too much like an authoritative runtime truth instead of a rebuildable/materialized view.
-* H3: Recent changes intentionally hardened unsafe auto-repair, but operator-facing recovery/reporting surfaces are not fully aligned with that behavior.
-* H4: Repair events are acting more like historical side-effect logs than deterministic replayable recovery units, which weakens reproducibility and operator trust.
+Your task is to determine which of those are real, which are not, and then implement the highest-priority design correction.
 
-For each hypothesis:
+## Hypotheses to keep as hypotheses until verified
 
-* Say whether current evidence supports it, weakens it, or leaves it unresolved.
-* Add or update tests that can verify or falsify it deterministically.
-* Avoid hand-wavy conclusions.
+Evaluate these as explicit hypotheses. Do not present them as facts unless you verify them from code and tests.
 
-Concrete tasks:
-
-1. Reproduce the incident in tests
+### Hypothesis 1
 
-   * Find existing fixtures/tests that resemble:
+The direct incident cause is that row 5 in `position_authority_repairs` materialized an invalid current projection.
 
-     * `portfolio.asset_qty = 0.00099986`
-     * stale dust projection totaling `0.001788`
-     * projection non-convergence
-     * unsafe rebuild refusal
-   * Reuse them if present; otherwise add a minimal, isolated regression fixture.
-   * Create at least one end-to-end regression test that demonstrates the exact class of incident:
+How to validate:
 
-     * portfolio truth matches broker-side truth,
-     * recent fills/trades are correct,
-     * projection/lot truth diverges,
-     * runtime becomes blocked,
-     * rebuild apply is refused,
-     * diagnostics clearly explain why.
+* trace the code path that can produce a `manual_portfolio_anchored_authority_projection_repair`
+* verify whether that path can create `open_position_lots` matching the incident shape
+* determine whether the invalid 14-row projection can be created by repo code as written
 
-2. Determine whether `open_position_lots` is effectively acting as authoritative state
-
-   * Inspect where it is read for:
+How to falsify:
 
-     * readiness classification,
-     * dust operability,
-     * entry/closeout permissions,
-     * recovery-stage selection.
-   * Determine whether the codebase currently treats it as:
+* show that row 5 cannot produce the incident shape
+* or show that the same bad projection can already exist before that repair path
 
-     * canonical truth,
-     * repairable projection,
-     * cached materialization,
-     * or an ambiguous hybrid.
-   * If it is an ambiguous hybrid, design a safer separation.
+### Hypothesis 2
 
-3. Strengthen the truth model
+The higher-order root cause is truth-model multiplicity: canonical truth, projection truth, and repair-event truth are not governed by one shared invariant set across reads and writes.
 
-   * Evaluate whether the system should center authority on:
+How to validate:
 
-     * `fills + orders + trades + portfolio`,
-     * with `open_position_lots` demoted to a deterministic materialized projection/cache.
-   * Implement the highest-value safe step toward that model, not a massive rewrite.
-   * Good outcomes include:
+* map the invariants used by:
 
-     * deterministic rebuild from canonical evidence,
-     * clearer separation between canonical truth and derived projection,
-     * less chance that stale projection residue alone blocks the system indefinitely.
+  * readiness classification
+  * repair preview
+  * repair apply
+  * rebuild/replay
+  * convergence checks
+* identify where those invariants differ or are only partially shared
 
-4. Strengthen quantity/lot contract invariants
+How to falsify:
 
-   * Review recent quantity-contract / lot-contract logic.
-   * Determine whether `QuantityContractSnapshot` (or equivalent) can become a cross-layer invariant instead of a diagnostic-only artifact.
-   * If appropriate, extend the invariant so the same semantic contract is visible and comparable across:
+* demonstrate that every authority mutation path and every readiness/read path already uses the same convergence oracle and same postconditions
 
-     * execution planning,
-     * fills,
-     * orders,
-     * open lots,
-     * lifecycle projections,
-     * readiness/reporting.
-   * Add tests that prove when contracts align and when they diverge.
+### Hypothesis 3
 
-5. Unify operator/reporting surfaces
+`open_position_lots` behaves as a long-lived materialized view that accumulates historical fragmentation and stale residues, corrupting present-tense authority semantics.
 
-   * Audit `health`, `recovery-report`, `restart-checklist`, and `ops-report`.
-   * If they can emit conflicting operator advice for the same DB snapshot, fix that.
-   * They may differ in detail, but must not contradict each other about:
+How to validate:
 
-     * whether trading may start,
-     * whether only process resume is allowed,
-     * whether new entry is blocked,
-     * whether closeout is blocked,
-     * whether auto-repair is allowed,
-     * whether inspection-only is required.
-   * Prefer a shared decision object / shared structured blocker representation over ad hoc string logic.
+* determine whether `open_position_lots` is fully and deterministically rebuildable from authoritative accounting state
+* compare how code treats it in theory vs in practice
+* check whether stale lot rows can survive repair/reconcile sequences and still influence readiness
 
-6. Improve recovery determinism
+How to falsify:
 
-   * Inspect whether repair records are durable proofs of state transition or just audit logs.
-   * If they are just logs, improve the design so that recovery planning and applied recovery are more reproducible.
-   * Good direction:
+* show that `open_position_lots` is already treated purely as disposable derived state, with no stale-state persistence risk
 
-     * explicit preview/plan/applied/proof phases,
-     * idempotent recovery semantics,
-     * replayable evidence,
-     * clear distinction between “historical repair event exists” and “current snapshot is safe to apply the same repair.”
+### Hypothesis 4
 
-7. Improve observability
+The test suite recognizes the incident class but still allows production-invalid authority projections to be persisted.
 
-   * Add structured diagnostics for projection divergence and truth-source disagreement.
-   * At minimum, make sure the system exposes, in a machine-testable way:
+How to validate:
 
-     * canonical asset qty,
-     * projected lot qty,
-     * divergence delta,
-     * convergence status,
-     * repair action state,
-     * structured blocker codes,
-     * whether the system is in inspect-only mode.
-   * Prefer enums / structured fields over brittle prose matching.
+* inspect `tests/test_position_authority_recovery_state.py`
+* identify what the tests already cover
+* identify what they do **not** guarantee
+* add a regression that reproduces the incident or a minimal equivalent and proves the current failure
+* then make that regression pass with the structural fix
 
-Constraints:
+How to falsify:
 
-* Do not solve this by simply changing a threshold or removing an `unsafe` check.
-* Do not make trading more permissive unless the underlying truth and replay model is actually improved.
-* Avoid a giant speculative rewrite. Implement a coherent, test-backed step that clearly improves architecture and recurrence resistance.
-* Preserve backwards-safe behavior where possible, but not at the expense of continuing ambiguity.
+* show that an equivalent regression already exists and would already fail the broken behavior
 
-Expected deliverables:
+## Priorities
 
-1. Code changes.
-2. New or updated tests covering:
+Keep these priorities in this order unless repo evidence forces a different order:
 
-   * the live-incident class,
-   * truth divergence,
-   * repair refusal conditions,
-   * reporting surface consistency,
-   * any new invariants introduced.
-3. A short developer note or inline documentation update if needed to explain the new model.
-4. Final report in this exact format:
+1. **Design correction over symptom patch**
 
-FINAL REPORT
+   * do not start by patching row-5-specific behavior only
+   * do not ship a narrow “ignore this one mismatch” fix
+   * do not delete rows ad hoc without a design reason
 
-Summary
+2. **Shared invariants and deterministic convergence**
 
-* What you changed and why.
+   * unify the write-path and read-path truth relations
+   * ensure any published projection is either converged or rejected
 
-Validated hypotheses
+3. **Derived-state discipline**
 
-* H1: supported / weakened / unresolved
+   * prefer making `open_position_lots` a disposable derived projection if repo evidence supports that direction
+   * separate evidence logging from current-state publication
 
-  * Evidence:
-  * Test(s):
-* H2: supported / weakened / unresolved
+4. **Reproducibility and operability**
 
-  * Evidence:
-  * Test(s):
-* H3: supported / weakened / unresolved
+   * incident must become reproducible in tests
+   * recovery semantics must become explainable and observable
+   * operator-facing diagnostics must reflect the actual state model
 
-  * Evidence:
-  * Test(s):
-* H4: supported / weakened / unresolved
+## Desired design direction
 
-  * Evidence:
-  * Test(s):
+Favor changes in this direction if repo evidence supports them:
 
-Root cause
+* treat `orders/fills/trades/portfolio` plus explicit accounting adjustments as canonical truth
+* treat `open_position_lots` as a rebuildable/materialized projection, not an independent truth source
+* separate:
 
-* Immediate cause:
-* Higher-level structural cause:
-* What remains uncertain:
+  * repair evidence append
+  * projection rebuild request
+  * projection publish / attestation
+* ensure every repair/apply path uses one convergence oracle and one publish gate
+* prevent any repair path from persisting a projection that the readiness layer will later reject as non-current or non-converged
+* make incident-grade replay possible from captured DB/runtime state
 
-Design changes
+Do **not** force this architecture if repo evidence decisively proves a better alternative. But if you choose a different direction, explain why.
 
-* Structural changes implemented:
-* Why these are preferable to symptom patches:
-* What problem class they prevent:
+## Concrete tasks
 
-Safety / operability impact
+### 1. Investigate the current architecture
 
-* How trading safety changed:
-* How recovery behavior changed:
-* How observability changed:
+* inspect the relevant files directly
+* map the authority lifecycle:
 
-Tests
+  * ingestion
+  * lifecycle projection
+  * repair preview
+  * repair apply
+  * readiness classification
+  * startup gate / resume logic
+* document where truth is defined, where it is derived, and where it is published
 
-* New tests:
-* Updated tests:
-* Incident/regression coverage added:
+### 2. Reproduce the incident in tests
 
-Open follow-ups
+* either:
 
-* Follow-up items that should be done later, clearly separated from this change set.
+  * create a minimized regression fixture matching the incident shape
+  * or build a deterministic equivalent that exercises the same structural failure
+* the regression must prove more than “resume is blocked”
+* it must prove that an invalid current projection can be persisted or published even though canonical holdings disagree
 
-Now inspect the repo, verify the hypotheses from code and tests, implement the most defensible structural improvement, and run the relevant tests before reporting back.
+### 3. Identify the highest-level correct fix
+
+* prefer a fix that closes the entire problem family
+* examples of acceptable scope:
+
+  * unify convergence publish rules
+  * prevent repair events from doubling as unverified current-state proof
+  * make `open_position_lots` explicitly disposable derived state
+  * require post-repair re-materialization from canonical truth before publish
+* avoid one-off exception logic for this exact row-5 shape unless it is part of a broader invariant-driven refactor
+
+### 4. Implement the fix
+
+* keep the change set coherent and reviewable
+* preserve or improve operator safety
+* do not weaken startup gate semantics just to make the incident pass
+* fail closed when truth is ambiguous
+* improve diagnostic clarity where helpful
+
+### 5. Expand the test suite
+
+Include tests for:
+
+* the reproduced incident or minimal equivalent
+* no repair path may publish an invalid projection that fails the same convergence oracle used by readiness
+* stale/historical repair events cannot alone justify current-state authority
+* rebuild/replay from canonical truth yields deterministic projection semantics
+* operator-facing readiness state matches the actual authority model after repair
+
+### 6. Improve observability/recovery ergonomics where justified
+
+Add or tighten diagnostics around:
+
+* canonical truth source
+* projection truth source
+* whether a repair event is evidence vs current-state proof
+* why a projection publish was accepted or rejected
+* whether a replay/rebuild would converge
+
+Prefer observability that helps future EC2 incidents become locally reproducible.
+
+## Scope constraints
+
+* Work inside `WG-14/bithumb-bot`
+* Verify everything against the actual repo state
+* Keep hypotheses explicitly labeled until confirmed
+* Make minimal but structurally meaningful changes
+* Do not introduce broad unrelated refactors
+* Do not hide the incident by loosening safety gates
+* Do not assume external infrastructure changes unless absolutely necessary
+* Do not treat EC2 logs as stronger than repo-validated invariants
+
+## Deliverables
+
+When done, provide a final report with these sections:
+
+### A. Verified findings
+
+State which hypotheses were confirmed, weakened, or falsified, and why.
+
+### B. Root cause
+
+Describe the **validated** root cause in repo terms, distinguishing:
+
+* direct incident trigger
+* higher-order structural cause
+
+### C. Code changes
+
+List the files changed and the purpose of each change.
+
+### D. Tests added or modified
+
+Summarize the new regression coverage and what failure mode each test prevents.
+
+### E. Architectural impact
+
+Explain how the fix moves the repo toward:
+
+* stronger truth-model discipline
+* deterministic recovery
+* better reproducibility
+* better operator safety
+
+### F. Remaining risks / follow-up
+
+List anything intentionally left out of scope, any unresolved ambiguity, and the next best structural step.
+
+## Success criteria
+
+The work is successful only if all of the following are true:
+
+* the incident class is reproducible in tests before the fix
+* the fix is driven by validated repo evidence, not speculation
+* the change addresses the problem family, not only this exact symptom
+* readiness and repair logic share stronger invariants after the change
+* invalid authority projections cannot be silently published and then later rejected as “historical evidence not current state proof”
+* the repo becomes more robust as an experimental automated trading system, not merely quieter
+
+Proceed by first verifying the current code paths and producing the smallest credible regression that captures the structural failure, then implement the design-level fix that closes the class of bug.
 

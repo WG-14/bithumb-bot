@@ -8,6 +8,7 @@ from .db_core import (
     compute_accounting_replay,
     normalize_asset_qty,
     record_external_position_adjustment,
+    record_position_authority_projection_publication,
     record_position_authority_repair,
 )
 from .lifecycle import (
@@ -397,6 +398,16 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
                     note=note,
                 )
             repair_basis["external_position_adjustment"] = adjustment
+            publication = record_position_authority_projection_publication(
+                conn,
+                event_ts=int(time.time() * 1000),
+                pair=settings.PAIR,
+                target_trade_id=target_trade_id,
+                source="manual_portfolio_anchored_authority_projection_publish",
+                publish_basis=repair_basis,
+                note=note,
+            )
+            repair_basis["projection_publication"] = publication
             repair = record_position_authority_repair(
                 conn,
                 event_ts=int(time.time() * 1000),
@@ -408,6 +419,7 @@ def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[s
             return {
                 "preview": preview,
                 "repair": repair,
+                "projection_publication": publication,
                 "external_position_adjustment": adjustment,
                 "lot_snapshot_before": before,
                 "lot_snapshot_after": after,

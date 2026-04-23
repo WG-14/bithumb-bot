@@ -578,6 +578,23 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS position_authority_projection_publications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            publication_key TEXT NOT NULL UNIQUE,
+            publication_type TEXT NOT NULL DEFAULT 'portfolio_projection_publish'
+                CHECK (publication_type = 'portfolio_projection_publish'),
+            pair TEXT NOT NULL,
+            target_trade_id INTEGER NOT NULL,
+            event_ts INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            publish_basis TEXT NOT NULL,
+            note TEXT,
+            created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS broker_fill_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL DEFAULT 'broker_fill_observation'
@@ -857,6 +874,24 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_position_authority_repairs_key
         ON position_authority_repairs(repair_key)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_position_authority_projection_publications_pair_event_ts
+        ON position_authority_projection_publications(pair, event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_position_authority_projection_publications_target
+        ON position_authority_projection_publications(pair, target_trade_id, event_ts, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_position_authority_projection_publications_key
+        ON position_authority_projection_publications(publication_key)
         """
     )
 
@@ -3298,6 +3333,118 @@ def record_position_authority_repair(
         "source": source_text,
         "reason": reason_text,
         "repair_basis": basis_text,
+        "note": note,
+        "created": True,
+    }
+
+
+def _position_authority_projection_publication_key(
+    *,
+    pair: str,
+    target_trade_id: int,
+    source: str,
+    publish_basis: str,
+    note: str | None,
+) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(str(pair).strip().encode("utf-8"))
+    hasher.update(b"\x1f")
+    hasher.update(str(int(target_trade_id)).encode("utf-8"))
+    hasher.update(b"\x1f")
+    hasher.update(str(source).strip().encode("utf-8"))
+    hasher.update(b"\x1f")
+    hasher.update(str(publish_basis).strip().encode("utf-8"))
+    hasher.update(b"\x1f")
+    hasher.update((note or "").strip().encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def record_position_authority_projection_publication(
+    conn: sqlite3.Connection,
+    *,
+    event_ts: int,
+    pair: str,
+    target_trade_id: int,
+    source: str,
+    publish_basis: dict[str, Any] | str,
+    note: str | None = None,
+    publication_key: str | None = None,
+) -> dict[str, Any]:
+    pair_text = str(pair).strip()
+    source_text = str(source).strip()
+    basis_text = (
+        json.dumps(publish_basis, ensure_ascii=False, sort_keys=True)
+        if isinstance(publish_basis, dict)
+        else str(publish_basis)
+    )
+    if not pair_text:
+        raise RuntimeError("position authority projection publication pair is required")
+    if int(target_trade_id) <= 0:
+        raise RuntimeError("position authority projection publication target_trade_id is required")
+    if not source_text:
+        raise RuntimeError("position authority projection publication source is required")
+    if not basis_text.strip():
+        raise RuntimeError("position authority projection publication basis is required")
+
+    key = publication_key or _position_authority_projection_publication_key(
+        pair=pair_text,
+        target_trade_id=int(target_trade_id),
+        source=source_text,
+        publish_basis=basis_text,
+        note=note,
+    )
+    existing = conn.execute(
+        """
+        SELECT id, publication_key, publication_type, pair, target_trade_id, event_ts, source, publish_basis, note
+        FROM position_authority_projection_publications
+        WHERE publication_key=?
+        """,
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return {
+            "id": int(existing["id"]),
+            "publication_key": str(existing["publication_key"]),
+            "publication_type": str(existing["publication_type"]),
+            "pair": str(existing["pair"]),
+            "target_trade_id": int(existing["target_trade_id"]),
+            "event_ts": int(existing["event_ts"]),
+            "source": str(existing["source"]),
+            "publish_basis": str(existing["publish_basis"]),
+            "note": str(existing["note"]) if existing["note"] is not None else None,
+            "created": False,
+        }
+
+    had_tx = conn.in_transaction
+    cursor = conn.execute(
+        """
+        INSERT INTO position_authority_projection_publications(
+            publication_key, publication_type, pair, target_trade_id, event_ts, source, publish_basis, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            key,
+            "portfolio_projection_publish",
+            pair_text,
+            int(target_trade_id),
+            int(event_ts),
+            source_text,
+            basis_text,
+            note,
+        ),
+    )
+    if not had_tx:
+        conn.commit()
+
+    return {
+        "id": int(cursor.lastrowid),
+        "publication_key": key,
+        "publication_type": "portfolio_projection_publish",
+        "pair": pair_text,
+        "target_trade_id": int(target_trade_id),
+        "event_ts": int(event_ts),
+        "source": source_text,
+        "publish_basis": basis_text,
         "note": note,
         "created": True,
     }

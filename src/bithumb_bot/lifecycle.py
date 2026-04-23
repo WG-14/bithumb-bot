@@ -19,7 +19,6 @@ from .dust import (
 )
 from .lot_model import build_market_lot_rules, lot_count_to_qty, qty_to_executable_lot_count
 from .markets import parse_user_market_input
-from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
 OPEN_POSITION_STATE = OPEN_EXPOSURE_LOT_STATE
 DUST_TRACKING_STATE = DUST_TRACKING_LOT_STATE
@@ -1178,7 +1177,7 @@ def rebuild_lifecycle_projections_from_trades(
             allow_entry_decision_fallback=allow_entry_decision_fallback,
         )
 
-    _apply_portfolio_anchored_projection_repairs(conn, pair=pair_text)
+    _apply_published_portfolio_projection_adjustments(conn, pair=pair_text)
 
     after = summarize_position_lots(conn, pair=pair_text)
     return ProjectionReplayResult(
@@ -1336,29 +1335,68 @@ def apply_portfolio_anchored_projection_repair_basis(
     )
 
 
-def _apply_portfolio_anchored_projection_repairs(conn: sqlite3.Connection, *, pair: str) -> int:
+def _published_portfolio_projection_matches_current_candidate(
+    conn: sqlite3.Connection,
+    *,
+    pair: str,
+    publish_basis: dict[str, object],
+) -> bool:
+    from .position_authority_state import build_position_authority_assessment
+
+    target_trade_id = int(publish_basis.get("target_trade_id") or 0)
+    target_remainder_qty = normalize_asset_qty(float(publish_basis.get("target_remainder_qty") or 0.0))
+    portfolio_qty = normalize_asset_qty(float(publish_basis.get("portfolio_qty") or 0.0))
+    if target_trade_id <= 0:
+        return False
+
+    assessment = build_position_authority_assessment(conn, pair=pair)
+    return bool(
+        assessment.get("needs_portfolio_projection_repair")
+        and bool(assessment.get("projection_repair_covers_excess"))
+        and int(assessment.get("target_trade_id") or 0) == target_trade_id
+        and abs(
+            normalize_asset_qty(float(assessment.get("portfolio_target_remainder_qty") or 0.0)) - target_remainder_qty
+        )
+        <= 1e-12
+        and abs(normalize_asset_qty(float(assessment.get("portfolio_qty") or 0.0)) - portfolio_qty) <= 1e-12
+    )
+
+
+def _apply_published_portfolio_projection_adjustments(conn: sqlite3.Connection, *, pair: str) -> int:
+    from .position_authority_state import build_lot_projection_convergence
+
     try:
         rows = conn.execute(
             """
-            SELECT repair_basis
-            FROM position_authority_repairs
-            WHERE reason=?
+            SELECT publish_basis
+            FROM position_authority_projection_publications
+            WHERE pair=?
             ORDER BY event_ts ASC, id ASC
             """,
-            (PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON,),
+            (str(pair),),
         ).fetchall()
     except sqlite3.OperationalError:
         return 0
 
     applied = 0
-    for row in rows:
+    for index, row in enumerate(rows, start=1):
         try:
-            basis = json.loads(str(_row_value(row, "repair_basis", 0) or "{}"))
+            basis = json.loads(str(_row_value(row, "publish_basis", 0) or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if not isinstance(basis, dict):
             continue
+        if not _published_portfolio_projection_matches_current_candidate(conn, pair=pair, publish_basis=basis):
+            continue
+        savepoint_name = f"position_authority_publication_{index}"
+        conn.execute(f"SAVEPOINT {savepoint_name}")
         apply_portfolio_anchored_projection_repair_basis(conn, pair=pair, repair_basis=basis)
+        convergence = build_lot_projection_convergence(conn, pair=pair)
+        if not bool(convergence.get("converged")):
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            continue
+        conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
         applied += 1
     return applied
 
