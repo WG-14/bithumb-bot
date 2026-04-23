@@ -17,6 +17,7 @@ NOTIFY_SCRIPT="${NOTIFY_SCRIPT:-${SCRIPT_DIR}/notify_ntfy.sh}"
 CODEX_BIN="${CODEX_BIN:-codex}"
 SSH_KEY="${BITHUMB_EC2_SSH_KEY:-${HOME}/.ssh/bithumb-bot-paper.pem}"
 EC2_TARGET="${BITHUMB_EC2_TARGET:-ec2-user@3.39.93.137}"
+REMOTE_VERIFY_MODE="${REMOTE_VERIFY_MODE:-smoke}"
 
 stage="preflight"
 
@@ -82,6 +83,14 @@ dirty_paths_excluding_request_file() {
 
 cd "${PROJECT_ROOT}"
 
+case "${REMOTE_VERIFY_MODE}" in
+  smoke|full)
+    ;;
+  *)
+    fail "invalid REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}; expected smoke or full"
+    ;;
+esac
+
 if [[ ! -f "${REQUEST_FILE}" ]]; then
   fail "request file not found: ${REQUEST_FILE}"
 fi
@@ -138,13 +147,13 @@ run_stage "git push" git push
 
 stage="remote EC2 verification"
 echo
-echo "[PIPELINE] ${stage}"
+echo "[PIPELINE] ${stage} (REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE})"
 if ssh \
     -i "${SSH_KEY}" \
     -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
     "${EC2_TARGET}" \
-    "bash -s" < "${REMOTE_VERIFY_SCRIPT}"; then
+    "REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE} bash -s" < "${REMOTE_VERIFY_SCRIPT}"; then
   remote_verify_exit=0
 else
   remote_verify_exit=$?
@@ -152,14 +161,15 @@ fi
 
 stage="complete"
 if [[ "${remote_verify_exit}" -eq 0 ]]; then
-  notify "bithumb-bot pipeline succeeded" "default" "Codex changes were committed, pushed, and verified on EC2."
+  notify "bithumb-bot pipeline succeeded" "default" \
+    "Codex changes were committed, pushed, and verified on EC2 with REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}."
   echo
   echo "[PIPELINE] success"
   exit 0
 fi
 
 notify "bithumb-bot pipeline failed" "high" \
-  "Codex changes were committed and pushed, but EC2 verification completed with one or more failed stages."
+  "Codex changes were committed and pushed, but EC2 verification completed with one or more failed stages in REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}."
 echo
 echo "[PIPELINE] EC2 verification completed with failed stages" >&2
 exit "${remote_verify_exit}"

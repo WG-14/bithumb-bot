@@ -420,6 +420,13 @@ This is the project’s intended full-suite validation command.
 - Run the full suite only when it is actually needed, and only at the baseline and final validation points unless a shared failure cluster resolution justifies another full rerun.
 - Localized changes such as small interface adjustments, logging improvements, report or output improvements, helper CLI additions or changes, and healthcheck-only changes may be validated with focused tests only if there is no broader regression risk. In those cases, the full suite may be skipped unless the task explicitly requires a clean pass under `uv run pytest -q`.
 
+### Remote Codex Pipeline Verification
+
+- `scripts/run_codex_pipeline.sh` defaults EC2 verification to `REMOTE_VERIFY_MODE=smoke`.
+- `REMOTE_VERIFY_MODE=smoke` must still run remote pull, sync, status, and summary verification, but skips remote full-suite pytest explicitly.
+- `REMOTE_VERIFY_MODE=full` opts into the remote `uv run pytest -q` stage.
+- Invalid remote verification modes must fail fast and be visible in operator output.
+
 ### Relevant focused tests
 
 When touching these areas, run the relevant focused tests first:

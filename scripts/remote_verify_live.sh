@@ -6,6 +6,7 @@ set -uo pipefail
 
 APP_DIR="${BITHUMB_REMOTE_APP_DIR:-${HOME}/apps/bithumb-bot}"
 PYTEST_TMPDIR="${BITHUMB_PYTEST_TMPDIR:-${HOME}/tmp/pytest-tmp}"
+REMOTE_VERIFY_MODE="${REMOTE_VERIFY_MODE:-smoke}"
 
 passed_stages=()
 failed_stages=()
@@ -40,6 +41,7 @@ run_stage_collect() {
 print_summary() {
   echo
   echo "[REMOTE-VERIFY] summary"
+  echo "[REMOTE-VERIFY] remote verify mode: ${REMOTE_VERIFY_MODE}"
   echo "[REMOTE-VERIFY] passed stages: ${#passed_stages[@]}"
   for stage in "${passed_stages[@]}"; do
     echo "[REMOTE-VERIFY]   PASS ${stage}"
@@ -55,6 +57,18 @@ print_summary() {
     echo "[REMOTE-VERIFY]   SKIP ${stage}"
   done
 }
+
+case "${REMOTE_VERIFY_MODE}" in
+  smoke|full)
+    echo "[REMOTE-VERIFY] remote verify mode: ${REMOTE_VERIFY_MODE}"
+    ;;
+  *)
+    echo "[REMOTE-VERIFY] invalid REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}; expected smoke or full" >&2
+    record_fail "remote preflight: invalid REMOTE_VERIFY_MODE=${REMOTE_VERIFY_MODE}"
+    print_summary
+    exit 1
+    ;;
+esac
 
 if [[ ! -d "${APP_DIR}" ]]; then
   echo "[REMOTE-VERIFY] app directory not found: ${APP_DIR}" >&2
@@ -78,7 +92,13 @@ run_stage_collect "git log --oneline -n 3" git log --oneline -n 3
 run_stage_collect "mkdir -p ${PYTEST_TMPDIR}" mkdir -p "${PYTEST_TMPDIR}"
 run_stage_collect "clear ${PYTEST_TMPDIR}" bash -lc "find \"${PYTEST_TMPDIR}\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +"
 run_stage_collect "TMPDIR=${PYTEST_TMPDIR} uv sync --locked" env TMPDIR="${PYTEST_TMPDIR}" uv sync --locked
-run_stage_collect "TMPDIR=${PYTEST_TMPDIR} uv run pytest -q" env TMPDIR="${PYTEST_TMPDIR}" uv run pytest -q
+if [[ "${REMOTE_VERIFY_MODE}" == "full" ]]; then
+  run_stage_collect "TMPDIR=${PYTEST_TMPDIR} uv run pytest -q" env TMPDIR="${PYTEST_TMPDIR}" uv run pytest -q
+else
+  echo
+  echo "[REMOTE-VERIFY] skip TMPDIR=${PYTEST_TMPDIR} uv run pytest -q because REMOTE_VERIFY_MODE=smoke"
+  record_skip "TMPDIR=${PYTEST_TMPDIR} uv run pytest -q (REMOTE_VERIFY_MODE=smoke)"
+fi
 
 print_summary
 
