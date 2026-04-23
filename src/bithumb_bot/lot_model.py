@@ -205,6 +205,85 @@ class LotSplit:
     non_executable_reason: str
 
 
+@dataclass(frozen=True)
+class QuantityContractSnapshot:
+    requested_qty: float
+    exchange_constrained_qty: float
+    internal_lot_size: float | None
+    intended_lot_count: int | None
+    executable_lot_count: int
+    executable_qty: float
+    residual_qty: float
+    residual_reason: str
+    semantic_version: int | None
+    provenance: str
+    compatibility_class: str = "lot-native"
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "requested_qty": float(self.requested_qty),
+            "exchange_constrained_qty": float(self.exchange_constrained_qty),
+            "internal_lot_size": (
+                None if self.internal_lot_size is None else float(self.internal_lot_size)
+            ),
+            "intended_lot_count": (
+                None if self.intended_lot_count is None else int(self.intended_lot_count)
+            ),
+            "executable_lot_count": int(self.executable_lot_count),
+            "executable_qty": float(self.executable_qty),
+            "residual_qty": float(self.residual_qty),
+            "residual_reason": str(self.residual_reason or "none"),
+            "semantic_version": (
+                None if self.semantic_version is None else int(self.semantic_version)
+            ),
+            "provenance": str(self.provenance or ""),
+            "compatibility_class": str(self.compatibility_class or "lot-native"),
+        }
+
+
+def build_quantity_contract_snapshot(
+    *,
+    requested_qty: float,
+    exchange_constrained_qty: float,
+    internal_lot_size: float | None,
+    intended_lot_count: int | None,
+    executable_lot_count: int | None,
+    residual_reason: str,
+    provenance: str,
+    semantic_version: int | None = None,
+    compatibility_class: str = "lot-native",
+) -> QuantityContractSnapshot:
+    normalized_requested_qty = max(0.0, float(requested_qty))
+    normalized_exchange_qty = max(0.0, float(exchange_constrained_qty))
+    normalized_internal_lot_size = (
+        None
+        if internal_lot_size is None or float(internal_lot_size) <= DUST_POSITION_EPS
+        else float(internal_lot_size)
+    )
+    normalized_executable_lot_count = max(0, int(executable_lot_count or 0))
+    if normalized_internal_lot_size is None:
+        executable_qty = 0.0
+    else:
+        executable_qty = lot_count_to_qty(
+            lot_count=normalized_executable_lot_count,
+            lot_size=normalized_internal_lot_size,
+        )
+    residual_qty = max(0.0, normalized_exchange_qty - float(executable_qty))
+    return QuantityContractSnapshot(
+        requested_qty=float(normalized_requested_qty),
+        exchange_constrained_qty=float(normalized_exchange_qty),
+        internal_lot_size=normalized_internal_lot_size,
+        intended_lot_count=(None if intended_lot_count is None else max(0, int(intended_lot_count))),
+        executable_lot_count=int(normalized_executable_lot_count),
+        executable_qty=float(executable_qty),
+        residual_qty=float(residual_qty),
+        residual_reason=str(residual_reason or "none"),
+        semantic_version=(None if semantic_version is None else int(semantic_version)),
+        provenance=str(provenance or ""),
+        compatibility_class=str(compatibility_class or "lot-native"),
+    )
+
+
 def build_market_lot_rules(
     *,
     market_id: str,

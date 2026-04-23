@@ -60,6 +60,7 @@ class SubmitPlan:
     plan_id: str | None = None
     phase_identity: str = "planning"
     phase_result: str = "planned"
+    quantity_contract: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

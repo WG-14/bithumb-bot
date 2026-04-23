@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import settings
 from .db_core import normalize_asset_qty
+from .lot_model import build_quantity_contract_snapshot
 from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
 
@@ -479,6 +480,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     projected_total_qty = normalize_asset_qty(target_total_qty + other_active_qty)
     projected_qty_excess = normalize_asset_qty(max(0.0, projected_total_qty - portfolio_qty))
     portfolio_target_remainder_qty = normalize_asset_qty(max(0.0, portfolio_qty - other_active_qty))
+    projection_repair_removable_qty = normalize_asset_qty(max(0.0, target_total_qty - portfolio_target_remainder_qty))
+    projection_repair_covers_excess = bool(projected_qty_excess <= projection_repair_removable_qty + _EPS)
     partial_close_residual_candidate = bool(
         conflicting_dust_authority
         and sell_after_count > 0
@@ -554,6 +557,66 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     )
     needs_portfolio_projection_repair = bool(portfolio_projection_divergence_candidate)
 
+    projection_internal_lot_size = 0.0
+    projection_semantic_version: int | None = None
+    if target_min_internal_lot_size > _EPS and abs(target_max_internal_lot_size - target_min_internal_lot_size) <= _EPS:
+        projection_internal_lot_size = float(target_min_internal_lot_size)
+        projection_semantic_version = 1
+
+    authoritative_contract = build_quantity_contract_snapshot(
+        requested_qty=float(fill_qty),
+        exchange_constrained_qty=float(fill_qty),
+        internal_lot_size=(canonical_lot_size if canonical_lot_size > _EPS else None),
+        intended_lot_count=(canonical_intended_lot_count if canonical_intended_lot_count > 0 else None),
+        executable_lot_count=int(canonical_executable_lot_count),
+        residual_reason=("dust_only_remainder" if fill_qty - canonical_executable_qty > _EPS else "none"),
+        provenance="accounted_buy_evidence",
+        semantic_version=(1 if canonical_lot_size > _EPS else None),
+    )
+    projection_contract = build_quantity_contract_snapshot(
+        requested_qty=float(target_total_qty),
+        exchange_constrained_qty=float(target_total_qty),
+        internal_lot_size=(projection_internal_lot_size if projection_internal_lot_size > _EPS else None),
+        intended_lot_count=(
+            target_executable_lot_count + target_dust_lot_count
+            if lot_row_count > 0
+            else None
+        ),
+        executable_lot_count=int(target_executable_lot_count),
+        residual_reason=(
+            "dust_tracking_projection"
+            if target_dust_qty > _EPS
+            else ("open_exposure_projection" if target_open_qty > _EPS else "none")
+        ),
+        provenance="open_position_lots_projection",
+        semantic_version=projection_semantic_version,
+    )
+
+    diagnostic_flags: list[str] = []
+    if not bool(projection_convergence.get("converged")):
+        diagnostic_flags.append("projection_diverged")
+    if (
+        (lot_row_count > 1 and target_executable_lot_count <= 0 and target_dust_lot_count > 1)
+        or (
+            other_active_lot_count > 1
+            and other_active_qty > _EPS
+            and target_total_qty > _EPS
+        )
+    ):
+        diagnostic_flags.append("historical_fragmentation")
+    if conflicting_dust_authority or (
+        authoritative_contract.internal_lot_size is not None
+        and projection_contract.internal_lot_size is not None
+        and abs(
+            float(authoritative_contract.internal_lot_size)
+            - float(projection_contract.internal_lot_size)
+        ) > _EPS
+    ):
+        diagnostic_flags.append("semantic_contract_mismatch")
+    if needs_portfolio_projection_repair and not projection_repair_covers_excess:
+        diagnostic_flags.append("unsafe_auto_repair")
+    alignment_state = diagnostic_flags[0] if diagnostic_flags else "same_truth"
+
     blockers: list[str] = []
     if not needs_correction and not needs_residual_normalization and not needs_portfolio_projection_repair:
         blockers.append("no_repairable_authority_conflict")
@@ -569,10 +632,29 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         )
     if order_status not in {"FILLED", "PARTIAL", "NEW", "unknown"}:
         blockers.append(f"order_status={order_status}")
+    if needs_portfolio_projection_repair and not projection_repair_covers_excess:
+        blockers.append(
+            "projection_excess_outside_target="
+            f"projected_qty_excess={projected_qty_excess:.12f},"
+            f"repair_removable_qty={projection_repair_removable_qty:.12f},"
+            f"other_active_qty={other_active_qty:.12f}"
+        )
 
     safe_to_normalize_residual = bool(needs_residual_normalization and not blockers)
     safe_to_repair_portfolio_projection = bool(needs_portfolio_projection_repair and not blockers)
     safe_to_correct = bool((needs_correction and not blockers) or safe_to_normalize_residual)
+    if safe_to_normalize_residual or safe_to_correct:
+        repair_action_state = "safe_to_apply_now"
+    elif safe_to_repair_portfolio_projection:
+        repair_action_state = "safe_to_apply_now"
+    elif needs_portfolio_projection_repair and any(
+        str(item).startswith("projection_excess_outside_target=") for item in blockers
+    ):
+        repair_action_state = "inspect_only"
+    elif needs_correction or needs_residual_normalization or needs_portfolio_projection_repair:
+        repair_action_state = "blocked_pending_evidence"
+    else:
+        repair_action_state = "not_applicable"
     if safe_to_normalize_residual:
         reason = "partial-close residual authority normalization applicable"
     elif safe_to_repair_portfolio_projection:
@@ -624,6 +706,11 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "canonical_intended_lot_count": canonical_intended_lot_count,
         "canonical_executable_lot_count": canonical_executable_lot_count,
         "canonical_executable_qty": canonical_executable_qty,
+        "authoritative_quantity_contract": authoritative_contract.as_dict(),
+        "projection_quantity_contract": projection_contract.as_dict(),
+        "alignment_state": alignment_state,
+        "diagnostic_flags": diagnostic_flags,
+        "repair_action_state": repair_action_state,
         "existing_lot_rows": lot_row_count,
         "existing_total_qty": target_total_qty,
         "existing_open_exposure_qty": target_open_qty,
@@ -638,6 +725,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "expected_residual_qty": expected_residual_qty,
         "projected_total_qty": projected_total_qty,
         "projected_qty_excess": projected_qty_excess,
+        "projection_repair_removable_qty": projection_repair_removable_qty,
+        "projection_repair_covers_excess": projection_repair_covers_excess,
         "portfolio_target_remainder_qty": portfolio_target_remainder_qty,
         "partial_close_residual_candidate": partial_close_residual_candidate,
         "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,

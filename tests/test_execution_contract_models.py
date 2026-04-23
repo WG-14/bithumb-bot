@@ -72,6 +72,7 @@ def test_execution_contract_models_are_instantiable() -> None:
         buy_price_none_submit_contract={"kind": "market-buy"},
         trace_id="cid-model",
         plan_id="cid-model:plan",
+        quantity_contract={"requested_qty": 0.001, "exchange_constrained_qty": 0.001},
     )
     signed_request = SignedOrderRequest(
         intent=intent,
@@ -197,6 +198,15 @@ def test_live_submit_flow_creates_explicit_execution_contract_models(monkeypatch
     assert isinstance(flow.signed_request, SignedOrderRequest)
     assert isinstance(confirmation.submission, SubmissionRecord)
     assert isinstance(confirmation, OrderConfirmation)
+    assert flow.plan.quantity_contract is not None
+    assert flow.plan.quantity_contract["requested_qty"] == pytest.approx(0.0008)
+    assert flow.plan.quantity_contract["exchange_constrained_qty"] == pytest.approx(0.0008)
+    assert flow.plan.quantity_contract["internal_lot_size"] == pytest.approx(0.0004)
+    assert flow.plan.quantity_contract["intended_lot_count"] == 2
+    assert flow.plan.quantity_contract["executable_lot_count"] == 2
+    assert flow.plan.quantity_contract["executable_qty"] == pytest.approx(0.0008)
+    assert flow.plan.quantity_contract["residual_qty"] == pytest.approx(0.0)
+    assert flow.plan.quantity_contract["provenance"] == "submit_plan.exchange_constraints"
     assert confirmation.client_order_id == "cid-contract-flow"
     assert confirmation.exchange_order_id == "ex-contract-flow"
     assert confirmation.submit_contract_context["exchange_order_type"] == submit_contract.exchange_order_type

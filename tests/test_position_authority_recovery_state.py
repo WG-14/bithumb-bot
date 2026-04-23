@@ -1071,7 +1071,7 @@ def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust
 
         preview = build_position_authority_rebuild_preview(conn)
         before = compute_runtime_readiness_snapshot(conn)
-        with pytest.raises(RuntimeError, match="projection_converged=0"):
+        with pytest.raises(RuntimeError, match="position authority rebuild is not safe to apply"):
             apply_position_authority_rebuild(conn)
         repair_count_before_rollback = conn.execute(
             "SELECT COUNT(*) AS cnt FROM position_authority_repairs"
@@ -1096,8 +1096,13 @@ def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust
         conn.close()
 
     assert preview["repair_mode"] == "portfolio_projection_repair"
-    assert preview["safe_to_apply"] is True
+    assert preview["safe_to_apply"] is False
+    assert preview["action_state"] == "inspect_only"
+    assert "projection_excess_outside_target=" in preview["eligibility_reason"]
     assert before.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
+    assert before.as_dict()["position_authority_alignment_state"] == "projection_diverged"
+    assert "historical_fragmentation" in before.as_dict()["position_authority_diagnostic_flags"]
+    assert "unsafe_auto_repair" in before.as_dict()["position_authority_diagnostic_flags"]
     assert repair_count_before_rollback["cnt"] == 0
     assert repair_count_after_rollback["cnt"] == 0
     assert rows_after_rollback["row_count"] == 16
@@ -1106,6 +1111,42 @@ def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust
         (FILL_QTY - LOT_SIZE) + LIVE_INCIDENT_STALE_DUST_QTY
     )
     assert rows_after_rollback["open_qty"] == pytest.approx(LOT_SIZE)
+
+
+def test_projection_divergence_emits_cross_layer_quantity_contract_diagnostics(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        _insert_live_incident_stale_dust_projection(conn)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        assessment = build_position_authority_assessment(conn)
+    finally:
+        conn.close()
+
+    authoritative = assessment["authoritative_quantity_contract"]
+    projection = assessment["projection_quantity_contract"]
+
+    assert assessment["alignment_state"] == "projection_diverged"
+    assert "historical_fragmentation" in assessment["diagnostic_flags"]
+    assert "unsafe_auto_repair" in assessment["diagnostic_flags"]
+    assert assessment["repair_action_state"] == "inspect_only"
+    assert assessment["projection_repair_covers_excess"] is False
+    assert authoritative["requested_qty"] == pytest.approx(FILL_QTY)
+    assert authoritative["internal_lot_size"] == pytest.approx(LOT_SIZE)
+    assert authoritative["executable_lot_count"] == 1
+    assert authoritative["residual_qty"] == pytest.approx(FILL_QTY - LOT_SIZE)
+    assert projection["requested_qty"] == pytest.approx(FILL_QTY)
+    assert projection["residual_reason"] == "dust_tracking_projection"
+    assert projection["executable_lot_count"] == 1
 
 
 def test_recorded_projection_repair_event_does_not_replace_aggregate_projection_convergence(

@@ -7,7 +7,12 @@ from decimal import Decimal, ROUND_FLOOR
 from .config import settings
 from .execution_models import OrderIntent, SubmitPlan, SubmitPriceTickPolicy
 from .fee_authority import build_fee_authority_snapshot
-from .lot_model import DUST_POSITION_EPS, build_market_lot_rules, lot_count_to_qty
+from .lot_model import (
+    DUST_POSITION_EPS,
+    build_market_lot_rules,
+    build_quantity_contract_snapshot,
+    lot_count_to_qty,
+)
 from .broker.base import BrokerRejectError, BrokerTemporaryError
 
 _DECIMAL_ZERO = Decimal("0")
@@ -293,6 +298,24 @@ def build_submit_plan(
             if intent.normalized_side == "bid"
             else "submit_plan.internal_lot_normalization"
         )
+        quantity_contract = build_quantity_contract_snapshot(
+            requested_qty=float(requested_qty),
+            exchange_constrained_qty=float(exchange_constrained_qty),
+            internal_lot_size=float(lot_rules.lot_size),
+            intended_lot_count=int(qty_split.lot_count),
+            executable_lot_count=(
+                int(qty_split.lot_count)
+                if qty_split.executable or (skip_qty_revalidation and intent.normalized_side == "ask")
+                else 0
+            ),
+            residual_reason=(
+                "executable"
+                if qty_split.executable or (skip_qty_revalidation and intent.normalized_side == "ask")
+                else str(qty_split.non_executable_reason or "none")
+            ),
+            provenance=submit_qty_authority,
+            semantic_version=1,
+        )
         if intent.normalized_side == "bid" and submitted_qty <= DUST_POSITION_EPS:
             raise BrokerRejectError(
                 "buy qty rounded to zero after exchange constraints: "
@@ -391,6 +414,7 @@ def build_submit_plan(
             plan_id=f"{trace_id}:plan",
             phase_identity="planning",
             phase_result="planned",
+            quantity_contract=quantity_contract.as_dict(),
         )
     except BrokerRejectError as exc:
         exc_submit_contract_context = getattr(exc, "submit_contract_context", None)

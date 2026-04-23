@@ -84,6 +84,15 @@ class RuntimeReadinessSnapshot:
             "open_order_count": int(self.open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
+            "position_authority_alignment_state": str(
+                self.position_authority_assessment.get("alignment_state") or "unknown"
+            ),
+            "position_authority_diagnostic_flags": list(
+                self.position_authority_assessment.get("diagnostic_flags") or []
+            ),
+            "position_authority_action_state": str(
+                self.position_authority_assessment.get("repair_action_state") or "unknown"
+            ),
             "projection_convergence": dict(self.projection_convergence),
             "projection_converged": bool(self.projection_convergence.get("converged")),
             "projection_non_convergence_reason": str(self.projection_convergence.get("reason") or "none"),

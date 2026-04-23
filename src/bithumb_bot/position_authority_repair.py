@@ -70,6 +70,7 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     net_accounted_qty = normalize_asset_qty(max(0.0, buy_qty - sell_qty))
     existing_lot_count = int(existing_lot_row["cnt"] if existing_lot_row else 0)
     reasons: list[str] = []
+    authority_action_state = str(authority_assessment.get("repair_action_state") or "not_applicable")
 
     if bool(authority_assessment.get("needs_portfolio_projection_repair")):
         repair_mode = "portfolio_projection_repair"
@@ -111,6 +112,12 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
                 "portfolio_remainder_still_executable="
                 f"remainder_qty={portfolio_remainder_qty:.12f},lot_size={canonical_lot_size:.12f}"
             )
+        if not bool(authority_assessment.get("projection_repair_covers_excess")):
+            reasons.append(
+                "projection_excess_outside_target="
+                f"projected_qty_excess={float(authority_assessment.get('projected_qty_excess') or 0.0):.12f},"
+                f"repair_removable_qty={float(authority_assessment.get('projection_repair_removable_qty') or 0.0):.12f}"
+            )
     if repair_mode == "rebuild":
         if existing_lot_count > 0:
             reasons.append(f"existing_lot_rows={existing_lot_count}")
@@ -125,7 +132,13 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
                 f"net_qty={net_accounted_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
             )
 
-    safe_to_apply = not reasons
+    effective_action_state = authority_action_state
+    if repair_mode == "rebuild" and not reasons:
+        effective_action_state = "safe_to_apply_now"
+    elif repair_mode == "rebuild" and authority_action_state == "not_applicable":
+        effective_action_state = "blocked_pending_evidence"
+
+    safe_to_apply = bool(not reasons and effective_action_state == "safe_to_apply_now")
     return {
         "needs_rebuild": snapshot.recovery_stage in {
             "AUTHORITY_REBUILD_PENDING",
@@ -134,6 +147,7 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
             "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING",
         },
         "safe_to_apply": safe_to_apply,
+        "action_state": effective_action_state,
         "eligibility_reason": (
             "partial-close residual authority normalization applicable"
             if safe_to_apply and repair_mode == "residual_normalization"
