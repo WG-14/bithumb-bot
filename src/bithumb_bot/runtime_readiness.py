@@ -436,6 +436,28 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                     authority_assessment=authority_assessment,
                 )
             )
+        elif bool(authority_assessment.get("needs_full_projection_rebuild")):
+            stage = "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
+            blockers.append("POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED")
+            categories.append("executable_authority")
+            operator_next_action = "review_position_authority_evidence"
+            recommended_command = "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",
+                    category="executable_authority",
+                    stage=stage,
+                    detail=str(
+                        authority_assessment.get("reason")
+                        or "historical fragmentation requires full projection rebuild"
+                    ),
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
         elif bool(authority_assessment.get("needs_portfolio_projection_repair")):
             stage = "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
             blockers.append("POSITION_AUTHORITY_PROJECTION_REPAIR_REQUIRED")
@@ -506,7 +528,12 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             blockers.append("POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED")
             categories.append("executable_authority")
             operator_next_action = "review_position_authority_evidence"
-            recommended_command = "uv run python bot.py rebuild-position-authority"
+            blocking_incident_class = str(authority_assessment.get("incident_class") or "NONE")
+            recommended_command = (
+                "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+                if blocking_incident_class == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+                else "uv run python bot.py rebuild-position-authority"
+            )
             structured_blockers.append(
                 _make_structured_blocker(
                     code="POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED",
@@ -516,7 +543,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                         "projection_convergence_required="
                         f"projected_total_qty={float(projection_convergence.get('projected_total_qty') or 0.0):.12f},"
                         f"portfolio_qty={float(projection_convergence.get('portfolio_qty') or 0.0):.12f},"
-                        f"reason={projection_convergence.get('reason') or 'none'}"
+                        f"reason={projection_convergence.get('reason') or 'none'},"
+                        f"incident_class={blocking_incident_class}"
                     ),
                     operator_next_action=operator_next_action,
                     recommended_command=recommended_command,

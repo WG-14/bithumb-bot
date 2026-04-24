@@ -1,278 +1,486 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your job is to investigate and fix a real recovery/readiness incident in a way that improves the repository’s architecture, reproducibility, and operability, not just its immediate symptom surface.
+Your task is not to apply a one-off workaround for the latest EC2 incident. Treat the EC2 observations below as a starting hypothesis, not as established truth. Inspect the repository directly, verify or falsify the hypotheses, and implement a structural fix that makes the live trading experiment system more deterministic, recoverable, observable, and operationally safe.
 
-Do **not** treat any single hypothesized cause as already proven. Start from the observed incident facts below, verify them directly in the repo and tests, and then drive the fix from the highest-leverage structural cause you can validate.
+## Incident starting point
 
-## Incident facts to use as the starting point
+A live EC2 runtime reached a startup safety block:
 
-There is an EC2 incident where:
+```text
+STARTUP_SAFETY_GATE_BLOCKED
+POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+can_resume=false
+resume_safety=unsafe
+```
 
-* canonical holdings are observed as `0.00099986 BTC` and broker/local/app agree on that quantity
-* persisted lot projection is `0.001788 BTC`
-* the current `open_position_lots` total equals that projected quantity
-* startup gate blocks resume with `POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED`
-* the 14 `open_position_lots` rows were materialized together, not naturally accumulated over time
-* `position_authority_repairs` row 5 with source `manual_portfolio_anchored_authority_projection_repair` records `lot_snapshot_after` with:
+Observed runtime state:
 
-  * `dust_tracking_lot_count = 14`
-  * `raw_total_asset_qty = 0.001788`
-* current readiness logic treats that repair history as `historical_evidence_not_current_state_proof` / `recorded_but_not_current_state_proof`
+```text
+broker / Bithumb app BTC balance = 0.00099986 BTC
+portfolio_qty                  = 0.00099986 BTC
+open_position_lots SUM(qty_open)= 0.001788 BTC
+difference                     = 0.00078814 BTC
+```
 
-Relevant repo areas already suspected:
+`open_position_lots` contained 14 `dust_tracking` rows:
 
-* `src/bithumb_bot/runtime_readiness.py`
-* `src/bithumb_bot/position_authority_repair.py`
-* `src/bithumb_bot/position_authority_state.py`
-* `src/bithumb_bot/lifecycle.py`
-* `src/bithumb_bot/db_core.py`
-* `tests/test_position_authority_recovery_state.py`
+```text
+position_state=dust_tracking
+rows=14
+qty_sum=0.001788
+executable_lots=0
+dust_lots=14
+internal_lot_size=0.0004
+```
 
-## Core problem statement
+Trades table summary:
 
-The likely direct cause is that a historical portfolio-anchored repair materialized an invalid current projection, but the more important question is whether the repo has a deeper structural flaw:
+```text
+BUY  count=15 qty_sum=0.00318798 fee_sum=59.0
+SELL count=10 qty_sum=0.0013     fee_sum=17.73
+```
 
-* multiple truth layers may coexist (`orders/fills/trades/portfolio`, materialized `open_position_lots`, repair-event history)
-* read paths and write paths may not share the same invariants
-* repair events may be treated as historical evidence in readiness logic while simultaneously acting as effective state writers in repair logic
-* `open_position_lots` may be functioning like a long-lived source of truth instead of a disposable derived projection
-* tests may recognize this incident class but still fail to enforce production-grade convergence guarantees
+The most recent BUY was correctly accounted:
 
-Your task is to determine which of those are real, which are not, and then implement the highest-priority design correction.
+```text
+client_order_id=live_1776905580000_buy_ae55843c
+fill_id=C0101000000983482756
+qty=0.00059998
+price=116303000
+fee=27.91
+accounting_status=accounting_complete
+```
 
-## Hypotheses to keep as hypotheses until verified
+`audit-ledger` reported accounting replay and portfolio as matching, while `health` and `recovery-report` still blocked startup because the lot-native materialized projection did not converge to portfolio holdings.
 
-Evaluate these as explicit hypotheses. Do not present them as facts unless you verify them from code and tests.
+Do not assume the direct cause is simply “14 stale dust rows.” Treat that as an observed symptom. Look for the higher-level structural cause.
+
+## Current working diagnosis to verify, not blindly accept
+
+The strongest current hypothesis is:
+
+> `open_position_lots` is intended to behave as a rebuildable materialized projection, but the implementation and recovery path currently allow it to behave like a long-lived source of truth. Existing repair logic appears centered on a latest/target trade, so historical dust fragmentation can survive as current executable/dust authority and keep startup blocked even when broker balance and accounting replay agree.
+
+You must verify this against the repository code.
+
+Important files and concepts to inspect:
+
+```text
+src/bithumb_bot/position_authority_state.py
+src/bithumb_bot/position_authority_repair.py
+src/bithumb_bot/lifecycle.py
+src/bithumb_bot/db_core.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/recovery.py
+src/bithumb_bot/reporting.py
+src/bithumb_bot/app.py
+docs/runtime-data-policy.md
+docs/storage-layout.md
+docs/RUNBOOK.md
+```
+
+Pay special attention to:
+
+```text
+build_lot_projection_convergence
+build_position_authority_assessment
+build_position_authority_rebuild_preview
+apply_position_authority_rebuild
+apply_portfolio_anchored_projection_repair_basis
+rebuild_lifecycle_projections_from_trades
+summarize_position_lots
+position_authority_projection_publications
+position_authority_repairs
+open_position_lots validation triggers
+```
+
+## Hypotheses to verify or falsify
 
 ### Hypothesis 1
 
-The direct incident cause is that row 5 in `position_authority_repairs` materialized an invalid current projection.
+`open_position_lots` is modeled as a rebuildable materialized projection, but in practice stale rows can persist across repairs and become current startup authority.
 
-How to validate:
+Verification:
 
-* trace the code path that can produce a `manual_portfolio_anchored_authority_projection_repair`
-* verify whether that path can create `open_position_lots` matching the incident shape
-* determine whether the invalid 14-row projection can be created by repo code as written
+* Inspect code and docs for the intended role of `open_position_lots`.
+* Confirm whether startup readiness depends directly on `SUM(open_position_lots.qty_open)`.
+* Determine whether there is a deterministic full rebuild path from canonical event/accounting/broker/portfolio state.
+* Determine whether stale historical fragments can survive legitimate repair flows.
 
-How to falsify:
+Falsification condition:
 
-* show that row 5 cannot produce the incident shape
-* or show that the same bad projection can already exist before that repair path
+* There is already a correct, transactional, full-projection rebuild path that can rebuild `open_position_lots` from canonical truth and converge to portfolio/broker holdings, and the observed incident would be impossible unless EC2 was running stale code or had local-only corruption.
 
 ### Hypothesis 2
 
-The higher-order root cause is truth-model multiplicity: canonical truth, projection truth, and repair-event truth are not governed by one shared invariant set across reads and writes.
+Current repair logic is too target-trade centric and does not treat historical fragmentation as a first-class incident class.
 
-How to validate:
+Verification:
 
-* map the invariants used by:
+* Inspect whether `build_position_authority_assessment()` chooses the latest BUY / target trade and classifies incidents around that target.
+* Inspect whether `apply_position_authority_rebuild()` deletes/replays only rows for one `entry_trade_id` in key paths.
+* Check whether `other_active_qty` and historical fragmentation are only diagnostic, or can drive a safe full rebuild action.
 
-  * readiness classification
-  * repair preview
-  * repair apply
-  * rebuild/replay
-  * convergence checks
-* identify where those invariants differ or are only partially shared
+Falsification condition:
 
-How to falsify:
-
-* demonstrate that every authority mutation path and every readiness/read path already uses the same convergence oracle and same postconditions
+* The current implementation already promotes historical fragmentation to a safe full-projection rebuild mode and has tests proving it.
 
 ### Hypothesis 3
 
-`open_position_lots` behaves as a long-lived materialized view that accumulates historical fragmentation and stale residues, corrupting present-tense authority semantics.
+Accounting replay and lot-authority projection are separate truth layers, but there is no strong enough invariant tying them together in audit, recovery, and restart readiness.
 
-How to validate:
+Verification:
 
-* determine whether `open_position_lots` is fully and deterministically rebuildable from authoritative accounting state
-* compare how code treats it in theory vs in practice
-* check whether stale lot rows can survive repair/reconcile sequences and still influence readiness
+* Inspect `audit-ledger`, `health`, `recovery-report`, `restart-checklist`, and runtime readiness logic.
+* Determine whether `audit-ledger OK` can coexist with lot projection non-convergence.
+* Determine whether operator-facing reports clearly separate:
 
-How to falsify:
+  * accounting projection health
+  * broker/portfolio health
+  * lot authority projection health
+  * live readiness
 
-* show that `open_position_lots` is already treated purely as disposable derived state, with no stale-state persistence risk
+Falsification condition:
+
+* Audit/restart tooling already treats lot projection convergence as a first-class invariant and reports it in a way that prevents operator confusion.
 
 ### Hypothesis 4
 
-The test suite recognizes the incident class but still allows production-invalid authority projections to be persisted.
+Repair events and current-state attestations are conceptually separated in the code, but the operational flow does not enforce this distinction strongly enough.
 
-How to validate:
+Verification:
 
-* inspect `tests/test_position_authority_recovery_state.py`
-* identify what the tests already cover
-* identify what they do **not** guarantee
-* add a regression that reproduces the incident or a minimal equivalent and proves the current failure
-* then make that regression pass with the structural fix
+* Inspect `position_authority_repairs` and `position_authority_projection_publications`.
+* Confirm whether a historical repair event can exist while current `open_position_lots` is non-converged.
+* Determine whether post-repair state is attested and revalidated as current state, not just logged as historical repair evidence.
 
-How to falsify:
+Falsification condition:
 
-* show that an equivalent regression already exists and would already fail the broken behavior
+* Every repair event is atomically paired with current-state projection publication and postcondition validation, and no later operation can invalidate it without a clear incident class.
 
-## Priorities
+### Hypothesis 5
 
-Keep these priorities in this order unless repo evidence forces a different order:
+External/manual state changes are not modeled strongly enough as first-class events that atomically update both accounting and lot-authority projection.
 
-1. **Design correction over symptom patch**
+Verification:
 
-   * do not start by patching row-5-specific behavior only
-   * do not ship a narrow “ignore this one mismatch” fix
-   * do not delete rows ad hoc without a design reason
+* Inspect manual flat repair, external position adjustment, fee pending repair, fee gap repair, and any broker reconciliation paths.
+* Determine whether these flows update accounting/portfolio without always rebuilding or converging lot-authority projection.
+* Determine whether a fee/manual/external repair can leave `open_position_lots` stale.
 
-2. **Shared invariants and deterministic convergence**
+Falsification condition:
 
-   * unify the write-path and read-path truth relations
-   * ensure any published projection is either converged or rejected
+* All such flows atomically update accounting, portfolio, lot projection, repair evidence, and projection publication, with postcondition rollback on failure.
 
-3. **Derived-state discipline**
+## Design priority
 
-   * prefer making `open_position_lots` a disposable derived projection if repo evidence supports that direction
-   * separate evidence logging from current-state publication
+Do not start with a symptom patch such as “delete the 14 rows.” That is not acceptable as the primary solution.
 
-4. **Reproducibility and operability**
+The preferred design direction is:
 
-   * incident must become reproducible in tests
-   * recovery semantics must become explainable and observable
-   * operator-facing diagnostics must reflect the actual state model
+> Make `open_position_lots` explicitly disposable, deterministic, and rebuildable as a materialized projection from canonical evidence plus broker/portfolio anchoring, rather than allowing it to become a long-lived independent source of truth.
 
-## Desired design direction
+Implement a structural repair capability if missing.
 
-Favor changes in this direction if repo evidence supports them:
+## Required design change
 
-* treat `orders/fills/trades/portfolio` plus explicit accounting adjustments as canonical truth
-* treat `open_position_lots` as a rebuildable/materialized projection, not an independent truth source
-* separate:
+Add or refactor a safe full-projection rebuild path. The exact CLI name is up to you, but prefer something explicit such as:
 
-  * repair evidence append
-  * projection rebuild request
-  * projection publish / attestation
-* ensure every repair/apply path uses one convergence oracle and one publish gate
-* prevent any repair path from persisting a projection that the readiness layer will later reject as non-current or non-converged
-* make incident-grade replay possible from captured DB/runtime state
+```bash
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes
+```
 
-Do **not** force this architecture if repo evidence decisively proves a better alternative. But if you choose a different direction, explain why.
+The dry-run must produce a clear repair plan. The apply mode must be transactional.
 
-## Concrete tasks
+Minimum safety gates for apply:
 
-### 1. Investigate the current architecture
+```text
+broker_qty_known = true
+broker_qty == portfolio_qty within existing asset tolerance
+remote_open_order_count = 0
+unresolved_open_order_count = 0
+recovery_required_count = 0
+pending_submit = 0
+submit_unknown = 0
+no unresolved fee-pending accounting issue
+no active broker/portfolio mismatch
+```
 
-* inspect the relevant files directly
-* map the authority lifecycle:
+The implementation must:
 
-  * ingestion
-  * lifecycle projection
-  * repair preview
-  * repair apply
-  * readiness classification
-  * startup gate / resume logic
-* document where truth is defined, where it is derived, and where it is published
+1. Start a DB transaction.
+2. Snapshot current `open_position_lots`, relevant `trade_lifecycles`, current convergence state, readiness state, broker/portfolio evidence, and repair history summary into the repair basis.
+3. Rebuild `open_position_lots` as a full materialized projection, not as a target-trade-only repair.
+4. Use portfolio/broker quantity as a hard anchor when safety gates prove they agree.
+5. Ensure the rebuilt rows satisfy existing `open_position_lots` trigger constraints.
+6. Preserve or regenerate enough lot-native authority for strategy execution and dust handling.
+7. Record a `position_authority_repair` with a complete repair basis.
+8. Record a `position_authority_projection_publication` as current-state attestation.
+9. Run `build_lot_projection_convergence()` as a postcondition.
+10. Roll back on any postcondition failure.
+11. Make the operation idempotent.
 
-### 2. Reproduce the incident in tests
+A successful postcondition must include:
 
-* either:
+```text
+projection_converged=true
+projected_total_qty == portfolio_qty
+broker_qty == portfolio_qty
+open_position_lots rows satisfy trigger constraints
+startup gate no longer blocked by POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+```
 
-  * create a minimized regression fixture matching the incident shape
-  * or build a deterministic equivalent that exercises the same structural failure
-* the regression must prove more than “resume is blocked”
-* it must prove that an invalid current projection can be persisted or published even though canonical holdings disagree
+If the safest design requires adding a new module instead of expanding the existing repair function, do that. Do not force the fix into the current target-trade repair flow if that makes the design weaker.
 
-### 3. Identify the highest-level correct fix
+## Incident classification change
 
-* prefer a fix that closes the entire problem family
-* examples of acceptable scope:
+Add or improve an explicit incident class for historical projection drift, for example:
 
-  * unify convergence publish rules
-  * prevent repair events from doubling as unverified current-state proof
-  * make `open_position_lots` explicitly disposable derived state
-  * require post-repair re-materialization from canonical truth before publish
-* avoid one-off exception logic for this exact row-5 shape unless it is part of a broader invariant-driven refactor
+```text
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+```
 
-### 4. Implement the fix
+Detection criteria should cover cases like:
 
-* keep the change set coherent and reviewable
-* preserve or improve operator safety
-* do not weaken startup gate semantics just to make the incident pass
-* fail closed when truth is ambiguous
-* improve diagnostic clarity where helpful
+```text
+projection_converged=false
+broker_qty == portfolio_qty
+open_order_count=0
+recovery_required_count=0
+open_position_lots row_count > 1
+projected_total_qty > portfolio_qty
+target-trade repair cannot cover projected excess
+historical_fragmentation diagnostic flag present
+```
 
-### 5. Expand the test suite
+This incident class should lead to:
 
-Include tests for:
+```text
+repair_mode=full_projection_rebuild
+repair_action_state=safe_to_apply_now | inspect_only | blocked_pending_evidence
+```
 
-* the reproduced incident or minimal equivalent
-* no repair path may publish an invalid projection that fails the same convergence oracle used by readiness
-* stale/historical repair events cannot alone justify current-state authority
-* rebuild/replay from canonical truth yields deterministic projection semantics
-* operator-facing readiness state matches the actual authority model after repair
+Do not leave this as a passive diagnostic flag only.
 
-### 6. Improve observability/recovery ergonomics where justified
+## Observability requirements
 
-Add or tighten diagnostics around:
+Improve operator-facing output so the system clearly distinguishes:
 
-* canonical truth source
-* projection truth source
-* whether a repair event is evidence vs current-state proof
-* why a projection publish was accepted or rejected
-* whether a replay/rebuild would converge
+```text
+ACCOUNTING_OK
+BROKER_PORTFOLIO_OK
+LOT_AUTHORITY_OK
+LIVE_READY
+```
 
-Prefer observability that helps future EC2 incidents become locally reproducible.
+`audit-ledger OK` must not be easily confused with “safe to live.” If accounting replay is OK but lot authority is not, the CLI should say so directly.
 
-## Scope constraints
+Update at least one of:
 
-* Work inside `WG-14/bithumb-bot`
-* Verify everything against the actual repo state
-* Keep hypotheses explicitly labeled until confirmed
-* Make minimal but structurally meaningful changes
-* Do not introduce broad unrelated refactors
-* Do not hide the incident by loosening safety gates
-* Do not assume external infrastructure changes unless absolutely necessary
-* Do not treat EC2 logs as stronger than repo-validated invariants
+```text
+audit-ledger
+health
+recovery-report
+restart-checklist
+ops-report
+```
 
-## Deliverables
+so that the operator sees:
 
-When done, provide a final report with these sections:
+```text
+accounting_projection_ok=true
+broker_portfolio_converged=true
+lot_projection_converged=false
+live_ready=false
+blocking_incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+recommended_next_action=rebuild-position-authority --full-projection-rebuild
+```
 
-### A. Verified findings
+When the rebuild succeeds, output should show:
 
-State which hypotheses were confirmed, weakened, or falsified, and why.
+```text
+old_projected_total_qty
+new_projected_total_qty
+portfolio_qty
+broker_qty
+old_lot_row_count
+new_lot_row_count
+repair_key
+projection_publication_key
+post_repair_projection_converged=true
+```
 
-### B. Root cause
+## Testing requirements
 
-Describe the **validated** root cause in repo terms, distinguishing:
+Do not rely only on live EC2 manual validation. Add automated tests.
 
-* direct incident trigger
-* higher-order structural cause
+At minimum, add tests for:
 
-### C. Code changes
+1. Historical fragmentation fixture:
 
-List the files changed and the purpose of each change.
+   * Build a test DB state equivalent to:
 
-### D. Tests added or modified
+     ```text
+     portfolio_qty=0.00099986
+     broker_qty=0.00099986 if broker evidence is modeled
+     open_position_lots has 14 dust_tracking rows
+     open_position_lots SUM(qty_open)=0.001788
+     BUY trades count=15, qty_sum=0.00318798
+     SELL trades count=10, qty_sum=0.0013
+     ```
+   * Assert dry-run detects `HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT`.
+   * Assert dry-run recommends full projection rebuild.
+   * Assert apply converges projected qty to portfolio qty.
 
-Summarize the new regression coverage and what failure mode each test prevents.
+2. Refusal when broker/portfolio mismatch:
 
-### E. Architectural impact
+   * Same state, but broker quantity differs from portfolio.
+   * Assert `safe_to_apply=false`.
 
-Explain how the fix moves the repo toward:
+3. Refusal when remote/open/unresolved orders exist:
 
-* stronger truth-model discipline
-* deterministic recovery
-* better reproducibility
-* better operator safety
+   * Add open or unresolved order evidence.
+   * Assert full rebuild refuses.
 
-### F. Remaining risks / follow-up
+4. Idempotency:
 
-List anything intentionally left out of scope, any unresolved ambiguity, and the next best structural step.
+   * Apply full rebuild twice.
+   * Second run should be no-op or safe, with no duplicate harmful state and no projection drift.
 
-## Success criteria
+5. Transaction rollback:
 
-The work is successful only if all of the following are true:
+   * Simulate postcondition failure.
+   * Assert original rows remain intact and no partial repair publication is committed.
 
-* the incident class is reproducible in tests before the fix
-* the fix is driven by validated repo evidence, not speculation
-* the change addresses the problem family, not only this exact symptom
-* readiness and repair logic share stronger invariants after the change
-* invalid authority projections cannot be silently published and then later rejected as “historical evidence not current state proof”
-* the repo becomes more robust as an experimental automated trading system, not merely quieter
+6. Operator output:
 
-Proceed by first verifying the current code paths and producing the smallest credible regression that captures the structural failure, then implement the design-level fix that closes the class of bug.
+   * Assert audit/recovery/readiness output distinguishes accounting OK from lot authority OK.
+
+Prefer small deterministic DB fixtures created in tests over relying on production DB files. If a fixture helper already exists, use it. If not, create one. Do not commit secrets, real API keys, or sensitive production data.
+
+## Runtime safety constraints
+
+Do not place any code path that can submit live orders inside the repair implementation or tests.
+
+The repair must never call broker order submission.
+
+The repair may use broker/portfolio evidence only as read-only evidence.
+
+The repair must not silently alter accounting replay unless explicitly required and recorded through existing repair/adjustment mechanisms with full repair basis.
+
+Manual SQL deletion is not an acceptable user-facing repair path.
+
+## Documentation requirements
+
+Update the runbook or runtime data policy docs to state:
+
+```text
+open_position_lots is a disposable materialized projection, not an independent truth source.
+repair events are historical evidence, not current-state proof.
+projection publications are current-state attestations.
+live readiness requires accounting, broker/portfolio, and lot-authority convergence.
+```
+
+Add an operator flow for:
+
+```text
+AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+```
+
+The runbook should include:
+
+```text
+Allowed:
+  rebuild-position-authority --full-projection-rebuild
+  rebuild-position-authority --full-projection-rebuild --apply --yes after safe dry-run
+
+Forbidden:
+  run
+  resume
+  manual SQL DELETE/UPDATE of open_position_lots
+```
+
+## Scope boundaries
+
+Stay focused on the structural recovery/projection problem.
+
+Do not rewrite the strategy.
+
+Do not change trading signal logic.
+
+Do not change order submission semantics unless a safety invariant requires it.
+
+Do not loosen startup gates to make live start pass. The fix must make the state correct, not bypass the gate.
+
+Do not remove existing safety checks unless replacing them with stronger ones.
+
+## Expected implementation areas
+
+Likely areas to modify:
+
+```text
+src/bithumb_bot/position_authority_repair.py
+src/bithumb_bot/position_authority_state.py
+src/bithumb_bot/lifecycle.py
+src/bithumb_bot/app.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/reporting.py
+tests/
+docs/
+```
+
+But inspect the repository first and choose the minimal coherent design.
+
+## Final validation commands
+
+After implementation, run the relevant test suite, and include exact commands and results in your final report. At minimum, try:
+
+```bash
+uv run pytest
+```
+
+If the repository has narrower tests, also run the new targeted tests explicitly.
+
+If there are lint/type commands in the repo, run them as well.
+
+## Final report format
+
+Return a final report with these sections:
+
+```markdown
+## Summary
+
+## Verified / Falsified Hypotheses
+- H1:
+- H2:
+- H3:
+- H4:
+- H5:
+
+## Root Cause
+State the root cause as a verified or still-partial conclusion. Do not overclaim.
+
+## Design Implemented
+Explain why this is a structural fix rather than a symptom patch.
+
+## Files Changed
+
+## Safety Properties
+List the safety gates and rollback guarantees.
+
+## Observability Improvements
+
+## Tests Added
+Include fixture details and exact assertions.
+
+## Validation Commands Run
+Include command output summaries.
+
+## Remaining Risks / Follow-ups
+Be explicit about anything not fully solved.
+```
+
+The target outcome is not merely to unblock this EC2 instance. The target outcome is to make `WG-14/bithumb-bot` a more robust, reproducible, and operable live automated-trading experiment system where broker truth, accounting truth, strategy lot authority, and materialized projections can be safely reconciled and rebuilt.
 

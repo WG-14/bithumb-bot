@@ -31,6 +31,7 @@ from .db_core import (
     get_position_authority_repair_summary,
     get_portfolio_breakdown,
     init_portfolio,
+    normalize_asset_qty,
     normalize_cash_amount,
     portfolio_asset_total,
     portfolio_cash_total,
@@ -1404,6 +1405,8 @@ def cmd_audit_ledger() -> None:
     conn = ensure_db()
     try:
         replay = _ledger_replay(conn)
+        readiness = compute_runtime_readiness_snapshot(conn).as_dict()
+        preview = build_position_authority_rebuild_preview(conn)
     finally:
         conn.close()
 
@@ -1447,6 +1450,19 @@ def cmd_audit_ledger() -> None:
     print(f"  included_event_families={','.join(replay['included_event_families'])}")
     print(f"  diagnostic_event_families={','.join(replay['diagnostic_event_families'])}")
     print(f"  omitted_event_families={','.join(replay['omitted_event_families'])}")
+    broker_qty = float(preview.get("broker_qty") or 0.0)
+    broker_qty_known = bool(preview.get("broker_qty_known"))
+    broker_portfolio_converged = bool(
+        broker_qty_known
+        and abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(float(replay["portfolio_qty"]))) <= 1e-12
+    )
+    incident_class = str((readiness.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
+    print(f"  accounting_projection_ok={1 if bool(replay['consistent']) else 0}")
+    print(f"  broker_portfolio_converged={1 if broker_portfolio_converged else 0}")
+    print(f"  lot_projection_converged={1 if bool(readiness.get('projection_converged')) else 0}")
+    print(f"  live_ready={1 if bool(readiness.get('resume_ready')) else 0}")
+    print(f"  blocking_incident_class={incident_class}")
+    print(f"  recommended_next_action={preview.get('recommended_command') or readiness.get('recommended_command') or 'none'}")
 
     if not bool(replay["consistent"]):
         print("[AUDIT-LEDGER] FAILED: replay result mismatches portfolio")
@@ -2598,6 +2614,13 @@ def _load_recovery_report(
         "latest_accounting_complete_count": 0,
         "verdicts": [],
     }
+    accounting_projection = {
+        "consistent": False,
+        "replay_qty": 0.0,
+        "replay_cash": 0.0,
+        "portfolio_cash": 0.0,
+        "portfolio_qty": 0.0,
+    }
     conn = ensure_db()
     try:
         recent_dust_unsellable_event = conn.execute(
@@ -2632,6 +2655,42 @@ def _load_recovery_report(
         runtime_readiness_snapshot = compute_runtime_readiness_snapshot(conn).as_dict()
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
         fill_accounting_incident_projection = summarize_fill_accounting_incident_projection(conn)
+        try:
+            accounting_projection = compute_accounting_replay(conn)
+            cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+            portfolio_cash = portfolio_cash_total(
+                cash_available=float(cash_available),
+                cash_locked=float(cash_locked),
+            )
+            portfolio_qty_local = portfolio_asset_total(
+                asset_available=float(asset_available),
+                asset_locked=float(asset_locked),
+            )
+            accounting_projection = {
+                **accounting_projection,
+                "portfolio_cash": portfolio_cash,
+                "portfolio_qty": portfolio_qty_local,
+                "consistent": bool(
+                    abs(float(accounting_projection.get("replay_cash") or 0.0) - portfolio_cash) <= 1e-8
+                    and abs(float(accounting_projection.get("replay_qty") or 0.0) - portfolio_qty_local) <= 1e-12
+                ),
+            }
+        except RuntimeError as exc:
+            cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+            accounting_projection = {
+                "consistent": False,
+                "replay_cash": 0.0,
+                "replay_qty": 0.0,
+                "portfolio_cash": portfolio_cash_total(
+                    cash_available=float(cash_available),
+                    cash_locked=float(cash_locked),
+                ),
+                "portfolio_qty": portfolio_asset_total(
+                    asset_available=float(asset_available),
+                    asset_locked=float(asset_locked),
+                ),
+                "error": str(exc),
+            }
     finally:
         conn.close()
     candidate_report: list[dict[str, object]] = []
@@ -2705,15 +2764,28 @@ def _load_recovery_report(
         if bool(resume_allowed) and readiness_has_deferred_debt
         else operator_next_action
     )
-    report_recommended_command = (
-        str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
-        if bool(resume_allowed) and readiness_has_deferred_debt
-        else recommended_command
-    )
     report_recommended_next_action = (
         "Resume may manage the open executable position; repair deferred historical fee-gap debt after flatten/closeout."
         if bool(resume_allowed) and readiness_has_deferred_debt
         else recommended_next_action
+    )
+    lot_projection = runtime_readiness_snapshot.get("projection_convergence") or {}
+    broker_qty = float(position_authority_rebuild_preview.get("broker_qty") or 0.0)
+    broker_qty_known = bool(position_authority_rebuild_preview.get("broker_qty_known"))
+    portfolio_qty = float(lot_projection.get("portfolio_qty") or 0.0)
+    broker_portfolio_converged = bool(
+        broker_qty_known and abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(portfolio_qty)) <= 1e-12
+    )
+    lot_projection_converged = bool(lot_projection.get("converged"))
+    blocking_incident_class = (
+        str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
+    )
+    report_recommended_command = (
+        str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
+        if (
+            bool(resume_allowed) and readiness_has_deferred_debt
+        ) or blocking_incident_class == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+        else recommended_command
     )
 
     return {
@@ -2776,6 +2848,14 @@ def _load_recovery_report(
         "position_authority_rebuild_preview": position_authority_rebuild_preview,
         "position_authority_repair_summary": position_authority_repair_summary,
         "runtime_readiness": runtime_readiness_snapshot,
+        "accounting_projection_ok": bool(accounting_projection.get("consistent")),
+        "broker_portfolio_converged": broker_portfolio_converged,
+        "broker_qty_known": broker_qty_known,
+        "broker_qty": broker_qty,
+        "portfolio_qty": portfolio_qty,
+        "lot_projection_converged": lot_projection_converged,
+        "live_ready": bool(runtime_readiness_snapshot.get("resume_ready")),
+        "blocking_incident_class": blocking_incident_class,
         "recovery_stage": runtime_readiness_snapshot.get("recovery_stage"),
         "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
@@ -2876,6 +2956,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P2] resume_eligibility")
     runtime_readiness = report.get("runtime_readiness") or {}
     print(f"    recovery_stage={runtime_readiness.get('recovery_stage') or 'UNKNOWN'}")
+    print(f"    accounting_projection_ok={1 if bool(report.get('accounting_projection_ok')) else 0}")
+    print(f"    broker_portfolio_converged={1 if bool(report.get('broker_portfolio_converged')) else 0}")
+    print(f"    lot_projection_converged={1 if bool(report.get('lot_projection_converged')) else 0}")
+    print(f"    live_ready={1 if bool(report.get('live_ready')) else 0}")
+    print(f"    blocking_incident_class={report.get('blocking_incident_class') or 'NONE'}")
     print(
         "    recovery_blocker_categories="
         f"{', '.join(str(x) for x in runtime_readiness.get('blocker_categories') or []) or 'none'}"
@@ -3654,10 +3739,19 @@ def cmd_fee_pending_accounting_repair(
     )
 
 
-def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False, note: str | None = None) -> None:
+def cmd_rebuild_position_authority(
+    *,
+    apply: bool = False,
+    confirm: bool = False,
+    note: str | None = None,
+    full_projection_rebuild: bool = False,
+) -> None:
     conn = ensure_db()
     try:
-        preview = build_position_authority_rebuild_preview(conn)
+        preview = build_position_authority_rebuild_preview(
+            conn,
+            full_projection_rebuild=bool(full_projection_rebuild),
+        )
         repair_summary = get_position_authority_repair_summary(conn)
         print("[REBUILD-POSITION-AUTHORITY] preview")
         print(
@@ -3690,6 +3784,15 @@ def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False
             f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f} "
             f"remote_open_order_count={int(preview.get('remote_open_order_count') or 0)}"
         )
+        if preview.get("repair_mode") == "full_projection_rebuild":
+            print(
+                "  "
+                f"accounting_projection_ok={1 if bool(preview.get('accounting_projection_ok')) else 0} "
+                f"broker_portfolio_converged={1 if bool(preview.get('broker_portfolio_converged')) else 0} "
+                f"unresolved_open_order_count={int(preview.get('unresolved_open_order_count') or 0)} "
+                f"pending_submit={int(preview.get('pending_submit_count') or 0)} "
+                f"submit_unknown={int(preview.get('submit_unknown_count') or 0)}"
+            )
         print(f"  next_required_action={preview['next_required_action']}")
         print(f"  recommended_command={preview['recommended_command']}")
 
@@ -3703,12 +3806,30 @@ def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False
             print("[REBUILD-POSITION-AUTHORITY] confirmation required: re-run with --apply --yes")
             raise SystemExit(1)
 
-        result = apply_position_authority_rebuild(conn, note=note)
-        repair = result["repair"]
-        after = result["lot_snapshot_after"]
-        conn.commit()
+        result = apply_position_authority_rebuild(
+            conn,
+            note=note,
+            full_projection_rebuild=bool(full_projection_rebuild),
+        )
+        if bool(result.get("noop")):
+            after = result["lot_snapshot_after"]
+            repair = None
+        else:
+            repair = result["repair"]
+            after = result["lot_snapshot_after"]
+            conn.commit()
     finally:
         conn.close()
+
+    if bool(result.get("noop")):
+        print("[REBUILD-POSITION-AUTHORITY] no-op")
+        print(
+            "  "
+            f"projection_converged={1 if bool(result.get('post_repair_projection_convergence', {}).get('converged')) else 0} "
+            f"open_lot_count={int(after.get('open_lot_count') or 0)} "
+            f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)}"
+        )
+        return
 
     runtime_state.disable_trading_until(
         float("inf"),
@@ -3721,14 +3842,41 @@ def cmd_rebuild_position_authority(*, apply: bool = False, confirm: bool = False
     runtime_state.set_startup_gate_reason(None)
     runtime_state.set_resume_gate(blocked=False, reason=None)
     print("[REBUILD-POSITION-AUTHORITY] applied")
-    print(
-        "  "
-        f"created={1 if bool(repair.get('created')) else 0} "
-        f"repair_key={repair['repair_key']} "
-        f"event_ts={kst_str(int(repair['event_ts']))} "
-        f"open_lot_count={int(after.get('open_lot_count') or 0)} "
-        f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)}"
-    )
+    if preview.get("repair_mode") == "full_projection_rebuild":
+        publication = result.get("projection_publication") or {}
+        before = result.get("lot_snapshot_before") or {}
+        convergence = result.get("post_repair_projection_convergence") or {}
+        print(
+            "  "
+            f"created={1 if bool(repair.get('created')) else 0} "
+            f"repair_key={repair['repair_key']} "
+            f"projection_publication_key={publication.get('publication_key') or 'none'} "
+            f"event_ts={kst_str(int(repair['event_ts']))}"
+        )
+        print(
+            "  "
+            f"old_projected_total_qty={float((preview.get('position_authority_assessment') or {}).get('projected_total_qty') or 0.0):.12f} "
+            f"new_projected_total_qty={float(convergence.get('projected_total_qty') or 0.0):.12f} "
+            f"portfolio_qty={float(preview.get('portfolio_qty') or 0.0):.12f} "
+            f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f}"
+        )
+        print(
+            "  "
+            f"old_lot_row_count={int((preview.get('position_authority_assessment') or {}).get('projection_convergence', {}).get('lot_row_count') or 0)} "
+            f"new_lot_row_count={int((convergence.get('lot_row_count') or 0))} "
+            f"open_lot_count={int(after.get('open_lot_count') or 0)} "
+            f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)} "
+            f"post_repair_projection_converged={1 if bool(convergence.get('converged')) else 0}"
+        )
+    else:
+        print(
+            "  "
+            f"created={1 if bool(repair.get('created')) else 0} "
+            f"repair_key={repair['repair_key']} "
+            f"event_ts={kst_str(int(repair['event_ts']))} "
+            f"open_lot_count={int(after.get('open_lot_count') or 0)} "
+            f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)}"
+        )
 
 
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:
@@ -4683,6 +4831,7 @@ def main(argv: list[str] | None = None) -> int:
             "when no open orders, no existing lots, no SELL history, and portfolio quantity match."
         ),
     )
+    rebuild_position_authority.add_argument("--full-projection-rebuild", action="store_true")
     rebuild_position_authority.add_argument("--apply", action="store_true")
     rebuild_position_authority.add_argument("--yes", action="store_true")
     rebuild_position_authority.add_argument("--note")
@@ -4844,6 +4993,7 @@ def main(argv: list[str] | None = None) -> int:
             apply=bool(args.apply),
             confirm=bool(args.yes),
             note=str(args.note) if args.note is not None else None,
+            full_projection_rebuild=bool(args.full_projection_rebuild),
         )
     elif args.cmd == "record-external-cash-adjustment":
         cmd_record_external_cash_adjustment(

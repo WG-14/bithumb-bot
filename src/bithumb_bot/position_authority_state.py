@@ -12,6 +12,7 @@ from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_R
 
 _EPS = 1e-12
 PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON = "partial_close_residual_authority_normalization"
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT = "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
 
 
 def _row_float(row: Any, key: str, default: float = 0.0) -> float:
@@ -660,6 +661,14 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         diagnostic_flags.append("semantic_contract_mismatch")
     if needs_portfolio_projection_repair and not projection_repair_covers_excess:
         diagnostic_flags.append("unsafe_auto_repair")
+    historical_fragmentation_projection_drift = bool(
+        not bool(projection_convergence.get("converged"))
+        and "historical_fragmentation" in diagnostic_flags
+        and lot_row_count > 1
+        and projected_total_qty > portfolio_qty + _EPS
+        and not projection_repair_covers_excess
+        and other_active_qty > _EPS
+    )
     alignment_state = diagnostic_flags[0] if diagnostic_flags else "same_truth"
 
     blockers: list[str] = []
@@ -685,13 +694,17 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
             f"other_active_qty={other_active_qty:.12f}"
         )
 
+    needs_full_projection_rebuild = bool(historical_fragmentation_projection_drift)
     safe_to_normalize_residual = bool(needs_residual_normalization and not blockers)
     safe_to_repair_portfolio_projection = bool(needs_portfolio_projection_repair and not blockers)
+    safe_to_full_projection_rebuild = False
     safe_to_correct = bool((needs_correction and not blockers) or safe_to_normalize_residual)
     if safe_to_normalize_residual or safe_to_correct:
         repair_action_state = "safe_to_apply_now"
     elif safe_to_repair_portfolio_projection:
         repair_action_state = "safe_to_apply_now"
+    elif needs_full_projection_rebuild:
+        repair_action_state = "inspect_only"
     elif needs_portfolio_projection_repair and any(
         str(item).startswith("projection_excess_outside_target=") for item in blockers
     ):
@@ -704,6 +717,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         reason = "partial-close residual authority normalization applicable"
     elif safe_to_repair_portfolio_projection:
         reason = "portfolio-anchored projection repair requires broker/portfolio evidence gates"
+    elif needs_full_projection_rebuild:
+        reason = "historical fragmentation requires a full projection rebuild with broker/portfolio evidence gates"
     elif safe_to_correct:
         reason = "position authority correction applicable"
     else:
@@ -741,14 +756,20 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     }
     return {
         "incident_class": (
-            "PROJECTION_PORTFOLIO_DIVERGENCE"
-            if needs_portfolio_projection_repair
+            HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+            if needs_full_projection_rebuild
             else (
-                "PROJECTION_RESIDUAL_DIVERGENCE"
-                if needs_residual_normalization
-                else ("LOT_AUTHORITY_CONFLICT" if needs_correction else "NONE")
+                "PROJECTION_PORTFOLIO_DIVERGENCE"
+                if needs_portfolio_projection_repair
+                else (
+                    "PROJECTION_RESIDUAL_DIVERGENCE"
+                    if needs_residual_normalization
+                    else ("LOT_AUTHORITY_CONFLICT" if needs_correction else "NONE")
+                )
             )
         ),
+        "needs_full_projection_rebuild": needs_full_projection_rebuild,
+        "safe_to_full_projection_rebuild": safe_to_full_projection_rebuild,
         "needs_correction": needs_correction,
         "needs_residual_normalization": needs_residual_normalization,
         "needs_portfolio_projection_repair": needs_portfolio_projection_repair,
@@ -758,18 +779,26 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "reason": reason,
         "recommended_action": (
             "apply_rebuild_position_authority"
-            if safe_to_correct or safe_to_repair_portfolio_projection
+            if safe_to_correct or safe_to_repair_portfolio_projection or safe_to_full_projection_rebuild
             else "review_recovery_report"
         ),
         "repair_mode": (
-            "portfolio_projection_repair"
-            if needs_portfolio_projection_repair
-            else ("residual_normalization" if needs_residual_normalization else "correction")
+            "full_projection_rebuild"
+            if needs_full_projection_rebuild
+            else (
+                "portfolio_projection_repair"
+                if needs_portfolio_projection_repair
+                else ("residual_normalization" if needs_residual_normalization else "correction")
+            )
         ),
         "repair_reason": (
-            PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
-            if needs_portfolio_projection_repair
-            else None
+            HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+            if needs_full_projection_rebuild
+            else (
+                PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
+                if needs_portfolio_projection_repair
+                else None
+            )
         ),
         "target_trade_id": target_trade_id,
         "target_client_order_id": client_order_id,

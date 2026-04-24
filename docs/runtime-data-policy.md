@@ -129,6 +129,16 @@ Prefer SQLite for:
 - Bot health tables
 - Other core recovery-critical tables
 
+`open_position_lots` is a disposable materialized projection, not an independent truth source.
+Its authoritative inputs are accounted fills/trades plus the current broker/portfolio anchor when recovery gates explicitly permit a projection rebuild.
+`position_authority_repairs` are historical repair evidence only.
+`position_authority_projection_publications` are current-state attestations.
+Live readiness requires all three layers to agree:
+
+- accounting projection health
+- broker/portfolio convergence
+- lot-authority projection convergence
+
 ### JSONL append-only
 
 Prefer JSONL append-only for:

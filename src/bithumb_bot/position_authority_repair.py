@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from typing import Any
 
@@ -12,13 +13,19 @@ from .db_core import (
     record_position_authority_repair,
 )
 from .lifecycle import (
+    DUST_TRACKING_STATE,
+    ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
+    LOT_SEMANTIC_VERSION_V1,
+    OPEN_POSITION_STATE,
     apply_fill_lifecycle,
     apply_portfolio_anchored_projection_repair_basis,
     rebuild_lifecycle_projections_from_trades,
     summarize_position_lots,
 )
+from .lot_model import lot_count_to_qty
 from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 from .position_authority_state import (
+    HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT,
     PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON,
     build_lot_projection_convergence,
     build_position_authority_assessment,
@@ -26,7 +33,120 @@ from .position_authority_state import (
 from .runtime_readiness import compute_runtime_readiness_snapshot
 
 
-def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
+_EPS = 1e-12
+FULL_PROJECTION_REBUILD_REASON = "full_projection_materialized_rebuild"
+
+
+def _fetch_anchor_buy_row(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT
+            t.id AS trade_id,
+            t.client_order_id,
+            t.ts AS fill_ts,
+            t.price,
+            t.qty,
+            t.fee,
+            t.strategy_name,
+            t.entry_decision_id,
+            f.fill_id,
+            COALESCE(f.internal_lot_size, o.internal_lot_size) AS internal_lot_size,
+            COALESCE(o.effective_min_trade_qty, f.internal_lot_size, o.internal_lot_size) AS effective_min_trade_qty,
+            COALESCE(o.qty_step, f.internal_lot_size, o.internal_lot_size) AS qty_step,
+            COALESCE(o.min_notional_krw, 0.0) AS min_notional_krw
+        FROM trades t
+        LEFT JOIN fills f
+          ON f.client_order_id=t.client_order_id
+         AND f.fill_ts=t.ts
+         AND ABS(f.price-t.price) < 1e-12
+         AND ABS(f.qty-t.qty) < 1e-12
+        LEFT JOIN orders o
+          ON o.client_order_id=t.client_order_id
+        WHERE t.pair=? AND t.side='BUY'
+        ORDER BY t.ts DESC, t.id DESC
+        LIMIT 1
+        """,
+        (settings.PAIR,),
+    ).fetchone()
+
+
+def _build_full_projection_rebuild_gate_report(
+    conn: sqlite3.Connection,
+    *,
+    snapshot,
+    authority_assessment: dict[str, Any],
+    portfolio_qty: float,
+) -> dict[str, Any]:
+    broker_qty = float(snapshot.position_state.normalized_exposure.raw_holdings.broker_qty)
+    broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
+    broker_portfolio_converged = bool(
+        broker_qty_known and abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(portfolio_qty)) <= _EPS
+    )
+    remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
+    unresolved_open_order_count = int(snapshot.open_order_count)
+    recovery_required_count = int(snapshot.recovery_required_count)
+    pending_submit_count = int(
+        (
+            conn.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status='PENDING_SUBMIT'").fetchone()
+            or {"cnt": 0}
+        )["cnt"]
+    )
+    submit_unknown_count = int(
+        (
+            conn.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status='SUBMIT_UNKNOWN'").fetchone()
+            or {"cnt": 0}
+        )["cnt"]
+    )
+    accounting_replay = compute_accounting_replay(conn)
+    replay_qty = float(accounting_replay.get("replay_qty") or 0.0)
+    accounting_projection_ok = bool(abs(normalize_asset_qty(replay_qty) - normalize_asset_qty(portfolio_qty)) <= _EPS)
+    unresolved_fee_pending = bool(int(snapshot.fee_pending_count) > 0)
+    reasons: list[str] = []
+    if not broker_qty_known:
+        reasons.append("broker_position_qty_evidence_missing")
+    elif not broker_portfolio_converged:
+        reasons.append(
+            "broker_portfolio_qty_mismatch="
+            f"broker_qty={broker_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+        )
+    if remote_open_order_count > 0:
+        reasons.append(f"remote_open_orders={remote_open_order_count}")
+    if unresolved_open_order_count > 0:
+        reasons.append(f"unresolved_open_orders={unresolved_open_order_count}")
+    if recovery_required_count > 0:
+        reasons.append(f"recovery_required_orders={recovery_required_count}")
+    if pending_submit_count > 0:
+        reasons.append(f"pending_submit={pending_submit_count}")
+    if submit_unknown_count > 0:
+        reasons.append(f"submit_unknown={submit_unknown_count}")
+    if unresolved_fee_pending:
+        reasons.append(f"fee_pending_count={int(snapshot.fee_pending_count)}")
+    if not accounting_projection_ok:
+        reasons.append(
+            "accounting_projection_mismatch="
+            f"replay_qty={replay_qty:.12f},"
+            f"portfolio_qty={portfolio_qty:.12f}"
+        )
+    if not bool(authority_assessment.get("needs_full_projection_rebuild")):
+        reasons.append("full_projection_rebuild_not_required")
+    return {
+        "broker_qty": broker_qty,
+        "broker_qty_known": broker_qty_known,
+        "broker_portfolio_converged": broker_portfolio_converged,
+        "remote_open_order_count": remote_open_order_count,
+        "unresolved_open_order_count": unresolved_open_order_count,
+        "recovery_required_count": recovery_required_count,
+        "pending_submit_count": pending_submit_count,
+        "submit_unknown_count": submit_unknown_count,
+        "unresolved_fee_pending": unresolved_fee_pending,
+        "accounting_projection_ok": accounting_projection_ok,
+        "accounting_replay": accounting_replay,
+        "reasons": reasons,
+        "safe_to_apply": not reasons,
+    }
+
+
+def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: bool = False) -> dict[str, Any]:
     snapshot = compute_runtime_readiness_snapshot(conn)
     authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
     lot_snapshot = snapshot.lot_snapshot
@@ -72,8 +192,11 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     existing_lot_count = int(existing_lot_row["cnt"] if existing_lot_row else 0)
     reasons: list[str] = []
     authority_action_state = str(authority_assessment.get("repair_action_state") or "not_applicable")
+    full_projection_gate_report: dict[str, Any] | None = None
 
-    if bool(authority_assessment.get("needs_portfolio_projection_repair")):
+    if full_projection_rebuild or bool(authority_assessment.get("needs_full_projection_rebuild")):
+        repair_mode = "full_projection_rebuild"
+    elif bool(authority_assessment.get("needs_portfolio_projection_repair")):
         repair_mode = "portfolio_projection_repair"
     elif bool(authority_assessment.get("needs_residual_normalization")):
         repair_mode = "residual_normalization"
@@ -92,6 +215,14 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     broker_qty = float(snapshot.position_state.normalized_exposure.raw_holdings.broker_qty)
     broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
     remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
+    if repair_mode == "full_projection_rebuild":
+        full_projection_gate_report = _build_full_projection_rebuild_gate_report(
+            conn,
+            snapshot=snapshot,
+            authority_assessment=authority_assessment,
+            portfolio_qty=portfolio_qty,
+        )
+        reasons = list(full_projection_gate_report["reasons"])
     if repair_mode == "portfolio_projection_repair":
         portfolio_remainder_qty = normalize_asset_qty(
             float(authority_assessment.get("portfolio_target_remainder_qty") or 0.0)
@@ -136,6 +267,10 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
     effective_action_state = authority_action_state
     if repair_mode == "rebuild" and not reasons:
         effective_action_state = "safe_to_apply_now"
+    elif repair_mode == "full_projection_rebuild" and not reasons:
+        effective_action_state = "safe_to_apply_now"
+    elif repair_mode == "full_projection_rebuild":
+        effective_action_state = "blocked_pending_evidence"
     elif repair_mode == "rebuild" and authority_action_state == "not_applicable":
         effective_action_state = "blocked_pending_evidence"
 
@@ -146,6 +281,7 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
             "AUTHORITY_CORRECTION_PENDING",
             "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING",
             "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING",
+            "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING",
         },
         "safe_to_apply": safe_to_apply,
         "action_state": effective_action_state,
@@ -156,9 +292,13 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
                 "portfolio-anchored projection repair applicable"
                 if safe_to_apply and repair_mode == "portfolio_projection_repair"
                 else (
+                "full projection rebuild applicable"
+                if safe_to_apply and repair_mode == "full_projection_rebuild"
+                else (
                 "position authority correction applicable"
                 if safe_to_apply and repair_mode == "correction"
                 else ("position authority rebuild applicable" if safe_to_apply else ", ".join(dict.fromkeys(reasons)))
+                )
                 )
             )
         ),
@@ -166,9 +306,17 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
         "repair_mode": repair_mode,
         "next_required_action": "apply_rebuild_position_authority" if safe_to_apply else snapshot.operator_next_action,
         "recommended_command": (
-            "uv run python bot.py rebuild-position-authority --apply --yes"
+            (
+                "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes"
+                if repair_mode == "full_projection_rebuild"
+                else "uv run python bot.py rebuild-position-authority --apply --yes"
+            )
             if safe_to_apply
-            else snapshot.recommended_command
+            else (
+                "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+                if repair_mode == "full_projection_rebuild"
+                else snapshot.recommended_command
+            )
         ),
         "position_authority_assessment": authority_assessment,
         "portfolio_qty": portfolio_qty,
@@ -184,6 +332,22 @@ def build_position_authority_rebuild_preview(conn) -> dict[str, Any]:
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
         "remote_open_order_count": remote_open_order_count,
+        "broker_portfolio_converged": (
+            None if full_projection_gate_report is None else bool(full_projection_gate_report["broker_portfolio_converged"])
+        ),
+        "accounting_projection_ok": (
+            None if full_projection_gate_report is None else bool(full_projection_gate_report["accounting_projection_ok"])
+        ),
+        "unresolved_open_order_count": (
+            None if full_projection_gate_report is None else int(full_projection_gate_report["unresolved_open_order_count"])
+        ),
+        "pending_submit_count": (
+            None if full_projection_gate_report is None else int(full_projection_gate_report["pending_submit_count"])
+        ),
+        "submit_unknown_count": (
+            None if full_projection_gate_report is None else int(full_projection_gate_report["submit_unknown_count"])
+        ),
+        "full_projection_rebuild_gate_report": full_projection_gate_report,
     }
 
 
@@ -206,8 +370,278 @@ def _assert_post_repair_projection_converged(
     return convergence
 
 
-def apply_position_authority_rebuild(conn, *, note: str | None = None) -> dict[str, Any]:
-    preview = build_position_authority_rebuild_preview(conn)
+def _load_position_authority_history_summary(conn: sqlite3.Connection) -> dict[str, Any]:
+    repair_summary = conn.execute(
+        """
+        SELECT COUNT(*) AS repair_count, MAX(event_ts) AS last_event_ts
+        FROM position_authority_repairs
+        """
+    ).fetchone()
+    publication_summary = conn.execute(
+        """
+        SELECT COUNT(*) AS publication_count, MAX(event_ts) AS last_event_ts
+        FROM position_authority_projection_publications
+        WHERE pair=?
+        """,
+        (settings.PAIR,),
+    ).fetchone()
+    return {
+        "repair_count": int(repair_summary["repair_count"] or 0) if repair_summary is not None else 0,
+        "repair_last_event_ts": (
+            int(repair_summary["last_event_ts"]) if repair_summary is not None and repair_summary["last_event_ts"] is not None else None
+        ),
+        "publication_count": (
+            int(publication_summary["publication_count"] or 0) if publication_summary is not None else 0
+        ),
+        "publication_last_event_ts": (
+            int(publication_summary["last_event_ts"])
+            if publication_summary is not None and publication_summary["last_event_ts"] is not None
+            else None
+        ),
+    }
+
+
+def _replace_with_portfolio_anchored_projection(
+    conn: sqlite3.Connection,
+    *,
+    portfolio_qty: float,
+    broker_qty: float,
+) -> dict[str, Any]:
+    anchor_row = _fetch_anchor_buy_row(conn)
+    if anchor_row is None:
+        raise RuntimeError("full projection rebuild requires accounted BUY fill evidence")
+    lot_size = float(anchor_row["internal_lot_size"] or 0.0)
+    if lot_size <= _EPS:
+        raise RuntimeError("full projection rebuild requires authoritative internal lot size")
+
+    normalized_portfolio_qty = normalize_asset_qty(portfolio_qty)
+    executable_lot_count = int(max(0, normalized_portfolio_qty / lot_size + _EPS))
+    executable_qty = normalize_asset_qty(lot_count_to_qty(lot_count=executable_lot_count, lot_size=lot_size))
+    dust_qty = normalize_asset_qty(max(0.0, normalized_portfolio_qty - executable_qty))
+
+    conn.execute("DELETE FROM open_position_lots WHERE pair=?", (settings.PAIR,))
+    if executable_qty > _EPS:
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total, strategy_name, entry_decision_id, entry_decision_linkage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                int(anchor_row["trade_id"]),
+                str(anchor_row["client_order_id"]),
+                (str(anchor_row["fill_id"]) if anchor_row["fill_id"] is not None else None),
+                int(anchor_row["fill_ts"]),
+                float(anchor_row["price"]),
+                executable_qty,
+                executable_lot_count,
+                0,
+                LOT_SEMANTIC_VERSION_V1,
+                lot_size,
+                float(anchor_row["effective_min_trade_qty"] or lot_size),
+                float(anchor_row["qty_step"] or lot_size),
+                float(anchor_row["min_notional_krw"] or 0.0),
+                int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+                "full_projection_rebuild_portfolio_anchor",
+                "lot-native",
+                OPEN_POSITION_STATE,
+                0.0,
+                (str(anchor_row["strategy_name"]) if anchor_row["strategy_name"] is not None else None),
+                (int(anchor_row["entry_decision_id"]) if anchor_row["entry_decision_id"] is not None else None),
+                ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
+            ),
+        )
+    if dust_qty > _EPS:
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total, strategy_name, entry_decision_id, entry_decision_linkage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                int(anchor_row["trade_id"]),
+                str(anchor_row["client_order_id"]),
+                (str(anchor_row["fill_id"]) if anchor_row["fill_id"] is not None else None),
+                int(anchor_row["fill_ts"]),
+                float(anchor_row["price"]),
+                dust_qty,
+                0,
+                1,
+                LOT_SEMANTIC_VERSION_V1,
+                lot_size,
+                float(anchor_row["effective_min_trade_qty"] or lot_size),
+                float(anchor_row["qty_step"] or lot_size),
+                float(anchor_row["min_notional_krw"] or 0.0),
+                int(settings.LIVE_ORDER_MAX_QTY_DECIMALS),
+                "full_projection_rebuild_portfolio_anchor",
+                "lot-native",
+                DUST_TRACKING_STATE,
+                0.0,
+                (str(anchor_row["strategy_name"]) if anchor_row["strategy_name"] is not None else None),
+                (int(anchor_row["entry_decision_id"]) if anchor_row["entry_decision_id"] is not None else None),
+                ENTRY_DECISION_LINKAGE_DEGRADED_RECOVERY_UNATTRIBUTED,
+            ),
+        )
+    return {
+        "anchor_trade_id": int(anchor_row["trade_id"]),
+        "anchor_client_order_id": str(anchor_row["client_order_id"]),
+        "anchor_fill_id": (str(anchor_row["fill_id"]) if anchor_row["fill_id"] is not None else None),
+        "anchor_fill_ts": int(anchor_row["fill_ts"]),
+        "internal_lot_size": lot_size,
+        "portfolio_qty": normalized_portfolio_qty,
+        "broker_qty": normalize_asset_qty(broker_qty),
+        "executable_lot_count": executable_lot_count,
+        "executable_qty": executable_qty,
+        "dust_qty": dust_qty,
+    }
+
+
+def _apply_full_projection_rebuild(conn: sqlite3.Connection, *, note: str | None = None) -> dict[str, Any]:
+    preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    convergence_before = build_lot_projection_convergence(conn, pair=settings.PAIR)
+    if not bool(preview["safe_to_apply"]):
+        if bool(
+            bool(convergence_before.get("converged"))
+            and (
+                str(preview.get("repair_mode") or "") != "full_projection_rebuild"
+                or "full_projection_rebuild_not_required" in str(preview.get("eligibility_reason") or "")
+            )
+        ):
+            return {
+                "preview": preview,
+                "noop": True,
+                "lot_snapshot_before": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "lot_snapshot_after": summarize_position_lots(conn, pair=settings.PAIR).as_dict(),
+                "post_repair_projection_convergence": convergence_before,
+            }
+        raise RuntimeError(f"position authority rebuild is not safe to apply: {preview['eligibility_reason']}")
+
+    before = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+    before_lot_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM open_position_lots
+            WHERE pair=?
+            ORDER BY entry_ts ASC, id ASC
+            """,
+            (settings.PAIR,),
+        ).fetchall()
+    ]
+    before_lifecycles = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM trade_lifecycles
+            WHERE pair=?
+            ORDER BY id ASC
+            """,
+            (settings.PAIR,),
+        ).fetchall()
+    ]
+    repair_basis: dict[str, Any] = {
+        "event_type": "full_projection_materialized_rebuild",
+        "preview": preview,
+        "lot_snapshot_before": before,
+        "projection_convergence_before": convergence_before,
+        "runtime_readiness_before": compute_runtime_readiness_snapshot(conn).as_dict(),
+        "broker_portfolio_evidence": {
+            "portfolio_qty": float(preview.get("portfolio_qty") or 0.0),
+            "broker_qty": float(preview.get("broker_qty") or 0.0),
+            "broker_qty_known": bool(preview.get("broker_qty_known")),
+            "broker_portfolio_converged": bool(preview.get("broker_portfolio_converged")),
+        },
+        "gate_report": dict(preview.get("full_projection_rebuild_gate_report") or {}),
+        "position_authority_history_summary": _load_position_authority_history_summary(conn),
+        "old_lot_rows": before_lot_rows,
+        "old_trade_lifecycle_rows": before_lifecycles,
+    }
+    savepoint = "position_authority_full_projection_rebuild"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        projection_replay = rebuild_lifecycle_projections_from_trades(
+            conn,
+            pair=settings.PAIR,
+            allow_entry_decision_fallback=False,
+        )
+        repair_basis["projection_replay"] = projection_replay.as_dict()
+        anchor_summary = _replace_with_portfolio_anchored_projection(
+            conn,
+            portfolio_qty=float(preview.get("portfolio_qty") or 0.0),
+            broker_qty=float(preview.get("broker_qty") or 0.0),
+        )
+        repair_basis["portfolio_anchor_projection"] = anchor_summary
+        after = summarize_position_lots(conn, pair=settings.PAIR).as_dict()
+        repair_basis["lot_snapshot_after"] = after
+        convergence = _assert_post_repair_projection_converged(
+            conn,
+            repair_basis=repair_basis,
+            repair_mode="full_projection_rebuild",
+        )
+        post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        repair_basis["position_authority_assessment_after"] = post_assessment
+        if bool(post_assessment.get("needs_full_projection_rebuild")):
+            raise RuntimeError("position authority full projection rebuild did not clear projection readiness block")
+        event_ts = int(time.time() * 1000)
+        publication = record_position_authority_projection_publication(
+            conn,
+            event_ts=event_ts,
+            pair=settings.PAIR,
+            target_trade_id=int(anchor_summary["anchor_trade_id"]),
+            source="manual_full_projection_rebuild_publish",
+            publish_basis=repair_basis,
+            note=note,
+        )
+        repair_basis["projection_publication"] = publication
+        repair = record_position_authority_repair(
+            conn,
+            event_ts=event_ts,
+            source="manual_full_projection_rebuild",
+            reason=FULL_PROJECTION_REBUILD_REASON,
+            repair_basis=repair_basis,
+            note=note,
+        )
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    return {
+        "preview": preview,
+        "repair": repair,
+        "projection_publication": publication,
+        "lot_snapshot_before": before,
+        "lot_snapshot_after": after,
+        "post_repair_projection_convergence": convergence,
+    }
+
+
+def apply_position_authority_rebuild(
+    conn,
+    *,
+    note: str | None = None,
+    full_projection_rebuild: bool = False,
+) -> dict[str, Any]:
+    preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=full_projection_rebuild)
+    if full_projection_rebuild:
+        return _apply_full_projection_rebuild(conn, note=note)
+    if str(preview.get("repair_mode") or "") == "full_projection_rebuild":
+        raise RuntimeError(
+            "position authority rebuild requires explicit full projection rebuild mode: "
+            "re-run with --full-projection-rebuild"
+        )
     if not bool(preview["safe_to_apply"]):
         raise RuntimeError(f"position authority rebuild is not safe to apply: {preview['eligibility_reason']}")
 

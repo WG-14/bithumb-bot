@@ -193,6 +193,35 @@ uv run bithumb-bot resume
 8. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
 9. Resume only after the state is understood.
 
+### Position Authority Projection Drift
+
+If `recovery-report`, `health`, or `audit-ledger` shows either:
+
+- `AUTHORITY_PROJECTION_NON_CONVERGED_PENDING`
+- `HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT`
+
+then treat `open_position_lots` as a disposable projection, not as independent truth.
+Do not resume or manually edit the table.
+
+Allowed:
+
+- `uv run bithumb-bot rebuild-position-authority --full-projection-rebuild`
+- `uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes`
+
+Apply only after the dry-run shows:
+
+- accounting projection OK
+- broker/portfolio converged
+- no remote open orders
+- no unresolved or recovery-required orders
+- no pending submit / submit unknown orders
+
+Forbidden:
+
+- `uv run bithumb-bot run`
+- `uv run bithumb-bot resume`
+- manual SQL `DELETE` / `UPDATE` against `open_position_lots`
+
 ## Post-Change Validation
 
 After a live change, verify:

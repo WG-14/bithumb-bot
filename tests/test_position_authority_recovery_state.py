@@ -4,12 +4,14 @@ import json
 
 import pytest
 
-from bithumb_bot.app import _load_recovery_report
+from bithumb_bot.app import _load_recovery_report, main as app_main
 from bithumb_bot import runtime_state
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
+    compute_accounting_replay,
     ensure_db,
     record_broker_fill_observation,
+    record_external_position_adjustment,
     record_position_authority_repair,
     set_portfolio_breakdown,
 )
@@ -36,6 +38,7 @@ from bithumb_bot.position_authority_repair import (
     build_position_authority_rebuild_preview,
 )
 from bithumb_bot.position_authority_state import build_position_authority_assessment
+from bithumb_bot.position_authority_state import build_lot_projection_convergence
 from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
 
 
@@ -304,6 +307,46 @@ def _insert_live_incident_stale_dust_projection(conn) -> None:
                 0.0,
             ),
         )
+
+
+def _align_accounting_projection_to_portfolio(conn, *, portfolio_qty: float) -> None:
+    replay_qty = float(compute_accounting_replay(conn)["replay_qty"])
+    delta_qty = portfolio_qty - replay_qty
+    if abs(delta_qty) <= 1e-12:
+        return
+    record_external_position_adjustment(
+        conn,
+        event_ts=1_776_745_550_000,
+        asset_qty_delta=delta_qty,
+        cash_delta=0.0,
+        source="test_projection_alignment",
+        reason="historical_fragmentation_fixture_alignment",
+        adjustment_basis={
+            "fixture": "historical_fragmentation_projection_drift",
+            "portfolio_qty": portfolio_qty,
+            "replay_qty_before": replay_qty,
+        },
+        adjustment_key=f"historical-fragmentation-alignment:{portfolio_qty:.12f}",
+    )
+
+
+def _set_portfolio_asset_qty_preserving_cash(conn, *, asset_qty: float) -> None:
+    row = conn.execute(
+        """
+        SELECT cash_available, cash_locked
+        FROM portfolio
+        WHERE id=1
+        """
+    ).fetchone()
+    cash_available = float(row["cash_available"] or 0.0) if row is not None else settings.START_CASH_KRW
+    cash_locked = float(row["cash_locked"] or 0.0) if row is not None else 0.0
+    set_portfolio_breakdown(
+        conn,
+        cash_available=cash_available,
+        cash_locked=cash_locked,
+        asset_available=asset_qty,
+        asset_locked=0.0,
+    )
 
 
 def _replace_with_tracked_dust_row(
@@ -1128,20 +1171,16 @@ def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust
     conn = ensure_db(str(recovery_db))
     try:
         _apply_fee_pending_buy(conn)
-        set_portfolio_breakdown(
-            conn,
-            cash_available=settings.START_CASH_KRW,
-            cash_locked=0.0,
-            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
-            asset_locked=0.0,
-        )
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
         _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
         conn.commit()
         _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
 
         preview = build_position_authority_rebuild_preview(conn)
         before = compute_runtime_readiness_snapshot(conn)
-        with pytest.raises(RuntimeError, match="position authority rebuild is not safe to apply"):
+        with pytest.raises(RuntimeError, match="requires explicit full projection rebuild mode"):
             apply_position_authority_rebuild(conn)
         repair_count_before_rollback = conn.execute(
             "SELECT COUNT(*) AS cnt FROM position_authority_repairs"
@@ -1165,11 +1204,11 @@ def test_missing_fee_incident_projection_repair_refuses_non_converged_stale_dust
     finally:
         conn.close()
 
-    assert preview["repair_mode"] == "portfolio_projection_repair"
-    assert preview["safe_to_apply"] is False
-    assert preview["action_state"] == "inspect_only"
-    assert "projection_excess_outside_target=" in preview["eligibility_reason"]
-    assert before.recovery_stage == "AUTHORITY_PROJECTION_PORTFOLIO_DIVERGENCE_PENDING"
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is True
+    assert preview["action_state"] == "safe_to_apply_now"
+    assert preview["eligibility_reason"] == "full projection rebuild applicable"
+    assert before.recovery_stage == "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING"
     assert before.as_dict()["position_authority_alignment_state"] == "projection_diverged"
     assert "historical_fragmentation" in before.as_dict()["position_authority_diagnostic_flags"]
     assert "unsafe_auto_repair" in before.as_dict()["position_authority_diagnostic_flags"]
@@ -1187,14 +1226,10 @@ def test_projection_divergence_emits_cross_layer_quantity_contract_diagnostics(r
     conn = ensure_db(str(recovery_db))
     try:
         _apply_fee_pending_buy(conn)
-        set_portfolio_breakdown(
-            conn,
-            cash_available=settings.START_CASH_KRW,
-            cash_locked=0.0,
-            asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
-            asset_locked=0.0,
-        )
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
         _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
         conn.commit()
         _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
 
@@ -1206,6 +1241,8 @@ def test_projection_divergence_emits_cross_layer_quantity_contract_diagnostics(r
     projection = assessment["projection_quantity_contract"]
 
     assert assessment["alignment_state"] == "projection_diverged"
+    assert assessment["incident_class"] == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+    assert assessment["repair_mode"] == "full_projection_rebuild"
     assert "historical_fragmentation" in assessment["diagnostic_flags"]
     assert "unsafe_auto_repair" in assessment["diagnostic_flags"]
     assert assessment["repair_action_state"] == "inspect_only"
@@ -1217,6 +1254,220 @@ def test_projection_divergence_emits_cross_layer_quantity_contract_diagnostics(r
     assert projection["requested_qty"] == pytest.approx(FILL_QTY)
     assert projection["residual_reason"] == "dust_tracking_projection"
     assert projection["executable_lot_count"] == 1
+
+
+def test_historical_fragmentation_full_projection_rebuild_dry_run_and_apply(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+        result = apply_position_authority_rebuild(conn, full_projection_rebuild=True, note="fixture full rebuild")
+        conn.commit()
+        convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, lot_rule_source_mode
+            FROM open_position_lots
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        repair = conn.execute(
+            """
+            SELECT reason, repair_basis
+            FROM position_authority_repairs
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        publication = conn.execute(
+            """
+            SELECT publication_key, publish_basis
+            FROM position_authority_projection_publications
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is True
+    assert preview["position_authority_assessment"]["incident_class"] == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+    assert result["repair"]["reason"] == "full_projection_materialized_rebuild"
+    assert convergence["converged"] is True
+    assert convergence["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert readiness.recovery_stage == "RESUME_READY"
+    assert readiness.resume_ready is True
+    assert len(rows) == 2
+    assert rows[0]["position_state"] == "open_exposure"
+    assert rows[0]["qty_open"] == pytest.approx(0.0008)
+    assert rows[0]["executable_lot_count"] == 2
+    assert rows[0]["lot_rule_source_mode"] == "full_projection_rebuild_portfolio_anchor"
+    assert rows[1]["position_state"] == "dust_tracking"
+    assert rows[1]["qty_open"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY - 0.0008)
+    assert rows[1]["dust_tracking_lot_count"] == 1
+    assert publication["publication_key"]
+    repair_basis = json.loads(repair["repair_basis"])
+    assert repair_basis["portfolio_anchor_projection"]["portfolio_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    publication_basis = json.loads(publication["publish_basis"])
+    assert publication_basis["portfolio_anchor_projection"]["broker_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+
+
+def test_full_projection_rebuild_refuses_broker_portfolio_mismatch(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY + 0.0001)
+
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is False
+    assert preview["broker_portfolio_converged"] is False
+    assert "broker_portfolio_qty_mismatch=" in preview["eligibility_reason"]
+
+
+def test_full_projection_rebuild_refuses_when_unresolved_orders_exist(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        record_order_if_missing(
+            conn,
+            client_order_id="unresolved-live-order",
+            side="BUY",
+            qty_req=0.0004,
+            price=PRICE,
+            ts_ms=1_776_745_700_000,
+            status="PENDING_SUBMIT",
+            internal_lot_size=LOT_SIZE,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert preview["pending_submit_count"] == 1
+    assert "pending_submit=1" in preview["eligibility_reason"]
+
+
+def test_full_projection_rebuild_is_idempotent(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        first = apply_position_authority_rebuild(conn, full_projection_rebuild=True, note="first rebuild")
+        conn.commit()
+        second = apply_position_authority_rebuild(conn, full_projection_rebuild=True, note="second rebuild")
+        conn.commit()
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()
+        publication_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_projection_publications"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert first["post_repair_projection_convergence"]["converged"] is True
+    assert second["noop"] is True
+    assert repair_count["cnt"] == 1
+    assert publication_count["cnt"] == 1
+
+
+def test_full_projection_rebuild_rolls_back_on_postcondition_failure(recovery_db, monkeypatch):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        before_rows = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(qty_open), 0.0) AS qty FROM open_position_lots"
+        ).fetchone()
+
+        monkeypatch.setattr(
+            "bithumb_bot.position_authority_repair._assert_post_repair_projection_converged",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced postcondition failure")),
+        )
+        with pytest.raises(RuntimeError, match="forced postcondition failure"):
+            apply_position_authority_rebuild(conn, full_projection_rebuild=True)
+        after_rows = conn.execute(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(qty_open), 0.0) AS qty FROM open_position_lots"
+        ).fetchone()
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()
+        publication_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_projection_publications"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert after_rows["cnt"] == before_rows["cnt"]
+    assert after_rows["qty"] == pytest.approx(before_rows["qty"])
+    assert repair_count["cnt"] == 0
+    assert publication_count["cnt"] == 0
+
+
+def test_recovery_report_and_audit_ledger_distinguish_accounting_and_lot_projection_states(
+    recovery_db, capsys
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+    finally:
+        conn.close()
+
+    report = _load_recovery_report()
+    app_main(["audit-ledger"])
+    audit_out = capsys.readouterr().out
+
+    assert report["accounting_projection_ok"] is True
+    assert report["broker_portfolio_converged"] is True
+    assert report["lot_projection_converged"] is False
+    assert report["live_ready"] is False
+    assert report["blocking_incident_class"] == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+    assert report["recommended_command"] == "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+    assert "accounting_projection_ok=1" in audit_out
+    assert "broker_portfolio_converged=1" in audit_out
+    assert "lot_projection_converged=0" in audit_out
+    assert "live_ready=0" in audit_out
+    assert "blocking_incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT" in audit_out
 
 
 def test_recorded_projection_repair_event_does_not_replace_aggregate_projection_convergence(
@@ -1295,6 +1546,7 @@ def test_projection_non_convergence_is_consistent_across_readiness_resume_and_re
 ):
     conn = ensure_db(str(recovery_db))
     try:
+        _apply_fee_pending_buy(conn)
         set_portfolio_breakdown(
             conn,
             cash_available=settings.START_CASH_KRW,
@@ -1303,6 +1555,7 @@ def test_projection_non_convergence_is_consistent_across_readiness_resume_and_re
             asset_locked=0.0,
         )
         _insert_live_incident_stale_dust_projection(conn)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
         conn.commit()
         _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
 
@@ -1323,17 +1576,18 @@ def test_projection_non_convergence_is_consistent_across_readiness_resume_and_re
     assert truth_model["projection_role"] == "rebuildable_materialized_view"
     assert truth_model["repair_event_role"] == "historical_evidence_not_current_state_proof"
     assert truth_model["portfolio_asset_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
-    assert truth_model["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    expected_projected_qty = LIVE_INCIDENT_STALE_DUST_QTY + FILL_QTY
+    assert truth_model["projected_total_qty"] == pytest.approx(expected_projected_qty)
     assert truth_model["projection_delta_qty"] == pytest.approx(
-        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+        expected_projected_qty - LIVE_INCIDENT_PORTFOLIO_QTY
     )
     assert truth_model["inspect_only"] is True
     assert structured_blocker["reason_code"] == "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
     assert structured_blocker["inspect_only"] is True
     assert structured_blocker["canonical_asset_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
-    assert structured_blocker["projected_lot_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert structured_blocker["projected_lot_qty"] == pytest.approx(expected_projected_qty)
     assert structured_blocker["divergence_delta_qty"] == pytest.approx(
-        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+        expected_projected_qty - LIVE_INCIDENT_PORTFOLIO_QTY
     )
     assert "position_authority_projection_convergence_required=" in str(startup_reason)
     assert resume_allowed is False
@@ -1349,7 +1603,7 @@ def test_projection_non_convergence_is_consistent_across_readiness_resume_and_re
         "POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED"
     )
     assert report["runtime_readiness"]["authority_truth_model"]["projection_delta_qty"] == pytest.approx(
-        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+        expected_projected_qty - LIVE_INCIDENT_PORTFOLIO_QTY
     )
     assert report["resume_allowed"] is False
     assert report["can_resume"] is False
