@@ -357,6 +357,13 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "portfolio_projection_repair_event_status": str(
             authority_assessment.get("portfolio_projection_repair_event_status") or "none"
         ),
+        "sell_after_target_buy_qty": float(authority_assessment.get("sell_after_target_buy_qty") or 0.0),
+        "target_lifecycle_matched_qty": float(authority_assessment.get("target_lifecycle_matched_qty") or 0.0),
+        "effective_closed_qty": float(authority_assessment.get("effective_closed_qty") or 0.0),
+        "lifecycle_matched_qty_accepted": bool(authority_assessment.get("lifecycle_matched_qty_accepted")),
+        "lifecycle_matched_qty_acceptance_reason": str(
+            authority_assessment.get("lifecycle_matched_qty_acceptance_reason") or "none"
+        ),
         "needs_full_projection_rebuild": bool(authority_assessment.get("needs_full_projection_rebuild")),
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
@@ -956,6 +963,9 @@ def apply_position_authority_rebuild(
             "sell_trade_ids": sell_trade_ids,
             "expected_residual_qty": assessment.get("expected_residual_qty"),
             "sell_after_target_buy_qty": assessment.get("sell_after_target_buy_qty"),
+            "target_lifecycle_matched_qty": assessment.get("target_lifecycle_matched_qty"),
+            "effective_closed_qty": assessment.get("effective_closed_qty"),
+            "lifecycle_matched_qty_acceptance_reason": assessment.get("lifecycle_matched_qty_acceptance_reason"),
             "canonical_executable_qty": assessment.get("canonical_executable_qty"),
             "old_lot_rows": before_rows,
             "old_trade_lifecycle_rows": before_lifecycles,

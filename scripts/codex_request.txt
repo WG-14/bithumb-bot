@@ -1,418 +1,352 @@
-Codex task for `WG-14/bithumb-bot`
+You are Codex working directly on the GitHub repository `WG-14/bithumb-bot`.
 
-You are working directly in the `WG-14/bithumb-bot` repository. Do not turn this into a generic cleanup. Treat this as a live-mode recovery blocker with a narrowly scoped suspected bug in position authority readiness classification.
+Your task is not to apply a narrow symptom patch. Treat the latest EC2 incident as a concrete production failure signal and use it to improve the repository into a more robust, reproducible, and operable automated trading experiment system.
 
-## Core problem statement
+Work from the hypotheses below, but do not assume they are facts. Verify or falsify them against the repository code, tests, and executable behavior.
 
-A live KRW-BTC bot instance is blocked from safe resume even though the external account evidence and local accounting evidence converge.
+Primary incident context:
 
-Observed live facts from the operator session:
-
-```text
-broker_qty = 0.00099986
-portfolio_qty = 0.00099986
-accounting_projection_ok = true
-broker_portfolio_converged = true
-unresolved_open_order_count = 0
-pending_submit_count = 0
-submit_unknown_count = 0
-unresolved_fee_pending = false
-```
-
-The mobile Bithumb app shows:
+A live EC2 run reached a state where:
 
 ```text
-KRW = 284,169
-BTC = 0.00099986
-last BUY qty = 0.00059998 BTC
-last BUY fee = 27.91 KRW
+portfolio / broker / replay qty converged to 0.00019986 BTC
+open_position_lots contained one dust_tracking row:
+  qty_open=0.00019986
+  position_state=dust_tracking
+  executable_lot_count=0
+  dust_tracking_lot_count=1
+
+trade_lifecycles showed the latest SELL 0.00080000 BTC closed two entry lots:
+  entry_trade_id=24 -> exit_trade_id=26 matched_qty=0.0004
+  entry_trade_id=25 -> exit_trade_id=26 matched_qty=0.0004
+
+But rebuild-position-authority preview remained blocked:
+  safe_to_apply=0
+  stage=AUTHORITY_CORRECTION_PENDING
+  repair_mode=correction
+  eligibility_reason=sell_after_target_buy=1, target_lot_qty_fill_mismatch=target_qty=0.000199860000,fill_qty=0.000599980000
+
+Runtime gate remained blocked:
+  POSITION_AUTHORITY_CORRECTION_REQUIRED
+  can_resume=false
+  run_loop_allowed=0
+  new_entry_allowed=0
 ```
 
-The local DB agrees with those values:
+The strongest current hypothesis is:
 
-```text
-portfolio.asset_qty = 0.00099986
-portfolio.cash_krw = 284169.87556
+> A single SELL can close multiple BUY lots, but `position_authority_state.py` appears to calculate partial-close residual eligibility using total SELL quantity after the target BUY (`sell_after_qty`) rather than the quantity actually matched to the target entry trade via `trade_lifecycles.matched_qty`. In the incident, total SELL after the target BUY was `0.0008`, while the target BUY’s matched closed quantity was only `0.0004`. This caused `expected_residual_qty` to collapse to zero and prevented classification as a valid partial-close dust residual.
 
-latest trade:
-id = 25
-side = BUY
-client_order_id = live_1776905580000_buy_ae55843c
-fill_id = C0101000000983482756
-qty = 0.00059998
-fee = 27.91
-asset_after = 0.00099986
-cash_after = 284169.87556
-```
+Do not treat that as proven. Verify it.
 
-However, the materialized lot projection is stale/diverged:
-
-```text
-open_position_lots:
-lot_count = 14
-sum(qty_open) = 0.00178800
-executable_lots = 0
-dust_lots = 14
-```
-
-`position_authority_projection_publications` is empty, so there is no current-state attestation proving the portfolio-anchored projection. `position_authority_repairs` contains historical repair evidence, but the readiness model explicitly treats repair events as historical evidence, not current-state proof.
-
-Current CLI behavior:
-
-```text
-MODE=live uv run bithumb-bot rebuild-position-authority
-
-needs_rebuild=1
-safe_to_apply=0
-stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
-repair_mode=rebuild
-eligibility_reason=recovery_stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING, existing_lot_rows=14, accounted_net_qty_portfolio_mismatch=buy_qty=0.003187980000,sell_qty=0.001300000000,net_qty=0.001887980000,portfolio_qty=0.000999860000
-next_required_action=review_position_authority_evidence
-```
-
-And:
-
-```text
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
-
-repair_mode=full_projection_rebuild
-safe_to_apply=0
-eligibility_reason=full_projection_rebuild_not_required
-```
-
-The full projection gate report shows the safety evidence is otherwise good; the blocker is effectively only `full_projection_rebuild_not_required`.
-
-The suspected bug is that `needs_full_projection_rebuild=false` is being derived even when the projection is clearly non-converged and the only stale state is fragmented historical materialized lots.
-
-## Hypothesis to verify, not assume
-
-The likely faulty logic is in `src/bithumb_bot/position_authority_state.py` around `historical_fragmentation_projection_drift`:
-
-```python
-historical_fragmentation_projection_drift = bool(
-    not bool(projection_convergence.get("converged"))
-    and "historical_fragmentation" in diagnostic_flags
-    and lot_row_count > 1
-    and projected_total_qty > portfolio_qty + _EPS
-    and not projection_repair_covers_excess
-    and other_active_qty > _EPS
-)
-```
-
-In the observed state:
-
-```text
-projection_converged = false
-lot_row_count = 14
-projected_total_qty = 0.001788
-portfolio_qty = 0.00099986
-other_active_qty = 0.001788
-portfolio_projection_publication_present = false
-portfolio_projection_repair_event_status = recorded_but_not_current_state_proof
-portfolio_projection_repair_recorded = true
-projected_qty_excess = 0.00078814
-```
-
-But `diagnostic_flags` contains only:
-
-```text
-["projection_diverged"]
-```
-
-So `historical_fragmentation_projection_drift` remains false, and the safe official rebuild path is blocked as “not required.”
-
-The hypothesis is: this is a classification blind spot. Projection is non-converged due to stale fragmented materialized lots, but the full projection rebuild path is gated on the presence of a pre-existing `historical_fragmentation` diagnostic flag that is not set for this state.
-
-## Non-negotiable constraints
-
-1. Do not manually edit the production DB as the primary fix.
-2. Prefer a code-level design correction that makes the official CLI recovery path work.
-3. Preserve the existing safety model: full projection rebuild must still require broker/portfolio convergence, accounting projection convergence, no remote/open/unresolved orders, no pending submit, no submit unknown, and no unresolved fee-pending state.
-4. Do not weaken safety gates to force live resume.
-5. Do not auto-resume or auto-run live trading.
-6. Do not introduce a broad “if projection diverged then rebuild” shortcut. The scope must be narrower: materialized projection excess with multiple stale lots, no current publication, and externally/accounting-anchored portfolio truth.
-7. Keep the hypothesis falsifiable. If the repo already has a more appropriate intended mechanism, use that instead and explain why.
-
-## Required investigation
-
-Work in the repo and inspect these areas first:
+Important repository areas to inspect:
 
 ```text
 src/bithumb_bot/position_authority_state.py
 src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/lifecycle.py
 src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/lifecycle.py
 src/bithumb_bot/db_core.py
 tests/test_position_authority_recovery_state.py
-tests/test_operator_commands.py
-docs/RUNBOOK.md
-docs/runtime-data-policy.md
 ```
 
-Specifically verify:
+Specific code paths to inspect:
 
-1. How `diagnostic_flags` gets `historical_fragmentation`.
-2. Why the observed state gets only `projection_diverged`.
-3. Whether `portfolio_projection_repair_event_status == recorded_but_not_current_state_proof` should participate in detecting full projection rebuild need.
-4. Whether `position_authority_projection_publications` is intentionally the current-state attestation required after full rebuild.
-5. Whether `_apply_full_projection_rebuild()` already has the correct postcondition behavior:
+1. `build_position_authority_assessment`
+2. `_partial_close_residual_state_converged`
+3. `build_position_authority_rebuild_preview`
+4. `apply_position_authority_rebuild`
+5. lifecycle generation and SELL matching in `lifecycle.py`
+6. runtime resume gate classification in `runtime_readiness.py`
 
-   * rebuild lifecycle projections from trades,
-   * replace with portfolio-anchored projection,
-   * assert convergence,
-   * record `position_authority_projection_publication`,
-   * record `position_authority_repair`.
-6. Whether the full projection rebuild gate already refuses unsafe states:
-
-   * missing broker evidence,
-   * broker/portfolio mismatch,
-   * remote open orders,
-   * unresolved orders,
-   * recovery-required orders,
-   * pending submit,
-   * submit unknown,
-   * unresolved fee pending,
-   * accounting replay mismatch.
-
-## Desired design behavior
-
-When the state is:
-
-```text
-projection_converged = false
-projected_total_qty > portfolio_qty
-lot_row_count > 1
-other_active_qty > 0
-projection_repair_covers_excess = false
-portfolio_projection_publication_present = false
-broker_portfolio_converged = true
-accounting_projection_ok = true
-no open/unresolved/pending/submit_unknown/recovery_required orders
-no unresolved fee pending
-```
-
-and the projection divergence is from stale fragmented materialized `open_position_lots`, then:
-
-```text
-needs_full_projection_rebuild = true
-repair_action_state = inspect_only or safe_to_apply only after full rebuild gate passes
-rebuild-position-authority --full-projection-rebuild preview should report safe_to_apply=1 only if all full rebuild gates pass
-recommended_command should be rebuild-position-authority --full-projection-rebuild --apply --yes
-```
-
-The normal non-full rebuild path must remain blocked for this case if it cannot safely interpret the existing lots.
-
-## Suggested implementation direction
-
-Do not blindly apply this patch if a better repo-native design exists, but evaluate this direction carefully.
-
-Introduce an explicit concept such as:
+The current suspected problematic pattern is conceptually:
 
 ```python
-projection_excess_with_materialized_fragmentation = bool(
-    not bool(projection_convergence.get("converged"))
-    and lot_row_count > 1
-    and projected_total_qty > portfolio_qty + _EPS
-    and not projection_repair_covers_excess
-    and other_active_qty > _EPS
-    and not portfolio_projection_publication_present
+sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
+expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - sell_after_qty))
+
+partial_close_residual_candidate = bool(
+    ...
+    and abs(sell_after_qty - canonical_executable_qty) <= _EPS
+    ...
+)
+
+residual_state_converged = _partial_close_residual_state_converged(
+    ...
+    expected_closed_qty=sell_after_qty,
+    ...
 )
 ```
 
-Then make `historical_fragmentation_projection_drift` true only for a narrow, evidence-rich subset, for example when:
+This may be wrong when one SELL closes multiple entry lots. For partial-close residual reasoning, the closed quantity should likely be the target entry’s lifecycle-matched quantity, not the total later SELL quantity.
+
+Expected investigation output before coding:
+
+1. Confirm whether the repository already has helper logic to aggregate `trade_lifecycles.matched_qty` by `entry_trade_id` and `exit_trade_id`.
+2. Confirm whether that helper is currently used only in convergence validation, not in `expected_residual_qty` and candidate classification.
+3. Confirm whether existing tests cover only the case where one SELL closes one target BUY lot, and do not cover the case where one SELL closes multiple entry lots.
+4. Identify whether the production incident should be classified as:
+
+   * already converged partial-close residual state,
+   * residual normalization needed,
+   * authority correction needed,
+   * or a broader projection/authority conflict.
+5. Explain any finding that contradicts the suspected cause.
+
+Implementation priority:
+
+Design-level correctness comes first. Do not just suppress `POSITION_AUTHORITY_CORRECTION_REQUIRED`. Do not weaken startup safety gates globally. Do not make “dust-only” automatically resume if authority evidence is inconsistent.
+
+Preferred fix direction:
+
+Promote target-entry lifecycle matched quantity to first-class evidence in position authority assessment.
+
+Implement something equivalent to:
 
 ```python
-projection_excess_with_materialized_fragmentation
-and (
-    "historical_fragmentation" in diagnostic_flags
-    or portfolio_projection_repair_recorded
-    or portfolio_projection_repair_event_status == "recorded_but_not_current_state_proof"
+target_lifecycle_matched_qty = ... # SUM(trade_lifecycles.matched_qty)
+                                  # WHERE pair=? AND entry_trade_id=?
+                                  # AND exit_trade_id IN sell_trade_ids
+
+effective_closed_qty = (
+    target_lifecycle_matched_qty
+    if target_lifecycle_matched_qty > _EPS
+    else sell_after_qty
 )
+
+expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - effective_closed_qty))
 ```
 
-If this condition is met and `historical_fragmentation` is not already in `diagnostic_flags`, append a diagnostic flag or add a more precise new flag such as `materialized_projection_fragmentation`. Choose the naming that best preserves existing semantics.
+Then use `effective_closed_qty`, not total `sell_after_qty`, for:
 
-Be careful: diagnostic flag naming affects tests and operator reports. Prefer adding more explicit observability rather than hiding the condition.
+1. partial-close residual candidate classification,
+2. `_partial_close_residual_state_converged(... expected_closed_qty=...)`,
+3. diagnostic fields,
+4. repair preview evidence.
 
-## Required tests
+Keep `sell_after_qty` visible as a diagnostic field, but do not use it as target-lot closed quantity when lifecycle matched evidence exists.
 
-Add or update tests. Do not rely only on manual live logs.
-
-At minimum, create a fixture that models:
+Add explicit diagnostics to the returned assessment, such as:
 
 ```text
-portfolio_qty = 0.00099986
-broker_qty = 0.00099986
-accounting replay qty = 0.00099986
-open_position_lots = 14 dust_tracking rows summing 0.001788
-latest accounted BUY fill = 0.00059998
-no open orders
-no unresolved orders
-no pending submit
-no submit unknown
-no recovery required orders
-no unresolved fee pending
-position_authority_repairs has a portfolio projection repair record
-position_authority_projection_publications is empty
+sell_after_target_buy_qty
+target_lifecycle_matched_qty
+effective_closed_qty
+expected_residual_qty
+partial_close_residual_candidate
+residual_state_converged
 ```
 
-Expected pre-apply behavior:
+Testing requirements:
+
+Add regression tests that reproduce the incident class.
+
+At minimum, add a test similar to:
+
+```python
+def test_partial_close_residual_uses_target_lifecycle_matched_qty_when_sell_closes_multiple_entries(...):
+    ...
+```
+
+The test should model:
 
 ```text
-build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
-  repair_mode == "full_projection_rebuild"
-  safe_to_apply == True
-  action_state == "safe_to_apply_now"
-  eligibility_reason == "full projection rebuild applicable"
+BUY A: executable lot 0.0004 plus possible residual
+BUY B: qty around 0.00059998, executable lot 0.0004 plus residual
+SELL: 0.00080000
+trade_lifecycles:
+  A -> SELL matched_qty=0.0004
+  B -> SELL matched_qty=0.0004
+open_position_lots:
+  B dust_tracking qty approximately 0.00019986 / 0.00019998
+  executable_lot_count=0
+  dust_tracking_lot_count=1
 ```
 
-Expected apply behavior:
+Expected behavior should be one of these, depending on the exact fixture state:
+
+Case A, state already converged:
 
 ```text
-apply_position_authority_rebuild(conn, full_projection_rebuild=True, note=...)
-  records a position_authority_projection_publication
-  records a position_authority_repair
-  replaces stale materialized open_position_lots with a portfolio-anchored projection
-  post_repair_projection_convergence.converged == True
+partial_close_residual_candidate=True
+residual_state_converged=True
+needs_residual_normalization=False
+recovery_stage=RESUME_READY
+startup_reason=None
+resume_allowed=True
+resume_blockers=[]
+run_loop_allowed=True
+new_entry_allowed=True
 ```
 
-Expected post-apply readiness behavior:
+Case B, state not yet converged but safely repairable:
 
 ```text
-lot_projection_converged == True
-portfolio_projection_publication_present == True
-portfolio_projection_publication_status == "published" or the repo’s equivalent current-state-attested status
-needs_full_projection_rebuild == False
-STARTUP_SAFETY_GATE_BLOCKED cleared, assuming no other blockers
+needs_residual_normalization=True
+safe_to_normalize_residual=True
+preview.repair_mode=residual_normalization
+preview.safe_to_apply=True
+preview.recommended_command includes rebuild-position-authority --apply --yes
 ```
 
-Add negative tests that prove full projection rebuild remains unsafe when any of these are true:
+Also ensure existing tests still pass, especially:
 
 ```text
-broker_qty != portfolio_qty
-accounting replay qty != portfolio_qty
-remote open orders exist
-unresolved local open orders exist
-pending submit exists
-submit unknown exists
-recovery_required orders exist
-unresolved fee pending exists
+test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matching
+test_partial_close_residual_normalization_replays_buy_and_sell_authority
+test_authority_correction_repairs_incident_dust_row_with_historical_sell_history
+tests around POSITION_AUTHORITY_CORRECTION_REQUIRED
+tests around fee pending + authority repair
 ```
 
-Also add a test that a simple `projection_diverged` state without multiple stale materialized lots and without repair/publication context does not become automatically full-rebuildable.
+Do not remove or relax tests that ensure unsafe authority conflicts remain blocked.
 
-## CLI and observability requirements
+Broader design review:
 
-Improve preview output if necessary so an operator can see why the full rebuild is or is not available. Include fields like:
+After fixing the immediate bug, inspect whether this incident reveals deeper design flaws. Evaluate these hypotheses explicitly:
 
-```text
-projection_converged
-projected_total_qty
-portfolio_qty
-projected_qty_excess
-lot_row_count
-other_active_qty
-portfolio_projection_publication_present
-portfolio_projection_repair_event_status
-needs_full_projection_rebuild
-full_projection_rebuild_gate_report.reasons
-```
+Hypothesis 1:
+`position_authority_state.py` conflates temporal SELL-after-target totals with target-entry lifecycle attribution.
 
-Do not require direct SQLite inspection to understand this state.
+Verification:
+Compare all uses of `sell_after_qty`, `sell_after_count`, `sell_trade_ids`, and lifecycle matched quantities. Identify which fields are temporal diagnostics and which fields are authority evidence.
 
-If `safe_to_apply=false`, the preview must say exactly which gate blocks it. Avoid misleading `full_projection_rebuild_not_required` when the projection is non-converged and stale lots are present.
+Hypothesis 2:
+State authority is too distributed across `trades`, `fills`, `orders`, `open_position_lots`, `trade_lifecycles`, `portfolio`, broker snapshots, repair records, and projection publications.
 
-## Recovery and rollback requirements
+Verification:
+Map the truth hierarchy used by recovery and readiness. Identify where a derived projection can override or conflict with event-sourced lifecycle truth. Determine whether `open_position_lots` and `trade_lifecycles` are consistently treated as derived projections or sometimes as authoritative sources.
 
-Before any live DB mutation, the operator runbook must say to back up the DB.
+Hypothesis 3:
+`rebuild-position-authority` has grown into a multi-purpose repair command rather than a clear state transition.
 
-Do not make the command mutate state unless `--apply --yes` is provided.
+Verification:
+List all repair modes selected by `build_position_authority_rebuild_preview`, including `correction`, `residual_normalization`, `portfolio_projection_repair`, `full_projection_rebuild`, and `rebuild`. Evaluate whether preview output gives a deterministic, machine-readable next action with enough evidence and postconditions.
 
-The apply path must remain transactional and rollback on postcondition failure.
+Hypothesis 4:
+Bithumb fee/fill detail incompleteness is forcing normal live operation through recovery paths too often.
 
-Postconditions must include:
+Verification:
+Inspect how fee pending observations and repairs materialize trades, fills, lots, and lifecycle projections. Identify whether provisional vs authoritative fills are cleanly separated. Do not attempt to solve all fee design issues in this PR unless needed for the incident fix, but document any structural risk.
 
-```text
-projection convergence to portfolio_qty
-publication recorded
-repair recorded
-no unresolved/open order state introduced
-accounting replay still converges to portfolio
-```
+Scope control:
 
-Update `docs/RUNBOOK.md` with a precise operator sequence:
+This task must include the immediate correctness fix and regression tests.
 
-```bash
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
-# apply only if safe_to_apply=1
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes --note "..."
-MODE=live uv run bithumb-bot audit-ledger
-MODE=live uv run bithumb-bot recovery-report
-MODE=live uv run bithumb-bot restart-checklist
-MODE=live uv run bithumb-bot health
-```
+This task should include small observability improvements if they are low-risk:
 
-And make clear:
+* expose `target_lifecycle_matched_qty`
+* expose `effective_closed_qty`
+* expose why lifecycle evidence was or was not accepted
+* make preview/recovery output more actionable for this incident class
 
-```text
-Do not resume live until can_resume=true, safe_to_resume=1, live_ready=1, lot_projection_converged=1, and startup gate is not blocked.
-```
+This task should not perform a broad CLI redesign unless it is small and necessary. Instead, document longer-term design changes in the final report.
 
-## Validation commands to run
+Do not:
 
-Run targeted tests first:
+* bypass startup safety gates,
+* classify all dust as harmless,
+* make broker/local quantity convergence alone sufficient for resume,
+* delete repair evidence,
+* mutate live DB assumptions,
+* add fragile tests that only match exact production row IDs,
+* hide the distinction between total later SELL qty and target matched SELL qty.
 
-```bash
-uv run pytest tests/test_position_authority_recovery_state.py -q
-uv run pytest tests/test_operator_commands.py -q
-```
+Recommended implementation sequence:
 
-Then run any narrower test names you add. If the full suites are too slow, report that and run the relevant targeted tests with exact names.
+1. Run the relevant tests before changes if feasible:
 
-Also run the CLI preview on a test/fixture DB if available. Do not run live apply unless explicitly instructed by the operator.
+   ```bash
+   uv run pytest tests/test_position_authority_recovery_state.py -q
+   ```
 
-## Deliverables
+2. Add the multi-entry single-SELL regression test first and confirm it fails for the expected reason.
 
-1. Code change implementing the corrected classification/gating behavior.
-2. Tests covering the observed edge case and negative safety gates.
-3. Runbook update.
-4. A final report with:
+3. Patch `position_authority_state.py` so target lifecycle matched quantity is used for partial-close residual authority.
 
-   * root cause,
-   * files changed,
-   * why the change is safe,
-   * tests run and results,
-   * exact operator commands for preview/apply/verification,
-   * explicit statement that live trading was not resumed,
-   * any remaining risks or assumptions.
+4. Add or update diagnostic fields in the assessment and preview output.
+
+5. Run targeted tests:
+
+   ```bash
+   uv run pytest tests/test_position_authority_recovery_state.py -q
+   ```
+
+6. If available, run broader tests:
+
+   ```bash
+   uv run pytest -q
+   ```
+
+7. Review whether the fix changes behavior of true unsafe authority conflicts. If any existing safety test starts passing incorrectly, stop and refine.
 
 Final report format:
 
-```markdown
-## Summary
-...
+Return a concise but complete report with these sections:
 
-## Root Cause
-...
+1. Summary
 
-## Design Change
-...
+   * What was changed.
+   * What was intentionally not changed.
 
-## Safety Gates Preserved
-...
+2. Verified Root Cause
 
-## Tests
-...
+   * State which hypotheses were confirmed, weakened, or rejected.
+   * Include the specific code path that caused the incident.
 
-## Operator Recovery Steps
-...
+3. Design Rationale
 
-## Not Performed
-- Did not manually edit production DB.
-- Did not resume live trading.
-- Did not submit/cancel/flatten any orders.
+   * Explain why target lifecycle matched quantity is the correct authority for partial-close residuals.
+   * Explain why total SELL-after-target quantity remains diagnostic only.
 
-## Remaining Risks / Follow-ups
-...
-```
+4. Tests
+
+   * List new tests.
+   * List existing tests that were relevant.
+   * Include command results.
+
+5. Operational Impact
+
+   * Expected behavior for the EC2 incident after patch:
+
+     ```text
+     rebuild-position-authority preview should either report residual_normalization safe_to_apply=1
+     or classify current state as RESUME_READY if lifecycle and dust projection are already converged.
+     ```
+   * Expected post-repair/resume signals:
+
+     ```text
+     POSITION_AUTHORITY_CORRECTION_REQUIRED absent
+     can_resume=true
+     run_loop_allowed=1
+     new_entry_allowed=1
+     open_exposure_qty=0
+     dust_tracking_qty preserved
+     ```
+
+6. Remaining Structural Risks
+
+   * State authority hierarchy concerns.
+   * Repair command overloading.
+   * Fee pending and provisional fill risk.
+   * Projection lineage / generation ID gap.
+
+7. Follow-up Recommendations
+
+   * Separate diagnostic vs repair commands.
+   * Make repair previews machine-readable.
+   * Treat `open_position_lots` and `trade_lifecycles` explicitly as derived projections from immutable events.
+   * Add scenario fixtures for real recovery incidents:
+
+     * BUY fee missing -> repair -> open exposure
+     * SELL fee missing -> repair -> dust-only resume
+     * one SELL closes one BUY
+     * one SELL closes multiple BUYs
+     * stale dust projection
+     * broker/local converged but lifecycle missing
+     * lifecycle converged but publication missing
+     * fee pending + authority correction simultaneous
+     * dust above exchange minimum but below internal lot boundary
+
+Make the final code change minimal but principled: fix the authority evidence model for this incident class, preserve safety, and leave the repository more testable and operable than before.
 

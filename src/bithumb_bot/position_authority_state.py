@@ -255,6 +255,59 @@ def _projection_publication_status(*, published: bool) -> str:
     return "published_current_state_attestation"
 
 
+def _load_target_lifecycle_matched_qty(
+    conn,
+    *,
+    pair: str,
+    target_trade_id: int,
+    sell_trade_ids: list[int],
+) -> dict[str, Any]:
+    if target_trade_id <= 0 or not sell_trade_ids:
+        return {
+            "matched_qty": 0.0,
+            "lifecycle_count": 0,
+            "accepted": False,
+            "acceptance_reason": "sell_history_missing",
+        }
+
+    placeholders = ",".join("?" for _ in sell_trade_ids)
+    try:
+        lifecycle_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS lifecycle_count,
+                COALESCE(SUM(matched_qty), 0.0) AS matched_qty
+            FROM trade_lifecycles
+            WHERE pair=?
+              AND entry_trade_id=?
+              AND exit_trade_id IN ({placeholders})
+            """,
+            (str(pair), int(target_trade_id), *[int(value) for value in sell_trade_ids]),
+        ).fetchone()
+    except (AssertionError, sqlite3.OperationalError):
+        return {
+            "matched_qty": 0.0,
+            "lifecycle_count": 0,
+            "accepted": False,
+            "acceptance_reason": "lifecycle_query_unavailable",
+        }
+
+    lifecycle_count = _row_int(lifecycle_row, "lifecycle_count")
+    matched_qty = normalize_asset_qty(_row_float(lifecycle_row, "matched_qty"))
+    if lifecycle_count <= 0:
+        acceptance_reason = "no_matching_lifecycle_rows"
+    elif matched_qty <= _EPS:
+        acceptance_reason = "matching_lifecycle_rows_zero_qty"
+    else:
+        acceptance_reason = "matched_qty_from_trade_lifecycles"
+    return {
+        "matched_qty": matched_qty,
+        "lifecycle_count": lifecycle_count,
+        "accepted": bool(lifecycle_count > 0 and matched_qty > _EPS),
+        "acceptance_reason": acceptance_reason,
+    }
+
+
 def _partial_close_residual_state_converged(
     conn,
     *,
@@ -299,25 +352,14 @@ def _partial_close_residual_state_converged(
     ):
         return False
 
-    placeholders = ",".join("?" for _ in sell_trade_ids)
-    try:
-        lifecycle_row = conn.execute(
-            f"""
-            SELECT
-                COUNT(*) AS lifecycle_count,
-                COALESCE(SUM(matched_qty), 0.0) AS matched_qty
-            FROM trade_lifecycles
-            WHERE pair=?
-              AND entry_trade_id=?
-              AND exit_trade_id IN ({placeholders})
-            """,
-            (str(pair), int(target_trade_id), *[int(value) for value in sell_trade_ids]),
-        ).fetchone()
-    except (AssertionError, sqlite3.OperationalError):
-        return False
-
-    lifecycle_count = _row_int(lifecycle_row, "lifecycle_count")
-    lifecycle_matched_qty = normalize_asset_qty(_row_float(lifecycle_row, "matched_qty"))
+    lifecycle_match = _load_target_lifecycle_matched_qty(
+        conn,
+        pair=pair,
+        target_trade_id=target_trade_id,
+        sell_trade_ids=sell_trade_ids,
+    )
+    lifecycle_count = int(lifecycle_match["lifecycle_count"] or 0)
+    lifecycle_matched_qty = normalize_asset_qty(float(lifecycle_match["matched_qty"] or 0.0))
     return bool(lifecycle_count > 0 and abs(lifecycle_matched_qty - expected_closed) <= _EPS)
 
 
@@ -475,6 +517,19 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     sell_after_count = _row_int(sell_after_row, "cnt")
     sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
     sell_trade_ids = [_row_int(row, "id") for row in sell_after_rows]
+    lifecycle_match = _load_target_lifecycle_matched_qty(
+        conn,
+        pair=pair_text,
+        target_trade_id=target_trade_id,
+        sell_trade_ids=sell_trade_ids,
+    )
+    target_lifecycle_match_count = int(lifecycle_match["lifecycle_count"] or 0)
+    target_lifecycle_matched_qty = normalize_asset_qty(float(lifecycle_match["matched_qty"] or 0.0))
+    lifecycle_matched_qty_accepted = bool(lifecycle_match["accepted"])
+    lifecycle_matched_qty_acceptance_reason = str(lifecycle_match["acceptance_reason"] or "unknown")
+    effective_closed_qty = (
+        target_lifecycle_matched_qty if lifecycle_matched_qty_accepted else sell_after_qty
+    )
     other_active_lot_count = _row_int(other_active_row, "cnt")
     other_active_qty = normalize_asset_qty(_row_float(other_active_row, "qty"))
     projection_convergence = build_lot_projection_convergence(conn, pair=pair_text)
@@ -493,7 +548,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     )
     target_qty_matches_fill = bool(abs(target_total_qty - fill_qty) <= 1e-12)
     portfolio_matches_target = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= 1e-12)
-    expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - sell_after_qty))
+    expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - effective_closed_qty))
     projected_total_qty = normalize_asset_qty(target_total_qty + other_active_qty)
     projected_qty_excess = normalize_asset_qty(max(0.0, projected_total_qty - portfolio_qty))
     portfolio_target_remainder_qty = normalize_asset_qty(max(0.0, portfolio_qty - other_active_qty))
@@ -503,7 +558,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         conflicting_dust_authority
         and sell_after_count > 0
         and canonical_executable_qty > _EPS
-        and abs(sell_after_qty - canonical_executable_qty) <= _EPS
+        and abs(effective_closed_qty - canonical_executable_qty) <= _EPS
         and expected_residual_qty > _EPS
         and abs(target_total_qty - expected_residual_qty) <= _EPS
         and abs(target_open_qty) <= _EPS
@@ -536,7 +591,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         target_trade_id=target_trade_id,
         sell_trade_ids=sell_trade_ids,
         expected_residual_qty=expected_residual_qty,
-        expected_closed_qty=sell_after_qty,
+        expected_closed_qty=effective_closed_qty,
         target_total_qty=target_total_qty,
         target_open_qty=target_open_qty,
         target_dust_qty=target_dust_qty,
@@ -870,6 +925,11 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "sell_after_target_buy_count": sell_after_count,
         "sell_after_target_buy_qty": sell_after_qty,
         "sell_trade_ids": sell_trade_ids,
+        "target_lifecycle_match_count": target_lifecycle_match_count,
+        "target_lifecycle_matched_qty": target_lifecycle_matched_qty,
+        "lifecycle_matched_qty_accepted": lifecycle_matched_qty_accepted,
+        "lifecycle_matched_qty_acceptance_reason": lifecycle_matched_qty_acceptance_reason,
+        "effective_closed_qty": effective_closed_qty,
         "expected_residual_qty": expected_residual_qty,
         "projected_total_qty": projected_total_qty,
         "projected_qty_excess": projected_qty_excess,

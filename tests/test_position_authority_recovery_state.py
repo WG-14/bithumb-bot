@@ -706,6 +706,147 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
     assert readiness.as_dict() == replay.as_dict()
 
 
+def test_partial_close_residual_uses_target_lifecycle_matched_qty_when_sell_closes_multiple_entries(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    buy_b_qty = 0.00059998
+    sell_qty = 0.0008
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="multi_buy_a",
+            side="BUY",
+            qty_req=LOT_SIZE,
+            price=PRICE,
+            ts_ms=1_700_000_000_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="multi_buy_a",
+            side="BUY",
+            fill_id="multi-buy-a-fill",
+            fill_ts=1_700_000_000_050,
+            price=PRICE,
+            qty=LOT_SIZE,
+            fee=1.0,
+            allow_entry_decision_fallback=False,
+        )
+        set_status("multi_buy_a", "FILLED", conn=conn)
+
+        record_order_if_missing(
+            conn,
+            client_order_id="multi_buy_b",
+            side="BUY",
+            qty_req=buy_b_qty,
+            price=PRICE,
+            ts_ms=1_700_000_100_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="multi_buy_b",
+            side="BUY",
+            fill_id="multi-buy-b-fill",
+            fill_ts=1_700_000_100_050,
+            price=PRICE,
+            qty=buy_b_qty,
+            fee=1.0,
+            allow_entry_decision_fallback=False,
+        )
+        set_status("multi_buy_b", "FILLED", conn=conn)
+
+        record_order_if_missing(
+            conn,
+            client_order_id="multi_sell_ab",
+            side="SELL",
+            qty_req=sell_qty,
+            price=PRICE,
+            ts_ms=1_700_000_200_000,
+            status="NEW",
+            internal_lot_size=LOT_SIZE,
+            effective_min_trade_qty=0.0002,
+            qty_step=0.0001,
+            min_notional_krw=0.0,
+            intended_lot_count=2,
+            executable_lot_count=2,
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="multi_sell_ab",
+            side="SELL",
+            fill_id="multi-sell-ab-fill",
+            fill_ts=1_700_000_200_050,
+            price=PRICE,
+            qty=sell_qty,
+            fee=1.0,
+        )
+        set_status("multi_sell_ab", "FILLED", conn=conn)
+        conn.commit()
+
+        lifecycles = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT entry_client_order_id, exit_client_order_id, matched_qty
+                FROM trade_lifecycles
+                WHERE exit_client_order_id='multi_sell_ab'
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        ]
+        assessment = build_position_authority_assessment(conn)
+        preview = build_position_authority_rebuild_preview(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert lifecycles == [
+        {
+            "entry_client_order_id": "multi_buy_a",
+            "exit_client_order_id": "multi_sell_ab",
+            "matched_qty": pytest.approx(LOT_SIZE),
+        },
+        {
+            "entry_client_order_id": "multi_buy_b",
+            "exit_client_order_id": "multi_sell_ab",
+            "matched_qty": pytest.approx(LOT_SIZE),
+        },
+    ]
+    assert assessment["sell_after_target_buy_qty"] == pytest.approx(sell_qty)
+    assert assessment["target_lifecycle_matched_qty"] == pytest.approx(LOT_SIZE)
+    assert assessment["lifecycle_matched_qty_accepted"] is True
+    assert assessment["lifecycle_matched_qty_acceptance_reason"] == "matched_qty_from_trade_lifecycles"
+    assert assessment["effective_closed_qty"] == pytest.approx(LOT_SIZE)
+    assert assessment["expected_residual_qty"] == pytest.approx(buy_b_qty - LOT_SIZE)
+    assert assessment["partial_close_residual_candidate"] is True
+    assert assessment["residual_state_converged"] is True
+    assert assessment["needs_residual_normalization"] is False
+    assert assessment["needs_correction"] is False
+    assert preview["repair_mode"] == "rebuild"
+    assert preview["safe_to_apply"] is False
+    assert preview["target_lifecycle_matched_qty"] == pytest.approx(LOT_SIZE)
+    assert preview["effective_closed_qty"] == pytest.approx(LOT_SIZE)
+    assert readiness.recovery_stage == "RESUME_READY"
+    assert readiness.resume_ready is True
+    assert readiness.resume_blockers == ()
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is True
+
+
 def test_sub_min_tracked_dust_paths_converge_to_entry_allowed_operability(recovery_db):
     conn = ensure_db(str(recovery_db))
     try:
