@@ -360,6 +360,12 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "sell_after_target_buy_qty": float(authority_assessment.get("sell_after_target_buy_qty") or 0.0),
         "target_lifecycle_matched_qty": float(authority_assessment.get("target_lifecycle_matched_qty") or 0.0),
         "effective_closed_qty": float(authority_assessment.get("effective_closed_qty") or 0.0),
+        "expected_residual_qty": float(authority_assessment.get("expected_residual_qty") or 0.0),
+        "target_residual_qty_delta": float(authority_assessment.get("target_residual_qty_delta") or 0.0),
+        "residual_qty_tolerance": float(authority_assessment.get("residual_qty_tolerance") or 0.0),
+        "sell_after_qty_authority_mode": str(
+            authority_assessment.get("sell_after_qty_authority_mode") or "not_applicable"
+        ),
         "lifecycle_matched_qty_accepted": bool(authority_assessment.get("lifecycle_matched_qty_accepted")),
         "lifecycle_matched_qty_acceptance_reason": str(
             authority_assessment.get("lifecycle_matched_qty_acceptance_reason") or "none"

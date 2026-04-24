@@ -16,6 +16,35 @@ HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT = "HISTORICAL_FRAGMENTATION_PROJECTION
 MATERIALIZED_PROJECTION_FRAGMENTATION = "materialized_projection_fragmentation"
 
 
+def _residual_qty_tolerance(
+    *,
+    internal_lot_size: float,
+    qty_step: float = 0.0,
+    max_qty_decimals: int | None = None,
+) -> float:
+    """Tolerance for residual-only convergence after a lifecycle-attributed partial close.
+
+    This tolerance is intentionally bounded well below executable-lot authority.
+    It covers exchange-side residual rounding and broker/materialized dust drift
+    without authorizing a missing executable lot.
+    """
+
+    decimal_unit = 0.0
+    if max_qty_decimals is not None and int(max_qty_decimals) > 0:
+        decimal_unit = 10 ** (-int(max_qty_decimals))
+    return max(
+        _EPS,
+        decimal_unit * 20.0,
+        abs(float(qty_step or 0.0)) * 0.002,
+        abs(float(internal_lot_size or 0.0)) * 0.001,
+        2e-7,
+    )
+
+
+def _qty_within_tolerance(left: float, right: float, *, tolerance: float) -> bool:
+    return abs(normalize_asset_qty(left) - normalize_asset_qty(right)) <= max(_EPS, float(tolerance))
+
+
 def _row_float(row: Any, key: str, default: float = 0.0) -> float:
     if row is None:
         return default
@@ -324,6 +353,7 @@ def _partial_close_residual_state_converged(
     target_min_internal_lot_size: float,
     target_max_internal_lot_size: float,
     expected_internal_lot_size: float,
+    residual_qty_tolerance: float,
 ) -> bool:
     """Return True when current tables already reflect the post-replay state.
 
@@ -338,9 +368,9 @@ def _partial_close_residual_state_converged(
     expected_closed = normalize_asset_qty(expected_closed_qty)
     if expected_residual <= _EPS or expected_closed <= _EPS:
         return False
-    if abs(normalize_asset_qty(target_total_qty) - expected_residual) > _EPS:
+    if not _qty_within_tolerance(target_total_qty, expected_residual, tolerance=residual_qty_tolerance):
         return False
-    if abs(normalize_asset_qty(target_dust_qty) - expected_residual) > _EPS:
+    if not _qty_within_tolerance(target_dust_qty, expected_residual, tolerance=residual_qty_tolerance):
         return False
     if abs(normalize_asset_qty(target_open_qty)) > _EPS:
         return False
@@ -360,7 +390,10 @@ def _partial_close_residual_state_converged(
     )
     lifecycle_count = int(lifecycle_match["lifecycle_count"] or 0)
     lifecycle_matched_qty = normalize_asset_qty(float(lifecycle_match["matched_qty"] or 0.0))
-    return bool(lifecycle_count > 0 and abs(lifecycle_matched_qty - expected_closed) <= _EPS)
+    return bool(
+        lifecycle_count > 0
+        and _qty_within_tolerance(lifecycle_matched_qty, expected_closed, tolerance=residual_qty_tolerance)
+    )
 
 
 def build_position_authority_assessment(conn, *, pair: str | None = None) -> dict[str, Any]:
@@ -391,6 +424,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
                 f.internal_lot_size AS fill_internal_lot_size,
                 o.status AS order_status,
                 o.qty_filled AS order_qty_filled,
+                o.effective_min_trade_qty AS order_effective_min_trade_qty,
+                o.qty_step AS order_qty_step,
                 o.intended_lot_count AS order_intended_lot_count,
                 o.executable_lot_count AS order_executable_lot_count,
                 o.internal_lot_size AS order_internal_lot_size
@@ -436,6 +471,9 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     canonical_lot_size = _row_float(latest_buy, "fill_internal_lot_size")
     if canonical_lot_size <= _EPS:
         canonical_lot_size = _row_float(latest_buy, "order_internal_lot_size")
+    canonical_qty_step = _row_float(latest_buy, "order_qty_step")
+    if canonical_qty_step <= _EPS:
+        canonical_qty_step = canonical_lot_size
     canonical_executable_lot_count = _row_int(latest_buy, "fill_executable_lot_count")
     if canonical_executable_lot_count <= 0:
         canonical_executable_lot_count = _row_int(latest_buy, "order_executable_lot_count")
@@ -455,7 +493,11 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
             COALESCE(SUM(executable_lot_count), 0) AS executable_lot_count,
             COALESCE(SUM(dust_tracking_lot_count), 0) AS dust_tracking_lot_count,
             COALESCE(MAX(internal_lot_size), 0.0) AS max_internal_lot_size,
-            COALESCE(MIN(internal_lot_size), 0.0) AS min_internal_lot_size
+            COALESCE(MIN(internal_lot_size), 0.0) AS min_internal_lot_size,
+            COALESCE(MAX(lot_qty_step), 0.0) AS max_qty_step,
+            COALESCE(MIN(lot_qty_step), 0.0) AS min_qty_step,
+            COALESCE(MAX(lot_max_qty_decimals), 0) AS max_qty_decimals,
+            COALESCE(MIN(lot_max_qty_decimals), 0) AS min_qty_decimals
         FROM open_position_lots
         WHERE pair=?
           AND entry_trade_id=?
@@ -514,6 +556,10 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_dust_lot_count = _row_int(lot_row, "dust_tracking_lot_count")
     target_min_internal_lot_size = _row_float(lot_row, "min_internal_lot_size")
     target_max_internal_lot_size = _row_float(lot_row, "max_internal_lot_size")
+    target_min_qty_step = _row_float(lot_row, "min_qty_step")
+    target_max_qty_step = _row_float(lot_row, "max_qty_step")
+    target_min_qty_decimals = _row_int(lot_row, "min_qty_decimals")
+    target_max_qty_decimals = _row_int(lot_row, "max_qty_decimals")
     sell_after_count = _row_int(sell_after_row, "cnt")
     sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
     sell_trade_ids = [_row_int(row, "id") for row in sell_after_rows]
@@ -527,6 +573,11 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_lifecycle_matched_qty = normalize_asset_qty(float(lifecycle_match["matched_qty"] or 0.0))
     lifecycle_matched_qty_accepted = bool(lifecycle_match["accepted"])
     lifecycle_matched_qty_acceptance_reason = str(lifecycle_match["acceptance_reason"] or "unknown")
+    sell_after_qty_authority_mode = (
+        "diagnostic_only"
+        if lifecycle_matched_qty_accepted
+        else ("fallback_authority" if sell_after_count > 0 else "not_applicable")
+    )
     effective_closed_qty = (
         target_lifecycle_matched_qty if lifecycle_matched_qty_accepted else sell_after_qty
     )
@@ -549,6 +600,19 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     target_qty_matches_fill = bool(abs(target_total_qty - fill_qty) <= 1e-12)
     portfolio_matches_target = bool(portfolio_qty <= _EPS or abs(portfolio_qty - target_total_qty) <= 1e-12)
     expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - effective_closed_qty))
+    residual_qty_step = max(target_max_qty_step, target_min_qty_step, canonical_qty_step, 0.0)
+    residual_max_qty_decimals = max(
+        target_max_qty_decimals,
+        target_min_qty_decimals,
+        int(settings.LIVE_ORDER_MAX_QTY_DECIMALS or 0),
+    )
+    residual_qty_tolerance = _residual_qty_tolerance(
+        internal_lot_size=canonical_lot_size,
+        qty_step=residual_qty_step,
+        max_qty_decimals=residual_max_qty_decimals,
+    )
+    target_residual_qty_delta = normalize_asset_qty(target_total_qty - expected_residual_qty)
+    target_dust_residual_qty_delta = normalize_asset_qty(target_dust_qty - expected_residual_qty)
     projected_total_qty = normalize_asset_qty(target_total_qty + other_active_qty)
     projected_qty_excess = normalize_asset_qty(max(0.0, projected_total_qty - portfolio_qty))
     portfolio_target_remainder_qty = normalize_asset_qty(max(0.0, portfolio_qty - other_active_qty))
@@ -558,9 +622,22 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         conflicting_dust_authority
         and sell_after_count > 0
         and canonical_executable_qty > _EPS
-        and abs(effective_closed_qty - canonical_executable_qty) <= _EPS
+        and _qty_within_tolerance(
+            effective_closed_qty,
+            canonical_executable_qty,
+            tolerance=residual_qty_tolerance,
+        )
         and expected_residual_qty > _EPS
-        and abs(target_total_qty - expected_residual_qty) <= _EPS
+        and _qty_within_tolerance(
+            target_total_qty,
+            expected_residual_qty,
+            tolerance=residual_qty_tolerance,
+        )
+        and _qty_within_tolerance(
+            target_dust_qty,
+            expected_residual_qty,
+            tolerance=residual_qty_tolerance,
+        )
         and abs(target_open_qty) <= _EPS
         and target_dust_lot_count > 0
         and other_active_lot_count == 0
@@ -600,6 +677,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         target_min_internal_lot_size=target_min_internal_lot_size,
         target_max_internal_lot_size=target_max_internal_lot_size,
         expected_internal_lot_size=canonical_lot_size,
+        residual_qty_tolerance=residual_qty_tolerance,
     )
     needs_residual_normalization = bool(
         partial_close_residual_candidate and not residual_state_converged
@@ -776,9 +854,19 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     blockers: list[str] = []
     if not needs_correction and not needs_residual_normalization and not needs_portfolio_projection_repair:
         blockers.append("no_repairable_authority_conflict")
-    if sell_after_count > 0 and not needs_residual_normalization and not needs_portfolio_projection_repair:
+    if (
+        sell_after_count > 0
+        and sell_after_qty_authority_mode != "diagnostic_only"
+        and not needs_residual_normalization
+        and not needs_portfolio_projection_repair
+    ):
         blockers.append(f"sell_after_target_buy={sell_after_count}")
-    if not target_qty_matches_fill and not needs_residual_normalization and not needs_portfolio_projection_repair:
+    if (
+        not target_qty_matches_fill
+        and not partial_close_residual_candidate
+        and not residual_state_converged
+        and not needs_portfolio_projection_repair
+    ):
         blockers.append(
             f"target_lot_qty_fill_mismatch=target_qty={target_total_qty:.12f},fill_qty={fill_qty:.12f}"
         )
@@ -929,8 +1017,12 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "target_lifecycle_matched_qty": target_lifecycle_matched_qty,
         "lifecycle_matched_qty_accepted": lifecycle_matched_qty_accepted,
         "lifecycle_matched_qty_acceptance_reason": lifecycle_matched_qty_acceptance_reason,
+        "sell_after_qty_authority_mode": sell_after_qty_authority_mode,
         "effective_closed_qty": effective_closed_qty,
         "expected_residual_qty": expected_residual_qty,
+        "target_residual_qty_delta": target_residual_qty_delta,
+        "target_dust_residual_qty_delta": target_dust_residual_qty_delta,
+        "residual_qty_tolerance": residual_qty_tolerance,
         "projected_total_qty": projected_total_qty,
         "projected_qty_excess": projected_qty_excess,
         "projection_repair_removable_qty": projection_repair_removable_qty,

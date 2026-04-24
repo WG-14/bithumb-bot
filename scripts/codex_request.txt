@@ -1,45 +1,102 @@
-You are Codex working directly on the GitHub repository `WG-14/bithumb-bot`.
+You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is not to apply a narrow symptom patch. Treat the latest EC2 incident as a concrete production failure signal and use it to improve the repository into a more robust, reproducible, and operable automated trading experiment system.
+Your task is to investigate, fix, and test the latest EC2 live-run incident as a concrete production failure signal. Do not apply a narrow symptom patch. Do not suppress `POSITION_AUTHORITY_CORRECTION_REQUIRED`. Do not weaken startup safety gates globally. Do not classify all dust-only states as resume-safe. Use this incident to make the repository more robust, reproducible, observable, and operable as an automated trading experiment system.
 
-Work from the hypotheses below, but do not assume they are facts. Verify or falsify them against the repository code, tests, and executable behavior.
+Work from the hypotheses below, but do not assume they are true. Verify or falsify them against the repository code, tests, and executable behavior.
 
-Primary incident context:
+## Production Incident Context
 
-A live EC2 run reached a state where:
+A live EC2 run reached this state:
 
 ```text
-portfolio / broker / replay qty converged to 0.00019986 BTC
-open_position_lots contained one dust_tracking row:
-  qty_open=0.00019986
-  position_state=dust_tracking
-  executable_lot_count=0
-  dust_tracking_lot_count=1
+Bithumb mobile app / broker / local portfolio / replay / projection all converged to:
+  KRW cash: about 376,915 KRW
+  BTC asset: 0.00019986 BTC
 
-trade_lifecycles showed the latest SELL 0.00080000 BTC closed two entry lots:
+Latest SELL:
+  qty = 0.00080000 BTC
+  fee = 37.11 KRW
+
+open_position_lots contained one residual row:
+  qty_open = 0.00019986
+  position_state = dust_tracking
+  executable_lot_count = 0
+  dust_tracking_lot_count = 1
+
+trade_lifecycles showed the latest SELL closed two entry lots:
   entry_trade_id=24 -> exit_trade_id=26 matched_qty=0.0004
   entry_trade_id=25 -> exit_trade_id=26 matched_qty=0.0004
 
-But rebuild-position-authority preview remained blocked:
-  safe_to_apply=0
-  stage=AUTHORITY_CORRECTION_PENDING
-  repair_mode=correction
-  eligibility_reason=sell_after_target_buy=1, target_lot_qty_fill_mismatch=target_qty=0.000199860000,fill_qty=0.000599980000
-
-Runtime gate remained blocked:
-  POSITION_AUTHORITY_CORRECTION_REQUIRED
-  can_resume=false
-  run_loop_allowed=0
-  new_entry_allowed=0
+The latest target BUY was:
+  target_trade_id = 25
+  target_client_order_id = live_1776905580000_buy_ae55843c
+  target_fill_id = C0101000000983482756
+  fill_qty = 0.00059998
 ```
 
-The strongest current hypothesis is:
+The live assessment output showed:
 
-> A single SELL can close multiple BUY lots, but `position_authority_state.py` appears to calculate partial-close residual eligibility using total SELL quantity after the target BUY (`sell_after_qty`) rather than the quantity actually matched to the target entry trade via `trade_lifecycles.matched_qty`. In the incident, total SELL after the target BUY was `0.0008`, while the target BUY’s matched closed quantity was only `0.0004`. This caused `expected_residual_qty` to collapse to zero and prevented classification as a valid partial-close dust residual.
+```text
+target_trade_id = 25
+sell_trade_ids = [26]
+sell_after_target_buy_count = 1
+sell_after_target_buy_qty = 0.0008
+target_lifecycle_matched_qty = 0.0004
+lifecycle_matched_qty_accepted = true
+lifecycle_matched_qty_acceptance_reason = matched_qty_from_trade_lifecycles
+effective_closed_qty = 0.0004
+expected_residual_qty = 0.00019998
 
-Do not treat that as proven. Verify it.
+portfolio_qty = 0.00019986
+portfolio_target_remainder_qty = 0.00019986
+projection_convergence.converged = true
+projection_convergence.projected_total_qty = 0.00019986
+projection_convergence.dust_tracking_qty = 0.00019986
+portfolio_projection_publication_present = true
 
-Important repository areas to inspect:
+partial_close_residual_candidate = false
+residual_state_converged = false
+needs_residual_normalization = false
+needs_correction = true
+safe_to_correct = false
+repair_action_state = blocked_pending_evidence
+alignment_state = semantic_contract_mismatch
+diagnostic_flags = ["semantic_contract_mismatch"]
+
+blockers = [
+  "sell_after_target_buy=1",
+  "target_lot_qty_fill_mismatch=target_qty=0.000199860000,fill_qty=0.000599980000"
+]
+```
+
+The important numeric delta is:
+
+```text
+expected_residual_qty = 0.00059998 - 0.0004 = 0.00019998
+actual materialized dust / portfolio / broker qty = 0.00019986
+delta = 0.00000012 BTC
+```
+
+This delta is tiny relative to the executable internal lot size:
+
+```text
+internal_lot_size = 0.0004
+delta / internal_lot_size = about 0.03%
+```
+
+Yet the startup/readiness gate remains blocked:
+
+```text
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+STARTUP_SAFETY_GATE_BLOCKED
+can_resume=false
+run_loop_allowed=0
+new_entry_allowed=0
+```
+
+## Important Files to Inspect
+
+Inspect the repository directly. At minimum, review:
 
 ```text
 src/bithumb_bot/position_authority_state.py
@@ -47,306 +104,615 @@ src/bithumb_bot/position_authority_repair.py
 src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/lifecycle.py
 src/bithumb_bot/db_core.py
+src/bithumb_bot/dust.py
+src/bithumb_bot/lot_model.py
 tests/test_position_authority_recovery_state.py
+tests/test_recovery_restart_regression.py
+tests/test_trade_lifecycle.py
+tests/test_dust.py
+scripts/codex_request.txt
 ```
 
-Specific code paths to inspect:
+## Current High-Priority Hypotheses
 
-1. `build_position_authority_assessment`
-2. `_partial_close_residual_state_converged`
-3. `build_position_authority_rebuild_preview`
-4. `apply_position_authority_rebuild`
-5. lifecycle generation and SELL matching in `lifecycle.py`
-6. runtime resume gate classification in `runtime_readiness.py`
+Treat these as hypotheses, not conclusions. Verify or falsify each.
 
-The current suspected problematic pattern is conceptually:
+### Hypothesis A: Partial-close residual convergence uses an overly strict quantity identity tolerance
 
-```python
-sell_after_qty = normalize_asset_qty(_row_float(sell_after_row, "qty"))
-expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - sell_after_qty))
-
-partial_close_residual_candidate = bool(
-    ...
-    and abs(sell_after_qty - canonical_executable_qty) <= _EPS
-    ...
-)
-
-residual_state_converged = _partial_close_residual_state_converged(
-    ...
-    expected_closed_qty=sell_after_qty,
-    ...
-)
-```
-
-This may be wrong when one SELL closes multiple entry lots. For partial-close residual reasoning, the closed quantity should likely be the target entry’s lifecycle-matched quantity, not the total later SELL quantity.
-
-Expected investigation output before coding:
-
-1. Confirm whether the repository already has helper logic to aggregate `trade_lifecycles.matched_qty` by `entry_trade_id` and `exit_trade_id`.
-2. Confirm whether that helper is currently used only in convergence validation, not in `expected_residual_qty` and candidate classification.
-3. Confirm whether existing tests cover only the case where one SELL closes one target BUY lot, and do not cover the case where one SELL closes multiple entry lots.
-4. Identify whether the production incident should be classified as:
-
-   * already converged partial-close residual state,
-   * residual normalization needed,
-   * authority correction needed,
-   * or a broader projection/authority conflict.
-5. Explain any finding that contradicts the suspected cause.
-
-Implementation priority:
-
-Design-level correctness comes first. Do not just suppress `POSITION_AUTHORITY_CORRECTION_REQUIRED`. Do not weaken startup safety gates globally. Do not make “dust-only” automatically resume if authority evidence is inconsistent.
-
-Preferred fix direction:
-
-Promote target-entry lifecycle matched quantity to first-class evidence in position authority assessment.
-
-Implement something equivalent to:
-
-```python
-target_lifecycle_matched_qty = ... # SUM(trade_lifecycles.matched_qty)
-                                  # WHERE pair=? AND entry_trade_id=?
-                                  # AND exit_trade_id IN sell_trade_ids
-
-effective_closed_qty = (
-    target_lifecycle_matched_qty
-    if target_lifecycle_matched_qty > _EPS
-    else sell_after_qty
-)
-
-expected_residual_qty = normalize_asset_qty(max(0.0, fill_qty - effective_closed_qty))
-```
-
-Then use `effective_closed_qty`, not total `sell_after_qty`, for:
-
-1. partial-close residual candidate classification,
-2. `_partial_close_residual_state_converged(... expected_closed_qty=...)`,
-3. diagnostic fields,
-4. repair preview evidence.
-
-Keep `sell_after_qty` visible as a diagnostic field, but do not use it as target-lot closed quantity when lifecycle matched evidence exists.
-
-Add explicit diagnostics to the returned assessment, such as:
+The strongest current hypothesis is that `position_authority_state.py` correctly computes target-entry lifecycle matched quantity:
 
 ```text
-sell_after_target_buy_qty
-target_lifecycle_matched_qty
-effective_closed_qty
-expected_residual_qty
-partial_close_residual_candidate
-residual_state_converged
+target_lifecycle_matched_qty = 0.0004
+effective_closed_qty = 0.0004
+expected_residual_qty = 0.00019998
 ```
 
-Testing requirements:
+but then compares the materialized residual `0.00019986` to `0.00019998` using `_EPS = 1e-12`, which is appropriate for strict identity checks but not for exchange/residual/lot-authority quantity convergence. This causes an otherwise converged partial-close dust residual to be misclassified as `needs_correction=True`.
 
-Add regression tests that reproduce the incident class.
-
-At minimum, add a test similar to:
-
-```python
-def test_partial_close_residual_uses_target_lifecycle_matched_qty_when_sell_closes_multiple_entries(...):
-    ...
-```
-
-The test should model:
+Verify by inspecting:
 
 ```text
-BUY A: executable lot 0.0004 plus possible residual
-BUY B: qty around 0.00059998, executable lot 0.0004 plus residual
-SELL: 0.00080000
-trade_lifecycles:
-  A -> SELL matched_qty=0.0004
-  B -> SELL matched_qty=0.0004
-open_position_lots:
-  B dust_tracking qty approximately 0.00019986 / 0.00019998
-  executable_lot_count=0
-  dust_tracking_lot_count=1
+_EPS usage in position_authority_state.py
+_partial_close_residual_state_converged()
+partial_close_residual_candidate classification
+target_total_qty / target_dust_qty / expected_residual_qty comparisons
+blocker construction for target_lot_qty_fill_mismatch
 ```
 
-Expected behavior should be one of these, depending on the exact fixture state:
+Expected confirmation signal:
 
-Case A, state already converged:
+A regression fixture with:
 
 ```text
-partial_close_residual_candidate=True
-residual_state_converged=True
-needs_residual_normalization=False
+BUY B fill_qty = 0.00059998
+SELL matched to B = 0.0004
+expected_residual = 0.00019998
+materialized dust row / portfolio / broker = 0.00019986
+delta = 0.00000012
+```
+
+currently falls into:
+
+```text
+partial_close_residual_candidate=false
+residual_state_converged=false
+needs_correction=true
+```
+
+when it should be either:
+
+```text
+partial_close_residual_candidate=true
+residual_state_converged=true
+needs_correction=false
 recovery_stage=RESUME_READY
-startup_reason=None
-resume_allowed=True
-resume_blockers=[]
-run_loop_allowed=True
-new_entry_allowed=True
+resume_blockers=()
+run_loop_allowed=true
+new_entry_allowed=true
 ```
 
-Case B, state not yet converged but safely repairable:
+or, if the current state is not yet converged by design:
 
 ```text
-needs_residual_normalization=True
-safe_to_normalize_residual=True
+needs_residual_normalization=true
+safe_to_normalize_residual=true
 preview.repair_mode=residual_normalization
-preview.safe_to_apply=True
-preview.recommended_command includes rebuild-position-authority --apply --yes
+preview.safe_to_apply=true
 ```
 
-Also ensure existing tests still pass, especially:
+Given the production state already has a single `dust_tracking` row, broker/portfolio/projection convergence, and a projection publication, the preferred classification is likely “already converged partial-close residual state,” not a repair-required state.
+
+Reject or weaken this hypothesis only if the production-like fixture reveals missing lifecycle evidence, missing projection publication, broker/portfolio divergence, open exposure, or another real safety issue.
+
+### Hypothesis B: Temporal SELL-after-target totals and target-entry lifecycle attribution are not fully separated
+
+Earlier suspicion was that a single SELL closing multiple BUY lots caused `sell_after_qty=0.0008` to be used as the target BUY’s closed quantity, collapsing expected residual to zero. The current code appears to have helper logic like `_load_target_lifecycle_matched_qty()` and `effective_closed_qty = target_lifecycle_matched_qty if accepted else sell_after_qty`.
+
+Verify this directly.
+
+If lifecycle attribution is already correctly used for `expected_residual_qty`, do not claim this is the primary root cause. Instead, identify any remaining places where:
 
 ```text
-test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matching
-test_partial_close_residual_normalization_replays_buy_and_sell_authority
-test_authority_correction_repairs_incident_dust_row_with_historical_sell_history
-tests around POSITION_AUTHORITY_CORRECTION_REQUIRED
-tests around fee pending + authority repair
+sell_after_qty
+sell_after_count
+sell_trade_ids
 ```
 
-Do not remove or relax tests that ensure unsafe authority conflicts remain blocked.
+are still treated as authority evidence rather than diagnostics.
 
-Broader design review:
+Authority decisions should use target-entry lifecycle attribution when available. Total later SELL quantity should remain visible for diagnostics, but it should not by itself block a partial-close residual state that has valid target lifecycle evidence and converged projections.
 
-After fixing the immediate bug, inspect whether this incident reveals deeper design flaws. Evaluate these hypotheses explicitly:
+### Hypothesis C: State authority is too distributed and the truth hierarchy is not enforced strongly enough
 
-Hypothesis 1:
-`position_authority_state.py` conflates temporal SELL-after-target totals with target-entry lifecycle attribution.
+Readiness currently uses many sources:
 
-Verification:
-Compare all uses of `sell_after_qty`, `sell_after_count`, `sell_trade_ids`, and lifecycle matched quantities. Identify which fields are temporal diagnostics and which fields are authority evidence.
+```text
+orders
+fills
+trades
+trade_lifecycles
+open_position_lots
+portfolio
+broker snapshots
+repair records
+projection publications
+runtime state
+reconcile metadata
+```
 
-Hypothesis 2:
-State authority is too distributed across `trades`, `fills`, `orders`, `open_position_lots`, `trade_lifecycles`, `portfolio`, broker snapshots, repair records, and projection publications.
+The intended hierarchy seems to be:
 
-Verification:
-Map the truth hierarchy used by recovery and readiness. Identify where a derived projection can override or conflict with event-sourced lifecycle truth. Determine whether `open_position_lots` and `trade_lifecycles` are consistently treated as derived projections or sometimes as authoritative sources.
+```text
+orders/fills/trades = immutable or near-immutable event source
+trade_lifecycles = attribution projection
+open_position_lots = executable/dust authority materialized projection
+portfolio/broker = current balance attestation
+repair records = historical operator evidence, not current-state proof
+projection publications = current-state attestation
+runtime_readiness = final policy classifier
+```
 
-Hypothesis 3:
-`rebuild-position-authority` has grown into a multi-purpose repair command rather than a clear state transition.
+Verify whether the code actually enforces this hierarchy, or whether derived projections and event-sourced evidence are mixed into a single `semantic_contract_mismatch` without enough typed explanation.
 
-Verification:
-List all repair modes selected by `build_position_authority_rebuild_preview`, including `correction`, `residual_normalization`, `portfolio_projection_repair`, `full_projection_rebuild`, and `rebuild`. Evaluate whether preview output gives a deterministic, machine-readable next action with enough evidence and postconditions.
+This task should not redesign the whole system, but any immediate fix should move the repository toward a clearer truth hierarchy.
 
-Hypothesis 4:
-Bithumb fee/fill detail incompleteness is forcing normal live operation through recovery paths too often.
+### Hypothesis D: `rebuild-position-authority` is overloaded and weakens operability
 
-Verification:
-Inspect how fee pending observations and repairs materialize trades, fills, lots, and lifecycle projections. Identify whether provisional vs authoritative fills are cleanly separated. Do not attempt to solve all fee design issues in this PR unless needed for the incident fix, but document any structural risk.
+`build_position_authority_rebuild_preview()` appears to multiplex multiple repair modes:
 
-Scope control:
+```text
+correction
+residual_normalization
+portfolio_projection_repair
+full_projection_rebuild
+rebuild
+```
 
-This task must include the immediate correctness fix and regression tests.
+The production incident showed confusing operator behavior: full projection rebuild was previewed, but it returned `safe_to_apply=0` and `full_projection_rebuild_not_required`, while the ordinary path still reported `AUTHORITY_CORRECTION_PENDING`.
 
-This task should include small observability improvements if they are low-risk:
+Verify whether each repair mode has a deterministic, machine-readable:
 
-* expose `target_lifecycle_matched_qty`
-* expose `effective_closed_qty`
-* expose why lifecycle evidence was or was not accepted
-* make preview/recovery output more actionable for this incident class
+```text
+precondition
+safe_to_apply
+eligibility_reason
+operator_next_action
+recommended_command
+postcondition
+```
 
-This task should not perform a broad CLI redesign unless it is small and necessary. Instead, document longer-term design changes in the final report.
+Do not perform a broad CLI redesign unless it is small and necessary for this fix. Prefer to improve preview diagnostics and final reporting now, and document larger CLI separation as follow-up.
+
+### Hypothesis E: Fee/fill incompleteness pushes normal live operation into recovery paths too often
+
+This incident involved fee/fill repair history, but the latest SELL fee was known:
+
+```text
+latest SELL fee = 37.11 KRW
+active fill accounting issue count = 0
+broker/local/projection converged
+```
+
+Do not expand the fix into a full fee subsystem rewrite. However, inspect whether provisional fee/fill handling can combine with authority repair to produce fragile states. Document structural risk and add scenario coverage if low-risk.
+
+## Non-Negotiable Safety Constraints
 
 Do not:
 
-* bypass startup safety gates,
-* classify all dust as harmless,
-* make broker/local quantity convergence alone sufficient for resume,
-* delete repair evidence,
-* mutate live DB assumptions,
-* add fragile tests that only match exact production row IDs,
-* hide the distinction between total later SELL qty and target matched SELL qty.
+```text
+bypass startup safety gates
+suppress POSITION_AUTHORITY_CORRECTION_REQUIRED globally
+make all dust-only positions resume-safe
+make broker/local convergence alone sufficient for resume
+delete repair evidence
+mutate production DB assumptions in tests
+add fragile tests that depend on exact production row IDs
+hide the distinction between total later SELL qty and target matched SELL qty
+weaken true unsafe authority conflict tests
+```
 
-Recommended implementation sequence:
+The fix must preserve safety. A dust-only state is resume-safe only when the authority evidence, lifecycle attribution, projection state, and broker/portfolio evidence meet explicit conditions.
 
-1. Run the relevant tests before changes if feasible:
+## Preferred Design Direction
 
-   ```bash
-   uv run pytest tests/test_position_authority_recovery_state.py -q
+The immediate code change should be minimal but principled.
+
+### 1. Promote quantity-contract-aware residual comparisons
+
+Introduce a dedicated residual authority quantity tolerance or comparison policy. Do not reuse `_EPS = 1e-12` for every exchange/residual/lot-authority comparison.
+
+The tolerance must be bounded and contextual. It should be based on available contract data such as:
+
+```text
+internal_lot_size
+qty_step
+max_qty_decimals
+exchange/broker quantity precision
+broker/local reconciliation tolerance
+dust boundary
+```
+
+A starting implementation may be local to `position_authority_state.py`, but structure it so it can later become a centralized quantity comparison policy.
+
+A possible shape:
+
+```python
+def _residual_qty_tolerance(
+    *,
+    internal_lot_size: float,
+    qty_step: float = 0.0,
+    max_qty_decimals: int | None = None,
+) -> float:
+    decimal_unit = 0.0
+    if max_qty_decimals is not None and max_qty_decimals > 0:
+        decimal_unit = 10 ** (-int(max_qty_decimals))
+
+    return max(
+        _EPS,
+        decimal_unit * 20,
+        abs(float(qty_step or 0.0)) * 0.002,
+        abs(float(internal_lot_size or 0.0)) * 0.001,
+        2e-7,
+    )
+```
+
+Do not blindly copy this if the repository already has a better quantity policy. Verify existing helpers first. If you use a constant like `2e-7`, document why it is bounded, why it covers the observed `1.2e-7 BTC` residual delta, and why it cannot accidentally grant executable authority for a full internal lot.
+
+### 2. Apply the residual tolerance only to residual convergence, not to all authority checks
+
+Use the residual tolerance for comparisons like:
+
+```text
+abs(target_total_qty - expected_residual_qty)
+abs(target_dust_qty - expected_residual_qty)
+abs(lifecycle_matched_qty - expected_closed_qty)
+```
+
+when and only when the context is a partial-close residual candidate or convergence check with lifecycle evidence.
+
+Do not use this tolerance to authorize executable exposure. Do not use it to hide missing lifecycle rows, missing broker evidence, open exposure conflicts, or projection divergence.
+
+### 3. Keep lifecycle matched quantity as first-class authority evidence
+
+Ensure partial-close residual logic uses:
+
+```text
+target_lifecycle_matched_qty
+lifecycle_matched_qty_accepted
+effective_closed_qty
+expected_residual_qty
+```
+
+for target-entry residual reasoning.
+
+Keep `sell_after_target_buy_qty` visible as a diagnostic field, but do not let total later SELL qty override valid target lifecycle attribution.
+
+### 4. Reclassify the production-like state correctly
+
+For the production-like fixture:
+
+```text
+target BUY fill_qty = 0.00059998
+target lifecycle matched closed qty = 0.0004
+expected residual = 0.00019998
+actual dust / portfolio / broker / projected qty = 0.00019986
+open_exposure_qty = 0
+executable_lot_count = 0
+dust_tracking_lot_count = 1
+projection_converged = true
+broker_portfolio_converged = true
+portfolio_projection_publication_present = true
+```
+
+the expected outcome should be one of:
+
+Preferred:
+
+```text
+partial_close_residual_candidate=true
+residual_state_converged=true
+needs_residual_normalization=false
+needs_correction=false
+recovery_stage=RESUME_READY
+resume_blockers=()
+run_loop_allowed=true
+new_entry_allowed=true
+closeout_allowed=false
+open_exposure_qty=0
+sellable_executable_qty=0
+dust_tracking_qty preserved
+```
+
+Acceptable only if justified by design:
+
+```text
+needs_residual_normalization=true
+safe_to_normalize_residual=true
+preview.repair_mode=residual_normalization
+preview.safe_to_apply=true
+recommended_command includes rebuild-position-authority --apply --yes
+```
+
+It must not remain:
+
+```text
+needs_correction=true
+safe_to_correct=false
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+```
+
+unless you can prove missing or contradictory evidence.
+
+## Required Implementation Work
+
+1. Inspect relevant code paths:
+
+   * `build_position_authority_assessment`
+   * `_partial_close_residual_state_converged`
+   * `_load_target_lifecycle_matched_qty`
+   * `build_position_authority_rebuild_preview`
+   * `apply_position_authority_rebuild`
+   * lifecycle generation / SELL matching in `lifecycle.py`
+   * runtime gate classification in `runtime_readiness.py`
+   * quantity normalization in `db_core.py`
+   * dust/lot thresholds in `dust.py` and `lot_model.py`
+
+2. Add a production-like regression test before changing behavior.
+
+   The test must model:
+
+   ```text
+   BUY A: executable lot 0.0004
+   BUY B: fill_qty 0.00059998
+   SELL: 0.00080000
+   trade_lifecycles:
+     A -> SELL matched_qty=0.0004
+     B -> SELL matched_qty=0.0004
+   materialized residual for B:
+     dust_tracking qty_open=0.00019986
+     executable_lot_count=0
+     dust_tracking_lot_count=1
+   portfolio/broker/projection qty:
+     0.00019986
+   expected residual from fill-lifecycle math:
+     0.00019998
+   delta:
+     0.00000012
    ```
 
-2. Add the multi-entry single-SELL regression test first and confirm it fails for the expected reason.
+   Avoid exact production row IDs. Use meaningful fixture names.
 
-3. Patch `position_authority_state.py` so target lifecycle matched quantity is used for partial-close residual authority.
+3. Confirm the test currently fails for the expected reason.
 
-4. Add or update diagnostic fields in the assessment and preview output.
+   It should fail because the state is misclassified as correction-required or not resume-ready, not because the fixture is malformed.
 
-5. Run targeted tests:
+4. Patch the authority evidence model.
 
-   ```bash
-   uv run pytest tests/test_position_authority_recovery_state.py -q
+   The fix should:
+
+   * use lifecycle matched qty as target-entry closed qty when accepted;
+   * apply residual-specific bounded tolerance to residual convergence comparisons;
+   * keep strict checks for unsafe conditions;
+   * avoid turning broker/local convergence into a universal resume override;
+   * preserve blocker behavior for real authority conflicts.
+
+5. Improve observability if low-risk.
+
+   Ensure assessment/preview/recovery outputs expose:
+
+   * `sell_after_target_buy_qty`
+   * `target_lifecycle_matched_qty`
+   * `lifecycle_matched_qty_accepted`
+   * `lifecycle_matched_qty_acceptance_reason`
+   * `effective_closed_qty`
+   * `expected_residual_qty`
+   * `target_residual_qty_delta`
+   * `residual_qty_tolerance`
+   * `partial_close_residual_candidate`
+   * `residual_state_converged`
+   * whether `sell_after_qty` was diagnostic-only or used as fallback authority evidence
+
+6. Strengthen tests around unsafe cases.
+
+   Add or preserve tests showing that the new tolerance does not allow resume when:
+
+   * lifecycle rows are missing;
+   * target lifecycle matched qty is zero;
+   * broker/portfolio/projection do not converge;
+   * open exposure remains but executable authority is contradictory;
+   * residual delta approaches executable lot size;
+   * other active lots make the residual ambiguous;
+   * order/fill evidence is missing;
+   * true `LOT_AUTHORITY_CONFLICT` remains unsafe.
+
+7. Do not remove existing safety tests.
+
+   Pay special attention to:
+
+   * tests around `POSITION_AUTHORITY_CORRECTION_REQUIRED`;
+   * tests around `POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED`;
+   * tests around `dust_only_remainder`;
+   * tests around fee pending + authority repair;
+   * tests around restart readiness and recovery reports.
+
+## Recommended Commands
+
+Run targeted tests before and after the change where feasible:
+
+```bash
+uv run pytest tests/test_position_authority_recovery_state.py -q
+```
+
+After the fix, run broader relevant suites:
+
+```bash
+uv run pytest tests/test_position_authority_recovery_state.py -q
+uv run pytest tests/test_recovery_restart_regression.py -q
+uv run pytest tests/test_trade_lifecycle.py -q
+uv run pytest tests/test_dust.py -q
+```
+
+If practical, run the full suite:
+
+```bash
+uv run pytest -q
+```
+
+If any safety test starts passing incorrectly or becomes weaker, stop and refine the design.
+
+## Expected Operational Behavior After Patch
+
+For the EC2 incident class, after deployment and revalidation, the live system should no longer report:
+
+```text
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+STARTUP_SAFETY_GATE_BLOCKED
+target_lot_qty_fill_mismatch as a non-repairable correction blocker
+```
+
+when the following are true:
+
+```text
+target lifecycle matched qty exists and is accepted
+effective_closed_qty matches executable lot authority
+materialized residual dust is within bounded residual tolerance
+open_exposure_qty=0
+executable_lot_count=0
+dust_tracking_lot_count=1
+broker/portfolio/projection converge
+no unresolved open orders
+no active fee pending issue
+```
+
+Expected recovery/health/restart signals:
+
+```text
+can_resume=true
+resume_allowed=1
+run_loop_allowed=1
+new_entry_allowed=1
+closeout_allowed=false
+open_exposure_qty=0
+sellable_executable_qty=0
+dust_tracking_qty=0.00019986
+terminal_state=dust_only
+POSITION_AUTHORITY_CORRECTION_REQUIRED absent
+```
+
+Do not add an automatic resume. The operator should still explicitly resume only after health/recovery/restart checks are clean.
+
+## Longer-Term Design Recommendations to Include in Final Report
+
+Do not implement all long-term items unless they are small and directly support the incident fix. But evaluate and document them clearly.
+
+1. Centralize quantity comparison policy.
+
+   Replace scattered `_EPS=1e-12` usage with explicit comparison classes:
+
+   ```text
+   strict_identity
+   exchange_qty
+   residual_dust
+   portfolio_reconcile
+   lot_authority
+   lifecycle_match
    ```
 
-6. If available, run broader tests:
+2. Make truth hierarchy explicit.
 
-   ```bash
-   uv run pytest -q
+   Treat:
+
+   * `orders/fills/trades` as event source;
+   * `trade_lifecycles` as attribution projection;
+   * `open_position_lots` as executable/dust authority materialized projection;
+   * `portfolio/broker` as balance attestation;
+   * repair records as historical operator evidence;
+   * projection publications as current-state attestation.
+
+3. Introduce typed authority verdicts.
+
+   Consider replacing loose dict booleans with a typed verdict model:
+
+   ```text
+   VERDICT_RESUME_READY_DUST_RESIDUAL
+   VERDICT_RESIDUAL_NORMALIZATION_REQUIRED_SAFE
+   VERDICT_CORRECTION_REQUIRED_UNSAFE
+   VERDICT_PROJECTION_REBUILD_REQUIRED
+   VERDICT_PROJECTION_CONVERGED_BUT_SEMANTIC_MISMATCH
+   VERDICT_INSUFFICIENT_EVIDENCE
    ```
 
-7. Review whether the fix changes behavior of true unsafe authority conflicts. If any existing safety test starts passing incorrectly, stop and refine.
+   Each verdict should include:
 
-Final report format:
+   ```text
+   authority_evidence
+   projection_evidence
+   broker_portfolio_evidence
+   repairability
+   operator_next_action
+   postcondition
+   machine_readable_blockers
+   ```
 
-Return a concise but complete report with these sections:
+4. Separate diagnostic, planning, and mutation commands.
 
-1. Summary
+   `rebuild-position-authority` currently multiplexes too many modes. Longer term, consider:
 
-   * What was changed.
-   * What was intentionally not changed.
+   ```text
+   authority diagnose --json
+   authority plan --json
+   authority apply --plan-id ...
+   ```
 
-2. Verified Root Cause
+5. Add real incident scenario fixtures.
 
-   * State which hypotheses were confirmed, weakened, or rejected.
-   * Include the specific code path that caused the incident.
+   Add reusable fixtures for:
 
-3. Design Rationale
+   ```text
+   BUY fee missing -> repair -> open exposure
+   SELL fee missing -> repair -> dust-only resume
+   one SELL closes one BUY
+   one SELL closes multiple BUYs
+   production-like residual delta after partial close
+   stale dust projection
+   broker/local converged but lifecycle missing
+   lifecycle converged but projection publication missing
+   fee pending + authority correction simultaneous
+   dust above exchange minimum but below internal lot boundary
+   projection converged but semantic authority mismatch
+   ```
 
-   * Explain why target lifecycle matched quantity is the correct authority for partial-close residuals.
-   * Explain why total SELL-after-target quantity remains diagnostic only.
+## Final Report Format
 
-4. Tests
+Return a concise but complete final report with these sections:
 
-   * List new tests.
-   * List existing tests that were relevant.
-   * Include command results.
+### 1. Summary
 
-5. Operational Impact
+* What was changed.
+* What was intentionally not changed.
+* Whether the startup safety gate was preserved.
 
-   * Expected behavior for the EC2 incident after patch:
+### 2. Verified Root Cause
 
-     ```text
-     rebuild-position-authority preview should either report residual_normalization safe_to_apply=1
-     or classify current state as RESUME_READY if lifecycle and dust projection are already converged.
-     ```
-   * Expected post-repair/resume signals:
+* State which hypotheses were confirmed, weakened, or rejected.
+* Include the precise code path that caused the incident.
+* Explicitly state whether the issue was lifecycle attribution, residual tolerance, truth hierarchy, repair command ambiguity, fee/fill incompleteness, or a combination.
 
-     ```text
-     POSITION_AUTHORITY_CORRECTION_REQUIRED absent
-     can_resume=true
-     run_loop_allowed=1
-     new_entry_allowed=1
-     open_exposure_qty=0
-     dust_tracking_qty preserved
-     ```
+### 3. Design Rationale
 
-6. Remaining Structural Risks
+* Explain why target lifecycle matched quantity is the correct authority for partial-close residuals.
+* Explain why total SELL-after-target quantity remains diagnostic-only when lifecycle evidence exists.
+* Explain why the residual tolerance is bounded and does not authorize executable exposure.
+* Explain why broker/portfolio convergence alone is insufficient.
 
-   * State authority hierarchy concerns.
-   * Repair command overloading.
-   * Fee pending and provisional fill risk.
-   * Projection lineage / generation ID gap.
+### 4. Tests
 
-7. Follow-up Recommendations
+* List new tests.
+* List updated tests.
+* List existing safety tests that were preserved.
+* Include exact command results.
 
-   * Separate diagnostic vs repair commands.
-   * Make repair previews machine-readable.
-   * Treat `open_position_lots` and `trade_lifecycles` explicitly as derived projections from immutable events.
-   * Add scenario fixtures for real recovery incidents:
+### 5. Operational Impact
 
-     * BUY fee missing -> repair -> open exposure
-     * SELL fee missing -> repair -> dust-only resume
-     * one SELL closes one BUY
-     * one SELL closes multiple BUYs
-     * stale dust projection
-     * broker/local converged but lifecycle missing
-     * lifecycle converged but publication missing
-     * fee pending + authority correction simultaneous
-     * dust above exchange minimum but below internal lot boundary
+* Expected behavior for the EC2 incident after patch.
+* Expected `recovery-report`, `health`, and `restart-checklist` signals.
+* State that live resume still requires explicit operator action after clean checks.
 
-Make the final code change minimal but principled: fix the authority evidence model for this incident class, preserve safety, and leave the repository more testable and operable than before.
+### 6. Remaining Structural Risks
+
+* State authority hierarchy concerns.
+* Repair command overloading.
+* Fee pending/provisional fill risk.
+* Projection lineage / generation ID gap.
+* Any remaining ambiguity in residual tolerance policy.
+
+### 7. Follow-up Recommendations
+
+* Centralize quantity comparison policy.
+* Make authority verdicts typed.
+* Separate diagnostic/plan/apply commands.
+* Add real incident fixtures.
+* Improve machine-readable recovery outputs.
+
+Keep the code change minimal but principled. Fix the authority evidence model for this incident class, preserve safety, improve regression coverage, and leave the repository more testable and operable than before.
 
