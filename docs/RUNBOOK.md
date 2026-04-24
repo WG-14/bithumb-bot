@@ -203,6 +203,12 @@ If `recovery-report`, `health`, or `audit-ledger` shows either:
 then treat `open_position_lots` as a disposable projection, not as independent truth.
 Do not resume or manually edit the table.
 
+Before any live DB mutation:
+
+- Back up the live DB first using the normal backup flow.
+- Do not apply any repair unless the preview shows `safe_to_apply=1`.
+- The command must remain dry-run unless `--apply --yes` is provided.
+
 Allowed:
 
 - `uv run bithumb-bot rebuild-position-authority --full-projection-rebuild`
@@ -221,6 +227,27 @@ Forbidden:
 - `uv run bithumb-bot run`
 - `uv run bithumb-bot resume`
 - manual SQL `DELETE` / `UPDATE` against `open_position_lots`
+
+Operator sequence:
+
+```bash
+./scripts/backup_sqlite.sh
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
+# apply only if safe_to_apply=1
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes --note "operator-reviewed projection rebuild"
+MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot recovery-report
+MODE=live uv run bithumb-bot restart-checklist
+MODE=live uv run bithumb-bot health
+```
+
+Do not resume live until all of the following are true:
+
+- `can_resume=true`
+- `safe_to_resume=1`
+- `live_ready=1`
+- `lot_projection_converged=1`
+- the startup safety gate is not blocked
 
 ## Post-Change Validation
 

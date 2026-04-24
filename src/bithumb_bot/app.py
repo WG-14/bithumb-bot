@@ -3787,11 +3787,35 @@ def cmd_rebuild_position_authority(
         if preview.get("repair_mode") == "full_projection_rebuild":
             print(
                 "  "
+                f"projection_converged={1 if bool(preview.get('projection_converged')) else 0} "
+                f"projected_total_qty={float(preview.get('projected_total_qty') or 0.0):.12f} "
+                f"portfolio_qty={float(preview.get('portfolio_qty') or 0.0):.12f} "
+                f"projected_qty_excess={float(preview.get('projected_qty_excess') or 0.0):.12f} "
+                f"lot_row_count={int(preview.get('lot_row_count') or 0)} "
+                f"other_active_qty={float(preview.get('other_active_qty') or 0.0):.12f}"
+            )
+            print(
+                "  "
+                f"portfolio_projection_publication_present="
+                f"{1 if bool(preview.get('portfolio_projection_publication_present')) else 0} "
+                "portfolio_projection_repair_event_status="
+                f"{preview.get('portfolio_projection_repair_event_status') or 'none'} "
+                f"needs_full_projection_rebuild={1 if bool(preview.get('needs_full_projection_rebuild')) else 0}"
+            )
+            print(
+                "  "
                 f"accounting_projection_ok={1 if bool(preview.get('accounting_projection_ok')) else 0} "
                 f"broker_portfolio_converged={1 if bool(preview.get('broker_portfolio_converged')) else 0} "
                 f"unresolved_open_order_count={int(preview.get('unresolved_open_order_count') or 0)} "
                 f"pending_submit={int(preview.get('pending_submit_count') or 0)} "
-                f"submit_unknown={int(preview.get('submit_unknown_count') or 0)}"
+                f"submit_unknown={int(preview.get('submit_unknown_count') or 0)} "
+                f"unresolved_fee_pending={1 if bool(preview.get('unresolved_fee_pending')) else 0}"
+            )
+            gate_report = preview.get("full_projection_rebuild_gate_report") or {}
+            print(
+                "  "
+                "full_projection_rebuild_gate_reasons="
+                f"{'|'.join(str(item) for item in gate_report.get('reasons') or []) or 'none'}"
             )
         print(f"  next_required_action={preview['next_required_action']}")
         print(f"  recommended_command={preview['recommended_command']}")

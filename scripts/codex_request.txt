@@ -1,486 +1,418 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+Codex task for `WG-14/bithumb-bot`
 
-Your task is not to apply a one-off workaround for the latest EC2 incident. Treat the EC2 observations below as a starting hypothesis, not as established truth. Inspect the repository directly, verify or falsify the hypotheses, and implement a structural fix that makes the live trading experiment system more deterministic, recoverable, observable, and operationally safe.
+You are working directly in the `WG-14/bithumb-bot` repository. Do not turn this into a generic cleanup. Treat this as a live-mode recovery blocker with a narrowly scoped suspected bug in position authority readiness classification.
 
-## Incident starting point
+## Core problem statement
 
-A live EC2 runtime reached a startup safety block:
+A live KRW-BTC bot instance is blocked from safe resume even though the external account evidence and local accounting evidence converge.
 
-```text
-STARTUP_SAFETY_GATE_BLOCKED
-POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
-can_resume=false
-resume_safety=unsafe
-```
-
-Observed runtime state:
+Observed live facts from the operator session:
 
 ```text
-broker / Bithumb app BTC balance = 0.00099986 BTC
-portfolio_qty                  = 0.00099986 BTC
-open_position_lots SUM(qty_open)= 0.001788 BTC
-difference                     = 0.00078814 BTC
+broker_qty = 0.00099986
+portfolio_qty = 0.00099986
+accounting_projection_ok = true
+broker_portfolio_converged = true
+unresolved_open_order_count = 0
+pending_submit_count = 0
+submit_unknown_count = 0
+unresolved_fee_pending = false
 ```
 
-`open_position_lots` contained 14 `dust_tracking` rows:
+The mobile Bithumb app shows:
 
 ```text
-position_state=dust_tracking
-rows=14
-qty_sum=0.001788
-executable_lots=0
-dust_lots=14
-internal_lot_size=0.0004
+KRW = 284,169
+BTC = 0.00099986
+last BUY qty = 0.00059998 BTC
+last BUY fee = 27.91 KRW
 ```
 
-Trades table summary:
+The local DB agrees with those values:
 
 ```text
-BUY  count=15 qty_sum=0.00318798 fee_sum=59.0
-SELL count=10 qty_sum=0.0013     fee_sum=17.73
+portfolio.asset_qty = 0.00099986
+portfolio.cash_krw = 284169.87556
+
+latest trade:
+id = 25
+side = BUY
+client_order_id = live_1776905580000_buy_ae55843c
+fill_id = C0101000000983482756
+qty = 0.00059998
+fee = 27.91
+asset_after = 0.00099986
+cash_after = 284169.87556
 ```
 
-The most recent BUY was correctly accounted:
+However, the materialized lot projection is stale/diverged:
 
 ```text
-client_order_id=live_1776905580000_buy_ae55843c
-fill_id=C0101000000983482756
-qty=0.00059998
-price=116303000
-fee=27.91
-accounting_status=accounting_complete
+open_position_lots:
+lot_count = 14
+sum(qty_open) = 0.00178800
+executable_lots = 0
+dust_lots = 14
 ```
 
-`audit-ledger` reported accounting replay and portfolio as matching, while `health` and `recovery-report` still blocked startup because the lot-native materialized projection did not converge to portfolio holdings.
+`position_authority_projection_publications` is empty, so there is no current-state attestation proving the portfolio-anchored projection. `position_authority_repairs` contains historical repair evidence, but the readiness model explicitly treats repair events as historical evidence, not current-state proof.
 
-Do not assume the direct cause is simply “14 stale dust rows.” Treat that as an observed symptom. Look for the higher-level structural cause.
+Current CLI behavior:
 
-## Current working diagnosis to verify, not blindly accept
+```text
+MODE=live uv run bithumb-bot rebuild-position-authority
 
-The strongest current hypothesis is:
+needs_rebuild=1
+safe_to_apply=0
+stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
+repair_mode=rebuild
+eligibility_reason=recovery_stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING, existing_lot_rows=14, accounted_net_qty_portfolio_mismatch=buy_qty=0.003187980000,sell_qty=0.001300000000,net_qty=0.001887980000,portfolio_qty=0.000999860000
+next_required_action=review_position_authority_evidence
+```
 
-> `open_position_lots` is intended to behave as a rebuildable materialized projection, but the implementation and recovery path currently allow it to behave like a long-lived source of truth. Existing repair logic appears centered on a latest/target trade, so historical dust fragmentation can survive as current executable/dust authority and keep startup blocked even when broker balance and accounting replay agree.
+And:
 
-You must verify this against the repository code.
+```text
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
 
-Important files and concepts to inspect:
+repair_mode=full_projection_rebuild
+safe_to_apply=0
+eligibility_reason=full_projection_rebuild_not_required
+```
+
+The full projection gate report shows the safety evidence is otherwise good; the blocker is effectively only `full_projection_rebuild_not_required`.
+
+The suspected bug is that `needs_full_projection_rebuild=false` is being derived even when the projection is clearly non-converged and the only stale state is fragmented historical materialized lots.
+
+## Hypothesis to verify, not assume
+
+The likely faulty logic is in `src/bithumb_bot/position_authority_state.py` around `historical_fragmentation_projection_drift`:
+
+```python
+historical_fragmentation_projection_drift = bool(
+    not bool(projection_convergence.get("converged"))
+    and "historical_fragmentation" in diagnostic_flags
+    and lot_row_count > 1
+    and projected_total_qty > portfolio_qty + _EPS
+    and not projection_repair_covers_excess
+    and other_active_qty > _EPS
+)
+```
+
+In the observed state:
+
+```text
+projection_converged = false
+lot_row_count = 14
+projected_total_qty = 0.001788
+portfolio_qty = 0.00099986
+other_active_qty = 0.001788
+portfolio_projection_publication_present = false
+portfolio_projection_repair_event_status = recorded_but_not_current_state_proof
+portfolio_projection_repair_recorded = true
+projected_qty_excess = 0.00078814
+```
+
+But `diagnostic_flags` contains only:
+
+```text
+["projection_diverged"]
+```
+
+So `historical_fragmentation_projection_drift` remains false, and the safe official rebuild path is blocked as “not required.”
+
+The hypothesis is: this is a classification blind spot. Projection is non-converged due to stale fragmented materialized lots, but the full projection rebuild path is gated on the presence of a pre-existing `historical_fragmentation` diagnostic flag that is not set for this state.
+
+## Non-negotiable constraints
+
+1. Do not manually edit the production DB as the primary fix.
+2. Prefer a code-level design correction that makes the official CLI recovery path work.
+3. Preserve the existing safety model: full projection rebuild must still require broker/portfolio convergence, accounting projection convergence, no remote/open/unresolved orders, no pending submit, no submit unknown, and no unresolved fee-pending state.
+4. Do not weaken safety gates to force live resume.
+5. Do not auto-resume or auto-run live trading.
+6. Do not introduce a broad “if projection diverged then rebuild” shortcut. The scope must be narrower: materialized projection excess with multiple stale lots, no current publication, and externally/accounting-anchored portfolio truth.
+7. Keep the hypothesis falsifiable. If the repo already has a more appropriate intended mechanism, use that instead and explain why.
+
+## Required investigation
+
+Work in the repo and inspect these areas first:
 
 ```text
 src/bithumb_bot/position_authority_state.py
 src/bithumb_bot/position_authority_repair.py
 src/bithumb_bot/lifecycle.py
-src/bithumb_bot/db_core.py
 src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/recovery.py
-src/bithumb_bot/reporting.py
-src/bithumb_bot/app.py
-docs/runtime-data-policy.md
-docs/storage-layout.md
+src/bithumb_bot/db_core.py
+tests/test_position_authority_recovery_state.py
+tests/test_operator_commands.py
 docs/RUNBOOK.md
+docs/runtime-data-policy.md
 ```
 
-Pay special attention to:
+Specifically verify:
+
+1. How `diagnostic_flags` gets `historical_fragmentation`.
+2. Why the observed state gets only `projection_diverged`.
+3. Whether `portfolio_projection_repair_event_status == recorded_but_not_current_state_proof` should participate in detecting full projection rebuild need.
+4. Whether `position_authority_projection_publications` is intentionally the current-state attestation required after full rebuild.
+5. Whether `_apply_full_projection_rebuild()` already has the correct postcondition behavior:
+
+   * rebuild lifecycle projections from trades,
+   * replace with portfolio-anchored projection,
+   * assert convergence,
+   * record `position_authority_projection_publication`,
+   * record `position_authority_repair`.
+6. Whether the full projection rebuild gate already refuses unsafe states:
+
+   * missing broker evidence,
+   * broker/portfolio mismatch,
+   * remote open orders,
+   * unresolved orders,
+   * recovery-required orders,
+   * pending submit,
+   * submit unknown,
+   * unresolved fee pending,
+   * accounting replay mismatch.
+
+## Desired design behavior
+
+When the state is:
 
 ```text
-build_lot_projection_convergence
-build_position_authority_assessment
-build_position_authority_rebuild_preview
-apply_position_authority_rebuild
-apply_portfolio_anchored_projection_repair_basis
-rebuild_lifecycle_projections_from_trades
-summarize_position_lots
-position_authority_projection_publications
-position_authority_repairs
-open_position_lots validation triggers
+projection_converged = false
+projected_total_qty > portfolio_qty
+lot_row_count > 1
+other_active_qty > 0
+projection_repair_covers_excess = false
+portfolio_projection_publication_present = false
+broker_portfolio_converged = true
+accounting_projection_ok = true
+no open/unresolved/pending/submit_unknown/recovery_required orders
+no unresolved fee pending
 ```
 
-## Hypotheses to verify or falsify
+and the projection divergence is from stale fragmented materialized `open_position_lots`, then:
 
-### Hypothesis 1
+```text
+needs_full_projection_rebuild = true
+repair_action_state = inspect_only or safe_to_apply only after full rebuild gate passes
+rebuild-position-authority --full-projection-rebuild preview should report safe_to_apply=1 only if all full rebuild gates pass
+recommended_command should be rebuild-position-authority --full-projection-rebuild --apply --yes
+```
 
-`open_position_lots` is modeled as a rebuildable materialized projection, but in practice stale rows can persist across repairs and become current startup authority.
+The normal non-full rebuild path must remain blocked for this case if it cannot safely interpret the existing lots.
 
-Verification:
+## Suggested implementation direction
 
-* Inspect code and docs for the intended role of `open_position_lots`.
-* Confirm whether startup readiness depends directly on `SUM(open_position_lots.qty_open)`.
-* Determine whether there is a deterministic full rebuild path from canonical event/accounting/broker/portfolio state.
-* Determine whether stale historical fragments can survive legitimate repair flows.
+Do not blindly apply this patch if a better repo-native design exists, but evaluate this direction carefully.
 
-Falsification condition:
+Introduce an explicit concept such as:
 
-* There is already a correct, transactional, full-projection rebuild path that can rebuild `open_position_lots` from canonical truth and converge to portfolio/broker holdings, and the observed incident would be impossible unless EC2 was running stale code or had local-only corruption.
+```python
+projection_excess_with_materialized_fragmentation = bool(
+    not bool(projection_convergence.get("converged"))
+    and lot_row_count > 1
+    and projected_total_qty > portfolio_qty + _EPS
+    and not projection_repair_covers_excess
+    and other_active_qty > _EPS
+    and not portfolio_projection_publication_present
+)
+```
 
-### Hypothesis 2
+Then make `historical_fragmentation_projection_drift` true only for a narrow, evidence-rich subset, for example when:
 
-Current repair logic is too target-trade centric and does not treat historical fragmentation as a first-class incident class.
+```python
+projection_excess_with_materialized_fragmentation
+and (
+    "historical_fragmentation" in diagnostic_flags
+    or portfolio_projection_repair_recorded
+    or portfolio_projection_repair_event_status == "recorded_but_not_current_state_proof"
+)
+```
 
-Verification:
+If this condition is met and `historical_fragmentation` is not already in `diagnostic_flags`, append a diagnostic flag or add a more precise new flag such as `materialized_projection_fragmentation`. Choose the naming that best preserves existing semantics.
 
-* Inspect whether `build_position_authority_assessment()` chooses the latest BUY / target trade and classifies incidents around that target.
-* Inspect whether `apply_position_authority_rebuild()` deletes/replays only rows for one `entry_trade_id` in key paths.
-* Check whether `other_active_qty` and historical fragmentation are only diagnostic, or can drive a safe full rebuild action.
+Be careful: diagnostic flag naming affects tests and operator reports. Prefer adding more explicit observability rather than hiding the condition.
 
-Falsification condition:
+## Required tests
 
-* The current implementation already promotes historical fragmentation to a safe full-projection rebuild mode and has tests proving it.
+Add or update tests. Do not rely only on manual live logs.
 
-### Hypothesis 3
+At minimum, create a fixture that models:
 
-Accounting replay and lot-authority projection are separate truth layers, but there is no strong enough invariant tying them together in audit, recovery, and restart readiness.
+```text
+portfolio_qty = 0.00099986
+broker_qty = 0.00099986
+accounting replay qty = 0.00099986
+open_position_lots = 14 dust_tracking rows summing 0.001788
+latest accounted BUY fill = 0.00059998
+no open orders
+no unresolved orders
+no pending submit
+no submit unknown
+no recovery required orders
+no unresolved fee pending
+position_authority_repairs has a portfolio projection repair record
+position_authority_projection_publications is empty
+```
 
-Verification:
+Expected pre-apply behavior:
 
-* Inspect `audit-ledger`, `health`, `recovery-report`, `restart-checklist`, and runtime readiness logic.
-* Determine whether `audit-ledger OK` can coexist with lot projection non-convergence.
-* Determine whether operator-facing reports clearly separate:
+```text
+build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+  repair_mode == "full_projection_rebuild"
+  safe_to_apply == True
+  action_state == "safe_to_apply_now"
+  eligibility_reason == "full projection rebuild applicable"
+```
 
-  * accounting projection health
-  * broker/portfolio health
-  * lot authority projection health
-  * live readiness
+Expected apply behavior:
 
-Falsification condition:
+```text
+apply_position_authority_rebuild(conn, full_projection_rebuild=True, note=...)
+  records a position_authority_projection_publication
+  records a position_authority_repair
+  replaces stale materialized open_position_lots with a portfolio-anchored projection
+  post_repair_projection_convergence.converged == True
+```
 
-* Audit/restart tooling already treats lot projection convergence as a first-class invariant and reports it in a way that prevents operator confusion.
+Expected post-apply readiness behavior:
 
-### Hypothesis 4
+```text
+lot_projection_converged == True
+portfolio_projection_publication_present == True
+portfolio_projection_publication_status == "published" or the repo’s equivalent current-state-attested status
+needs_full_projection_rebuild == False
+STARTUP_SAFETY_GATE_BLOCKED cleared, assuming no other blockers
+```
 
-Repair events and current-state attestations are conceptually separated in the code, but the operational flow does not enforce this distinction strongly enough.
+Add negative tests that prove full projection rebuild remains unsafe when any of these are true:
 
-Verification:
+```text
+broker_qty != portfolio_qty
+accounting replay qty != portfolio_qty
+remote open orders exist
+unresolved local open orders exist
+pending submit exists
+submit unknown exists
+recovery_required orders exist
+unresolved fee pending exists
+```
 
-* Inspect `position_authority_repairs` and `position_authority_projection_publications`.
-* Confirm whether a historical repair event can exist while current `open_position_lots` is non-converged.
-* Determine whether post-repair state is attested and revalidated as current state, not just logged as historical repair evidence.
+Also add a test that a simple `projection_diverged` state without multiple stale materialized lots and without repair/publication context does not become automatically full-rebuildable.
 
-Falsification condition:
+## CLI and observability requirements
 
-* Every repair event is atomically paired with current-state projection publication and postcondition validation, and no later operation can invalidate it without a clear incident class.
+Improve preview output if necessary so an operator can see why the full rebuild is or is not available. Include fields like:
 
-### Hypothesis 5
+```text
+projection_converged
+projected_total_qty
+portfolio_qty
+projected_qty_excess
+lot_row_count
+other_active_qty
+portfolio_projection_publication_present
+portfolio_projection_repair_event_status
+needs_full_projection_rebuild
+full_projection_rebuild_gate_report.reasons
+```
 
-External/manual state changes are not modeled strongly enough as first-class events that atomically update both accounting and lot-authority projection.
+Do not require direct SQLite inspection to understand this state.
 
-Verification:
+If `safe_to_apply=false`, the preview must say exactly which gate blocks it. Avoid misleading `full_projection_rebuild_not_required` when the projection is non-converged and stale lots are present.
 
-* Inspect manual flat repair, external position adjustment, fee pending repair, fee gap repair, and any broker reconciliation paths.
-* Determine whether these flows update accounting/portfolio without always rebuilding or converging lot-authority projection.
-* Determine whether a fee/manual/external repair can leave `open_position_lots` stale.
+## Recovery and rollback requirements
 
-Falsification condition:
+Before any live DB mutation, the operator runbook must say to back up the DB.
 
-* All such flows atomically update accounting, portfolio, lot projection, repair evidence, and projection publication, with postcondition rollback on failure.
+Do not make the command mutate state unless `--apply --yes` is provided.
 
-## Design priority
+The apply path must remain transactional and rollback on postcondition failure.
 
-Do not start with a symptom patch such as “delete the 14 rows.” That is not acceptable as the primary solution.
+Postconditions must include:
 
-The preferred design direction is:
+```text
+projection convergence to portfolio_qty
+publication recorded
+repair recorded
+no unresolved/open order state introduced
+accounting replay still converges to portfolio
+```
 
-> Make `open_position_lots` explicitly disposable, deterministic, and rebuildable as a materialized projection from canonical evidence plus broker/portfolio anchoring, rather than allowing it to become a long-lived independent source of truth.
-
-Implement a structural repair capability if missing.
-
-## Required design change
-
-Add or refactor a safe full-projection rebuild path. The exact CLI name is up to you, but prefer something explicit such as:
+Update `docs/RUNBOOK.md` with a precise operator sequence:
 
 ```bash
 MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes
+# apply only if safe_to_apply=1
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes --note "..."
+MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot recovery-report
+MODE=live uv run bithumb-bot restart-checklist
+MODE=live uv run bithumb-bot health
 ```
 
-The dry-run must produce a clear repair plan. The apply mode must be transactional.
-
-Minimum safety gates for apply:
+And make clear:
 
 ```text
-broker_qty_known = true
-broker_qty == portfolio_qty within existing asset tolerance
-remote_open_order_count = 0
-unresolved_open_order_count = 0
-recovery_required_count = 0
-pending_submit = 0
-submit_unknown = 0
-no unresolved fee-pending accounting issue
-no active broker/portfolio mismatch
+Do not resume live until can_resume=true, safe_to_resume=1, live_ready=1, lot_projection_converged=1, and startup gate is not blocked.
 ```
 
-The implementation must:
+## Validation commands to run
 
-1. Start a DB transaction.
-2. Snapshot current `open_position_lots`, relevant `trade_lifecycles`, current convergence state, readiness state, broker/portfolio evidence, and repair history summary into the repair basis.
-3. Rebuild `open_position_lots` as a full materialized projection, not as a target-trade-only repair.
-4. Use portfolio/broker quantity as a hard anchor when safety gates prove they agree.
-5. Ensure the rebuilt rows satisfy existing `open_position_lots` trigger constraints.
-6. Preserve or regenerate enough lot-native authority for strategy execution and dust handling.
-7. Record a `position_authority_repair` with a complete repair basis.
-8. Record a `position_authority_projection_publication` as current-state attestation.
-9. Run `build_lot_projection_convergence()` as a postcondition.
-10. Roll back on any postcondition failure.
-11. Make the operation idempotent.
-
-A successful postcondition must include:
-
-```text
-projection_converged=true
-projected_total_qty == portfolio_qty
-broker_qty == portfolio_qty
-open_position_lots rows satisfy trigger constraints
-startup gate no longer blocked by POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
-```
-
-If the safest design requires adding a new module instead of expanding the existing repair function, do that. Do not force the fix into the current target-trade repair flow if that makes the design weaker.
-
-## Incident classification change
-
-Add or improve an explicit incident class for historical projection drift, for example:
-
-```text
-HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-```
-
-Detection criteria should cover cases like:
-
-```text
-projection_converged=false
-broker_qty == portfolio_qty
-open_order_count=0
-recovery_required_count=0
-open_position_lots row_count > 1
-projected_total_qty > portfolio_qty
-target-trade repair cannot cover projected excess
-historical_fragmentation diagnostic flag present
-```
-
-This incident class should lead to:
-
-```text
-repair_mode=full_projection_rebuild
-repair_action_state=safe_to_apply_now | inspect_only | blocked_pending_evidence
-```
-
-Do not leave this as a passive diagnostic flag only.
-
-## Observability requirements
-
-Improve operator-facing output so the system clearly distinguishes:
-
-```text
-ACCOUNTING_OK
-BROKER_PORTFOLIO_OK
-LOT_AUTHORITY_OK
-LIVE_READY
-```
-
-`audit-ledger OK` must not be easily confused with “safe to live.” If accounting replay is OK but lot authority is not, the CLI should say so directly.
-
-Update at least one of:
-
-```text
-audit-ledger
-health
-recovery-report
-restart-checklist
-ops-report
-```
-
-so that the operator sees:
-
-```text
-accounting_projection_ok=true
-broker_portfolio_converged=true
-lot_projection_converged=false
-live_ready=false
-blocking_incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-recommended_next_action=rebuild-position-authority --full-projection-rebuild
-```
-
-When the rebuild succeeds, output should show:
-
-```text
-old_projected_total_qty
-new_projected_total_qty
-portfolio_qty
-broker_qty
-old_lot_row_count
-new_lot_row_count
-repair_key
-projection_publication_key
-post_repair_projection_converged=true
-```
-
-## Testing requirements
-
-Do not rely only on live EC2 manual validation. Add automated tests.
-
-At minimum, add tests for:
-
-1. Historical fragmentation fixture:
-
-   * Build a test DB state equivalent to:
-
-     ```text
-     portfolio_qty=0.00099986
-     broker_qty=0.00099986 if broker evidence is modeled
-     open_position_lots has 14 dust_tracking rows
-     open_position_lots SUM(qty_open)=0.001788
-     BUY trades count=15, qty_sum=0.00318798
-     SELL trades count=10, qty_sum=0.0013
-     ```
-   * Assert dry-run detects `HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT`.
-   * Assert dry-run recommends full projection rebuild.
-   * Assert apply converges projected qty to portfolio qty.
-
-2. Refusal when broker/portfolio mismatch:
-
-   * Same state, but broker quantity differs from portfolio.
-   * Assert `safe_to_apply=false`.
-
-3. Refusal when remote/open/unresolved orders exist:
-
-   * Add open or unresolved order evidence.
-   * Assert full rebuild refuses.
-
-4. Idempotency:
-
-   * Apply full rebuild twice.
-   * Second run should be no-op or safe, with no duplicate harmful state and no projection drift.
-
-5. Transaction rollback:
-
-   * Simulate postcondition failure.
-   * Assert original rows remain intact and no partial repair publication is committed.
-
-6. Operator output:
-
-   * Assert audit/recovery/readiness output distinguishes accounting OK from lot authority OK.
-
-Prefer small deterministic DB fixtures created in tests over relying on production DB files. If a fixture helper already exists, use it. If not, create one. Do not commit secrets, real API keys, or sensitive production data.
-
-## Runtime safety constraints
-
-Do not place any code path that can submit live orders inside the repair implementation or tests.
-
-The repair must never call broker order submission.
-
-The repair may use broker/portfolio evidence only as read-only evidence.
-
-The repair must not silently alter accounting replay unless explicitly required and recorded through existing repair/adjustment mechanisms with full repair basis.
-
-Manual SQL deletion is not an acceptable user-facing repair path.
-
-## Documentation requirements
-
-Update the runbook or runtime data policy docs to state:
-
-```text
-open_position_lots is a disposable materialized projection, not an independent truth source.
-repair events are historical evidence, not current-state proof.
-projection publications are current-state attestations.
-live readiness requires accounting, broker/portfolio, and lot-authority convergence.
-```
-
-Add an operator flow for:
-
-```text
-AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
-HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-```
-
-The runbook should include:
-
-```text
-Allowed:
-  rebuild-position-authority --full-projection-rebuild
-  rebuild-position-authority --full-projection-rebuild --apply --yes after safe dry-run
-
-Forbidden:
-  run
-  resume
-  manual SQL DELETE/UPDATE of open_position_lots
-```
-
-## Scope boundaries
-
-Stay focused on the structural recovery/projection problem.
-
-Do not rewrite the strategy.
-
-Do not change trading signal logic.
-
-Do not change order submission semantics unless a safety invariant requires it.
-
-Do not loosen startup gates to make live start pass. The fix must make the state correct, not bypass the gate.
-
-Do not remove existing safety checks unless replacing them with stronger ones.
-
-## Expected implementation areas
-
-Likely areas to modify:
-
-```text
-src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/position_authority_state.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/app.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/reporting.py
-tests/
-docs/
-```
-
-But inspect the repository first and choose the minimal coherent design.
-
-## Final validation commands
-
-After implementation, run the relevant test suite, and include exact commands and results in your final report. At minimum, try:
+Run targeted tests first:
 
 ```bash
-uv run pytest
+uv run pytest tests/test_position_authority_recovery_state.py -q
+uv run pytest tests/test_operator_commands.py -q
 ```
 
-If the repository has narrower tests, also run the new targeted tests explicitly.
+Then run any narrower test names you add. If the full suites are too slow, report that and run the relevant targeted tests with exact names.
 
-If there are lint/type commands in the repo, run them as well.
+Also run the CLI preview on a test/fixture DB if available. Do not run live apply unless explicitly instructed by the operator.
 
-## Final report format
+## Deliverables
 
-Return a final report with these sections:
+1. Code change implementing the corrected classification/gating behavior.
+2. Tests covering the observed edge case and negative safety gates.
+3. Runbook update.
+4. A final report with:
+
+   * root cause,
+   * files changed,
+   * why the change is safe,
+   * tests run and results,
+   * exact operator commands for preview/apply/verification,
+   * explicit statement that live trading was not resumed,
+   * any remaining risks or assumptions.
+
+Final report format:
 
 ```markdown
 ## Summary
-
-## Verified / Falsified Hypotheses
-- H1:
-- H2:
-- H3:
-- H4:
-- H5:
+...
 
 ## Root Cause
-State the root cause as a verified or still-partial conclusion. Do not overclaim.
+...
 
-## Design Implemented
-Explain why this is a structural fix rather than a symptom patch.
+## Design Change
+...
 
-## Files Changed
+## Safety Gates Preserved
+...
 
-## Safety Properties
-List the safety gates and rollback guarantees.
+## Tests
+...
 
-## Observability Improvements
+## Operator Recovery Steps
+...
 
-## Tests Added
-Include fixture details and exact assertions.
-
-## Validation Commands Run
-Include command output summaries.
+## Not Performed
+- Did not manually edit production DB.
+- Did not resume live trading.
+- Did not submit/cancel/flatten any orders.
 
 ## Remaining Risks / Follow-ups
-Be explicit about anything not fully solved.
+...
 ```
-
-The target outcome is not merely to unblock this EC2 instance. The target outcome is to make `WG-14/bithumb-bot` a more robust, reproducible, and operable live automated-trading experiment system where broker truth, accounting truth, strategy lot authority, and materialized projections can be safely reconciled and rebuilt.
 

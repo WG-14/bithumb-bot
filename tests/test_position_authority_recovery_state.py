@@ -11,6 +11,7 @@ from bithumb_bot.db_core import (
     compute_accounting_replay,
     ensure_db,
     record_broker_fill_observation,
+    record_external_cash_adjustment,
     record_external_position_adjustment,
     record_position_authority_repair,
     set_portfolio_breakdown,
@@ -49,6 +50,9 @@ PORTFOLIO_DIVERGENCE_BUY_QTY = 0.00059992
 PORTFOLIO_DIVERGENCE_QTY = 0.00039988
 LIVE_INCIDENT_PORTFOLIO_QTY = 0.00099986
 LIVE_INCIDENT_STALE_DUST_QTY = 0.001788
+OBSERVED_LIVE_BUY_QTY = 0.00059998
+OBSERVED_LIVE_BUY_FEE = 27.91
+OBSERVED_LIVE_CASH_KRW = 284_169.87556
 
 
 @pytest.fixture
@@ -328,6 +332,94 @@ def _align_accounting_projection_to_portfolio(conn, *, portfolio_qty: float) -> 
         },
         adjustment_key=f"historical-fragmentation-alignment:{portfolio_qty:.12f}",
     )
+
+
+def _align_accounting_cash_to_portfolio(conn, *, portfolio_cash: float) -> None:
+    replay_cash = float(compute_accounting_replay(conn)["replay_cash"])
+    delta_cash = portfolio_cash - replay_cash
+    if abs(delta_cash) <= 1e-12:
+        return
+    record_external_cash_adjustment(
+        conn,
+        event_ts=1_776_905_550_100,
+        currency="KRW",
+        delta_amount=delta_cash,
+        source="test_projection_alignment",
+        reason="historical_fragmentation_fixture_cash_alignment",
+        broker_snapshot_basis={
+            "fixture": "historical_fragmentation_projection_drift",
+            "portfolio_cash": portfolio_cash,
+            "replay_cash_before": replay_cash,
+        },
+        note="align accounting replay cash to observed portfolio fixture",
+        adjustment_key=f"historical-fragmentation-cash-alignment:{portfolio_cash:.8f}",
+    )
+
+
+def _create_observed_live_projection_fragmentation_fixture(conn) -> None:
+    client_order_id = "live_1776905580000_buy_ae55843c"
+    fill_id = "C0101000000983482756"
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side="BUY",
+        qty_req=OBSERVED_LIVE_BUY_QTY,
+        price=PRICE,
+        ts_ms=1_776_905_580_000,
+        status="NEW",
+        internal_lot_size=LOT_SIZE,
+        effective_min_trade_qty=0.0002,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id=client_order_id,
+        side="BUY",
+        fill_id=fill_id,
+        fill_ts=1_776_905_580_050,
+        price=PRICE,
+        qty=OBSERVED_LIVE_BUY_QTY,
+        fee=OBSERVED_LIVE_BUY_FEE,
+        allow_entry_decision_fallback=False,
+    )
+    set_status(client_order_id, "FILLED", conn=conn)
+    target_trade = conn.execute(
+        "SELECT id, client_order_id FROM trades WHERE client_order_id=? AND side='BUY'",
+        (client_order_id,),
+    ).fetchone()
+    assert target_trade is not None
+    conn.execute("DELETE FROM open_position_lots WHERE entry_trade_id=?", (int(target_trade["id"]),))
+    _insert_live_incident_stale_dust_projection(conn)
+    _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+    _align_accounting_cash_to_portfolio(conn, portfolio_cash=OBSERVED_LIVE_CASH_KRW)
+    set_portfolio_breakdown(
+        conn,
+        cash_available=OBSERVED_LIVE_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=LIVE_INCIDENT_PORTFOLIO_QTY,
+        asset_locked=0.0,
+    )
+    record_position_authority_repair(
+        conn,
+        event_ts=1_776_905_600_000,
+        source="test_observed_live_projection_fragmentation",
+        reason="portfolio_anchored_authority_projection_repair",
+        repair_basis={
+            "event_type": "portfolio_anchored_authority_projection_repair",
+            "target_trade_id": int(target_trade["id"]),
+            "target_client_order_id": str(target_trade["client_order_id"]),
+            "target_remainder_qty": 0.0,
+            "portfolio_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+            "projected_total_qty": LIVE_INCIDENT_STALE_DUST_QTY,
+            "projected_qty_excess": LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY,
+        },
+        note="historical repair evidence without current-state publication",
+    )
+    conn.commit()
+    _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
 
 
 def _set_portfolio_asset_qty_preserving_cash(conn, *, asset_qty: float) -> None:
@@ -1539,6 +1631,289 @@ def test_recorded_projection_repair_event_does_not_replace_aggregate_projection_
     assert readiness.closeout_allowed is False
     assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "run_loop_blocked"
     assert readiness.tradeability_operator_fields["trading_allowed"] is False
+
+
+def test_recorded_projection_repair_without_publication_enables_full_rebuild_preview(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+
+        assessment = build_position_authority_assessment(conn)
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert assessment["alignment_state"] == "projection_diverged"
+    assert assessment["portfolio_projection_repair_event_status"] == "recorded_but_not_current_state_proof"
+    assert assessment["portfolio_projection_publication_present"] is False
+    assert assessment["projection_excess_with_materialized_fragmentation"] is True
+    assert assessment["needs_full_projection_rebuild"] is True
+    assert "materialized_projection_fragmentation" in assessment["diagnostic_flags"]
+    assert "historical_fragmentation" in assessment["diagnostic_flags"]
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is True
+    assert preview["action_state"] == "safe_to_apply_now"
+    assert preview["eligibility_reason"] == "full projection rebuild applicable"
+    assert preview["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert preview["portfolio_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert preview["projected_qty_excess"] == pytest.approx(
+        LIVE_INCIDENT_STALE_DUST_QTY - LIVE_INCIDENT_PORTFOLIO_QTY
+    )
+    assert preview["lot_row_count"] == 14
+    assert preview["other_active_qty"] == pytest.approx(LIVE_INCIDENT_STALE_DUST_QTY)
+    assert preview["portfolio_projection_publication_present"] is False
+    assert preview["portfolio_projection_repair_event_status"] == "recorded_but_not_current_state_proof"
+    assert preview["needs_full_projection_rebuild"] is True
+    assert preview["full_projection_rebuild_gate_report"]["reasons"] == []
+
+
+def test_recorded_projection_repair_without_publication_full_rebuild_apply_records_publication(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+
+        result = apply_position_authority_rebuild(
+            conn,
+            full_projection_rebuild=True,
+            note="observed live stale fragmented projection",
+        )
+        conn.commit()
+        convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        rows = conn.execute(
+            """
+            SELECT position_state, qty_open, executable_lot_count, dust_tracking_lot_count, lot_rule_source_mode
+            FROM open_position_lots
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        publication_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM position_authority_projection_publications"
+        ).fetchone()
+        repair_count = conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()
+    finally:
+        conn.close()
+
+    assert result["projection_publication"]["publication_key"]
+    assert result["repair"]["reason"] == "full_projection_materialized_rebuild"
+    assert publication_count["cnt"] == 1
+    assert repair_count["cnt"] == 2
+    assert convergence["converged"] is True
+    assert convergence["projected_total_qty"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY)
+    assert len(rows) == 2
+    assert rows[0]["position_state"] == "open_exposure"
+    assert rows[0]["qty_open"] == pytest.approx(0.0008)
+    assert rows[0]["executable_lot_count"] == 2
+    assert rows[1]["position_state"] == "dust_tracking"
+    assert rows[1]["qty_open"] == pytest.approx(LIVE_INCIDENT_PORTFOLIO_QTY - 0.0008)
+    assert rows[1]["dust_tracking_lot_count"] == 1
+    assert readiness.as_dict()["projection_converged"] is True
+    assert readiness.as_dict()["position_authority_assessment"]["portfolio_projection_publication_present"] is True
+    assert readiness.as_dict()["position_authority_assessment"]["portfolio_projection_publication_status"] == (
+        "published_current_state_attestation"
+    )
+    assert readiness.as_dict()["position_authority_assessment"]["needs_full_projection_rebuild"] is False
+    assert readiness.recovery_stage == "RESUME_READY"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    [
+        (
+            lambda conn: _record_portfolio_projection_broker_evidence(
+                broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY + 0.0001
+            ),
+            "broker_portfolio_qty_mismatch=",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="unresolved-open-blocker",
+                side="BUY",
+                qty_req=0.0004,
+                price=PRICE,
+                ts_ms=1_776_905_700_050,
+                status="NEW",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "unresolved_open_orders=1",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="pending-submit-blocker",
+                side="BUY",
+                qty_req=0.0004,
+                price=PRICE,
+                ts_ms=1_776_905_700_000,
+                status="PENDING_SUBMIT",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "pending_submit=1",
+        ),
+        (
+            lambda conn: record_order_if_missing(
+                conn,
+                client_order_id="submit-unknown-blocker",
+                side="BUY",
+                qty_req=0.0004,
+                price=PRICE,
+                ts_ms=1_776_905_700_100,
+                status="SUBMIT_UNKNOWN",
+                internal_lot_size=LOT_SIZE,
+                intended_lot_count=1,
+                executable_lot_count=1,
+            ),
+            "submit_unknown=1",
+        ),
+        (
+            lambda conn: record_broker_fill_observation(
+                conn,
+                event_ts=1_776_905_700_200,
+                client_order_id="observed_fee_pending",
+                exchange_order_id="observed-fee-pending-ex",
+                fill_id="observed-fee-pending-fill",
+                fill_ts=1_776_905_700_150,
+                side="BUY",
+                price=PRICE,
+                qty=0.0001,
+                fee=None,
+                fee_status="missing",
+                accounting_status="fee_pending",
+                source="test_observed_projection_fragmentation",
+                raw_payload={"fixture": "fee_pending_gate"},
+            ),
+            "fee_pending_count=1",
+        ),
+    ],
+)
+def test_recorded_projection_repair_without_publication_full_rebuild_gates_remain_strict(
+    recovery_db, mutation, expected_reason
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        mutation(conn)
+        conn.commit()
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is False
+    assert expected_reason in preview["eligibility_reason"]
+
+
+def test_recorded_projection_repair_without_publication_full_rebuild_refuses_remote_open_orders(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "balance_observed_ts_ms": 1_776_905_800_000,
+                "remote_open_order_found": 1,
+                "unresolved_open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+                "dust_residual_present": 1,
+                "dust_residual_allow_resume": 1,
+                "dust_effective_flat": 1,
+                "dust_state": "harmless_dust",
+                "dust_broker_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "dust_local_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "dust_delta_qty": 0.0,
+                "dust_qty_gap_tolerance": 0.000001,
+                "dust_qty_gap_small": 1,
+                "dust_min_qty": LOT_SIZE,
+            },
+            now_epoch_sec=1.0,
+        )
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "remote_open_orders=1" in preview["eligibility_reason"]
+
+
+def test_recorded_projection_repair_without_publication_full_rebuild_refuses_accounting_mismatch(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        conn.execute("DELETE FROM external_position_adjustments")
+        conn.commit()
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "accounting_projection_mismatch=" in preview["eligibility_reason"]
+
+
+def test_recorded_projection_repair_without_publication_full_rebuild_refuses_recovery_required_orders(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="recovery-required-blocker",
+            side="SELL",
+            qty_req=0.0004,
+            price=PRICE,
+            ts_ms=1_776_905_700_300,
+            status="RECOVERY_REQUIRED",
+            internal_lot_size=LOT_SIZE,
+            intended_lot_count=1,
+            executable_lot_count=1,
+        )
+        conn.commit()
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["safe_to_apply"] is False
+    assert "recovery_required_orders=1" in preview["eligibility_reason"]
+
+
+def test_projection_diverged_without_fragmented_materialized_excess_does_not_require_full_rebuild(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        set_status("incident_buy", "FILLED", conn=conn)
+        _replace_with_tracked_dust_row(conn, residual_qty=FILL_QTY - LOT_SIZE)
+        _set_portfolio_asset_qty_preserving_cash(conn, asset_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        _align_accounting_projection_to_portfolio(conn, portfolio_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+        conn.commit()
+        _record_portfolio_projection_broker_evidence(broker_qty=LIVE_INCIDENT_PORTFOLIO_QTY)
+
+        assessment = build_position_authority_assessment(conn)
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert assessment["projection_state_converged"] is False
+    assert assessment["projection_excess_with_materialized_fragmentation"] is False
+    assert assessment["needs_full_projection_rebuild"] is False
+    assert "materialized_projection_fragmentation" not in assessment["diagnostic_flags"]
+    assert preview["repair_mode"] == "full_projection_rebuild"
+    assert preview["safe_to_apply"] is False
+    assert preview["eligibility_reason"] == "full_projection_rebuild_not_required"
 
 
 def test_projection_non_convergence_is_consistent_across_readiness_resume_and_reports(

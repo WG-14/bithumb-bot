@@ -141,6 +141,22 @@ def _build_full_projection_rebuild_gate_report(
         "unresolved_fee_pending": unresolved_fee_pending,
         "accounting_projection_ok": accounting_projection_ok,
         "accounting_replay": accounting_replay,
+        "needs_full_projection_rebuild": bool(authority_assessment.get("needs_full_projection_rebuild")),
+        "projection_converged": bool(
+            (authority_assessment.get("projection_convergence") or {}).get("converged")
+        ),
+        "projected_total_qty": float(authority_assessment.get("projected_total_qty") or 0.0),
+        "projected_qty_excess": float(authority_assessment.get("projected_qty_excess") or 0.0),
+        "lot_row_count": int(
+            ((authority_assessment.get("projection_convergence") or {}).get("lot_row_count") or 0)
+        ),
+        "other_active_qty": float(authority_assessment.get("other_active_qty") or 0.0),
+        "portfolio_projection_publication_present": bool(
+            authority_assessment.get("portfolio_projection_publication_present")
+        ),
+        "portfolio_projection_repair_event_status": str(
+            authority_assessment.get("portfolio_projection_repair_event_status") or "none"
+        ),
         "reasons": reasons,
         "safe_to_apply": not reasons,
     }
@@ -193,6 +209,7 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
     reasons: list[str] = []
     authority_action_state = str(authority_assessment.get("repair_action_state") or "not_applicable")
     full_projection_gate_report: dict[str, Any] | None = None
+    projection_convergence = dict(authority_assessment.get("projection_convergence") or {})
 
     if full_projection_rebuild or bool(authority_assessment.get("needs_full_projection_rebuild")):
         repair_mode = "full_projection_rebuild"
@@ -329,6 +346,18 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "open_lot_count": int(lot_snapshot.open_lot_count),
         "dust_tracking_lot_count": int(lot_snapshot.dust_tracking_lot_count),
         "authority_gap_reason": position.authority_gap_reason,
+        "projection_converged": bool(projection_convergence.get("converged")),
+        "projected_total_qty": float(authority_assessment.get("projected_total_qty") or 0.0),
+        "projected_qty_excess": float(authority_assessment.get("projected_qty_excess") or 0.0),
+        "lot_row_count": int(projection_convergence.get("lot_row_count") or 0),
+        "other_active_qty": float(authority_assessment.get("other_active_qty") or 0.0),
+        "portfolio_projection_publication_present": bool(
+            authority_assessment.get("portfolio_projection_publication_present")
+        ),
+        "portfolio_projection_repair_event_status": str(
+            authority_assessment.get("portfolio_projection_repair_event_status") or "none"
+        ),
+        "needs_full_projection_rebuild": bool(authority_assessment.get("needs_full_projection_rebuild")),
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
         "remote_open_order_count": remote_open_order_count,
@@ -346,6 +375,9 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         ),
         "submit_unknown_count": (
             None if full_projection_gate_report is None else int(full_projection_gate_report["submit_unknown_count"])
+        ),
+        "unresolved_fee_pending": (
+            None if full_projection_gate_report is None else bool(full_projection_gate_report["unresolved_fee_pending"])
         ),
         "full_projection_rebuild_gate_report": full_projection_gate_report,
     }

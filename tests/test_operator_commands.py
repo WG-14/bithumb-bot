@@ -24,6 +24,7 @@ from bithumb_bot.app import (
     cmd_recovery_report,
     cmd_risk_report,
     cmd_restart_checklist,
+    cmd_rebuild_position_authority,
     cmd_resume,
 )
 from bithumb_bot.broker.base import BrokerBalance, BrokerFill, BrokerOrder
@@ -331,7 +332,72 @@ def test_cash_drift_report_shows_unexplained_residual_delta(tmp_path, monkeypatc
     assert "external_cash_adjustment_total=0.000" in out
     assert "explained_delta=0.000" in out
     assert "unexplained_residual_delta=75.000" in out
-    assert "recent_adjustments=none" in out
+
+
+def test_rebuild_position_authority_preview_shows_full_projection_gate_details(monkeypatch, capsys):
+    class _DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(app_module, "ensure_db", lambda: _DummyConn())
+    monkeypatch.setattr(
+        app_module,
+        "get_position_authority_repair_summary",
+        lambda _conn: {"repair_count": 1},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_position_authority_rebuild_preview",
+        lambda _conn, full_projection_rebuild=False: {
+            "needs_rebuild": True,
+            "safe_to_apply": False,
+            "recovery_stage": "AUTHORITY_PROJECTION_NON_CONVERGED_PENDING",
+            "repair_mode": "full_projection_rebuild",
+            "eligibility_reason": "remote_open_orders=1",
+            "portfolio_qty": 0.00099986,
+            "accounted_buy_qty": 0.00059998,
+            "accounted_buy_fill_count": 1,
+            "sell_trade_count": 0,
+            "open_lot_count": 0,
+            "dust_tracking_lot_count": 14,
+            "existing_lot_rows": 14,
+            "position_authority_assessment": {"incident_class": "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"},
+            "broker_qty_known": True,
+            "broker_qty": 0.00099986,
+            "remote_open_order_count": 1,
+            "projection_converged": False,
+            "projected_total_qty": 0.001788,
+            "projected_qty_excess": 0.00078814,
+            "lot_row_count": 14,
+            "other_active_qty": 0.001788,
+            "portfolio_projection_publication_present": False,
+            "portfolio_projection_repair_event_status": "recorded_but_not_current_state_proof",
+            "needs_full_projection_rebuild": True,
+            "accounting_projection_ok": True,
+            "broker_portfolio_converged": True,
+            "unresolved_open_order_count": 0,
+            "pending_submit_count": 0,
+            "submit_unknown_count": 0,
+            "unresolved_fee_pending": False,
+            "next_required_action": "review_position_authority_evidence",
+            "recommended_command": "uv run python bot.py rebuild-position-authority --full-projection-rebuild",
+            "full_projection_rebuild_gate_report": {"reasons": ["remote_open_orders=1"]},
+        },
+    )
+
+    cmd_rebuild_position_authority(full_projection_rebuild=True)
+    out = capsys.readouterr().out
+
+    assert "projection_converged=0" in out
+    assert "projected_total_qty=0.001788000000" in out
+    assert "projected_qty_excess=0.000788140000" in out
+    assert "lot_row_count=14" in out
+    assert "other_active_qty=0.001788000000" in out
+    assert "portfolio_projection_publication_present=0" in out
+    assert "portfolio_projection_repair_event_status=recorded_but_not_current_state_proof" in out
+    assert "needs_full_projection_rebuild=1" in out
+    assert "unresolved_fee_pending=0" in out
+    assert "full_projection_rebuild_gate_reasons=remote_open_orders=1" in out
 
 
 def test_cash_drift_report_handles_no_adjustment_edge_case(tmp_path, monkeypatch, capsys):

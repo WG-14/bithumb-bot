@@ -13,6 +13,7 @@ from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_R
 _EPS = 1e-12
 PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON = "partial_close_residual_authority_normalization"
 HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT = "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
+MATERIALIZED_PROJECTION_FRAGMENTATION = "materialized_projection_fragmentation"
 
 
 def _row_float(row: Any, key: str, default: float = 0.0) -> float:
@@ -477,6 +478,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     other_active_lot_count = _row_int(other_active_row, "cnt")
     other_active_qty = normalize_asset_qty(_row_float(other_active_row, "qty"))
     projection_convergence = build_lot_projection_convergence(conn, pair=pair_text)
+    total_projected_lot_row_count = _row_int(projection_convergence, "lot_row_count")
     canonical_executable_qty = normalize_asset_qty(
         float(canonical_lot_size) * float(max(0, canonical_executable_lot_count))
     )
@@ -557,7 +559,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     try:
         publication_rows = conn.execute(
             """
-            SELECT publish_basis
+            SELECT target_trade_id, publish_basis
             FROM position_authority_projection_publications
             WHERE pair=? AND target_trade_id=?
             ORDER BY event_ts DESC, id DESC
@@ -574,14 +576,36 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
             basis = json.loads(str(row["publish_basis"]))
         except (TypeError, ValueError, json.JSONDecodeError, KeyError, IndexError):
             continue
-        if int(basis.get("target_trade_id") or 0) != int(target_trade_id):
+        basis_target_trade_id = int(row["target_trade_id"] or 0)
+        if basis_target_trade_id <= 0:
+            basis_target_trade_id = int(basis.get("target_trade_id") or 0)
+        portfolio_anchor_projection = basis.get("portfolio_anchor_projection") or {}
+        if basis_target_trade_id <= 0:
+            basis_target_trade_id = int(portfolio_anchor_projection.get("anchor_trade_id") or 0)
+        if basis_target_trade_id != int(target_trade_id):
+            continue
+        try:
+            basis_portfolio = normalize_asset_qty(
+                float(
+                    basis.get("portfolio_qty")
+                    or portfolio_anchor_projection.get("portfolio_qty")
+                    or 0.0
+                )
+            )
+        except (TypeError, ValueError):
             continue
         try:
             basis_remainder = normalize_asset_qty(float(basis.get("target_remainder_qty") or 0.0))
-            basis_portfolio = normalize_asset_qty(float(basis.get("portfolio_qty") or 0.0))
         except (TypeError, ValueError):
-            continue
-        if abs(basis_remainder - expected_remainder) <= _EPS and abs(basis_portfolio - expected_portfolio) <= _EPS:
+            basis_remainder = 0.0
+        legacy_projection_publication_match = bool(
+            abs(basis_remainder - expected_remainder) <= _EPS and abs(basis_portfolio - expected_portfolio) <= _EPS
+        )
+        full_rebuild_publication_match = bool(
+            abs(basis_portfolio - expected_portfolio) <= _EPS
+            and abs(target_total_qty - expected_portfolio) <= _EPS
+        )
+        if legacy_projection_publication_match or full_rebuild_publication_match:
             portfolio_projection_publication_present = True
             break
     portfolio_projection_state_converged = bool(
@@ -595,6 +619,10 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         and target_min_internal_lot_size > _EPS
         and abs(target_min_internal_lot_size - canonical_lot_size) <= _EPS
         and abs(target_max_internal_lot_size - canonical_lot_size) <= _EPS
+    )
+    portfolio_projection_repair_event_status = _repair_event_status(
+        recorded=portfolio_projection_repair_recorded,
+        state_converged=portfolio_projection_state_converged,
     )
     needs_correction = bool(
         conflicting_dust_authority
@@ -638,6 +666,18 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         semantic_version=projection_semantic_version,
     )
 
+    projection_excess_with_materialized_fragmentation = bool(
+        not bool(projection_convergence.get("converged"))
+        and total_projected_lot_row_count > 1
+        and projected_total_qty > portfolio_qty + _EPS
+        and not projection_repair_covers_excess
+        and other_active_qty > _EPS
+        and not portfolio_projection_publication_present
+    )
+    repair_event_confirms_fragmentation_history = bool(
+        portfolio_projection_repair_recorded
+        or portfolio_projection_repair_event_status == "recorded_but_not_current_state_proof"
+    )
     diagnostic_flags: list[str] = []
     if not bool(projection_convergence.get("converged")):
         diagnostic_flags.append("projection_diverged")
@@ -650,6 +690,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         )
     ):
         diagnostic_flags.append("historical_fragmentation")
+    if projection_excess_with_materialized_fragmentation:
+        diagnostic_flags.append(MATERIALIZED_PROJECTION_FRAGMENTATION)
     if conflicting_dust_authority or (
         authoritative_contract.internal_lot_size is not None
         and projection_contract.internal_lot_size is not None
@@ -661,13 +703,18 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         diagnostic_flags.append("semantic_contract_mismatch")
     if needs_portfolio_projection_repair and not projection_repair_covers_excess:
         diagnostic_flags.append("unsafe_auto_repair")
+    if (
+        projection_excess_with_materialized_fragmentation
+        and repair_event_confirms_fragmentation_history
+        and "historical_fragmentation" not in diagnostic_flags
+    ):
+        diagnostic_flags.append("historical_fragmentation")
     historical_fragmentation_projection_drift = bool(
-        not bool(projection_convergence.get("converged"))
-        and "historical_fragmentation" in diagnostic_flags
-        and lot_row_count > 1
-        and projected_total_qty > portfolio_qty + _EPS
-        and not projection_repair_covers_excess
-        and other_active_qty > _EPS
+        projection_excess_with_materialized_fragmentation
+        and (
+            "historical_fragmentation" in diagnostic_flags
+            or repair_event_confirms_fragmentation_history
+        )
     )
     alignment_state = diagnostic_flags[0] if diagnostic_flags else "same_truth"
 
@@ -726,10 +773,6 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     residual_repair_event_status = _repair_event_status(
         recorded=residual_normalization_recorded,
         state_converged=residual_state_converged,
-    )
-    portfolio_projection_repair_event_status = _repair_event_status(
-        recorded=portfolio_projection_repair_recorded,
-        state_converged=portfolio_projection_state_converged,
     )
     projection_publication_status = _projection_publication_status(
         published=portfolio_projection_publication_present,
@@ -835,6 +878,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "portfolio_target_remainder_qty": portfolio_target_remainder_qty,
         "partial_close_residual_candidate": partial_close_residual_candidate,
         "portfolio_projection_divergence_candidate": portfolio_projection_divergence_candidate,
+        "projection_excess_with_materialized_fragmentation": projection_excess_with_materialized_fragmentation,
         "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
         "portfolio_projection_publication_present": portfolio_projection_publication_present,
         "portfolio_projection_state_converged": portfolio_projection_state_converged,
