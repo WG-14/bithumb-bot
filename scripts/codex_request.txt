@@ -1,6 +1,8 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The first patch has already been made. Your next task is to verify, harden, and extend that patch so the repo becomes a more robust, reproducible, and operable automated-trading experiment system. Do not treat the current diagnosis as proven fact. Keep the root causes as hypotheses, verify or falsify them directly from the repository code and tests, and make targeted design-level improvements where the evidence supports them.
+The repository has already been patched once or more. Your task is **not** to repeat the previous patch mechanically. Your task is to verify, harden, and extend the current implementation so the system becomes a more robust, reproducible, and operable automated-trading experiment system.
+
+Do not treat the current diagnosis as proven fact. Treat it as the starting hypothesis. Verify or falsify each hypothesis directly from the repo code, tests, and available runtime behavior.
 
 ## Incident context
 
@@ -18,7 +20,7 @@ Bithumb order fills successfully
 → operator manually repairs fee/principal/lot state and sometimes bot_health
 ```
 
-Observed runtime facts from the incident:
+Runtime evidence from the incident:
 
 ```text
 Actual Bithumb mobile-app fee rate: 0.04% = 0.0004 = ~4 bps
@@ -29,7 +31,7 @@ latest BUY fee_bps   = 3.999902
 previous SELL        = 3.998178
 previous BUY         = 3.999148
 
-Resolved setting during the incident:
+Resolved setting during incident:
 LIVE_FEE_RATE_ESTIMATE = 0.0025
 LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW = 10000.0
 ```
@@ -45,88 +47,77 @@ actual Bithumb paid fee rate      = 0.0004
 → accounting/recovery cascade
 ```
 
-But this must not be reduced to “just set LIVE_FEE_RATE_ESTIMATE=0.0004.” That is operational hygiene, not a sufficient repository-level fix.
+But do **not** reduce the fix to “set `LIVE_FEE_RATE_ESTIMATE=0.0004`.” That is required operational hygiene, not a repository-level fix.
 
-The higher-priority structural issue is:
+The higher-priority structural problem is:
 
 ```text
-The system must not let a local estimated fee rate override coherent exchange-provided paid_fee evidence as a live accounting gate.
+The system must not let a local estimated fee rate override coherent exchange-provided paid_fee evidence as a live settlement/accounting gate.
 
-For a single-fill order where exchange order-level paid_fee is present, non-negative, non-zero for material notional, and the executed volume/funds/identifiers match, the fill should be accounting-complete even if the configured fee estimate is wrong.
+For a single-fill order where exchange order-level paid_fee is present, non-negative, non-zero for material notional, and executed volume/funds/identifiers match, the fill should be accounting-complete even if the configured fee estimate is wrong.
 
-The expected fee rate mismatch must remain visible as diagnostics/warning/anomaly, but it must not by itself force fee_pending or destabilize portfolio/lot accounting.
+expected_fee_rate_mismatch must remain visible as warning/diagnostic/anomaly, but must not by itself force fee_pending, principal-pending accounting, broker/local drift, lot projection drift, halt state, or flatten recommendations.
 ```
 
 ## Current patch state to verify
 
-The current `main` appears to have already changed `src/bithumb_bot/fee_observation.py` so that `expected_fee_rate_match` is no longer required for validating single-fill order-level `paid_fee`.
-
-Current expected behavior:
+The current implementation appears to have improved beyond the first patch:
 
 ```text
-Required for accounting-complete:
-- single_fill == true
-- paid_fee_present == true
-- executed_volume_match == true
-- executed_funds_match == true
-- identifiers_match == true
-- fee is non-negative
-- not a material zero-fee case
+fee_observation.py:
+  expected_fee_rate_match is no longer required for single-fill order-level paid_fee validation.
+  mismatch becomes expected_fee_rate_warning with explicit reason/provenance.
 
-Not required for accounting-complete:
-- expected_fee_rate_match
+live_submission_execution.py:
+  fee-rate warning fills are observed as live_application_fee_rate_warning,
+  not live_application_fee_pending.
+  accounting can continue through finalized accounting instead of pending-fee path.
 
-If expected_fee_rate_match == false:
-- keep checks["expected_fee_rate_warning"] == true
-- preserve reason/provenance such as:
-  order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch
-  order_level_paid_fee_validated_single_fill_fee_rate_warning
-- do not classify solely as fee_pending
+tests/test_myorder_runtime_ingestion.py:
+  private stream ingestion includes an incident-style fixture where
+  LIVE_FEE_RATE_ESTIMATE=0.0025,
+  actual paid_fee≈0.0004*notional,
+  normalized_event.accounting_status == accounting_complete,
+  fill fee_accounting_status == fee_finalized,
+  expected_fee_rate_warning == True,
+  and broker_fill_observations count remains 0.
 ```
 
-`tests/test_fee_observation.py` also appears to contain incident-shaped regression cases using real values:
-
-```text
-BUY  notional=69276.6907 KRW fee=27.71 KRW → ~3.999902 bps
-SELL notional=92580.0 KRW    fee=37.03 KRW → ~3.999784 bps
-SELL notional=46096.0 KRW    fee=18.43 KRW → ~3.998178 bps
-```
-
-Your job is to verify this patch is correct, complete enough, and integrated through the actual live application paths. Then improve the repo where the remaining structural risks are still present.
+Verify that this is actually true in the repo. Then improve any remaining gaps.
 
 ## Working hypotheses to verify or falsify
 
-Keep these as hypotheses until the code/tests prove them.
+Keep these as hypotheses until the repo proves them.
 
-### Hypothesis A — direct trigger: live fee-rate configuration drift
+### Hypothesis A — Direct trigger: fee-rate configuration drift
 
-The incident was directly triggered by `LIVE_FEE_RATE_ESTIMATE=0.0025` while actual Bithumb paid fees were ~`0.0004`.
+The incident was directly triggered by `LIVE_FEE_RATE_ESTIMATE=0.0025` while actual Bithumb paid fees were approximately `0.0004`.
 
 Verify:
 
 ```text
 - config.py fallback behavior
-- .env.example guidance
-- live env/preflight behavior
-- whether LIVE_FEE_RATE_ESTIMATE is still used in any live settlement/accounting decision
+- .env.example or deployment docs
+- startup/preflight output
+- health/fee-diagnostics/recovery-report output
+- whether LIVE_FEE_RATE_ESTIMATE is still used in settlement/accounting decisions
 - whether it is now only a planning/diagnostic/anomaly baseline
 ```
 
-Confirm or falsify with tests. The fix must not rely only on setting the env to `0.0004`.
+Do not rely solely on environment correction. The repo should remain safe if this estimate drifts.
 
-### Hypothesis B — higher-level root cause: fee authority was incorrectly ordered
+### Hypothesis B — Higher-level root cause: fee authority was previously inverted
 
-Before the patch, local estimated fee rate effectively had veto power over exchange order-level `paid_fee`. This is the higher-level design issue.
+The higher-level bug was not simply “wrong fee rate.” It was that local estimated fee rate could veto coherent exchange `paid_fee` evidence.
 
 Verify:
 
 ```text
-- validate_single_fill_order_level_paid_fee no longer requires expected_fee_rate_match for coherent exchange paid_fee evidence
-- expected_fee_rate_mismatch remains visible as warning/diagnostic
-- unsafe evidence still stays pending/blocked
+- validate_single_fill_order_level_paid_fee accepts coherent exchange order-level paid_fee even when expected_fee_rate_match is false.
+- expected_fee_rate_mismatch remains visible as warning/provenance/reason.
+- unsafe evidence still fails closed.
+- all live ingestion/application paths use the same semantics.
 ```
-
-If the current patch only fixes `fee_observation.py` but another ingestion path still emits `order_level_candidate` or `fee_pending` for the same coherent exchange paid_fee shape, fix that path too.
 
 Check at least:
 
@@ -138,13 +129,19 @@ src/bithumb_bot/broker/myorder_runtime.py
 src/bithumb_bot/execution.py
 src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/recovery.py
+tests/test_fee_observation.py
+tests/test_myorder_runtime_ingestion.py
+tests/test_live_broker.py
+tests/test_bithumb_private_api.py
+tests/test_operator_commands.py
 ```
 
-### Hypothesis C — fee/principal/portfolio/lot coupling amplified the incident
+### Hypothesis C — Fee pending still has dangerous coupling to portfolio/lot/recovery state
 
-Even if fee authority is now fixed, the system may still allow a fee-pending state to cascade into:
+Even after the fee-authority fix, true fee-pending cases may still cascade into:
 
 ```text
+principal_applied_fee_pending
 broker/local mismatch
 RISK_STATE_MISMATCH
 HALT_STATE_UNRESOLVED
@@ -153,37 +150,45 @@ manual rebuild-position-authority
 manual bot_health clearing
 ```
 
-Verify:
+Verify whether this is still true. Do not remove fail-closed behavior for truly unsafe fees, but make sure coherent paid_fee + estimate mismatch does not enter this path.
+
+### Hypothesis D — Operational guardrails remain insufficient
+
+The code may now be safer, but the system still needs strong operator-facing observability and recovery guidance.
+
+Verify whether `fee-diagnostics`, `health`, `recovery-report`, and `restart-checklist` clearly expose:
 
 ```text
-- fee_pending fills are not unnecessarily produced for coherent exchange paid_fee
-- when true fee_pending happens, principal application is idempotent
-- pending fee state does not unnecessarily poison lot projection
-- audit-ledger and recovery-report can distinguish active issue vs historical repaired issue
+configured_fee_rate
+configured_fee_bps
+observed_fee_bps_median_10 or equivalent
+observed_fee_sample_count
+fee_rate_deviation_pct
+expected_fee_rate_warning_count
+fee_pending_count
+fee_pending_accounting_repair_count
+position_authority_repair_count
+whether drift is diagnostic-only or startup-blocking
 ```
 
-Do not rewrite the whole accounting engine unless the repo already has safe abstractions for doing so. But identify and patch obvious coupling bugs that can cause repeated manual repair.
-
-### Hypothesis D — operational guardrails are still insufficient
-
-The first patch improves fee authority, but the system may still be weak operationally:
-
-```text
-- live preflight may not clearly display configured fee rate vs observed fee_bps median
-- recovery-report may still recommend flatten when the root problem is accounting/fee authority
-- repair commands may remain scattered and operator-dependent
-- health/recovery output may not give enough forensic evidence before suggesting new orders
-```
-
-Verify directly from `health`, `fee-diagnostics`, `recovery-report`, `restart-checklist`, and their tests.
+Also verify whether recovery suppresses flatten as the primary recommendation when the dominant issue is accounting/fee-authority root cause rather than actual executable market exposure.
 
 ## Required design priorities
 
-Prioritize problem-class prevention over symptom patches.
+### 1. Make fee authority explicit and correctly ordered
 
-### 1. Fee authority must be explicit and ordered correctly
+If current `FeeEvaluation` still relies mainly on the loose combination of:
 
-If the current `FeeEvaluation` still relies on a loose combination of `fee_status`, `fee_source`, `fee_confidence`, `provenance`, and `reason`, improve it where feasible without over-scoping.
+```text
+fee_status
+fee_source
+fee_confidence
+provenance
+reason
+checks
+```
+
+then improve it where feasible without over-scoping.
 
 Preferred direction:
 
@@ -193,27 +198,29 @@ accounting_decision = "finalize"
 diagnostic_flags = ["expected_fee_rate_mismatch"]
 ```
 
-At minimum, make sure the semantics are unambiguous in code and tests:
+At minimum, make this semantic ordering unambiguous in code and tests:
 
 ```text
-exchange trade-level fee                 → authoritative
-exchange order-level paid_fee single-fill → authoritative/validated if qty/funds/ids match
-operator_confirmed fee                   → authoritative
-configured fee estimate                  → planning/diagnostic only, not live settlement authority
-unknown/missing fee                      → pending/blocked depending on safety policy
+exchange trade-level fee                     → authoritative
+exchange order-level paid_fee single-fill     → authoritative/validated if qty/funds/ids match
+operator_confirmed fee                       → authoritative
+configured fee estimate                      → planning/diagnostic/anomaly baseline only
+unknown/missing/unparseable fee              → pending/blocked depending on safety policy
 ```
 
-### 2. Expected fee-rate mismatch must be diagnostics, not settlement veto
+### 2. Preserve the core invariant across every path
 
-Preserve this invariant across all ingestion/application paths:
+The invariant is:
 
 ```text
 single-fill exchange paid_fee + matching qty/funds/ids
-→ accounting_complete
+→ accounting_complete / fee_finalized
 
 expected fee-rate mismatch
 → warning/anomaly/diagnostic
 → not fee_pending by itself
+→ not principal_applied_fee_pending by itself
+→ not startup/restart blocker by itself
 ```
 
 Unsafe cases must remain pending/blocked:
@@ -222,48 +229,48 @@ Unsafe cases must remain pending/blocked:
 missing/unparseable paid_fee on material notional
 negative fee
 material zero paid_fee
-multi-fill order-level fee ambiguity
+multi-fill order-level paid_fee ambiguity
 executed_volume mismatch
 executed_funds mismatch
 identifier mismatch, if current policy requires identifiers
 ```
 
-### 3. Live fee-rate drift must be observable
+### 3. Make live fee-rate drift visible
 
-Even after the fee-authority fix, `LIVE_FEE_RATE_ESTIMATE=0.0025` while actual fees are `0.0004` is still operationally dangerous for strategy planning, cost estimates, and diagnostics.
+Even after the fee-authority fix, `LIVE_FEE_RATE_ESTIMATE=0.0025` while actual fees are `0.0004` is still operationally dangerous for strategy planning, sizing, diagnostics, and future incident analysis.
 
-Add or improve operator-facing output in `fee-diagnostics`, `health`, `recovery-report`, and/or `restart-checklist` so the operator can see:
+Add or improve operator-facing output in at least `fee-diagnostics`, and preferably also `health`, `recovery-report`, or `restart-checklist`.
+
+Required fields or equivalents:
 
 ```text
 configured_fee_rate
 configured_fee_bps
-observed_fee_bps_median_10 or similar
+observed_fee_bps_median
 observed_fee_sample_count
 fee_rate_deviation_pct
 expected_fee_rate_warning_count
 fee_pending_count
 fee_pending_accounting_repair_count
 position_authority_repair_count
-whether drift is only diagnostic or startup-blocking
+diagnostic_only_vs_startup_blocking
 ```
 
-If a hard startup block would be too disruptive, use a strong warning. But do not keep this invisible.
+Use a strong warning if hard-blocking startup would be too disruptive. But do not keep this invisible.
 
-### 4. Recovery must not recommend flatten as a default response to accounting-root-cause incidents
+### 4. Recovery must not default to flatten for accounting-root-cause incidents
 
-The incident showed that flatten can make accounting incidents worse by creating another real fill that goes through the same broken fee path.
+Flatten made this incident worse by creating additional real fills that went through the same broken fee path.
 
-Modify recovery/reporting logic if needed so that when the dominant issue is unresolved fee/accounting authority drift, the primary recommendation is forensic diagnosis or repair-plan generation, not flatten.
-
-Desired policy:
+Modify recovery/reporting guidance if needed:
 
 ```text
 If accounting/fee-authority root cause is unresolved:
   - suppress flatten as the primary recommendation
-  - prevent new orders unless safety gates explicitly allow
+  - do not suggest additional orders as the first action
   - recommend forensic fee/accounting diagnosis
   - collect broker order/fill evidence
-  - propose auditable repair plan if needed
+  - propose an auditable repair plan if needed
 
 If actual executable market exposure exists and accounting evidence is reliable:
   - flatten may be recommended as market-risk mitigation
@@ -271,9 +278,9 @@ If actual executable market exposure exists and accounting evidence is reliable:
 
 ### 5. Repairability must move away from manual DB edits
 
-Do not add another opaque manual DB workaround.
+Do not add manual DB update instructions or another opaque repair shortcut.
 
-If repair behavior needs improvement, make it auditable and idempotent. Prefer moving toward:
+Any repair-related change should move toward:
 
 ```bash
 bithumb-bot doctor --live --explain
@@ -281,9 +288,7 @@ bithumb-bot repair-plan --live
 bithumb-bot repair-apply --plan-id ...
 ```
 
-A full repair-plan engine may be too large for this task. But any repair-related change should move in that direction.
-
-Each repair plan or preview should expose:
+A full repair-plan engine may be too large for this task, but previews and operator output should expose:
 
 ```text
 preconditions
@@ -296,29 +301,32 @@ expected audit-ledger result
 why it is safe
 ```
 
-### 6. Treat open_position_lots as a rebuildable projection, not unquestioned truth
+### 6. Treat `open_position_lots` as a rebuildable projection
 
-Do not fully rewrite lot accounting unless necessary. But verify that `open_position_lots` is treated as a deterministic materialized projection over canonical accounting evidence where possible.
-
-Desired direction:
+Do not rewrite the full accounting engine unless necessary. But ensure the direction is clear:
 
 ```text
 canonical truth:
   fills + trades + fee finalization/adjustment events + external adjustments
 
 projection:
-  open_position_lots, rebuildable deterministically under safe preconditions
+  open_position_lots, deterministic and rebuildable under safe preconditions
 ```
 
-Make sure the fee-authority fix does not leave a path where one fee warning can drift lot projection and force repeated `rebuild-position-authority`.
+Make sure one fee warning cannot drift lot projection and force repeated `rebuild-position-authority`.
 
 ## Required tests
 
-First, verify the existing incident tests. Then add missing tests at the right level.
+### Existing tests to verify
 
-### Unit tests: fee observation
+Run and inspect:
 
-Ensure `tests/test_fee_observation.py` covers:
+```bash
+uv run pytest tests/test_fee_observation.py
+uv run pytest tests/test_myorder_runtime_ingestion.py -k "paid_fee or expected_fee_rate"
+```
+
+The tests must prove:
 
 ```text
 configured_fee_rate=0.0025
@@ -335,9 +343,11 @@ Expected:
 - checks["expected_fee_rate_warning"] == True
 - reason/provenance preserve mismatch warning
 - not fee_pending
+- not principal_applied_fee_pending
+- no broker_fill_observation recorded as fee_pending solely due to estimate mismatch
 ```
 
-Incident fixtures that must exist:
+Incident fixtures that must remain covered:
 
 ```text
 BUY  notional=69276.6907 fee=27.71
@@ -357,21 +367,21 @@ executed_funds mismatch
 missing identifiers, if current policy requires identifiers
 ```
 
-### Integration tests: live application path
+### Add missing integration coverage
 
-Add or strengthen tests so the actual live fill application path is covered, not just `fee_observation.py`.
+If not already covered, add the smallest high-value integration tests for the REST order/fill path as well as private stream path.
 
 Required behavior:
 
 ```text
-broker fill parsed
-→ fee_observation accepts exchange paid_fee with expected_fee_rate_warning
-→ live_submission_execution applies finalized accounting path
-→ no live_application_fee_pending observation solely due to estimate mismatch
-→ no active fee_pending startup blocker solely due to estimate mismatch
+REST order-level paid_fee + single fill + estimate mismatch
+→ accounting_complete
+→ fee_finalized
+→ no fee_pending observation
+→ no startup/restart blocker solely due to estimate mismatch
 ```
 
-Search for existing tests in:
+Search and extend:
 
 ```text
 tests/test_live_broker.py
@@ -381,13 +391,20 @@ tests/test_accounting_projection.py
 tests/test_operator_commands.py
 ```
 
-Add the smallest high-value integration test that proves the incident would not recur through the real path.
+### Add or strengthen observability tests
 
-### Observability tests
+If you add fee drift output, test that operator-facing commands print fields equivalent to:
 
-If you add fee-rate drift output, add tests asserting that operator-facing commands print the key fields.
+```text
+configured_fee_rate
+configured_fee_bps
+observed_fee_bps_median
+fee_rate_deviation_pct
+expected_fee_rate_warning_count
+fee_pending_count
+```
 
-At minimum test one of:
+At minimum cover one of:
 
 ```text
 fee-diagnostics
@@ -396,19 +413,11 @@ recovery-report
 restart-checklist
 ```
 
-Expected output should include fields equivalent to:
+Prefer covering `fee-diagnostics` plus one startup/recovery surface.
 
-```text
-configured_fee_rate
-observed_fee_bps_median
-fee_rate_deviation_pct
-expected_fee_rate_warning_count
-fee_pending_count
-```
+### Add or strengthen recovery policy tests
 
-### Recovery policy tests
-
-If recovery currently recommends flatten when accounting root cause is unresolved, add tests to change that.
+If current recovery output still recommends flatten as primary action for accounting-root-cause incidents, add tests to change that.
 
 Expected behavior:
 
@@ -422,38 +431,38 @@ Do not remove flatten entirely. Keep it available for actual executable exposure
 
 ## Required verification commands
 
-Run targeted tests first, then broader relevant tests. Use existing project conventions.
+Run targeted tests first, then broader relevant tests.
 
 At minimum attempt:
 
 ```bash
 uv run pytest tests/test_fee_observation.py
+uv run pytest tests/test_myorder_runtime_ingestion.py -k "paid_fee or expected_fee_rate"
 uv run pytest tests/test_bithumb_private_api.py -k "fee or paid_fee or expected_fee_rate or single_fill"
 uv run pytest tests/test_live_broker.py -k "fee or paid_fee or expected_fee_rate or accounting"
-uv run pytest tests/test_myorder_runtime_ingestion.py -k "fee or expected_fee_rate"
 uv run pytest tests/test_accounting_projection.py -k "fee or pending or projection"
 uv run pytest tests/test_operator_commands.py -k "fee or recovery or restart or diagnostics"
 ```
 
-If a subset is too slow or fails for unrelated reasons, report:
+If a command fails or is too broad/slow, report:
 
 ```text
 exact command
 failing test names
 failure summary
-why it is related or unrelated
+whether it is related or unrelated
 whether you added a narrower replacement test
 ```
 
-## EC2 operational follow-up to preserve in the final report
+## EC2 operational follow-up to preserve in final report
 
-Even though the repository-level fix should not depend on this, EC2 live env should still be corrected because strategy planning and diagnostics should match actual fees:
+Even though repository-level safety must not depend on it, the EC2 live env should still be corrected:
 
 ```bash
 LIVE_FEE_RATE_ESTIMATE=0.0004
 ```
 
-Before live restart, operator should verify:
+Before live restart, the operator should verify:
 
 ```bash
 cd ~/apps/bithumb-bot
@@ -492,6 +501,7 @@ Expected post-fill outcome:
 ```text
 expected_fee_rate_warning may appear
 but no fee_pending solely due to estimate mismatch
+no principal_applied_fee_pending solely due to estimate mismatch
 no broker/local mismatch
 broker_portfolio_converged=1
 lot_projection_converged=1
@@ -503,10 +513,10 @@ blockers=none
 Do:
 
 ```text
-- Verify the current fee authority patch against the real incident shape.
-- Fix any remaining path that still converts coherent exchange paid_fee + fee estimate mismatch into fee_pending.
-- Add or strengthen integration tests through live application/ingestion paths.
-- Add or improve operator-facing fee-rate drift observability.
+- Verify the current fee-authority patch through all relevant ingestion/application paths.
+- Fix any remaining path that converts coherent exchange paid_fee + estimate mismatch into fee_pending.
+- Add or strengthen REST/live application integration coverage.
+- Add or strengthen fee-rate drift observability.
 - Improve recovery messaging/policy if it still suggests flatten for accounting-root-cause incidents.
 - Preserve unsafe-case fail-closed behavior.
 - Keep changes deterministic and idempotent.
@@ -516,12 +526,12 @@ Do not:
 
 ```text
 - Treat LIVE_FEE_RATE_ESTIMATE=0.0004 as the whole fix.
-- Hide expected_fee_rate_mismatch; preserve it as a warning/diagnostic.
+- Hide expected_fee_rate_mismatch; preserve it as warning/diagnostic.
 - Let configured estimates act as authoritative live settlement data.
-- Relax truly unsafe fee evidence.
+- Relax genuinely unsafe fee evidence.
 - Add manual DB UPDATE workarounds.
 - Make flatten the primary response to accounting drift.
-- Rewrite the entire accounting engine unless a small, safe abstraction already exists.
+- Rewrite the entire accounting engine unless a small safe abstraction already exists.
 ```
 
 ## Final report format
@@ -532,7 +542,7 @@ When finished, produce a report with exactly these sections:
 1. Summary
    - What changed.
    - Whether the current patch was already sufficient for fee_observation.
-   - What additional gaps were found.
+   - What additional gaps were found and fixed.
 
 2. Hypothesis results
    - Hypothesis A: confirmed / falsified / partially confirmed, with evidence.
@@ -544,6 +554,7 @@ When finished, produce a report with exactly these sections:
    - Whether exchange paid_fee now outranks configured fee estimates for settlement accounting.
    - Whether expected fee-rate mismatch is preserved as diagnostics.
    - Whether unsafe fee evidence still fails closed.
+   - Whether live application/private stream/REST paths share the same invariant.
    - Remaining architectural risks.
 
 4. Code changes
@@ -570,5 +581,5 @@ When finished, produce a report with exactly these sections:
    - Follow-up issues recommended.
 ```
 
-Keep the priority sharp: the central goal is not “make the fee mismatch disappear.” The central goal is to make `WG-14/bithumb-bot` robust against fee-estimate drift by treating coherent exchange-provided paid_fee as settlement authority, while preserving mismatch diagnostics, preventing accounting/lot/recovery cascades, and improving live operability.
+Keep the priority sharp: the central goal is not to make a fee mismatch disappear. The central goal is to make `WG-14/bithumb-bot` robust against fee-estimate drift by treating coherent exchange-provided paid_fee as settlement authority, preserving mismatch diagnostics, preventing accounting/lot/recovery cascades, improving operator-facing observability, and stopping flatten from being the default response to accounting-root-cause incidents.
 

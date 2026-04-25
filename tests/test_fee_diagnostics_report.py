@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
 from bithumb_bot.app import main as app_main
 from bithumb_bot.config import settings
@@ -138,7 +139,91 @@ def test_fee_diagnostics_cli_json_smoke(tmp_path, monkeypatch, capsys):
     assert payload["roundtrip_window"]["limit"] == 2
     assert "fills" in payload
     assert "roundtrip" in payload
+    assert "fee_rate_drift" in payload
     assert manager.fee_diagnostics_report_path().exists()
+
+
+def test_fee_diagnostics_exposes_fee_rate_drift_operational_fields(tmp_path, monkeypatch, capsys):
+    _set_managed_runtime_paths(monkeypatch, tmp_path)
+    db_path = str(tmp_path / "fee-diagnostics-drift.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                fee_provenance, fee_validation_reason, fee_validation_checks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "live_1777104360000_buy_aee4c564",
+                "C0101000002949768709",
+                "C0101000000983820316",
+                1_777_104_360_321,
+                "BUY",
+                115_465_000.0,
+                0.00059998,
+                27.71,
+                "validated_order_level_paid_fee",
+                "order_level_paid_fee",
+                "validated",
+                "accounting_complete",
+                "live_application_fee_rate_warning",
+                "order_level_paid_fee_validated_single_fill_fee_rate_warning",
+                "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch",
+                json.dumps(
+                    {
+                        "single_fill": True,
+                        "paid_fee_present": True,
+                        "executed_volume_match": True,
+                        "executed_funds_match": True,
+                        "expected_fee_rate_match": False,
+                        "expected_fee_rate_warning": True,
+                        "identifiers_match": True,
+                        "material_notional_suspicious": True,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_fee_diagnostics(as_json=False)
+    out = capsys.readouterr().out
+    assert "[FEE-RATE-DRIFT]" in out
+    assert "configured_fee_rate=0.002500" in out
+    assert "configured_fee_bps=25.000" in out
+    assert "observed_fee_bps_median=4.000 bps" in out
+    assert "observed_fee_sample_count=1" in out
+    assert "fee_rate_deviation_pct=525.02%" in out
+    assert "expected_fee_rate_warning_count=1" in out
+    assert "fee_pending_count=0" in out
+    assert "fee_pending_accounting_repair_count=0" in out
+    assert "position_authority_repair_count=0" in out
+    assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in out
+    assert "startup_impact=diagnostic_only_without_active_fee_pending" in out
+
+    cmd_fee_diagnostics(as_json=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["fee_rate_drift"]["configured_fee_rate"] == 0.0025
+    assert payload["fee_rate_drift"]["configured_fee_bps"] == 25.0
+    assert payload["fee_rate_drift"]["observed_fee_bps_median"] == pytest.approx(3.9999023798635354)
+    assert payload["fee_rate_drift"]["observed_fee_sample_count"] == 1
+    assert payload["fee_rate_drift"]["expected_fee_rate_warning_count"] == 1
+    assert payload["fee_rate_drift"]["fee_pending_count"] == 0
+    assert payload["fee_rate_drift"]["fee_pending_accounting_repair_count"] == 0
+    assert payload["fee_rate_drift"]["position_authority_repair_count"] == 0
+    assert payload["fee_rate_drift"]["diagnostic_only_vs_startup_blocking"] == "diagnostic_only"
 
 
 def test_fee_diagnostics_default_estimate_uses_live_fee_rate_in_live_mode(monkeypatch):

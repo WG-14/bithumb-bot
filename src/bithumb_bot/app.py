@@ -18,7 +18,6 @@ import math
 import json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from statistics import median
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import (
     compute_accounting_replay,
@@ -96,6 +95,7 @@ from .position_state_snapshot import build_canonical_position_snapshot
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .reporting import (
+    build_fee_rate_drift_diagnostics,
     cmd_experiment_report,
     cmd_cash_drift_report,
     cmd_decision_telemetry,
@@ -1459,101 +1459,12 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def _parse_fee_validation_checks(raw: object) -> dict[str, object]:
-    if isinstance(raw, dict):
-        return dict(raw)
-    if raw in (None, ""):
-        return {}
-    try:
-        parsed = json.loads(str(raw))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return dict(parsed) if isinstance(parsed, dict) else {}
-
-
 def _fee_rate_drift_diagnostics(
     conn: sqlite3.Connection,
     *,
     observation_limit: int = 100,
 ) -> dict[str, object]:
-    configured_fee_rate = float(settings.LIVE_FEE_RATE_ESTIMATE)
-    material_threshold = float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW)
-    rows = conn.execute(
-        """
-        SELECT fee, price, qty, accounting_status, fee_validation_reason, fee_validation_checks
-        FROM broker_fill_observations
-        ORDER BY event_ts DESC, id DESC
-        LIMIT ?
-        """,
-        (max(1, int(observation_limit)),),
-    ).fetchall()
-    recent_fee_bps: list[float] = []
-    mismatch_count = 0
-    fee_pending_count = 0
-    for row in rows:
-        accounting_status = str(row["accounting_status"] or "")
-        if accounting_status == "fee_pending":
-            fee_pending_count += 1
-        checks = _parse_fee_validation_checks(row["fee_validation_checks"])
-        if checks.get("expected_fee_rate_match") is False:
-            mismatch_count += 1
-        elif str(row["fee_validation_reason"] or "") == "expected_fee_rate_mismatch":
-            mismatch_count += 1
-        fee = row["fee"]
-        if fee is None:
-            continue
-        try:
-            fee_value = float(fee)
-            price_value = float(row["price"] or 0.0)
-            qty_value = float(row["qty"] or 0.0)
-        except (TypeError, ValueError):
-            continue
-        notional = max(0.0, price_value) * max(0.0, qty_value)
-        if fee_value < 0.0 or notional < material_threshold or notional <= 0.0:
-            continue
-        recent_fee_bps.append((fee_value / notional) * 10000.0)
-
-    repair_row = conn.execute(
-        "SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs"
-    ).fetchone()
-    position_repair_row = conn.execute(
-        "SELECT COUNT(*) AS repair_count FROM position_authority_repairs"
-    ).fetchone()
-    observed_fee_bps_median = median(recent_fee_bps) if recent_fee_bps else None
-    configured_fee_bps = configured_fee_rate * 10000.0
-    deviation_bps = (
-        configured_fee_bps - float(observed_fee_bps_median)
-        if observed_fee_bps_median is not None
-        else None
-    )
-    deviation_pct = (
-        ((configured_fee_bps - float(observed_fee_bps_median)) / float(observed_fee_bps_median)) * 100.0
-        if observed_fee_bps_median is not None and abs(float(observed_fee_bps_median)) > 1e-12
-        else None
-    )
-    if fee_pending_count > 0:
-        startup_impact = "active_fee_pending_blocks_resume; fee_rate_drift_alone_remains_diagnostic_only"
-    elif mismatch_count > 0:
-        startup_impact = "diagnostic_only_without_active_fee_pending"
-    else:
-        startup_impact = "no_recent_fee_rate_drift_detected"
-    return {
-        "configured_fee_rate_estimate": configured_fee_rate,
-        "configured_fee_bps": configured_fee_bps,
-        "observed_fee_bps_median": observed_fee_bps_median,
-        "observed_material_fee_sample_count": len(recent_fee_bps),
-        "observation_window_count": len(rows),
-        "configured_minus_observed_bps": deviation_bps,
-        "fee_rate_deviation_pct": deviation_pct,
-        "recent_expected_fee_rate_mismatch_count": mismatch_count,
-        "recent_fee_pending_observation_count": fee_pending_count,
-        "fee_pending_accounting_repair_count": int(repair_row["repair_count"] or 0) if repair_row else 0,
-        "position_authority_repair_count": int(position_repair_row["repair_count"] or 0)
-        if position_repair_row
-        else 0,
-        "material_notional_threshold_krw": material_threshold,
-        "startup_impact": startup_impact,
-    }
+    return build_fee_rate_drift_diagnostics(conn, observation_limit=observation_limit)
 
 
 def cmd_audit_ledger() -> None:

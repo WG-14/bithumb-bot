@@ -123,6 +123,136 @@ class FeeDiagnosticSummary:
     notes: list[str]
 
 
+def _parse_fee_validation_checks(raw: object) -> dict[str, object]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def build_fee_rate_drift_diagnostics(
+    conn: sqlite3.Connection,
+    *,
+    observation_limit: int = 100,
+) -> dict[str, object]:
+    configured_fee_rate = float(settings.LIVE_FEE_RATE_ESTIMATE)
+    material_threshold = float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW)
+    empty_result = {
+        "configured_fee_rate": configured_fee_rate,
+        "configured_fee_rate_estimate": configured_fee_rate,
+        "configured_fee_bps": configured_fee_rate * 10000.0,
+        "observed_fee_bps_median": None,
+        "observed_fee_sample_count": 0,
+        "observed_material_fee_sample_count": 0,
+        "observation_window_count": 0,
+        "configured_minus_observed_bps": None,
+        "fee_rate_deviation_pct": None,
+        "expected_fee_rate_warning_count": 0,
+        "recent_expected_fee_rate_mismatch_count": 0,
+        "fee_pending_count": 0,
+        "recent_fee_pending_observation_count": 0,
+        "fee_pending_accounting_repair_count": 0,
+        "position_authority_repair_count": 0,
+        "material_notional_threshold_krw": material_threshold,
+        "startup_impact": "no_recent_fee_rate_drift_detected",
+        "diagnostic_only_vs_startup_blocking": "none",
+    }
+    if not hasattr(conn, "execute"):
+        return empty_result
+    try:
+        rows = conn.execute(
+            """
+            SELECT fee, price, qty, accounting_status, fee_validation_reason, fee_validation_checks
+            FROM broker_fill_observations
+            ORDER BY event_ts DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, int(observation_limit)),),
+        ).fetchall()
+    except sqlite3.Error:
+        return empty_result
+    recent_fee_bps: list[float] = []
+    mismatch_count = 0
+    fee_pending_count = 0
+    for row in rows:
+        accounting_status = str(row["accounting_status"] or "")
+        if accounting_status == "fee_pending":
+            fee_pending_count += 1
+        checks = _parse_fee_validation_checks(row["fee_validation_checks"])
+        if checks.get("expected_fee_rate_match") is False:
+            mismatch_count += 1
+        elif str(row["fee_validation_reason"] or "") == "expected_fee_rate_mismatch":
+            mismatch_count += 1
+        fee = row["fee"]
+        if fee is None:
+            continue
+        try:
+            fee_value = float(fee)
+            price_value = float(row["price"] or 0.0)
+            qty_value = float(row["qty"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        notional = max(0.0, price_value) * max(0.0, qty_value)
+        if fee_value < 0.0 or notional < material_threshold or notional <= 0.0:
+            continue
+        recent_fee_bps.append((fee_value / notional) * 10000.0)
+
+    try:
+        repair_row = conn.execute("SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs").fetchone()
+        position_repair_row = conn.execute("SELECT COUNT(*) AS repair_count FROM position_authority_repairs").fetchone()
+    except sqlite3.Error:
+        repair_row = None
+        position_repair_row = None
+    observed_fee_bps_median = median(recent_fee_bps) if recent_fee_bps else None
+    configured_fee_bps = configured_fee_rate * 10000.0
+    deviation_bps = (
+        configured_fee_bps - float(observed_fee_bps_median)
+        if observed_fee_bps_median is not None
+        else None
+    )
+    deviation_pct = (
+        ((configured_fee_bps - float(observed_fee_bps_median)) / float(observed_fee_bps_median)) * 100.0
+        if observed_fee_bps_median is not None and abs(float(observed_fee_bps_median)) > 1e-12
+        else None
+    )
+    if fee_pending_count > 0:
+        startup_impact = "active_fee_pending_blocks_resume; fee_rate_drift_alone_remains_diagnostic_only"
+        impact_class = "startup_blocking_due_to_active_fee_pending"
+    elif mismatch_count > 0:
+        startup_impact = "diagnostic_only_without_active_fee_pending"
+        impact_class = "diagnostic_only"
+    else:
+        startup_impact = "no_recent_fee_rate_drift_detected"
+        impact_class = "none"
+    return {
+        "configured_fee_rate": configured_fee_rate,
+        "configured_fee_rate_estimate": configured_fee_rate,
+        "configured_fee_bps": configured_fee_bps,
+        "observed_fee_bps_median": observed_fee_bps_median,
+        "observed_fee_sample_count": len(recent_fee_bps),
+        "observed_material_fee_sample_count": len(recent_fee_bps),
+        "observation_window_count": len(rows),
+        "configured_minus_observed_bps": deviation_bps,
+        "fee_rate_deviation_pct": deviation_pct,
+        "expected_fee_rate_warning_count": mismatch_count,
+        "recent_expected_fee_rate_mismatch_count": mismatch_count,
+        "fee_pending_count": fee_pending_count,
+        "recent_fee_pending_observation_count": fee_pending_count,
+        "fee_pending_accounting_repair_count": int(repair_row["repair_count"] or 0) if repair_row else 0,
+        "position_authority_repair_count": int(position_repair_row["repair_count"] or 0)
+        if position_repair_row
+        else 0,
+        "material_notional_threshold_krw": material_threshold,
+        "startup_impact": startup_impact,
+        "diagnostic_only_vs_startup_blocking": impact_class,
+    }
+
+
 @dataclass
 class DecisionTelemetrySummary:
     """Operator-facing telemetry summary; qty fields are diagnostic, not authority."""
@@ -2253,6 +2383,7 @@ def cmd_fee_diagnostics(
             roundtrip_limit=roundtrip_limit,
             estimated_fee_rate=estimate,
         )
+        fee_rate_drift = build_fee_rate_drift_diagnostics(conn)
     finally:
         conn.close()
 
@@ -2278,6 +2409,7 @@ def cmd_fee_diagnostics(
             "estimated_minus_actual_bps": summary.estimated_minus_actual_bps,
             "fee_authority": fee_authority_payload,
         },
+        "fee_rate_drift": fee_rate_drift,
         "roundtrip": {
             "total_fee": summary.roundtrip_fee_total,
             "pnl_before_fee": summary.pnl_before_fee_total,
@@ -2320,6 +2452,34 @@ def cmd_fee_diagnostics(
         f"estimated_fee_rate={summary.estimated_fee_rate:.6f} "
         f"estimated_minus_actual_bps={_fmt_rate(summary.estimated_minus_actual_bps, as_bps=True)} "
         f"fee_authority_source={str((fee_authority_payload or {}).get('fee_source') or 'manual_or_paper')}"
+    )
+    observed_fee_bps_text = (
+        "-"
+        if fee_rate_drift.get("observed_fee_bps_median") is None
+        else f"{float(fee_rate_drift.get('observed_fee_bps_median')):.3f} bps"
+    )
+    deviation_pct_text = (
+        "-"
+        if fee_rate_drift.get("fee_rate_deviation_pct") is None
+        else f"{float(fee_rate_drift.get('fee_rate_deviation_pct')):.2f}%"
+    )
+    print("\n[FEE-RATE-DRIFT]")
+    print(
+        "  "
+        f"configured_fee_rate={float(fee_rate_drift.get('configured_fee_rate') or 0.0):.6f} "
+        f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
+        f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"observed_fee_sample_count={int(fee_rate_drift.get('observed_fee_sample_count') or 0)} "
+        f"fee_rate_deviation_pct={deviation_pct_text}"
+    )
+    print(
+        "  "
+        f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
+        f"fee_pending_count={int(fee_rate_drift.get('fee_pending_count') or 0)} "
+        f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
+        f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+        f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
     )
     print("\n[ROUNDTRIP-FEE-AND-PNL]")
     print(
