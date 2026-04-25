@@ -298,7 +298,7 @@ def _default_flat_start_safety_check() -> tuple[bool, str]:
             """
             SELECT COUNT(*) AS cnt
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         unresolved_count = int(unresolved_row["cnt"] if unresolved_row else 0)

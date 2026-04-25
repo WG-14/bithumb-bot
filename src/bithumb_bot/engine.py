@@ -190,6 +190,11 @@ def _classify_startup_gate_reason(startup_gate_reason: str | None, *, state) -> 
             "FEE_GAP_RECOVERY_REQUIRED",
             "fee-related accounting inconsistency requires manual recovery",
         )
+    if "fee_pending_auto_recovering=" in reason:
+        return (
+            "FEE_PENDING_AUTO_RECOVERING",
+            "fee-pending fill accounting is still auto-recovering",
+        )
     if int(state.recovery_required_count) > 0 or "recovery_required_orders=" in reason:
         return (
             BLOCKER_SUBMIT_UNKNOWN_RECOVERY_REQUIRED,
@@ -370,14 +375,15 @@ def _classify_fee_gap_recovery_blocker(metadata: dict[str, object]) -> ResumeBlo
 
 def _last_reconcile_fee_pending_recovery_required() -> bool:
     state = runtime_state.snapshot()
-    if int(state.recovery_required_count or 0) <= 0:
-        return False
     try:
         metadata = json.loads(str(state.last_reconcile_metadata or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):
         return False
     try:
-        return int(metadata.get("fee_pending_recovery_required", 0) or 0) > 0
+        return (
+            int(metadata.get("fee_pending_auto_recovering", 0) or 0) > 0
+            or int(metadata.get("unaccounted_fee_pending_observation_count", 0) or 0) > 0
+        )
     except (TypeError, ValueError):
         return False
 
@@ -757,6 +763,7 @@ def evaluate_startup_safety_gate() -> str | None:
             """
             SELECT
                 SUM(CASE WHEN status='PENDING_SUBMIT' THEN 1 ELSE 0 END) AS pending_submit_count,
+                SUM(CASE WHEN status='ACCOUNTING_PENDING' THEN 1 ELSE 0 END) AS accounting_pending_count,
                 SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
                 SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count,
                 SUM(
@@ -780,6 +787,7 @@ def evaluate_startup_safety_gate() -> str | None:
     if row is not None:
         status_counts = {
             "pending_submit": int(row["pending_submit_count"] or 0),
+            "accounting_pending": int(row["accounting_pending_count"] or 0),
             "submit_unknown": int(row["submit_unknown_count"] or 0),
             "recovery_required": int(row["recovery_required_count"] or 0),
             "stale_new_partial": int(row["stale_new_partial_count"] or 0),
@@ -792,6 +800,8 @@ def evaluate_startup_safety_gate() -> str | None:
 
     if status_counts["pending_submit"] > 0:
         reasons.append(f"pending_submit_orders={status_counts['pending_submit']}")
+    if status_counts.get("accounting_pending", 0) > 0:
+        reasons.append(f"accounting_pending_orders={status_counts['accounting_pending']}")
     if status_counts["submit_unknown"] > 0:
         reasons.append(f"submit_unknown_orders={status_counts['submit_unknown']}")
     if status_counts["recovery_required"] > 0:
@@ -847,6 +857,8 @@ def evaluate_startup_safety_gate() -> str | None:
             f"{normalized_position.authority_gap_reason}"
             f"(terminal_state={normalized_position.terminal_state})"
         )
+    if int(readiness_snapshot.fee_pending_count or 0) > 0:
+        reasons.append(f"fee_pending_auto_recovering={int(readiness_snapshot.fee_pending_count)}")
 
     fee_gap_incident = readiness_snapshot.fee_gap_incident
     try:
@@ -1180,12 +1192,12 @@ def build_resume_guidance(
         recommended_next_action = "Review overridable blockers and force resume only if risk is accepted."
         resume_blocked_reason = "resume blocked by overridable blockers"
     elif _last_reconcile_fee_pending_recovery_required():
-        operator_next_action = "fee_pending_accounting_repair_required"
-        recommended_command = "uv run python bot.py fee-pending-accounting-repair --help"
+        operator_next_action = "wait_for_auto_reconcile_or_review_fee_evidence"
+        recommended_command = "uv run python bot.py recovery-report"
         recommended_next_action = (
-            "Finalize the observed fee-pending fill with explicit fee provenance, then rerun recovery-report before resume."
+            "Wait for automatic reconcile to finalize fee-pending accounting, or inspect broker fill evidence if it does not clear."
         )
-        resume_blocked_reason = "resume blocked by fee-pending fill accounting"
+        resume_blocked_reason = "resume blocked while fee-pending accounting is auto-recovering"
     elif recovery_required_count > 0:
         operator_next_action = "manual_recovery_required"
         recommended_command = "uv run python bot.py recover-order --client-order-id <id>"
@@ -1414,7 +1426,7 @@ def evaluate_restart_readiness() -> list[tuple[str, bool, str]]:
             """
             SELECT COUNT(*) AS open_count
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING')
             """
         ).fetchone()
         recovery_row = conn.execute(
@@ -1697,7 +1709,7 @@ def _latest_order_identifiers() -> tuple[str | None, str | None]:
             """
             SELECT client_order_id, exchange_order_id
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             ORDER BY updated_ts DESC, created_ts DESC
             LIMIT 1
             """

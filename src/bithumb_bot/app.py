@@ -514,6 +514,21 @@ def cmd_audit():
             f"order {row['client_order_id']} has FILLED status but qty_filled={float(row['qty_filled'])}"
         )
 
+    terminal_orders_with_pending_local_intent = conn.execute(
+        """
+        SELECT client_order_id, status, local_intent_state
+        FROM orders
+        WHERE status IN ('FILLED', 'FAILED', 'CANCELED')
+          AND COALESCE(local_intent_state, '')='PENDING_SUBMIT'
+        """
+    ).fetchall()
+    for row in terminal_orders_with_pending_local_intent:
+        errors.append(
+            "terminal order retained pending local intent state: "
+            f"client_order_id={row['client_order_id']} "
+            f"status={row['status']} local_intent_state={row['local_intent_state']}"
+        )
+
     orphan_fills = conn.execute(
         """
         SELECT f.id, f.client_order_id
@@ -654,6 +669,26 @@ def cmd_audit():
     print("[AUDIT] OK")
 
 
+def _finalize_repair_runtime_policy(
+    *,
+    reason_code: str,
+    metadata: dict[str, object],
+) -> bool:
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code=reason_code,
+        metadata=metadata,
+    )
+    runtime_state.refresh_open_order_health()
+    runtime_state.set_startup_gate_reason(None)
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    resume_allowed, _ = evaluate_resume_eligibility()
+    if resume_allowed:
+        enable_trading()
+        return True
+    return False
+
+
 def cmd_run(short_n: int, long_n: int):
     from .engine import run_loop
     from .run_lock import RunLockError, acquire_run_lock
@@ -767,7 +802,7 @@ def cmd_health() -> None:
             """
             SELECT COUNT(*) AS open_order_count
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         if open_order_row is not None:
@@ -1800,7 +1835,7 @@ def cmd_broker_diagnose() -> None:
                 """
                 SELECT client_order_id, exchange_order_id
                 FROM orders
-                WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+                WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
                 """
             ).fetchall()
         finally:
@@ -2003,7 +2038,7 @@ def _safe_recent_broker_orders_snapshot(*, limit: int = 100) -> tuple[list[objec
             """
             SELECT client_order_id, exchange_order_id
             FROM orders
-            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+            WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING', 'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             ORDER BY updated_ts DESC, created_ts DESC
             LIMIT ?
             """,
@@ -2848,6 +2883,9 @@ def _load_recovery_report(
         "position_authority_rebuild_preview": position_authority_rebuild_preview,
         "position_authority_repair_summary": position_authority_repair_summary,
         "runtime_readiness": runtime_readiness_snapshot,
+        "pending_fee_count": int(fill_accounting_incident_projection.get("active_fee_pending_count") or 0),
+        "auto_recovery_count": int(runtime_readiness_snapshot.get("auto_recovery_count") or 0),
+        "operator_review_required_count": recovery_required_count,
         "accounting_projection_ok": bool(accounting_projection.get("consistent")),
         "broker_portfolio_converged": broker_portfolio_converged,
         "broker_qty_known": broker_qty_known,
@@ -2861,6 +2899,13 @@ def _load_recovery_report(
         "broker_fill_observation_summary": broker_fill_observation_summary,
         "fill_accounting_incident_projection": fill_accounting_incident_projection,
         "trading_enabled": bool(state.trading_enabled),
+        "trading_state": (
+            "blocked"
+            if blocker_list
+            else ("paused" if not bool(state.trading_enabled) else "running")
+        ),
+        "trading_blocked": bool(blocker_list),
+        "hard_halt_reason": recent_halt_reason if bool(state.halt_new_orders_blocked or state.halt_state_unresolved) else "none",
         "emergency_flatten_blocked": bool(state.emergency_flatten_blocked),
         "emergency_flatten_block_reason": state.emergency_flatten_block_reason,
         "resume_allowed": bool(resume_allowed),
@@ -3699,26 +3744,16 @@ def cmd_fee_pending_accounting_repair(
         conn.commit()
     finally:
         conn.close()
-    runtime_state.disable_trading_until(
-        float("inf"),
-        reason="fee-pending accounting repair completed; explicit resume required",
-        reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
-        halt_new_orders_blocked=False,
-        unresolved=False,
-    )
-    runtime_state.record_reconcile_result(
-        success=True,
+    auto_cleared = _finalize_repair_runtime_policy(
         reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
         metadata={
             "fee_pending_recovery_required": 0,
+            "fee_pending_auto_recovering": 0,
             "fee_pending_fill_count": 0,
             "balance_split_mismatch_count": 0,
             "fee_pending_accounting_repair_count": 1,
         },
     )
-    runtime_state.refresh_open_order_health()
-    runtime_state.set_startup_gate_reason(None)
-    runtime_state.set_resume_gate(blocked=False, reason=None)
 
     print("[FEE-PENDING-ACCOUNTING-REPAIR] applied")
     print(
@@ -3737,6 +3772,7 @@ def cmd_fee_pending_accounting_repair(
         f"dust_tracking_lot_count={int(post_lot_snapshot.get('dust_tracking_lot_count') or 0)} "
         f"executable_exposure_qty={float(post_lot_snapshot.get('executable_exposure_qty') or 0.0):.12f}"
     )
+    print(f"  trading_auto_cleared={1 if auto_cleared else 0}")
 
 
 def cmd_rebuild_position_authority(
@@ -3863,16 +3899,10 @@ def cmd_rebuild_position_authority(
         )
         return
 
-    runtime_state.disable_trading_until(
-        float("inf"),
-        reason="position authority rebuild completed; explicit resume required",
+    auto_cleared = _finalize_repair_runtime_policy(
         reason_code="POSITION_AUTHORITY_REBUILD_COMPLETED",
-        halt_new_orders_blocked=False,
-        unresolved=False,
+        metadata={},
     )
-    runtime_state.refresh_open_order_health()
-    runtime_state.set_startup_gate_reason(None)
-    runtime_state.set_resume_gate(blocked=False, reason=None)
     print("[REBUILD-POSITION-AUTHORITY] applied")
     if preview.get("repair_mode") == "full_projection_rebuild":
         publication = result.get("projection_publication") or {}
@@ -3900,6 +3930,7 @@ def cmd_rebuild_position_authority(
             f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)} "
             f"post_repair_projection_converged={1 if bool(convergence.get('converged')) else 0}"
         )
+        print(f"  trading_auto_cleared={1 if auto_cleared else 0}")
     else:
         print(
             "  "
@@ -3909,6 +3940,7 @@ def cmd_rebuild_position_authority(
             f"open_lot_count={int(after.get('open_lot_count') or 0)} "
             f"dust_tracking_lot_count={int(after.get('dust_tracking_lot_count') or 0)}"
         )
+        print(f"  trading_auto_cleared={1 if auto_cleared else 0}")
 
 
 def _load_restart_safety_checklist() -> list[tuple[str, bool, str]]:

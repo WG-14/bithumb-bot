@@ -1928,6 +1928,36 @@ def _mark_recovery_required(*, conn, client_order_id: str, side: str, from_statu
     )
 
 
+def _mark_accounting_pending(*, conn, client_order_id: str, side: str, from_status: str, reason: str) -> None:
+    record_status_transition(
+        client_order_id,
+        from_status=from_status,
+        to_status="ACCOUNTING_PENDING",
+        reason=reason,
+        conn=conn,
+    )
+    set_status(
+        client_order_id,
+        "ACCOUNTING_PENDING",
+        last_error=reason,
+        conn=conn,
+    )
+    notify(
+        safety_event(
+            "accounting_pending_transition",
+            client_order_id=client_order_id,
+            submit_attempt_id=UNSET_EVENT_FIELD,
+            exchange_order_id=UNSET_EVENT_FIELD,
+            state_from=from_status,
+            state_to="ACCOUNTING_PENDING",
+            reason_code=AMBIGUOUS_SUBMIT,
+            side=side,
+            status="ACCOUNTING_PENDING",
+            reason=reason,
+        )
+    )
+
+
 def _block_new_submission_for_unresolved_risk(
     *,
     conn,

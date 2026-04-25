@@ -137,6 +137,9 @@ class _LoopConn:
         if "SELECT COUNT(*) AS cnt FROM orders WHERE status='RECOVERY_REQUIRED'" in q:
             return _Rows({"cnt": 0})
 
+        if "SELECT COUNT(*) AS cnt FROM orders WHERE status='ACCOUNTING_PENDING'" in q:
+            return _Rows({"cnt": 0})
+
         if "status='SUBMIT_UNKNOWN'" in q and "exchange_order_id" in q:
             return _Rows({"cnt": 0})
 
@@ -179,6 +182,7 @@ class _LoopConn:
 
         if (
             "AS pending_submit_count" in q
+            and "AS accounting_pending_count" in q
             and "AS submit_unknown_count" in q
             and "AS recovery_required_count" in q
             and "AS stale_new_partial_count" in q
@@ -188,6 +192,7 @@ class _LoopConn:
                 return _Rows(
                     {
                         "pending_submit_count": 0,
+                        "accounting_pending_count": 0,
                         "submit_unknown_count": 0,
                         "recovery_required_count": 0,
                         "stale_new_partial_count": 0,
@@ -204,6 +209,7 @@ class _LoopConn:
                 return _Rows(
                     {
                         "pending_submit_count": 0,
+                        "accounting_pending_count": 0,
                         "submit_unknown_count": 0,
                         "recovery_required_count": 0,
                         "stale_new_partial_count": 0,
@@ -213,6 +219,7 @@ class _LoopConn:
             return _Rows(
                 {
                     "pending_submit_count": row["pending_submit_count"] or 0,
+                    "accounting_pending_count": row["accounting_pending_count"] or 0,
                     "submit_unknown_count": row["submit_unknown_count"] or 0,
                     "recovery_required_count": row["recovery_required_count"] or 0,
                     "stale_new_partial_count": row["stale_new_partial_count"] or 0,

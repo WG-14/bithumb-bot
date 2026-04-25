@@ -36,6 +36,7 @@ class RuntimeReadinessSnapshot:
     lot_snapshot: Any
     reconcile_metadata: dict[str, object]
     fee_pending_count: int
+    auto_recovery_count: int
     fill_accounting_incident_summary: dict[str, object]
     fee_gap_recovery_required: bool
     fee_gap_resume_blocking: bool
@@ -76,6 +77,7 @@ class RuntimeReadinessSnapshot:
             "normalized_exposure": self.position_state.normalized_exposure.as_dict(),
             "lot_snapshot": self.lot_snapshot.as_dict(),
             "fee_pending_count": int(self.fee_pending_count),
+            "auto_recovery_count": int(self.auto_recovery_count),
             "fill_accounting_incident_summary": dict(self.fill_accounting_incident_summary),
             "fee_gap_recovery_required": bool(self.fee_gap_recovery_required),
             "fee_gap_resume_blocking": bool(self.fee_gap_resume_blocking),
@@ -235,14 +237,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             """
             SELECT
                 COUNT(*) AS open_order_count,
+                COALESCE(SUM(CASE WHEN status='ACCOUNTING_PENDING' THEN 1 ELSE 0 END), 0)
+                    AS accounting_pending_count,
                 COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0)
                     AS recovery_required_count
             FROM orders
             WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN',
+                             'ACCOUNTING_PENDING',
                              'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
             """
         ).fetchone()
         open_order_count = _row_int(open_row, "open_order_count")
+        accounting_pending_count = _row_int(open_row, "accounting_pending_count")
         recovery_required_count = _row_int(open_row, "recovery_required_count")
 
         portfolio_row = conn.execute(
@@ -386,22 +392,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         operator_next_action = "resume_now"
         recommended_command = "uv run python bot.py resume"
 
-        if fee_pending_count > 0 or _metadata_int(metadata, "fee_pending_recovery_required") > 0:
-            stage = "ACCOUNTING_PENDING_FEE"
-            blockers.append("FEE_PENDING_ACCOUNTING_REQUIRED")
-            categories.append("incident_local")
-            operator_next_action = "apply_fee_pending_accounting_repair"
-            recommended_command = (
-                "uv run python bot.py fee-pending-accounting-repair "
-                "--client-order-id <id> --fill-id <fill_id> --fee <fee> "
-                "--fee-provenance <source> --apply --yes"
-            )
+        if fee_pending_count > 0:
+            stage = "ACCOUNTING_AUTO_RECOVERING"
+            blockers.append("FEE_PENDING_AUTO_RECOVERING")
+            categories.append("accounting_latency")
+            operator_next_action = "wait_for_auto_reconcile_or_review_fee_evidence"
+            recommended_command = "uv run python bot.py recovery-report"
             structured_blockers.append(
                 _make_structured_blocker(
-                    code="FEE_PENDING_ACCOUNTING_REQUIRED",
-                    category="incident_local",
+                    code="FEE_PENDING_AUTO_RECOVERING",
+                    category="accounting_latency",
                     stage=stage,
-                    detail="fee-pending fill accounting must be finalized before resume",
+                    detail="fee-pending fill accounting is auto-recovering; new submissions stay blocked until accounting converges",
                     operator_next_action=operator_next_action,
                     recommended_command=recommended_command,
                     projection_convergence=projection_convergence,
@@ -615,6 +617,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             lot_snapshot=lot_snapshot,
             reconcile_metadata=metadata,
             fee_pending_count=fee_pending_count,
+            auto_recovery_count=max(accounting_pending_count, fee_pending_count),
             fill_accounting_incident_summary=fill_accounting_incident_summary,
             fee_gap_recovery_required=fee_gap_required,
             fee_gap_resume_blocking=fee_gap_policy.resume_blocking,

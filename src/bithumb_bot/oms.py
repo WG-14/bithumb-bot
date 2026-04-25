@@ -12,8 +12,20 @@ from .db_core import ensure_db
 from .config import settings
 
 
-OPEN_ORDER_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED")
-TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED", "RECOVERY_REQUIRED")
+OPEN_ORDER_STATUSES = (
+    "PENDING_SUBMIT",
+    "NEW",
+    "PARTIAL",
+    "SUBMIT_UNKNOWN",
+    "ACCOUNTING_PENDING",
+    "RECOVERY_REQUIRED",
+    "CANCEL_REQUESTED",
+)
+TERMINAL_ORDER_STATUSES = ("CANCELED", "FILLED", "FAILED")
+AUTO_RECOVERING_ORDER_STATUSES = ("ACCOUNTING_PENDING",)
+OPERATOR_REVIEW_ORDER_STATUSES = ("RECOVERY_REQUIRED",)
+ORDER_INTENT_PENDING_STATES = {"PENDING_SUBMIT", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
+ORDER_INTENT_TERMINAL_STATES = {"FILLED", "CANCELED", "FAILED"}
 ORDER_INTENT_DEDUP_RELEASE_STATUSES = {"FAILED", "RELEASED"}
 
 
@@ -27,6 +39,9 @@ def evaluate_unresolved_order_gate(
     state = collect_risky_order_state(conn, now_ms=now_ms, max_open_order_age_sec=max_open_order_age_sec)
     if state["submit_unknown_count"] > 0:
         return True, "SUBMIT_UNKNOWN_PRESENT", "submit-unknown unresolved order exists"
+
+    if state["accounting_pending_count"] > 0:
+        return True, "ACCOUNTING_PENDING_PRESENT", "accounting-pending order exists"
 
     if state["recovery_required_count"] > 0:
         return True, "RECOVERY_REQUIRED_PRESENT", "recovery-required order exists"
@@ -56,6 +71,9 @@ def collect_risky_order_state(
     recovery_required_row = conn.execute(
         "SELECT COUNT(*) AS cnt FROM orders WHERE status='RECOVERY_REQUIRED'"
     ).fetchone()
+    accounting_pending_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM orders WHERE status='ACCOUNTING_PENDING'"
+    ).fetchone()
     submit_unknown_without_exchange_row = conn.execute(
         """
         SELECT COUNT(*) AS cnt
@@ -69,7 +87,7 @@ def collect_risky_order_state(
         SELECT COUNT(*) AS cnt
         FROM orders
         WHERE client_order_id LIKE 'remote_%'
-          AND status IN ('PENDING_SUBMIT','NEW','PARTIAL','SUBMIT_UNKNOWN','RECOVERY_REQUIRED')
+          AND status IN ('PENDING_SUBMIT','NEW','PARTIAL','SUBMIT_UNKNOWN','ACCOUNTING_PENDING','RECOVERY_REQUIRED')
         """
     ).fetchone()
 
@@ -91,6 +109,7 @@ def collect_risky_order_state(
     max_age_sec = max(1, int(max_open_order_age_sec))
     return {
         "submit_unknown_count": int(submit_unknown_row["cnt"] if submit_unknown_row else 0),
+        "accounting_pending_count": int(accounting_pending_row["cnt"] if accounting_pending_row else 0),
         "recovery_required_count": int(recovery_required_row["cnt"] if recovery_required_row else 0),
         "unresolved_open_order_count": open_count,
         "oldest_unresolved_open_order_age_sec": age_sec,
@@ -103,16 +122,50 @@ def collect_risky_order_state(
 
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "PENDING_SUBMIT": ("PENDING_SUBMIT", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
-    "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
-    "PARTIAL": ("PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
-    "SUBMIT_UNKNOWN": ("SUBMIT_UNKNOWN", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
-    "CANCEL_REQUESTED": ("CANCEL_REQUESTED", "CANCELED", "FILLED", "PARTIAL", "RECOVERY_REQUIRED"),
-    "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED"),
+    "PENDING_SUBMIT": (
+        "PENDING_SUBMIT",
+        "NEW",
+        "PARTIAL",
+        "FILLED",
+        "CANCELED",
+        "FAILED",
+        "SUBMIT_UNKNOWN",
+        "ACCOUNTING_PENDING",
+        "RECOVERY_REQUIRED",
+        "CANCEL_REQUESTED",
+    ),
+    "NEW": ("NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "PARTIAL": ("PARTIAL", "FILLED", "CANCELED", "FAILED", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"),
+    "SUBMIT_UNKNOWN": (
+        "SUBMIT_UNKNOWN",
+        "NEW",
+        "PARTIAL",
+        "FILLED",
+        "CANCELED",
+        "FAILED",
+        "ACCOUNTING_PENDING",
+        "RECOVERY_REQUIRED",
+        "CANCEL_REQUESTED",
+    ),
+    "ACCOUNTING_PENDING": ("ACCOUNTING_PENDING", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "RECOVERY_REQUIRED"),
+    "CANCEL_REQUESTED": ("CANCEL_REQUESTED", "CANCELED", "FILLED", "PARTIAL", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED"),
+    "RECOVERY_REQUIRED": ("RECOVERY_REQUIRED", "NEW", "PARTIAL", "FILLED", "CANCELED", "FAILED", "ACCOUNTING_PENDING"),
     "FILLED": ("FILLED",),
     "CANCELED": ("CANCELED",),
     "FAILED": ("FAILED",),
 }
+
+
+def _next_local_intent_state(*, current_state: str | None, status: str) -> str | None:
+    current = str(current_state or "").strip() or None
+    if status in ORDER_INTENT_TERMINAL_STATES:
+        return status
+    if status in ORDER_INTENT_PENDING_STATES:
+        return status
+    if status in {"NEW", "PARTIAL"}:
+        if current in {None, "PENDING_SUBMIT", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}:
+            return status
+    return current
 
 
 def validate_status_transition(*, from_status: str, to_status: str) -> tuple[bool, str | None]:
@@ -952,7 +1005,7 @@ def set_status(
     conn = conn or ensure_db()
     try:
         current = conn.execute(
-            "SELECT status FROM orders WHERE client_order_id=?",
+            "SELECT status, local_intent_state FROM orders WHERE client_order_id=?",
             (client_order_id,),
         ).fetchone()
         if current is None:
@@ -973,10 +1026,45 @@ def set_status(
                 conn.commit()
             raise ValueError(reason)
 
-        conn.execute(
-            "UPDATE orders SET status=?, updated_ts=?, last_error=? WHERE client_order_id=?",
-            (status, ts, (last_error[:500] if last_error else None), client_order_id),
+        current_local_intent_state = str(current["local_intent_state"] or "").strip() or None
+        next_local_intent_state = _next_local_intent_state(
+            current_state=current_local_intent_state,
+            status=status,
         )
+
+        conn.execute(
+            """
+            UPDATE orders
+            SET status=?, local_intent_state=?, updated_ts=?, last_error=?
+            WHERE client_order_id=?
+            """,
+            (
+                status,
+                next_local_intent_state,
+                ts,
+                (last_error[:500] if last_error else None),
+                client_order_id,
+            ),
+        )
+        if status in ORDER_INTENT_DEDUP_RELEASE_STATUSES:
+            conn.execute(
+                "DELETE FROM order_intent_dedup WHERE client_order_id=?",
+                (client_order_id,),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE order_intent_dedup
+                SET order_status=?, updated_ts=?, last_error=?
+                WHERE client_order_id=?
+                """,
+                (
+                    status,
+                    ts,
+                    (last_error[:500] if last_error else None),
+                    client_order_id,
+                ),
+            )
         event_type = "status_changed"
         if status == "SUBMIT_UNKNOWN":
             event_type = "submit_timeout"

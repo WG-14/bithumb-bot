@@ -42,7 +42,7 @@ from .observability import safety_event
 from .reason_codes import AMBIGUOUS_RECENT_FILL, AMBIGUOUS_SUBMIT, RECONCILE_MISMATCH, WEAK_ORDER_CORRELATION
 
 
-LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED")
+LOCAL_RECONCILE_STATUSES = ("PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "CANCEL_REQUESTED")
 
 REASON_REMOTE_OPEN_ORDER_FOUND = "REMOTE_OPEN_ORDER_FOUND"
 REASON_RECENT_FILL_APPLIED = "RECENT_FILL_APPLIED"
@@ -56,8 +56,8 @@ REASON_IDENTIFIER_LOOKUP_REQUIRES_RECOVERY = "IDENTIFIER_LOOKUP_REQUIRES_RECOVER
 REASON_FEE_GAP_RECOVERY_REQUIRED = "FEE_GAP_RECOVERY_REQUIRED"
 REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED = "FILL_FEE_PENDING_RECOVERY_REQUIRED"
 
-OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "CANCEL_REQUESTED"}
-UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
+OPEN_ORDER_TRUSTED_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "CANCEL_REQUESTED"}
+UNRESOLVED_ORDER_STATUSES = {"PENDING_SUBMIT", "NEW", "PARTIAL", "SUBMIT_UNKNOWN", "ACCOUNTING_PENDING", "RECOVERY_REQUIRED", "CANCEL_REQUESTED"}
 NON_CLEARING_RECONCILE_REASON_CODES = {
     REASON_RECONCILE_FAILED,
     REASON_SOURCE_CONFLICT_HALT,
@@ -129,11 +129,11 @@ def classify_recovery_outcome(
             reason="startup gate remains blocked",
         )
 
-    if int(metadata.get("fee_pending_recovery_required", 0)) > 0:
+    if int(metadata.get("fee_pending_auto_recovering", 0)) > 0:
         return RecoveryClassification(
-            disposition=RecoveryDisposition.MANUAL_RECOVERY_REQUIRED,
-            progress_state=RecoveryProgressState.MANUAL_INTERVENTION_REQUIRED,
-            reason="broker fill observed but fee is pending; accounting remains incomplete",
+            disposition=RecoveryDisposition.AUTO_RECOVERABLE_CANDIDATE,
+            progress_state=RecoveryProgressState.CANDIDATE_IDENTIFIED,
+            reason="broker fill observed but fee is pending; automatic accounting reconcile remains in progress",
         )
 
     if int(metadata.get("fee_gap_recovery_required", 0)) > 0:
@@ -504,6 +504,72 @@ def _mark_recovery_required_with_reason(
     )
 
 
+def _mark_accounting_pending_with_reason(
+    conn,
+    *,
+    client_order_id: str,
+    side: str,
+    from_status: str,
+    reason: str,
+) -> None:
+    current = conn.execute(
+        "SELECT status FROM orders WHERE client_order_id=?",
+        (client_order_id,),
+    ).fetchone()
+    current_status = str(current["status"]) if current is not None else str(from_status)
+    base_from_status = current_status or str(from_status)
+    target_status = "ACCOUNTING_PENDING"
+    allowed, blocked_reason = validate_status_transition(
+        from_status=base_from_status,
+        to_status=target_status,
+    )
+    if not allowed:
+        conn.execute(
+            "UPDATE orders SET last_error=? WHERE client_order_id=?",
+            (reason[:500], client_order_id),
+        )
+        record_status_transition(
+            client_order_id,
+            from_status=base_from_status,
+            to_status=base_from_status,
+            reason=(
+                "accounting-pending incident preserved current status after blocked transition; "
+                f"blocked_reason={blocked_reason}; incident_reason={reason}"
+            ),
+            conn=conn,
+        )
+        return
+
+    record_status_transition(
+        client_order_id,
+        from_status=base_from_status,
+        to_status=target_status,
+        reason=reason,
+        conn=conn,
+    )
+    set_status(
+        client_order_id,
+        target_status,
+        last_error=reason,
+        conn=conn,
+    )
+    notify(
+        safety_event(
+            "accounting_pending_transition",
+            client_order_id=client_order_id,
+            exchange_order_id="-",
+            side=side,
+            status=target_status,
+            state_from=base_from_status,
+            state_to=target_status,
+            reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
+            reason=reason,
+            operator_next_action="allow automatic reconcile retry or inspect broker fill evidence if it does not clear",
+            operator_hint_command="uv run python bot.py recovery-report --json",
+        )
+    )
+
+
 def _classify_lookup_error(exc: Exception) -> str:
     if isinstance(exc, BrokerIdentifierMismatchError):
         return "identifier_mismatch"
@@ -710,7 +776,7 @@ def _evaluate_dust_residual_policy(
     status_counts = conn.execute(
         """
         SELECT
-            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'ACCOUNTING_PENDING', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END) AS unresolved_open_order_count,
             SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END) AS submit_unknown_count,
             SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
         FROM orders
@@ -991,18 +1057,17 @@ def _apply_recent_fills(
                 fills=[fill],
                 source="reconcile_recent_activity_fee_pending",
             )
-            _mark_recovery_required_with_reason(
+            _mark_accounting_pending_with_reason(
                 conn,
                 client_order_id=local_id,
                 side=str(local["side"]),
                 from_status=str(local["status"]),
-                reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
                 reason=(
                     "recent broker fill observed but accounting is fee-pending; "
                     f"exchange_order_id={remote_exchange_id or '<none>'}; "
                     f"fill_id={fill.fill_id}; "
                     f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                    "manual fee resolution required before ledger apply"
+                    "automatic reconcile retry will continue until fee evidence is complete"
                 ),
             )
             updates = _fee_pending_metadata_updates(observation_summary)
@@ -1280,18 +1345,17 @@ def _try_resolve_submit_unknown_from_recent_activity(
                 fills=list(interpretation.matched_fills),
                 source="reconcile_recent_activity_fee_pending",
             )
-            _mark_recovery_required_with_reason(
+            _mark_accounting_pending_with_reason(
                 conn,
                 client_order_id=client_order_id,
                 side=side,
                 from_status="SUBMIT_UNKNOWN",
-                reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
                 reason=(
                     "submit_unknown recent broker fill observed but accounting is fee-pending; "
                     f"exchange_order_id={matched_exchange_order_id or '<none>'}; "
                     f"fill_id={fill.fill_id}; "
                     f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                    "manual fee resolution required before ledger apply"
+                    "automatic reconcile retry will continue until fee evidence is complete"
                 ),
             )
             return SubmitUnknownResolution(
@@ -1518,7 +1582,7 @@ def _clear_reconcile_halt_if_safe(
     unresolved_row = conn.execute(
         """
         SELECT
-            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN') THEN 1 ELSE 0 END) AS unresolved_count,
+            SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING') THEN 1 ELSE 0 END) AS unresolved_count,
             SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END) AS recovery_required_count
         FROM orders
         """
@@ -1798,6 +1862,36 @@ def _record_fee_pending_observations(
         accounting_status = _fill_fee_accounting_status(fill)
         if accounting_status != "accounting_complete":
             fee_pending_count += 1
+        existing_observation = conn.execute(
+            """
+            SELECT id
+            FROM broker_fill_observations
+            WHERE client_order_id=?
+              AND COALESCE(exchange_order_id, '')=COALESCE(?, '')
+              AND COALESCE(fill_id, '')=COALESCE(?, '')
+              AND fill_ts=?
+              AND ABS(price-?) < 1e-12
+              AND ABS(qty-?) < 1e-12
+              AND accounting_status=?
+              AND fee_status=?
+              AND source=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                client_order_id,
+                fill.exchange_order_id or exchange_order_id,
+                fill.fill_id,
+                int(fill.fill_ts),
+                float(fill.price),
+                float(fill.qty),
+                accounting_status,
+                str(getattr(fill, "fee_status", "unknown") or "unknown"),
+                source,
+            ),
+        ).fetchone()
+        if existing_observation is not None:
+            continue
         record_broker_fill_observation(
             conn,
             event_ts=event_ts,
@@ -1834,12 +1928,12 @@ def _fee_pending_metadata_updates(observation_summary: dict[str, int | str]) -> 
     return {
         "observed_fill_count": int(observation_summary["observed_fill_count"]),
         "fee_pending_fill_count": int(observation_summary["fee_pending_fill_count"]),
-        "fee_pending_recovery_required": 1,
+        "fee_pending_auto_recovering": 1,
         "fee_pending_latest_fill_ts": int(observation_summary["fee_pending_latest_fill_ts"]),
         "fee_pending_latest_fee_status": str(observation_summary["fee_pending_latest_fee_status"]),
         "fee_pending_latest_fill_id": str(observation_summary["fee_pending_latest_fill_id"]),
         "fee_pending_operator_next_action": (
-            "inspect broker_fill_observations and resolve fee before ledger apply or manual accounting repair"
+            "await automatic reconcile retry or inspect broker_fill_observations before manual accounting repair"
         ),
     }
 
@@ -1850,9 +1944,9 @@ def _merge_fee_pending_metadata(
 ) -> None:
     metadata["observed_fill_count"] = int(metadata["observed_fill_count"]) + int(updates["observed_fill_count"])
     metadata["fee_pending_fill_count"] = int(metadata["fee_pending_fill_count"]) + int(updates["fee_pending_fill_count"])
-    metadata["fee_pending_recovery_required"] = max(
-        int(metadata["fee_pending_recovery_required"]),
-        int(updates["fee_pending_recovery_required"]),
+    metadata["fee_pending_auto_recovering"] = max(
+        int(metadata.get("fee_pending_auto_recovering", 0) or 0),
+        int(updates.get("fee_pending_auto_recovering", 0) or 0),
     )
     metadata["fee_pending_latest_fill_ts"] = int(updates["fee_pending_latest_fill_ts"])
     metadata["fee_pending_latest_fee_status"] = str(updates["fee_pending_latest_fee_status"])
@@ -1889,7 +1983,7 @@ def reconcile_with_broker(broker: Broker) -> None:
         "fee_gap_recovery_required": 0,
         "observed_fill_count": 0,
         "fee_pending_fill_count": 0,
-        "fee_pending_recovery_required": 0,
+        "fee_pending_auto_recovering": 0,
         "fee_pending_latest_fill_ts": 0,
         "fee_pending_latest_fee_status": "none",
         "fee_pending_latest_fill_id": "none",
@@ -1946,7 +2040,7 @@ def reconcile_with_broker(broker: Broker) -> None:
                                 int(metadata["invalid_fill_price_blocked"])
                                 + int(resolution.metadata_updates["invalid_fill_price_blocked"])
                             )
-                        if "fee_pending_recovery_required" in resolution.metadata_updates:
+                        if "fee_pending_auto_recovering" in resolution.metadata_updates:
                             _merge_fee_pending_metadata(metadata, resolution.metadata_updates)
                     if resolution.reason_code and reason_code == REASON_RECONCILE_OK:
                         reason_code = resolution.reason_code
@@ -2094,18 +2188,17 @@ def reconcile_with_broker(broker: Broker) -> None:
                     fills=fills,
                     source="reconcile_fee_pending",
                 )
-                _mark_recovery_required_with_reason(
+                _mark_accounting_pending_with_reason(
                     conn,
                     client_order_id=oid,
                     side=str(row["side"]),
                     from_status=remote.status,
-                    reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
                     reason=(
-                        "reconcile blocked: broker fill observed but accounting is fee-pending; "
+                        "reconcile deferred ledger apply: broker fill observed but accounting is fee-pending; "
                         f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
                         f"fill_id={fee_pending_fill.fill_id}; "
                         f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                        "manual fee resolution required before ledger apply"
+                        "automatic reconcile retry will continue until fee evidence is complete"
                     ),
                 )
                 _merge_fee_pending_metadata(metadata, _fee_pending_metadata_updates(observation_summary))
@@ -2300,7 +2393,7 @@ def reconcile_with_broker(broker: Broker) -> None:
         pending_observation_summary = _unaccounted_fee_pending_observation_summary(conn)
         metadata.update(pending_observation_summary)
         if int(pending_observation_summary["unaccounted_fee_pending_observation_count"]) > 0:
-            metadata["fee_pending_recovery_required"] = 1
+            metadata["fee_pending_auto_recovering"] = 1
             metadata["fee_pending_fill_count"] = max(
                 int(metadata.get("fee_pending_fill_count", 0) or 0),
                 int(pending_observation_summary["unaccounted_fee_pending_observation_count"]),
@@ -2574,14 +2667,13 @@ def recover_order_with_exchange_id(
                 f"fill_id={fee_pending_fill.fill_id}; "
                 f"fee_status={observation_summary['fee_pending_latest_fee_status']}"
             )
-            record_status_transition(
-                client_order_id,
+            _mark_accounting_pending_with_reason(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
                 from_status="RECOVERY_REQUIRED",
-                to_status="RECOVERY_REQUIRED",
                 reason=reason,
-                conn=conn,
             )
-            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
             conn.commit()
             return
         for fill in fills:
@@ -2742,21 +2834,20 @@ def backfill_broker_order_with_exchange_id(
                 f"exchange_order_id={resolved_exchange_order_id}; "
                 f"fill_id={fee_pending_fill.fill_id}; "
                 f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                "manual fee resolution required before ledger apply"
+                "automatic reconcile retry will continue until fee evidence is complete"
             )
-            record_status_transition(
-                client_order_id,
+            _mark_accounting_pending_with_reason(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
                 from_status="RECOVERY_REQUIRED",
-                to_status="RECOVERY_REQUIRED",
                 reason=reason,
-                conn=conn,
             )
-            set_status(client_order_id, "RECOVERY_REQUIRED", last_error=reason, conn=conn)
             conn.commit()
             return {
                 "client_order_id": client_order_id,
                 "exchange_order_id": resolved_exchange_order_id,
-                "status": "RECOVERY_REQUIRED",
+                "status": "ACCOUNTING_PENDING",
                 "fill_count": len(fills),
                 "applied_fill_count": 0,
                 "blocked_reason": "fee_pending",

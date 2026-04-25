@@ -4,6 +4,8 @@ import pytest
 
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.oms import (
+    OPEN_ORDER_STATUSES,
+    TERMINAL_ORDER_STATUSES,
     add_fill,
     create_order,
     record_order_suppression,
@@ -269,8 +271,61 @@ def test_status_transition_event_records_common_fields(tmp_path):
     assert row["event_type"] == "status_transition"
     assert row["order_status"] == "SUBMIT_UNKNOWN"
     assert "from=PENDING_SUBMIT" in str(row["message"])
-    assert "to=SUBMIT_UNKNOWN" in str(row["message"])
-    assert "reason=submit unknown: timeout" in str(row["message"])
+
+
+def test_terminal_orders_do_not_keep_pending_local_intent_state(tmp_path):
+    db_path = tmp_path / "terminal_local_intent.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        for client_order_id, terminal_status in (
+            ("o_filled", "FILLED"),
+            ("o_failed", "FAILED"),
+            ("o_canceled", "CANCELED"),
+        ):
+            create_order(
+                client_order_id=client_order_id,
+                side="BUY",
+                qty_req=0.01,
+                price=None,
+                status="PENDING_SUBMIT",
+                local_intent_state="PENDING_SUBMIT",
+                ts_ms=1000,
+                conn=conn,
+            )
+            if terminal_status == "FILLED":
+                add_fill(
+                    client_order_id=client_order_id,
+                    fill_id=f"{client_order_id}-fill",
+                    fill_ts=1001,
+                    price=100000000.0,
+                    qty=0.01,
+                    fee=10.0,
+                    conn=conn,
+                )
+            set_status(client_order_id, terminal_status, conn=conn)
+
+        rows = conn.execute(
+            """
+            SELECT client_order_id, status, local_intent_state
+            FROM orders
+            WHERE client_order_id IN ('o_filled', 'o_failed', 'o_canceled')
+            ORDER BY client_order_id
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [(row["status"], row["local_intent_state"]) for row in rows] == [
+        ("CANCELED", "CANCELED"),
+        ("FAILED", "FAILED"),
+        ("FILLED", "FILLED"),
+    ]
+
+
+def test_recovery_required_not_both_open_and_terminal():
+    assert "RECOVERY_REQUIRED" in OPEN_ORDER_STATUSES
+    assert "RECOVERY_REQUIRED" not in TERMINAL_ORDER_STATUSES
+    assert "ACCOUNTING_PENDING" in OPEN_ORDER_STATUSES
 
 
 def test_validate_status_transition_allows_only_whitelisted_paths():

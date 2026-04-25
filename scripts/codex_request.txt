@@ -1,371 +1,411 @@
-You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
+You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is to investigate and implement a structural fix for a live EC2 recovery failure in the Bithumb trading bot. Do not treat the current diagnosis as proven fact. Use it as the starting hypothesis, then verify or falsify it from the repository code, tests, and a minimal reproducible fixture.
+Treat this as an engineering task to make the live trading bot more robust, reproducible, and operable. Do not reduce this to a narrow symptom patch. The recent EC2 incident should be used as the starting point, but do not assume the current diagnosis is automatically true. Validate or falsify the hypotheses below directly against the repository code and tests.
 
-## Problem context
+Context:
 
-A live EC2 bot instance stopped after a final SELL fill. The initial trigger was a fee-pending SELL accounting issue, but that was repaired manually. After that repair:
+The EC2 live bot has repeatedly stopped after exactly one BUY or SELL execution. The operator has had to manually resume the bot and sometimes manually repair the DB. The current observed pattern is:
 
-* Orders were no longer unresolved.
-* `recovery_required_count=0`.
-* Broker and local portfolio balances converged.
-* Full projection rebuild succeeded in matching total lot projection to portfolio.
-* Resume was still blocked by:
+* A live order is submitted.
+* Broker/exchange fill is observed.
+* Fee/accounting information is incomplete or delayed.
+* The bot promotes this to `RECOVERY_REQUIRED`.
+* Later, fee/accounting repair succeeds.
+* Audit/recovery reports show no active blocking issue.
+* Yet runtime remains paused or requires explicit `resume`.
+* Recent DB rows showed terminal orders such as `FILLED` and `FAILED` while `orders.local_intent_state` remained `PENDING_SUBMIT`.
 
-```text
-POSITION_AUTHORITY_CORRECTION_REQUIRED
-target_lot_qty_fill_mismatch=target_qty=0.000399850000,fill_qty=0.000599990000
-```
+Important files and areas to inspect first:
 
-The relevant live sequence observed on EC2 was:
+* `src/bithumb_bot/broker/live_submission_execution.py`
+* `src/bithumb_bot/oms.py`
+* `src/bithumb_bot/fee_pending_repair.py`
+* `src/bithumb_bot/recovery.py`
+* `src/bithumb_bot/runtime_readiness.py`
+* `src/bithumb_bot/engine.py`
+* `src/bithumb_bot/app.py`
+* `src/bithumb_bot/db_core.py`
+* `tests/test_position_authority_recovery_state.py`
+* `tests/test_operator_commands.py`
+* Any tests covering recovery, restart, ops report, accounting projection, order lifecycle, and runtime readiness.
 
-```text
-trade 27 BUY  qty=0.00059999 BTC
-trade 28 SELL qty=0.00040000 BTC
-current broker/local BTC balance = 0.00039985 BTC
-```
+Known suspicious findings to verify, not blindly assume:
 
-The remaining `open_position_lots` row after full projection rebuild looked like:
+1. `live_submission_execution.py` appears to treat any fill whose accounting status is `fee_pending` as an application failure and transitions the order to `RECOVERY_REQUIRED`, with a reason like “broker fill observed but accounting is fee-pending.”
+2. `oms.py` appears to include `RECOVERY_REQUIRED` in both open/risky order status sets and terminal status sets, which may give different components inconsistent semantics.
+3. `fee_pending_repair.py` already contains logic to apply fee-pending repairs and transition projected order status, but this appears to be operator-command-oriented rather than a first-class idempotent reconciler in the live run loop.
+4. Runtime readiness often knows the system is safe to resume, for example with no active blockers, no unresolved fee state, converged broker/portfolio/lot projection, and `safe_to_resume=1`, but the live runtime still requires an explicit operator resume.
+5. Terminal orders can retain `local_intent_state=PENDING_SUBMIT`, which suggests the order state model is not being updated atomically or consistently.
 
-```text
-entry_trade_id=27
-entry_client_order_id=live_1777042500000_buy_ae2ac30c
-qty_open=0.00039985
-position_state=dust_tracking
-dust_tracking_lot_count=1
-internal_lot_size=0.0004
-lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
-entry_decision_linkage=degraded_recovery_unattributed
-```
+Primary objective:
 
-The working hypothesis is:
+Redesign and implement the smallest coherent change set that prevents this entire class of failures: recoverable exchange/accounting latency must not be escalated into a manual halt/resume cycle unless there is a real unresolved risk or operator-review condition.
 
-> A `full_projection_rebuild` created a portfolio-anchor projection row that correctly matched current broker/portfolio quantity, but the subsequent readiness/authority assessment treated that synthetic portfolio-anchor row as a normal fill-native BUY residual. It then compared the anchor row’s `qty_open=0.00039985` to the original latest BUY fill quantity `0.00059999`, generated `target_lot_qty_fill_mismatch`, and blocked resume even though broker, accounting, and projection totals had converged.
+Do not merely add a workaround that auto-runs `resume` after the old broken flow. Prefer a state-machine and reconciler design that makes the system correct before it reaches halt/resume.
 
-Do not blindly patch around `target_lot_qty_fill_mismatch`. The goal is not to suppress a symptom. The goal is to separate truth-source semantics so the recovery system remains safe, reproducible, and operational.
+Working hypotheses to validate or falsify:
 
-## Repository areas to inspect first
+Hypothesis 1: Fee-pending is promoted to a hard recovery state too early.
 
-Inspect at least these files:
+Bithumb fill data may be eventually consistent. The live submission path currently appears to require immediate authoritative fee/accounting data. If a fill is observed but fee is missing/pending, it records a broker fill observation and transitions to `RECOVERY_REQUIRED`. That may be structurally wrong. A fee-pending fill should usually become an accounting-pending state with automatic retry/reconciliation, not an operator recovery incident.
 
-```text
-src/bithumb_bot/position_authority_state.py
-src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/lifecycle.py
-src/bithumb_bot/db_core.py
-tests/test_position_authority_recovery_state.py
-tests/test_operator_commands.py
-tests/test_ops_report.py
-```
+Validation:
 
-Relevant concepts already present in the codebase include:
+* Search for `fee_pending_fills`, `live_application_fee_pending`, `manual fee resolution required before ledger apply`, `LiveFillFeeValidationError`, and `_mark_recovery_required`.
+* Identify every code path that converts fee-missing/fee-pending into `RECOVERY_REQUIRED`, halt, pause, or resume gate.
+* Determine whether the parser is actually failing to read available fee data, or whether the exchange genuinely does not provide authoritative fee immediately.
+* Inspect `broker_fill_observations.raw_payload`, `fee_status`, `fee_source`, `fee_confidence`, and `fee_validation_reason` handling.
 
-```text
-canonical_truth_source = orders_fills_trades_plus_portfolio
-projection_truth_source = open_position_lots_materialized_projection
-projection_role = rebuildable_materialized_view
-projection_publication_role = current_state_attestation
-lot_rule_source_mode = full_projection_rebuild_portfolio_anchor
-```
+Required test:
 
-The design intent appears to be that `open_position_lots` is a materialized projection / executable-authority layer, not necessarily the canonical immutable event log. Verify this from the code before acting.
+Create or update a fake broker/live-submission test where:
 
-## Hypotheses to verify or falsify
+* First broker read returns a fill with missing or pending fee.
+* The bot records a fee-pending observation.
+* The order is not treated as a hard unresolved recovery blocker.
+* The run loop or accounting reconciler remains able to continue safely.
+* A subsequent broker read returns authoritative fee.
+* The fill is applied idempotently.
+* Final status is terminal/accounted, trading does not require manual resume, and audit passes.
 
-Keep these as hypotheses, not assumptions.
+Hypothesis 2: The order state model is not a single coherent state machine.
 
-### Hypothesis A: Portfolio-anchor projection rows are being misclassified as fill-native correction targets
+`orders.status`, `orders.local_intent_state`, `order_intent_dedup.order_status`, `order_events.order_status`, runtime halt state, and recovery counters may be updated independently. This allows contradictory states such as `orders.status='FILLED'` with `local_intent_state='PENDING_SUBMIT'`.
 
-`_replace_with_portfolio_anchored_projection()` appears to create `open_position_lots` rows with:
+Validation:
 
-```text
-lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
-```
+* Search all writes to `orders.status`, `orders.local_intent_state`, `order_intent_dedup.order_status`, and `order_events.order_status`.
+* Identify whether `set_status()` updates only `orders.status` and not related intent/dedup/lifecycle fields.
+* Add invariant checks for terminal orders retaining submit-pending local intent state.
+* Determine whether `local_intent_state` is meaningful or redundant. If meaningful, it must be synchronized. If redundant, reduce its operational role or document it clearly.
 
-These rows are anchored to a recent BUY only as provenance. Their `qty_open` may represent the current portfolio/broker balance, not the natural residual of that single BUY fill.
+Required tests:
 
-Verify whether `build_position_authority_assessment()` later treats such rows as normal fill-native lots and applies fill-native invariants such as:
+* A terminal `FILLED` order must not retain `local_intent_state=PENDING_SUBMIT`.
+* A terminal `FAILED`, `REJECTED`, or `CANCELED` order must not retain `local_intent_state=PENDING_SUBMIT`.
+* `order_intent_dedup.order_status` must not disagree with `orders.status` for active dedup rows unless explicitly documented.
+* `audit` or an equivalent invariant test must fail on terminal orders with pending local intent state.
 
-```text
-target_total_qty == fill_qty
-target_total_qty == expected_residual_qty
-```
+Hypothesis 3: `RECOVERY_REQUIRED` has overloaded semantics.
 
-Confirm or refute by building a minimal test scenario and/or by tracing these fields:
+`RECOVERY_REQUIRED` appears to mean too many things at once: unresolved risky order, terminal historical recovery marker, operator-review-required state, and auto-repairable accounting pending state. If it is both “open” and “terminal,” startup gate and resume logic can disagree.
 
-```text
-target_trade_id
-target_client_order_id
-target_total_qty
-target_dust_qty
-fill_qty
-portfolio_qty
-projection_convergence.converged
-portfolio_projection_publication_present
-lot_rule_source_mode for the target row
-needs_correction
-safe_to_correct
-blockers
-repair_action_state
-reason
-```
+Validation:
 
-### Hypothesis B: `full_projection_rebuild` conflates “matching current portfolio quantity” with “reconstructing fill-native position authority”
+* Search every use of `RECOVERY_REQUIRED` in `src`, `tests`, and `docs`.
+* Classify each use into:
 
-Investigate `_apply_full_projection_rebuild()` and `_replace_with_portfolio_anchored_projection()`.
+  * submit outcome
+  * accounting pending/recovery
+  * operator halt blocker
+  * terminal historical marker
+  * risk gate condition
+  * report/display state
+* Decide whether `RECOVERY_REQUIRED` must be split into more precise states, or whether its membership in open/terminal sets must be corrected.
 
-Verify whether the full rebuild first replays lifecycles, then deletes/replaces `open_position_lots` with a portfolio-anchored projection that is quantity-converged but no longer a true per-fill lifecycle decomposition.
+Design preference:
 
-A valid full projection rebuild may still be safe, but only if subsequent readiness logic understands the row’s projection kind and applies projection-specific invariants.
+Do not let a single string represent both an unresolved live risk and a completed historical repair marker. Introduce clearer distinctions if needed, such as:
 
-### Hypothesis C: The “latest BUY only” authority assessment is structurally fragile with accumulated residual/dust
+* `ACCOUNTING_PENDING`
+* `FEE_PENDING`
+* `AUTO_RECOVERING`
+* `OPERATOR_REVIEW_REQUIRED`
+* `RECOVERY_REPAIRED`
+* `HARD_HALTED`
 
-`build_position_authority_assessment()` appears to focus on the latest accounted BUY and its rows. This may fail when the current residual portfolio is a combination of older residual plus the latest BUY’s residual.
+The exact names may differ, but the semantics must be clear and tested.
 
-Reproduce or falsify with a test fixture:
+Hypothesis 4: Repair succeeds but runtime policy refuses automatic recovery.
 
-```text
-prior residual exists, e.g. 0.00019986
-latest BUY qty = 0.00059999, executable_lot_count=1, internal_lot_size=0.0004
-latest SELL qty = 0.00040000
-current portfolio/broker qty = 0.00039985
-full projection rebuild creates one portfolio-anchor dust row
-assessment should not require this portfolio-anchor row’s qty to equal latest BUY fill qty
-```
+Fee-pending repair, fee-gap repair, and position-authority rebuild can make the ledger and lot projections consistent. But runtime policy may still require explicit operator resume even when no blocker remains.
 
-### Hypothesis D: The recovery state machine lacks an actionable “safe_to_apply=false” diagnostic path
+Validation:
 
-When `safe_to_apply=false`, the operator currently gets blocked but may need to read code to understand whether this is:
+* Search for `POSITION_AUTHORITY_REBUILD_COMPLETED`, `explicit resume required`, `resume_now`, `safe_to_resume`, `enable_trading`, and `disable_trading_until`.
+* Trace how readiness snapshots become runtime policy decisions.
+* Determine whether `compute_runtime_readiness_snapshot` and restart/resume eligibility are only report outputs or actually used as policy inputs.
+* Identify conditions under which the bot can safely auto-clear a repair-completed pause.
 
-* missing broker evidence,
-* missing projection publication,
-* unsafe open orders,
-* stale repair event,
-* fill-native mismatch,
-* portfolio-anchor projection mismatch,
-* or a code/model limitation.
+Required behavior:
 
-Inspect `recovery-report`, `restart-checklist`, and health output paths. Improve observability if needed.
+If all of the following are true, the bot should not require manual resume:
 
-## Required design direction
+* `unresolved_open_order_count == 0`
+* `recovery_required_count == 0`
+* `unresolved_fee_state == 0`
+* `fill_accounting_active_issue_count == 0`
+* broker portfolio is converged
+* lot projection is converged
+* `blocking_incident_class == NONE`
+* no operator-review-required state remains
+* no hard risk halt such as kill switch or loss limit is active
 
-Prioritize a design change over a narrow symptom patch.
+Implement this as a principled runtime policy, not as a blind unconditional auto-resume.
 
-The system should distinguish at least these row semantics:
+Hypothesis 5: Dust/lot accounting flatness and execution flatness are not cleanly separated.
 
-```text
-fill_native_lot
-  - created from a specific BUY fill’s executable/dust split
-  - fill quantity, lifecycle SELL quantity, and residual quantity are valid invariants
+The system may preserve residual BTC as accounting evidence while treating it as execution-flat for new entries. This is acceptable, but only if it does not repeatedly trigger position authority rebuild and explicit resume.
 
-portfolio_anchor_projection_lot
-  - created to attest current broker/portfolio quantity after recovery
-  - entry_trade_id is provenance anchor only
-  - fill quantity equality must not be required
-  - must require strong broker/accounting/projection/publication evidence
+Validation:
 
-manual_external_position_adjustment_lot
-  - created from external adjustment/manual repair
-  - should not be interpreted as a natural BUY-fill residual
-```
+* Inspect `position_authority_state`, `position_authority_repair`, `runtime_readiness`, `dust`, and related tests.
+* Verify that `DUST_ONLY_TRACKED` / harmless dust allows new entries, blocks only closeout as appropriate, and does not stop the run loop.
+* Add tests to ensure dust-only tracked state permits continued operation without manual resume when no hard blocker exists.
 
-Do not necessarily add a large migration unless necessary. It is acceptable to start by centralizing provenance classification using existing columns such as `lot_rule_source_mode`, but the code must make the semantic split explicit, named, and tested.
+Design requirements:
 
-## Minimum expected implementation
+1. Separate state axes instead of overloading one order status.
 
-Implement a robust fix that satisfies all of the following:
+At minimum, distinguish:
 
-1. Add or refactor a small explicit helper/model that classifies `open_position_lots` provenance or projection kind, at least recognizing:
+* Submission state: intent created, submitting, submitted, acknowledged, rejected, submit unknown.
+* Exchange execution state: open, partial, filled, canceled.
+* Accounting state: not applied, fee pending, applied, repaired, invalid.
+* Operator/risk state: ok, degraded, auto-recovering, operator-review-required, hard-halted.
 
-```text
-full_projection_rebuild_portfolio_anchor
-ledger / fill-native rows
-manual/external adjustment rows if already represented
-unknown rows fail closed
-```
+This does not necessarily require a full DB migration in one PR, but the code paths touched by this incident must move toward these semantics and must not deepen the overload of `RECOVERY_REQUIRED`.
 
-2. Update `build_position_authority_assessment()` so a converged portfolio-anchor projection row is not treated as a fill-native correction target.
+2. Treat fee-pending as asynchronous accounting, not immediate manual recovery.
 
-A portfolio-anchor projection may be considered converged only under strict conditions. Suggested minimum conditions:
+Preferred flow:
 
-```text
-target lot row source/provenance is full_projection_rebuild_portfolio_anchor
-projection_convergence.converged is true
-target_total_qty matches portfolio_qty
-portfolio_projection_publication_present is true, or another current-state attestation exists and is verified
-unresolved_open_order_count == 0
-recovery_required_count == 0
-unresolved fee pending state is false
-no executable exposure is being inferred from qty alone
-row remains dust_tracking if executable_lot_count == 0
-```
+* Broker fill observed with missing/pending fee.
+* Record `broker_fill_observations` with `accounting_status='fee_pending'`.
+* Mark order/accounting as fee/accounting pending, not hard recovery, unless there is another real risk.
+* Retry broker order/fill reads for a bounded time/count.
+* If authoritative fee becomes available, apply fill and trade idempotently.
+* If only order-level fee is available and attribution is unambiguous, apply automatically with clear provenance.
+* If account cash drift can infer fee and there is a single candidate, allow automatic repair with explicit evidence.
+* If attribution is ambiguous, fee is invalid, or drift is large/unexplained, transition to `OPERATOR_REVIEW_REQUIRED`, not a generic overloaded recovery state.
 
-Use the repository’s existing available data paths. If not all checks belong inside `position_authority_state.py`, keep the separation clean and document the boundary.
+3. Promote fee-pending repair into an idempotent reconciler.
 
-3. Do not globally ignore `target_lot_qty_fill_mismatch`.
+Do not leave `fee_pending_repair.py` as only a manual CLI path. Extract or reuse its core logic in a reconciler that the live run loop/reconcile flow can call safely and repeatedly.
 
-For fill-native lots, this mismatch must still block unless a valid partial-close residual normalization applies.
-
-4. Strengthen the full projection rebuild postcondition.
-
-After `_apply_full_projection_rebuild()` publishes a portfolio-anchor projection, it should not leave the system immediately in `AUTHORITY_CORRECTION_PENDING` due to misclassifying its own output.
-
-If the post-assessment still requires correction, the full rebuild should either:
-
-* fail with a precise postcondition error, or
-* classify the portfolio-anchor projection as converged and resume-safe according to the stricter portfolio-anchor invariants.
-
-5. Improve operator diagnostics for `safe_to_apply=false`.
-
-At minimum, ensure the preview/report surfaces:
-
-```text
-target row provenance/projection kind
-whether the blocker is fill-native or portfolio-anchor specific
-which evidence is missing
-whether manual DB update is unsafe
-what command or code path is next
-```
-
-Do not add noisy logs in normal operation. Prefer structured report fields or existing report output.
-
-## Required tests
-
-Add regression tests before or with the fix. Prefer focused unit/integration tests using the existing test helpers in `tests/test_position_authority_recovery_state.py`.
-
-At minimum add tests equivalent to:
+Suggested shape:
 
 ```python
-def test_full_projection_rebuild_portfolio_anchor_does_not_require_fill_qty_match_after_partial_close_with_existing_residual(...):
-    """
-    Reproduce the EC2 failure pattern:
-    - prior residual exists
-    - latest BUY 0.00059999 has one executable lot of 0.0004 and dust remainder
-    - later SELL 0.00040000 closes the executable lot
-    - current portfolio/broker qty is 0.00039985
-    - full projection rebuild creates a portfolio-anchor dust row
-    - build_position_authority_assessment() must not classify it as fill-native target_lot_qty_fill_mismatch
-    - runtime readiness must not enter AUTHORITY_CORRECTION_PENDING solely because of that mismatch
-    """
+class AccountingReconciler:
+    def reconcile_pending_fees(self, conn, broker) -> ReconcileResult:
+        ...
 ```
 
-Also add safety tests:
+The exact API may differ, but it must be idempotent, testable, and observable.
 
-```python
-def test_portfolio_anchor_projection_still_blocks_without_current_publication_attestation(...):
-    """
-    A portfolio-anchor-looking row without valid current-state publication/attestation must fail closed.
-    """
+4. Make runtime halt policy severity-based.
 
-def test_portfolio_anchor_projection_still_blocks_when_projection_or_portfolio_not_converged(...):
-    """
-    If projection quantity does not match portfolio/broker/accounting evidence, do not treat it as converged.
-    """
+Use explicit severity levels or equivalent semantics:
 
-def test_fill_native_lot_qty_mismatch_still_blocks(...):
-    """
-    A normal fill-native lot with target/fill mismatch must still produce a blocker.
-    """
-```
+* OK: continue normally.
+* DEGRADED: continue but report warnings.
+* AUTO_RECOVERING: retry/reconcile; optionally block new submissions if necessary.
+* OPERATOR_REVIEW_REQUIRED: block new submissions, keep process observable, require operator action.
+* HARD_HALTED: stop trading due to real risk, kill switch, loss limit, irreconcilable broker conflict, or unsafe unknown order.
 
-If existing test helpers make these exact names impractical, use equivalent names but preserve the scenarios and assertions.
+Recoverable fee/accounting latency must not be treated as hard halt.
 
-## Recovery and reproducibility improvements
+5. Preserve safety.
 
-If feasible within the same change, add or sketch a small recovery-case export path. Do not let this distract from the core fix, but leave the repository more operational.
+Do not allow duplicate orders, overfills, double application of fills, or silent fee omission. Idempotency is mandatory.
 
-Desired future command shape:
+Must-have invariants:
+
+* A fill is applied at most once.
+* A fee repair is applied at most once per fill identity.
+* Terminal order states cannot retain submit-pending local intent.
+* Auto-recovery cannot place a new order while there is an unresolved live order that could still execute.
+* Operator-review-required states must block new submissions.
+* Hard risk states must remain hard blocked.
+* Manual DB edits must not be part of normal recovery.
+
+Implementation scope:
+
+Prefer a coherent, reviewable PR-sized change. If a full multi-axis DB schema migration is too large, implement a compatibility layer that introduces the semantics without breaking existing data.
+
+Acceptable near-term implementation:
+
+* Add helper functions/constants that distinguish:
+
+  * open exchange/order statuses
+  * terminal execution statuses
+  * accounting-pending states
+  * operator-review states
+  * hard-blocking risk states
+* Remove or neutralize the contradiction where `RECOVERY_REQUIRED` is both open and terminal, or explicitly split the uses.
+* Update `set_status` or introduce a single authoritative transition function that synchronizes:
+
+  * `orders.status`
+  * `orders.local_intent_state`
+  * `order_intent_dedup.order_status`
+  * order events
+  * last error
+* Add a startup/audit repair or migration-safe check for stale terminal rows with `local_intent_state=PENDING_SUBMIT`.
+* Convert fee-pending live application handling from immediate hard recovery to pending/reconciler flow.
+* Auto-clear repair-completed runtime pause only when readiness proves there are no active blockers.
+* Add regression tests that reproduce the EC2 pattern.
+
+Tests to add or update:
+
+1. `test_live_fee_pending_fill_does_not_require_manual_resume`
+
+Simulate live order submission where the first fill observation has pending/missing fee. Assert the bot records pending accounting state, does not escalate to manual recovery/hard halt, and later applies the fill when fee appears.
+
+2. `test_terminal_orders_do_not_keep_pending_local_intent_state`
+
+Create FILLED/FAILED/CANCELED/REJECTED transitions and assert `local_intent_state` is terminal or cleared appropriately.
+
+3. `test_repaired_fee_pending_order_is_not_unresolved`
+
+After fee-pending repair applies, assert the order is not counted as unresolved open/recovery-required.
+
+4. `test_dust_only_tracked_allows_new_entry_without_resume`
+
+Use or extend existing EC2 repro constants in `tests/test_position_authority_recovery_state.py`. Assert `DUST_ONLY_TRACKED` with harmless residual allows run loop/new entry and only blocks closeout when appropriate.
+
+5. `test_recovery_required_not_both_open_and_terminal`
+
+Add a semantic test for status classification. A status must not be simultaneously treated as terminal historical state and unresolved open risk unless there is a precise documented reason and the code accounts for it safely.
+
+6. `test_repair_completed_with_no_blockers_auto_clears_pause`
+
+Given completed repair, no unresolved orders, no active accounting issue, converged broker/portfolio/lot state, and no hard risk halt, assert operator resume is not required.
+
+7. Audit/ops/report tests
+
+Ensure reports expose:
+
+* pending fee count
+* auto-recovery count
+* operator-review-required count
+* hard halt reason
+* whether trading is blocked, degraded, or running
+* next action, if any
+
+Observability requirements:
+
+* Log every transition with structured fields:
+
+  * client_order_id
+  * exchange_order_id
+  * fill_id
+  * old/new order status
+  * accounting state
+  * operator/risk state
+  * reason code
+  * whether new submissions are blocked
+  * whether process loop continues
+  * fee source/provenance/confidence
+* When fee-pending occurs, log it as an accounting latency condition, not as an application crash, unless it becomes operator-review-required.
+* When auto-recovery succeeds, log the exact evidence and invariant checks.
+* When operator review is required, print a precise command or report path.
+* Add or update an incident artifact path if the system enters operator-review or hard-halt.
+
+Documentation requirements:
+
+Create or update `docs/OPERATIONS_STATE_MACHINE.md`.
+
+It must define:
+
+* The separate state axes.
+* Which states are terminal.
+* Which states block new orders.
+* Which states allow the process loop to keep running.
+* Which states require operator action.
+* How fee-pending is handled.
+* How dust-only tracked residual is handled.
+* What invariants audit enforces.
+* Recovery commands and when they are appropriate.
+* A note that manual DB editing is not normal recovery; repairs must be event-recorded.
+
+Do not overfit to the single EC2 event. The design must handle the whole class of exchange eventual-consistency and accounting-latency issues.
+
+Safety boundaries:
+
+* Do not weaken checks for overfill, duplicate fill, submit unknown, broker conflicts, loss limits, kill switch, or unknown remote open orders.
+* Do not silently assume zero fee for material live fills.
+* Do not auto-apply ambiguous fee attribution.
+* Do not auto-resume from hard risk halts.
+* Do not remove existing operator commands unless replaced with safer equivalents.
+* Preserve backward compatibility for existing SQLite DBs where possible.
+
+Suggested investigation commands inside the repo:
 
 ```bash
-bithumb-bot export-recovery-case --redact-secrets --case-id <id>
+grep -RIn \
+  "fee_pending_fills\|live_application_fee_pending\|manual fee resolution required before ledger apply\|_mark_recovery_required\|LiveFillFeeValidationError" \
+  src tests
+
+grep -RIn \
+  "local_intent_state\|PENDING_SUBMIT\|set_status\|order_intent_dedup\|RECOVERY_REQUIRED" \
+  src tests docs
+
+grep -RIn \
+  "POSITION_AUTHORITY_REBUILD_COMPLETED\|explicit resume required\|resume_now\|safe_to_resume\|enable_trading\|disable_trading_until" \
+  src tests
 ```
 
-Desired output contents:
-
-```text
-schema version
-subset of orders/fills/trades/portfolio/open_position_lots
-relevant repair/publication tables
-runtime readiness snapshot
-recovery-report JSON
-expected failing blocker
-```
-
-If implementing this is too large, create a clear TODO or issue-ready note in code/tests/docs explaining where it should live and how it would help convert EC2-only failures into repeatable fixtures.
-
-## Non-goals and safety constraints
-
-Do not:
-
-* simply remove the `target_lot_qty_fill_mismatch` blocker;
-* allow qty-only inference of executable exposure;
-* make resume possible when broker/portfolio/accounting/projection evidence is not converged;
-* add a manual DB UPDATE workaround as the primary fix;
-* weaken fail-closed behavior for unknown row provenance;
-* overfit to exactly `0.00039985` or the specific EC2 order IDs.
-
-The fix must generalize to the problem family:
-
-```text
-fee repair + partial close + accumulated dust/residual + full projection rebuild + broker/portfolio reconciliation
-```
-
-## Suggested commands to run
-
-Use the repository’s normal tooling. At minimum run targeted tests around position authority and operator reports:
+Suggested validation commands:
 
 ```bash
-pytest tests/test_position_authority_recovery_state.py -q
-pytest tests/test_operator_commands.py -q
-pytest tests/test_ops_report.py -q
+uv run pytest \
+  tests/test_position_authority_recovery_state.py \
+  tests/test_operator_commands.py \
+  tests/test_recovery_restart_regression.py \
+  tests/test_accounting_projection.py \
+  tests/test_ops_report.py
+
+uv run pytest
 ```
 
-If the full test suite is practical, also run:
+If the full test suite is too slow, run the targeted tests first, then run the full suite if feasible.
 
-```bash
-pytest -q
-```
+Final report format:
 
-If any test is too slow or fails for unrelated environmental reasons, report that clearly and include the exact command/output.
+Return a concise but complete engineering report with these sections:
 
-## Final report format
+1. Summary
 
-When done, report in this structure:
+State what was changed and why.
 
-```text
-Summary
-- What changed
-- Why this is a design fix rather than a symptom suppression
+2. Hypotheses evaluated
 
-Hypotheses
-- Hypothesis A: confirmed/refuted/partially confirmed, with evidence
-- Hypothesis B: confirmed/refuted/partially confirmed, with evidence
-- Hypothesis C: confirmed/refuted/partially confirmed, with evidence
-- Hypothesis D: confirmed/refuted/partially confirmed, with evidence
+For each hypothesis, mark one of:
 
-Implementation
-- Files changed
-- New/changed concepts or invariants
-- How portfolio-anchor projection rows are now distinguished from fill-native lots
-- Why fill-native target_lot_qty_fill_mismatch remains protected
+* supported
+* partially supported
+* falsified
+* still unresolved
 
-Tests
-- Tests added
-- Commands run
-- Results
-- Any tests not run and why
+Include evidence from code/tests.
 
-Operational impact
-- What an EC2 operator should now see in recovery-report/health/restart-checklist
-- Whether the previous stuck state should become resume-ready or should fail with a clearer blocker
-- Any remaining manual verification steps
+3. Design changes
 
-Long-term follow-ups
-- Typed projection/provenance schema
-- recovery plan/apply/postcheck standardization
-- export-recovery-case fixture generation
-```
+Explain the new or revised state semantics and why they prevent the class of incidents.
 
-Be explicit about uncertainties. If a hypothesis is not fully proven, keep it as a hypothesis and state what further evidence would prove or disprove it.
+4. Files changed
+
+List each changed file and its role.
+
+5. Safety properties preserved
+
+Explicitly confirm duplicate order, overfill, ambiguous fee, hard halt, and operator-review safety.
+
+6. Tests
+
+List tests added/changed and commands run, with pass/fail results.
+
+7. Operational impact
+
+Explain how the next live fee-pending incident should behave differently:
+
+* what gets logged
+* whether trading continues
+* when new submissions are blocked
+* when operator action is required
+* what report/command the operator should use
+
+8. Remaining risks / follow-up
+
+List any remaining limitations, especially if a full DB schema migration was deferred.
 

@@ -715,7 +715,7 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
             COUNT(*) AS open_order_count,
             COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0) AS recovery_required_count
         FROM orders
-        WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN',
+        WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN', 'ACCOUNTING_PENDING',
                          'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
         """
     ).fetchone()

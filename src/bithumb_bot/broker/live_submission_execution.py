@@ -213,6 +213,36 @@ def _record_application_fill_observations(
         if accounting_status == "fee_pending":
             fee_pending_count += 1
             latest_fee_status = str(getattr(fill, "fee_status", "unknown") or "unknown")
+        existing_observation = conn.execute(
+            """
+            SELECT id
+            FROM broker_fill_observations
+            WHERE client_order_id=?
+              AND COALESCE(exchange_order_id, '')=COALESCE(?, '')
+              AND COALESCE(fill_id, '')=COALESCE(?, '')
+              AND fill_ts=?
+              AND ABS(price-?) < 1e-12
+              AND ABS(qty-?) < 1e-12
+              AND accounting_status=?
+              AND fee_status=?
+              AND source=?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                client_order_id,
+                getattr(fill, "exchange_order_id", None) or exchange_order_id,
+                getattr(fill, "fill_id", None),
+                int(getattr(fill, "fill_ts", 0) or 0),
+                float(getattr(fill, "price", 0.0) or 0.0),
+                float(getattr(fill, "qty", 0.0) or 0.0),
+                accounting_status,
+                str(getattr(fill, "fee_status", "unknown") or "unknown"),
+                source,
+            ),
+        ).fetchone()
+        if existing_observation is not None:
+            continue
         record_broker_fill_observation(
             conn,
             event_ts=event_ts,
@@ -274,13 +304,13 @@ def reconcile_apply_fills_and_refresh(
         )
         from_status = str(order.status or "NEW")
         reason = (
-            "live application blocked: broker fill observed but accounting is fee-pending; "
+            "live application deferred ledger apply: broker fill observed but accounting is fee-pending; "
             f"exchange_order_id={exchange_order_id or live_module.UNSET_EVENT_FIELD}; "
             f"fill_id={fee_pending_fills[0].fill_id}; "
             f"fee_status={observation_summary['latest_fee_status']}; "
-            "manual fee resolution required before ledger apply"
+            "automatic reconcile retry will continue until fee evidence is complete"
         )
-        live_module._mark_recovery_required(
+        live_module._mark_accounting_pending(
             conn=conn,
             client_order_id=client_order_id,
             side=side,
@@ -291,14 +321,14 @@ def reconcile_apply_fills_and_refresh(
             conn,
             intent_key=submission.intent_key,
             client_order_id=client_order_id,
-            order_status="RECOVERY_REQUIRED",
+            order_status="ACCOUNTING_PENDING",
         )
         exc = LiveFillFeeValidationError(reason)
         _record_application_phase(
             submission=submission,
-            order_status="RECOVERY_REQUIRED",
-            execution_state="application_failed",
-            submission_reason_code="application_failed",
+            order_status="ACCOUNTING_PENDING",
+            execution_state="application_deferred_fee_pending",
+            submission_reason_code="application_deferred_fee_pending",
             broker_response_summary=(
                 "application_exception=LiveFillFeeValidationError;"
                 f"error={reason};observed_fill_count={observation_summary['observation_count']};"
@@ -316,6 +346,7 @@ def reconcile_apply_fills_and_refresh(
                 observed_fill_count=observation_summary["observation_count"],
                 fee_pending_fill_count=observation_summary["fee_pending_count"],
                 latest_fee_status=observation_summary["latest_fee_status"],
+                order_status="ACCOUNTING_PENDING",
             )
         )
         return None

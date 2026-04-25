@@ -1670,7 +1670,7 @@ def test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocke
     state = runtime_state.snapshot()
 
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert row["exchange_order_id"] is None
     assert "manual recovery required" in str(row["last_error"])
     assert reason is not None
@@ -1925,9 +1925,9 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
     assert metadata["observed_fill_count"] == 1
     assert metadata["fee_pending_fill_count"] == 1
-    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
-    assert "recovery_required_orders=1" in str(gate_reason)
+    assert "accounting_pending_orders=1" in str(gate_reason)
 
 
 def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee_confirmed(isolated_db):
@@ -1982,7 +1982,7 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert broker.parse_modes
     assert set(broker.parse_modes) == {"salvage"}
     assert order is not None
-    assert order["status"] == "RECOVERY_REQUIRED"
+    assert order["status"] == "ACCOUNTING_PENDING"
     assert float(order["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(order["last_error"])
     assert fill_count["cnt"] == 0
@@ -1997,14 +1997,14 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
     assert "paid_fee" in str(observation["raw_payload"])
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
-    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
     assert replay["broker_fill_observation_count"] >= 1
     assert replay["broker_fill_fee_pending_count"] >= 1
     assert replay["broker_fill_fee_candidate_order_level_count"] >= 1
     assert replay["broker_fill_missing_fee_count"] == 0
     assert "broker_fill_observations" in replay["omitted_event_families"]
-    assert "recovery_required_orders=1" in str(gate_reason)
+    assert "accounting_pending_orders=1" in str(gate_reason)
 
 
 def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):

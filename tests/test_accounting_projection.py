@@ -321,7 +321,7 @@ def test_fee_pending_observation_without_fill_remains_active_incident(projection
     assert replay["unresolved_fee_state"] is True
     assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 1
     assert readiness.fee_pending_count == 1
-    assert readiness.recovery_stage == "ACCOUNTING_PENDING_FEE"
+    assert readiness.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
     assert preview["needs_repair"] is True
     assert preview["safe_to_apply"] is True
     assert "fee_authority" in preview

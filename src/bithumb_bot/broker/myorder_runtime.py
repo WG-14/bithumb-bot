@@ -175,19 +175,19 @@ def ingest_myorder_event(
                 "myorder fill accounting is fee-pending; "
                 f"exchange_order_id={exchange_order_id or '<none>'}; "
                 f"fill_id={event.fill_id}; fee_status={event.fee_status}; "
-                "manual fee resolution required before ledger apply"
+                "automatic reconcile retry will continue until fee evidence is complete"
             )
             current_status = str(row["status"] or "")
             record_status_transition(
                 client_order_id,
                 from_status=current_status,
-                to_status="RECOVERY_REQUIRED",
+                to_status="ACCOUNTING_PENDING",
                 reason=reason,
                 conn=conn,
             )
             set_status(
                 client_order_id,
-                "RECOVERY_REQUIRED",
+                "ACCOUNTING_PENDING",
                 last_error=reason,
                 conn=conn,
             )
@@ -195,16 +195,16 @@ def ingest_myorder_event(
                 conn,
                 dedupe_key=event.dedupe_key,
                 applied=True,
-                applied_status="recovery_required_fee_pending",
+                applied_status="accounting_pending_fee_pending",
             )
             return MyOrderIngestResult(
                 dedupe_key=event.dedupe_key,
                 accepted=True,
                 applied=True,
-                action="recovery_required_fee_pending",
+                action="accounting_pending_fee_pending",
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
-                status="RECOVERY_REQUIRED",
+                status="ACCOUNTING_PENDING",
             )
         try:
             trade = apply_fill_and_trade(

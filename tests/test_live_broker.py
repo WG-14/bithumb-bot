@@ -3652,20 +3652,20 @@ def test_live_execute_signal_records_observation_when_fee_pending_blocks_apply(t
     conn.close()
 
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "FILLED"
     assert "accounting is fee-pending" in str(row["last_error"])
     assert application_event is not None
     assert application_event["submit_phase"] == "application"
-    assert application_event["order_status"] == "RECOVERY_REQUIRED"
-    assert application_event["submission_reason_code"] == "application_failed"
+    assert application_event["order_status"] == "ACCOUNTING_PENDING"
+    assert application_event["submission_reason_code"] == "application_deferred_fee_pending"
     application_evidence = json.loads(str(application_event["submit_evidence"]))
     assert application_evidence["submit_phase"] == "application"
-    assert application_evidence["execution_state"] == "application_failed"
+    assert application_evidence["execution_state"] == "application_deferred_fee_pending"
     assert observation_summary["observation_count"] == 2
     assert observation_summary["fee_pending_count"] == 1
     assert observation_summary["fee_status"] == "complete"
     assert observation_summary["source"] == "live_application_fee_pending"
-    assert any("event=recovery_required_transition" in msg for msg in notifications)
+    assert any("event=accounting_pending_transition" in msg for msg in notifications)
 
 
 def test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fee(tmp_path, monkeypatch):
@@ -3744,7 +3744,7 @@ def test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fe
         conn.close()
 
     assert trade is not None
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert float(row["qty_filled"]) == pytest.approx(0.01)
     assert row["last_error"] is None
     assert observation_count["cnt"] == 0
@@ -3807,7 +3807,7 @@ def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
     p = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
     conn.close()
 
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert float(p["asset_qty"]) == 0.01
 
 
@@ -3907,7 +3907,7 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     report = _load_recovery_report()
 
     assert row is not None
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
     assert fill_count["cnt"] == 0
@@ -3921,9 +3921,9 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
     assert metadata["observed_fill_count"] == 1
     assert metadata["fee_pending_fill_count"] == 1
-    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
-    assert metadata["fee_pending_operator_next_action"].startswith("inspect broker_fill_observations")
+    assert metadata["fee_pending_operator_next_action"].startswith("await automatic reconcile retry")
     assert report["can_resume"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
@@ -3965,7 +3965,7 @@ def test_reconcile_fee_pending_terminal_truth_is_idempotent(tmp_path):
     conn.close()
 
     assert row is not None
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
     assert observation_count["cnt"] == 1
@@ -4068,23 +4068,17 @@ def test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_
             note="incident repair test",
         )
         conn.commit()
-        runtime_state.disable_trading_until(
-            float("inf"),
-            reason="fee-pending accounting repair completed; explicit resume required",
-            reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
-            halt_new_orders_blocked=False,
-            unresolved=False,
-        )
         runtime_state.record_reconcile_result(
             success=True,
             reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
             metadata={
-                "fee_pending_recovery_required": 0,
+                "fee_pending_auto_recovering": 0,
                 "fee_pending_fill_count": 0,
                 "balance_split_mismatch_count": 0,
             },
         )
         runtime_state.refresh_open_order_health(now_epoch_sec=2.0)
+        runtime_state.enable_trading()
         order = conn.execute(
             "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_missing_fee'"
         ).fetchone()
@@ -4203,7 +4197,7 @@ def test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_
     conn.close()
 
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert row["exchange_order_id"] == "ex_missing_fee"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
@@ -4687,10 +4681,10 @@ def test_backfill_broker_order_fee_pending_keeps_recovery_required_with_observat
     finally:
         conn.close()
 
-    assert result["status"] == "RECOVERY_REQUIRED"
+    assert result["status"] == "ACCOUNTING_PENDING"
     assert result["blocked_reason"] == "fee_pending"
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert "fee-pending" in str(row["last_error"])
     assert observation is not None
     assert observation["source"] == "broker_known_backfill_fee_pending"

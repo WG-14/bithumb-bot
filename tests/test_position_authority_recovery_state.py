@@ -3403,7 +3403,7 @@ def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomple
         runtime_state.record_reconcile_result(
             success=True,
             reason_code="FILL_FEE_PENDING_RECOVERY_REQUIRED",
-            metadata={"fee_pending_recovery_required": 1},
+            metadata={"fee_pending_auto_recovering": 1},
             now_epoch_sec=1.0,
         )
 

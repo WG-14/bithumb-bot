@@ -415,7 +415,7 @@ def test_reconcile_does_not_absorb_cash_drift_with_unaccounted_fee_pending_obser
     assert portfolio["cash_krw"] == pytest.approx(1_000_000.0)
     assert portfolio["cash_available"] == pytest.approx(1_000_000.0)
     assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
-    assert metadata["fee_pending_recovery_required"] == 1
+    assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["unaccounted_fee_pending_observation_count"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
     assert metadata["fee_pending_operator_next_action"].startswith("resolve unaccounted")

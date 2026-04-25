@@ -2572,7 +2572,7 @@ def test_panic_stop_with_flatten_attempts_sell_after_cancelling_open_orders(monk
         assert flatten_row["status"] == "NEW"
         assert flatten_row["side"] == "SELL"
         assert flatten_row["strategy_name"] == "operator_flatten"
-        assert flatten_row["local_intent_state"] == "PENDING_SUBMIT"
+        assert flatten_row["local_intent_state"] == "NEW"
         event_types = {
             str(row["event_type"])
             for row in conn.execute(
@@ -4545,7 +4545,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
 
     cmd_recovery_report(as_json=True)
     out = capsys.readouterr().out
-    payload = json.loads(out)
+    payload = json.loads(out.strip().splitlines()[-1])
 
     assert set(payload.keys()) == {
         "broker_recent_orders_snapshot_error",
@@ -4600,10 +4600,13 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "position_authority_rebuild_preview",
         "position_authority_repair_summary",
             "broker_fill_observation_summary",
-            "runtime_readiness",
-            "accounting_projection_ok",
-            "broker_portfolio_converged",
-            "broker_qty_known",
+        "runtime_readiness",
+        "pending_fee_count",
+        "auto_recovery_count",
+        "operator_review_required_count",
+        "accounting_projection_ok",
+        "broker_portfolio_converged",
+        "broker_qty_known",
             "broker_qty",
             "portfolio_qty",
             "lot_projection_converged",
@@ -4637,6 +4640,9 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "resume_allowed",
         "risk_level",
         "trading_enabled",
+        "trading_state",
+        "trading_blocked",
+        "hard_halt_reason",
         "emergency_flatten_blocked",
         "emergency_flatten_block_reason",
         "recovery_candidates",
@@ -4671,7 +4677,7 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     )
 
     cmd_recovery_report(as_json=True)
-    payload = json.loads(capsys.readouterr().out)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
     assert payload["trading_enabled"] is False
     assert "code=" in payload["recent_halt_reason"]
@@ -6537,6 +6543,63 @@ def test_restart_checklist_scopes_safe_to_resume_when_sub_min_tracked_dust_allow
     assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
     assert "trading_block_reason=closeout_blocked:dust_only_remainder" in out
     assert "authoritative internal lot boundary" in out
+
+
+def test_repair_completed_with_no_blockers_auto_clears_pause(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path, monkeypatch)
+    runtime_state.disable_trading_until(float("inf"), reason="manual operator pause")
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={"balance_split_mismatch_count": 0},
+    )
+
+    auto_cleared = app_module._finalize_repair_runtime_policy(
+        reason_code="FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+        metadata={
+            "fee_pending_auto_recovering": 0,
+            "fee_pending_fill_count": 0,
+            "balance_split_mismatch_count": 0,
+        },
+    )
+
+    state = runtime_state.snapshot()
+    report = _load_recovery_report()
+
+    assert auto_cleared is True
+    assert state.trading_enabled is True
+    assert report["can_resume"] is True
+    assert report["auto_recovery_count"] == 0
+
+
+def test_audit_fails_on_terminal_order_with_pending_local_intent_state(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    conn = ensure_db()
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="audit_bad_terminal",
+            side="BUY",
+            qty_req=0.01,
+            price=100.0,
+            ts_ms=1,
+            status="FILLED",
+            local_intent_state="PENDING_SUBMIT",
+        )
+        conn.execute(
+            "UPDATE orders SET qty_filled=? WHERE client_order_id='audit_bad_terminal'",
+            (0.01,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(SystemExit) as exc:
+        app_main(["audit"])
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "terminal order retained pending local intent state" in out
 
 
 class _FlattenBrokerSuccess:
