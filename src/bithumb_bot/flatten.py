@@ -323,6 +323,29 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     try:
         init_portfolio(conn)
         readiness = compute_runtime_readiness_snapshot(conn)
+        if trigger == "operator":
+            if int(readiness.recovery_required_count or 0) > 0:
+                return {
+                    "status": "blocked",
+                    "reason": "recovery_required_orders_present",
+                    "recovery_stage": readiness.recovery_stage,
+                    "recovery_required_count": int(readiness.recovery_required_count or 0),
+                    "recommended_command": readiness.recommended_command,
+                    "closeout_allowed": False,
+                    "dry_run": int(bool(dry_run)),
+                    "trigger": trigger,
+                }
+            if int(readiness.open_order_count or 0) > 0:
+                return {
+                    "status": "blocked",
+                    "reason": "unresolved_orders_present",
+                    "recovery_stage": readiness.recovery_stage,
+                    "open_order_count": int(readiness.open_order_count or 0),
+                    "recommended_command": readiness.recommended_command,
+                    "closeout_allowed": False,
+                    "dry_run": int(bool(dry_run)),
+                    "trigger": trigger,
+                }
         unapplied_principal_pending_count = int(
             (readiness.fill_accounting_incident_summary or {}).get("unapplied_principal_pending_count") or 0
         )
@@ -333,6 +356,20 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
                 "recovery_stage": readiness.recovery_stage,
                 "unapplied_principal_pending_count": unapplied_principal_pending_count,
                 "recommended_command": "uv run python bot.py recovery-report",
+                "closeout_allowed": False,
+                "dry_run": int(bool(dry_run)),
+                "trigger": trigger,
+            }
+        fee_validation_blocked_count = int(
+            (readiness.fill_accounting_incident_summary or {}).get("fee_validation_blocked_count") or 0
+        )
+        if trigger == "operator" and fee_validation_blocked_count > 0:
+            return {
+                "status": "blocked",
+                "reason": "fee_validation_blocked",
+                "recovery_stage": readiness.recovery_stage,
+                "fee_validation_blocked_count": fee_validation_blocked_count,
+                "recommended_command": readiness.recommended_command,
                 "closeout_allowed": False,
                 "dry_run": int(bool(dry_run)),
                 "trigger": trigger,

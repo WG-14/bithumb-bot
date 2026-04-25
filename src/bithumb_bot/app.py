@@ -2822,8 +2822,26 @@ def _load_recovery_report(
         "principal_applied": 0,
         "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
         "fee_status": broker_fill_observation_summary.get("last_fee_status") or "none",
+        "fee_source": broker_fill_observation_summary.get("last_fee_source") or "none",
+        "fee_confidence": broker_fill_observation_summary.get("last_fee_confidence") or "none",
+        "fee_provenance": broker_fill_observation_summary.get("last_fee_provenance") or "none",
+        "latest_fee_validation_reason": broker_fill_observation_summary.get("last_fee_validation_reason") or "none",
+        "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
+        "accounting_status_counts": {
+            "unapplied_principal_pending": int(
+                fill_accounting_incident_projection.get("unapplied_principal_pending_count") or 0
+            ),
+            "principal_applied_fee_pending": int(
+                fill_accounting_incident_projection.get("principal_applied_fee_pending_count") or 0
+            ),
+            "fee_validation_blocked": int(
+                fill_accounting_incident_projection.get("fee_validation_blocked_count") or 0
+            ),
+            "fee_finalized": int(fill_accounting_incident_projection.get("fee_finalized_count") or 0),
+        },
         "operator_action": "none",
         "derived_blockers": [],
+        "root_chain": [],
     }
     if int(fill_accounting_incident_projection.get("unapplied_principal_pending_count") or 0) > 0:
         derived_blockers: list[str] = []
@@ -2839,18 +2857,33 @@ def _load_recovery_report(
             "principal_applied": 0,
             "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
             "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "fee_source": broker_fill_observation_summary.get("last_fee_source") or "unknown",
+            "fee_confidence": broker_fill_observation_summary.get("last_fee_confidence") or "unknown",
+            "fee_provenance": broker_fill_observation_summary.get("last_fee_provenance") or "unknown",
+            "latest_fee_validation_reason": broker_fill_observation_summary.get("last_fee_validation_reason") or "unknown",
+            "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
+            "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "wait_for_auto_reconcile_or_review_fee_evidence",
             "derived_blockers": derived_blockers,
+            "root_chain": [fill_root_cause, *derived_blockers],
         }
     elif int(fill_accounting_incident_projection.get("fee_validation_blocked_count") or 0) > 0:
+        derived_blockers = ["resume_blocked"]
         fill_root_cause = "fee_validation_blocked"
         fill_root_summary = {
             "root": fill_root_cause,
             "principal_applied": 1,
             "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
             "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "fee_source": broker_fill_observation_summary.get("last_fee_source") or "unknown",
+            "fee_confidence": broker_fill_observation_summary.get("last_fee_confidence") or "unknown",
+            "fee_provenance": broker_fill_observation_summary.get("last_fee_provenance") or "unknown",
+            "latest_fee_validation_reason": broker_fill_observation_summary.get("last_fee_validation_reason") or "unknown",
+            "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
+            "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "review_fee_evidence",
-            "derived_blockers": ["resume_blocked"],
+            "derived_blockers": derived_blockers,
+            "root_chain": [fill_root_cause, *derived_blockers],
         }
     elif int(fill_accounting_incident_projection.get("principal_applied_fee_pending_count") or 0) > 0:
         fill_root_cause = "fee_finalization_pending"
@@ -2859,8 +2892,15 @@ def _load_recovery_report(
             "principal_applied": 1,
             "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
             "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "fee_source": broker_fill_observation_summary.get("last_fee_source") or "unknown",
+            "fee_confidence": broker_fill_observation_summary.get("last_fee_confidence") or "unknown",
+            "fee_provenance": broker_fill_observation_summary.get("last_fee_provenance") or "unknown",
+            "latest_fee_validation_reason": broker_fill_observation_summary.get("last_fee_validation_reason") or "unknown",
+            "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
+            "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "none_or_review_fee_evidence",
             "derived_blockers": [],
+            "root_chain": [fill_root_cause],
         }
     blocking_incident_class = (
         str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
@@ -3255,7 +3295,8 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"last_fill_id={broker_fill_observation_summary.get('last_fill_id') or 'none'} "
         f"last_fee_status={broker_fill_observation_summary.get('last_fee_status') or 'none'} "
         f"last_accounting_status={broker_fill_observation_summary.get('last_accounting_status') or 'none'} "
-        f"last_source={broker_fill_observation_summary.get('last_source') or 'none'}"
+        f"last_source={broker_fill_observation_summary.get('last_source') or 'none'} "
+        f"last_fee_validation_reason={broker_fill_observation_summary.get('last_fee_validation_reason') or 'none'}"
     )
     fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
     print("  [P3.0e2] fill_accounting_incidents")
@@ -3263,9 +3304,30 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         "    "
         f"active_issue_count={int(fill_accounting_incident_projection.get('active_issue_count') or 0)} "
         f"active_fee_pending_count={int(fill_accounting_incident_projection.get('active_fee_pending_count') or 0)} "
+        f"unapplied_principal_pending_count={int(fill_accounting_incident_projection.get('unapplied_principal_pending_count') or 0)} "
+        f"principal_applied_fee_pending_count={int(fill_accounting_incident_projection.get('principal_applied_fee_pending_count') or 0)} "
+        f"fee_validation_blocked_count={int(fill_accounting_incident_projection.get('fee_validation_blocked_count') or 0)} "
         f"already_accounted_stale_count="
         f"{int(fill_accounting_incident_projection.get('already_accounted_observation_stale_count') or 0)} "
         f"repaired_count={int(fill_accounting_incident_projection.get('repaired_count') or 0)}"
+    )
+    fill_root_cause = report.get("fill_accounting_root_cause") or {}
+    print("  [P3.0e3] fill_accounting_root_cause")
+    print(
+        "    "
+        f"root={fill_root_cause.get('root') or 'none'} "
+        f"principal_applied={int(fill_root_cause.get('principal_applied') or 0)} "
+        f"broker_local_asset_converged={int(fill_root_cause.get('broker_local_asset_converged') or 0)} "
+        f"fee_status={fill_root_cause.get('fee_status') or 'none'} "
+        f"fee_source={fill_root_cause.get('fee_source') or 'none'} "
+        f"fee_confidence={fill_root_cause.get('fee_confidence') or 'none'} "
+        f"operator_action={fill_root_cause.get('operator_action') or 'none'}"
+    )
+    print(
+        "    "
+        "root_chain="
+        f"{' -> '.join(str(item) for item in (fill_root_cause.get('root_chain') or [])) or 'none'} "
+        f"latest_fee_validation_reason={fill_root_cause.get('latest_fee_validation_reason') or 'none'}"
     )
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
@@ -4430,6 +4492,15 @@ def cmd_flatten_position(*, dry_run: bool = False) -> None:
     if status == "dry_run":
         print("[FLATTEN-POSITION] dry-run: submit skipped")
         return
+
+    if status == "blocked":
+        print(
+            "[FLATTEN-POSITION] blocked "
+            f"reason={str(summary.get('reason') or 'unknown')} "
+            f"recovery_stage={str(summary.get('recovery_stage') or 'unknown')} "
+            f"recommended_command={str(summary.get('recommended_command') or 'uv run python bot.py recovery-report')}"
+        )
+        raise SystemExit(1)
 
     if status == "failed":
         err = str(summary.get("error") or "unknown flatten failure")

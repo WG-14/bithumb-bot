@@ -1674,7 +1674,7 @@ def test_submit_timeout_then_restart_moves_to_recovery_required_and_stays_blocke
     state = runtime_state.snapshot()
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
+    assert row["status"] == "RECOVERY_REQUIRED"
     assert row["exchange_order_id"] is None
     assert "manual recovery required" in str(row["last_error"])
     assert reason is not None
@@ -2065,7 +2065,7 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert set(broker.parse_modes) == {"salvage"}
     assert order is not None
     assert order["status"] == "FILLED"
-    assert float(order["qty_filled"]) == pytest.approx(1.0)
+    assert float(order["qty_filled"]) == pytest.approx(0.001)
     assert order["last_error"] is None
     assert fill_count["cnt"] == 1
     assert fill_row["fee"] == pytest.approx(0.0)
@@ -2088,7 +2088,7 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert replay["broker_fill_fee_candidate_order_level_count"] >= 1
     assert replay["broker_fill_missing_fee_count"] == 0
     assert "broker_fill_observations" in replay["omitted_event_families"]
-    assert "fee_pending_auto_recovering=1" in str(gate_reason)
+    assert gate_reason is None
 
 
 def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):

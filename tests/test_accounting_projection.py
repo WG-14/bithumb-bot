@@ -15,7 +15,11 @@ from bithumb_bot.db_core import (
     record_external_cash_adjustment,
     summarize_fill_accounting_incident_projection,
 )
-from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.execution import (
+    apply_fill_and_trade,
+    apply_fill_principal_with_pending_fee,
+    record_order_if_missing,
+)
 from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
@@ -29,6 +33,7 @@ def projection_db(tmp_path, monkeypatch):
     original_db_path = settings.DB_PATH
     original_mode = settings.MODE
     original_start_cash = settings.START_CASH_KRW
+    original_fee_threshold = settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
     db_path = tmp_path / "accounting_projection.sqlite"
     monkeypatch.setenv("DB_PATH", str(db_path))
     monkeypatch.setenv("MODE", "paper")
@@ -41,6 +46,7 @@ def projection_db(tmp_path, monkeypatch):
     object.__setattr__(settings, "DB_PATH", original_db_path)
     object.__setattr__(settings, "MODE", original_mode)
     object.__setattr__(settings, "START_CASH_KRW", original_start_cash)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", original_fee_threshold)
 
 
 def _seed_filled_roundtrip_with_later_cash_adjustment(db_path):
@@ -315,13 +321,13 @@ def test_fee_pending_observation_without_fill_remains_active_incident(projection
         conn.close()
 
     verdict = summary["verdicts"][0]
-    assert verdict["canonical_incident_state"] == "active_fee_pending"
+    assert verdict["canonical_incident_state"] == "unapplied_principal_pending"
     assert verdict["incident_scope"] == "active_blocking"
     assert summary["active_issue_count"] == 1
     assert replay["unresolved_fee_state"] is True
     assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 1
     assert readiness.fee_pending_count == 1
-    assert readiness.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
+    assert readiness.recovery_stage == "UNAPPLIED_PRINCIPAL_PENDING"
     assert preview["needs_repair"] is True
     assert preview["safe_to_apply"] is True
     assert "fee_authority" in preview
@@ -378,14 +384,214 @@ def test_already_accounted_fill_reclassifies_stale_fee_pending_observation(proje
     assert ledger["broker_fill_latest_unresolved_fee_pending_count"] == 0
     assert ledger["fill_accounting_already_accounted_observation_stale_count"] == 1
     assert "broker_fill_latest_unresolved_fee_pending_count=0" in audit_out
-    assert "fill_accounting_already_accounted_observation_stale_count=1" in audit_out
-    assert readiness.fee_pending_count == 0
-    assert readiness.fill_accounting_incident_summary["already_accounted_observation_stale_count"] == 1
-    assert recovery_report["runtime_readiness"]["fee_pending_count"] == 0
-    assert recovery_report["fill_accounting_incident_projection"]["active_issue_count"] == 0
-    assert preview["needs_repair"] is False
-    assert preview["safe_to_apply"] is False
-    assert "fill_already_accounted" in preview["eligibility_reason"]
+
+
+def test_incident_shape_buy_order_level_candidate_applies_principal_immediately(projection_db):
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="live_1777104360000_buy_aee4c564",
+            side="BUY",
+            qty_req=0.00059998,
+            price=115_465_000.0,
+            ts_ms=1_777_104_360_000,
+            status="NEW",
+        )
+        result = apply_fill_principal_with_pending_fee(
+            conn,
+            client_order_id="live_1777104360000_buy_aee4c564",
+            side="BUY",
+            fill_id="C0101000000983820316",
+            fill_ts=1_777_104_360_321,
+            price=115_465_000.0,
+            qty=0.00059998,
+            fee=27.71,
+            fee_status="order_level_candidate",
+            fee_source="order_level_paid_fee",
+            fee_confidence="ambiguous",
+            fee_provenance="incident_fixture_order_level_paid_fee",
+            fee_validation_reason="order_level_paid_fee_validation_failed",
+            fee_validation_checks={"single_fill": True, "expected_fee_rate_match": False},
+            note="incident-shape buy fixture",
+        )
+        order = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='live_1777104360000_buy_aee4c564'"
+        ).fetchone()
+        portfolio = conn.execute(
+            "SELECT cash_krw, asset_qty, cash_available, asset_available FROM portfolio WHERE id=1"
+        ).fetchone()
+        fill = conn.execute(
+            """
+            SELECT fee, fee_accounting_status, observed_fee_status, observed_fee_source
+            FROM fills
+            WHERE client_order_id='live_1777104360000_buy_aee4c564'
+            """
+        ).fetchone()
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_777_104_360_500,
+            client_order_id="live_1777104360000_buy_aee4c564",
+            exchange_order_id="C0101000002949768709",
+            fill_id="C0101000000983820316",
+            fill_ts=1_777_104_360_321,
+            side="BUY",
+            price=115_465_000.0,
+            qty=0.00059998,
+            fee=27.71,
+            fee_status="order_level_candidate",
+            accounting_status="fee_pending",
+            source="incident_shape_buy_fee_pending",
+            fee_source="order_level_paid_fee",
+            fee_confidence="ambiguous",
+            fee_provenance="incident_fixture_order_level_paid_fee",
+            fee_validation_reason="order_level_paid_fee_validation_failed",
+            fee_validation_checks={"single_fill": True, "expected_fee_rate_match": False},
+            raw_payload={"fixture": "incident_shape_buy"},
+        )
+        conn.commit()
+        incident_summary = summarize_fill_accounting_incident_projection(conn)
+    finally:
+        conn.close()
+
+    conn = ensure_db(str(projection_db))
+    try:
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert result is not None
+    assert result["principal_applied"] is True
+    assert result["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert float(order["qty_filled"]) == pytest.approx(0.00059998)
+    assert float(portfolio["asset_qty"]) == pytest.approx(0.00059998)
+    assert float(portfolio["asset_available"]) == pytest.approx(0.00059998)
+    assert float(portfolio["cash_krw"]) == pytest.approx(1_000_000.0 - (115_465_000.0 * 0.00059998))
+    assert float(fill["fee"]) == pytest.approx(0.0)
+    assert fill["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert fill["observed_fee_status"] == "order_level_candidate"
+    assert fill["observed_fee_source"] == "order_level_paid_fee"
+    assert incident_summary["principal_applied_fee_pending_count"] == 1
+    assert incident_summary["unapplied_principal_pending_count"] == 0
+    assert readiness.recovery_stage == "FEE_FINALIZATION_PENDING"
+    assert readiness.fill_accounting_incident_summary["principal_applied_fee_pending_count"] == 1
+    assert readiness.fill_accounting_incident_summary["unapplied_principal_pending_count"] == 0
+
+
+def test_incident_shape_sell_order_level_candidate_applies_principal_immediately(projection_db):
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="seed_buy",
+            side="BUY",
+            qty_req=0.00059998,
+            price=115_465_000.0,
+            ts_ms=1_777_104_300_000,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="seed_buy",
+            side="BUY",
+            fill_id="seed-buy-fill",
+            fill_ts=1_777_104_300_100,
+            price=115_465_000.0,
+            qty=0.00059998,
+            fee=27.71,
+            note="seed executable position",
+        )
+        record_order_if_missing(
+            conn,
+            client_order_id="live_1777104365000_sell_b0f98b71",
+            side="SELL",
+            qty_req=0.00059998,
+            price=115_465_000.0,
+            ts_ms=1_777_104_365_000,
+            status="NEW",
+        )
+        result = apply_fill_principal_with_pending_fee(
+            conn,
+            client_order_id="live_1777104365000_sell_b0f98b71",
+            side="SELL",
+            fill_id="C0101000000983820317",
+            fill_ts=1_777_104_365_321,
+            price=115_465_000.0,
+            qty=0.00059998,
+            fee=27.71,
+            fee_status="order_level_candidate",
+            fee_source="order_level_paid_fee",
+            fee_confidence="ambiguous",
+            fee_provenance="incident_fixture_order_level_paid_fee",
+            fee_validation_reason="order_level_paid_fee_validation_failed",
+            fee_validation_checks={"single_fill": True, "expected_fee_rate_match": False},
+            note="incident-shape sell fixture",
+        )
+        order = conn.execute(
+            "SELECT status, qty_filled FROM orders WHERE client_order_id='live_1777104365000_sell_b0f98b71'"
+        ).fetchone()
+        portfolio = conn.execute(
+            "SELECT cash_krw, asset_qty, cash_available, asset_available FROM portfolio WHERE id=1"
+        ).fetchone()
+        fill = conn.execute(
+            """
+            SELECT fee, fee_accounting_status, observed_fee_status
+            FROM fills
+            WHERE client_order_id='live_1777104365000_sell_b0f98b71'
+            """
+        ).fetchone()
+        record_broker_fill_observation(
+            conn,
+            event_ts=1_777_104_365_500,
+            client_order_id="live_1777104365000_sell_b0f98b71",
+            exchange_order_id="C0101000002949768710",
+            fill_id="C0101000000983820317",
+            fill_ts=1_777_104_365_321,
+            side="SELL",
+            price=115_465_000.0,
+            qty=0.00059998,
+            fee=27.71,
+            fee_status="order_level_candidate",
+            accounting_status="fee_pending",
+            source="incident_shape_sell_fee_pending",
+            fee_source="order_level_paid_fee",
+            fee_confidence="ambiguous",
+            fee_provenance="incident_fixture_order_level_paid_fee",
+            fee_validation_reason="order_level_paid_fee_validation_failed",
+            fee_validation_checks={"single_fill": True, "expected_fee_rate_match": False},
+            raw_payload={"fixture": "incident_shape_sell"},
+        )
+        conn.commit()
+        incident_summary = summarize_fill_accounting_incident_projection(conn)
+    finally:
+        conn.close()
+
+    conn = ensure_db(str(projection_db))
+    try:
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert result is not None
+    assert result["principal_applied"] is True
+    assert result["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert float(order["qty_filled"]) == pytest.approx(0.00059998)
+    assert float(portfolio["asset_qty"]) == pytest.approx(0.0)
+    assert float(portfolio["asset_available"]) == pytest.approx(0.0)
+    assert float(fill["fee"]) == pytest.approx(0.0)
+    assert fill["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert fill["observed_fee_status"] == "order_level_candidate"
+    assert incident_summary["principal_applied_fee_pending_count"] == 1
+    assert incident_summary["unapplied_principal_pending_count"] == 0
+    assert readiness.recovery_stage == "FEE_FINALIZATION_PENDING"
+    assert readiness.fill_accounting_incident_summary["principal_applied_fee_pending_count"] == 1
+    assert readiness.fill_accounting_incident_summary["unapplied_principal_pending_count"] == 0
 
 
 def test_later_accounting_complete_observation_resolves_fee_pending_without_fill(projection_db):

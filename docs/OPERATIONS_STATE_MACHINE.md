@@ -32,7 +32,10 @@ Runtime behavior should be interpreted across four separate axes.
 ### 3. Accounting State
 
 - `accounting_complete`: authoritative fee and ledger application are complete.
-- `fee_pending`: fill evidence is present but authoritative fee/accounting is not yet complete.
+- `unapplied_principal_pending`: fill evidence exists but principal has not been ledger-applied yet. This is a hard accounting blocker.
+- `principal_applied_fee_pending`: principal is already ledger-applied, but fee finalization is still pending.
+- `fee_validation_blocked`: principal is already ledger-applied, but fee evidence is invalid or ambiguous enough to require operator review.
+- `fee_pending`: broker-observation umbrella state meaning fee/accounting is not yet complete. Authoritative incident reporting must further classify it into one of the three states above.
 - `repaired`: accounting was later finalized by an explicit repair event.
 - `fee_gap_recovery_required`: accounting drift remains unresolved and requires operator action.
 
@@ -77,16 +80,25 @@ Fee-pending fill handling is asynchronous accounting, not immediate manual recov
 Expected flow:
 
 1. Broker fill is observed.
-2. If fee/accounting is incomplete, `broker_fill_observations` records `accounting_status='fee_pending'`.
-3. The order transitions to `ACCOUNTING_PENDING`.
-4. New submissions remain blocked by the unresolved-order gate.
+2. Principal is applied immediately when fill identity, side, price, qty, and notional are valid.
+3. If fee/accounting is incomplete, `broker_fill_observations` records `accounting_status='fee_pending'`, while the authoritative `fills` row is stored as either `principal_applied_fee_pending` or `fee_validation_blocked`.
+4. New submissions remain blocked by the unresolved-order or readiness gate when policy requires it.
 5. The process loop stays alive and reconcile continues retrying safely.
    `run_loop_allowed=1` is valid while `resume_ready=0` for this state.
-6. If authoritative fee later becomes available, the fill is applied idempotently and the order reaches its terminal accounted state.
-7. If fee attribution remains ambiguous or invalid, operator repair or review is still required.
+6. If authoritative fee later becomes available, only the fee is finalized idempotently. Principal must not be re-applied.
+7. If fee attribution remains ambiguous or invalid, operator repair or review is still required, but this is not a reason to flatten the position.
 
 Manual DB editing is not a normal recovery path.
 Repairs must be recorded as explicit events such as `fee_pending_accounting_repair`.
+
+## Flatten / Closeout
+
+Flatten is a live market action, not an accounting repair tool.
+
+- Do not use `flatten-position` to resolve an `unapplied_principal_pending` incident.
+- Operator flatten must refuse when unresolved orders, unapplied principal, or fee-validation-blocked incidents remain active.
+- `principal_applied_fee_pending` is degraded accounting debt, not proof that flatten is required.
+- Recovery reporting should surface the fill-accounting root cause and derived blockers before any operator is led toward flatten.
 
 ## Resume / Pause Policy
 

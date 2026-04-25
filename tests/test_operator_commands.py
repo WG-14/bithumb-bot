@@ -4596,10 +4596,11 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_gap_accounting_repair_preview",
         "fee_gap_accounting_repair_summary",
         "fee_pending_accounting_repair_summary",
-        "fill_accounting_incident_projection",
-        "position_authority_rebuild_preview",
-        "position_authority_repair_summary",
-            "broker_fill_observation_summary",
+            "fill_accounting_incident_projection",
+            "fill_accounting_root_cause",
+            "position_authority_rebuild_preview",
+            "position_authority_repair_summary",
+                "broker_fill_observation_summary",
         "runtime_readiness",
         "pending_fee_count",
         "auto_recovery_count",
@@ -7066,15 +7067,14 @@ def test_flatten_position_reserved_exit_qty_does_not_bypass_canonical_sell_autho
         lambda _pair: BestQuote(market="KRW-BTC", bid_price=100_000_000.0, ask_price=100_010_000.0),
     )
 
-    cmd_flatten_position(dry_run=False)
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
     out = capsys.readouterr().out
 
-    assert "no position to flatten" in out
+    assert exc.value.code == 1
+    assert "blocked" in out
+    assert "reason=unresolved_orders_present" in out
     assert broker.calls == []
-    state = runtime_state.snapshot()
-    assert state.last_flatten_position_status == "no_position"
-    assert state.last_flatten_position_summary is not None
-    assert '"executable_exposure_qty": 0.0002' in state.last_flatten_position_summary
 
 
 def test_flatten_position_submit_failure_persisted(monkeypatch, tmp_path, capsys):
@@ -7362,6 +7362,95 @@ def test_flatten_position_blocks_when_live_unarmed(monkeypatch, tmp_path, capsys
     assert exc.value.code == 1
     out = capsys.readouterr().out
     assert "LIVE_REAL_ORDER_ARMED=true is required" in out
+
+
+def test_flatten_position_blocks_when_unapplied_principal_pending(monkeypatch, tmp_path, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("MODE", "live")
+    object.__setattr__(settings, "MODE", "live")
+    monkeypatch.setattr("bithumb_bot.app.validate_live_mode_preflight", lambda _cfg: None)
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO portfolio(
+                id, cash_krw, asset_qty, cash_available, cash_locked, asset_available, asset_locked
+            ) VALUES (1, 1000000.0, 0.00059998, 1000000.0, 0.0, 0.00059998, 0.0)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair,
+                entry_trade_id,
+                entry_client_order_id,
+                entry_ts,
+                entry_price,
+                qty_open,
+                executable_lot_count,
+                dust_tracking_lot_count,
+                position_semantic_basis,
+                position_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                1,
+                "incident_open_buy",
+                1_777_104_360_321,
+                115_465_000.0,
+                0.00059998,
+                1,
+                0,
+                "lot-native",
+                "open_exposure",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, accounting_status, source, raw_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "live_1777104360000_buy_aee4c564",
+                "C0101000002949768709",
+                "C0101000000983820316",
+                1_777_104_360_321,
+                "BUY",
+                115_465_000.0,
+                0.00059998,
+                27.71,
+                "order_level_candidate",
+                "fee_pending",
+                "incident_fixture_fee_pending",
+                '{"fixture":"incident_shape_unapplied_principal"}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    class _NoSubmitBroker:
+        def get_balance(self) -> BrokerBalance:
+            return BrokerBalance(cash_available=0.0, cash_locked=0.0, asset_available=10.0, asset_locked=0.0)
+
+        def place_order(self, **_kwargs):
+            raise AssertionError("flatten must not submit while principal is unapplied")
+
+    monkeypatch.setattr("bithumb_bot.broker.bithumb.BithumbBroker", lambda: _NoSubmitBroker())
+
+    with pytest.raises(SystemExit) as exc:
+        cmd_flatten_position(dry_run=False)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "blocked" in out
+    assert "reason=unapplied_principal_pending" in out
+    assert "recommended_command=uv run python bot.py recovery-report" in out
 
 
 def test_resume_blocked_when_emergency_flatten_unresolved(tmp_path, monkeypatch):
