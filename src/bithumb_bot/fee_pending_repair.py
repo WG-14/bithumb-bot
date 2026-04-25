@@ -357,8 +357,13 @@ def apply_fee_pending_accounting_repair(
         qty=float(preview["qty"]),
         fee=float(preview["fee"]),
         fee_status="operator_confirmed",
+        fee_source="operator_confirmed",
+        fee_confidence="authoritative",
         accounting_status="accounting_complete",
         source="fee_pending_accounting_repair",
+        fee_provenance=str(preview["fee_provenance"]),
+        fee_validation_reason="operator_confirmed",
+        fee_validation_checks={"operator_confirmed": True},
         parse_warnings=(
             "operator_fee_provenance="
             f"{str(preview['fee_provenance']).replace(';', ',')}"

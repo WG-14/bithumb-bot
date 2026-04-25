@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from bithumb_bot.broker.bithumb import BithumbBroker
@@ -59,6 +62,26 @@ def _official_trade_payload(
     if extra:
         payload.update(extra)
     return payload
+
+
+def _incident_runtime_payload() -> dict[str, object]:
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "bithumb" / "live_paid_fee_single_fill_buy_2026_04_24.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    trade = dict(fixture["trade"])
+    return _official_trade_payload(
+        client_order_id="cid-incident-paid-fee",
+        order_uuid="ex-incident-paid-fee",
+        trade_uuid=str(trade["uuid"]),
+        price=str(trade["price"]),
+        volume=str(trade["volume"]),
+        executed_volume=str(trade["volume"]),
+        extra={
+            "paid_fee": str(fixture["order_fee_fields"]["paid_fee"]),
+            "executed_funds": str(trade["funds"]),
+        },
+    )
 
 
 def test_myorder_runtime_ingestion_applies_fill_and_status(tmp_path) -> None:
@@ -214,7 +237,8 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
         ).fetchone()["cnt"]
         observation = conn.execute(
             """
-            SELECT fill_id, fee, fee_status, accounting_status, source, parse_warnings
+            SELECT fill_id, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                   fee_provenance, fee_validation_reason, fee_validation_checks, parse_warnings
             FROM broker_fill_observations
             WHERE client_order_id='cid-entry-missing-fee'
             """
@@ -239,8 +263,12 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
     assert observation["fill_id"] == "fill-missing-fee"
     assert observation["fee"] is None
     assert observation["fee_status"] == "missing"
+    assert observation["fee_source"] == "missing"
+    assert observation["fee_confidence"] == "invalid"
     assert observation["accounting_status"] == "fee_pending"
     assert observation["source"] == "myorder_private_stream_fee_pending"
+    assert observation["fee_provenance"] == "missing_fee_field"
+    assert observation["fee_validation_reason"] == "missing_fee_field"
     assert "missing_fee_field" in str(observation["parse_warnings"])
     assert int(stream_row["applied"]) == 1
     assert stream_row["applied_status"] == "recovery_required_fee_pending"
@@ -278,7 +306,8 @@ def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete
         ).fetchone()["cnt"]
         observation = conn.execute(
             """
-            SELECT fee, fee_status, accounting_status, source, parse_warnings
+            SELECT fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                   fee_provenance, fee_validation_reason, fee_validation_checks, parse_warnings
             FROM broker_fill_observations
             WHERE client_order_id='cid-entry-paid-fee'
             """
@@ -293,9 +322,56 @@ def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete
     assert fill_count == 0
     assert observation["fee"] == pytest.approx(50.0)
     assert observation["fee_status"] == "order_level_candidate"
+    assert observation["fee_source"] == "order_level_paid_fee"
+    assert observation["fee_confidence"] == "ambiguous"
     assert observation["accounting_status"] == "fee_pending"
     assert observation["source"] == "myorder_private_stream_fee_pending"
+    assert observation["fee_provenance"] == "order_level_paid_fee_unvalidated"
+    assert observation["fee_validation_reason"] == "expected_fee_rate_mismatch"
+    assert '"expected_fee_rate_match": false' in str(observation["fee_validation_checks"]).lower()
     assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
+
+
+def test_myorder_runtime_ingestion_validated_single_fill_paid_fee_applies_ledger(tmp_path) -> None:
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    conn = ensure_db(str(tmp_path / "myorder_validated_paid_fee.sqlite"))
+    try:
+        create_order(
+            conn=conn,
+            client_order_id="cid-incident-paid-fee",
+            side="BUY",
+            qty_req=0.00059999,
+            price=116_110_000.0,
+            status="NEW",
+        )
+        result = BithumbBroker.ingest_myorder_event_runtime(conn, payload=_incident_runtime_payload())
+        conn.commit()
+
+        order_row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fill_id, qty, price, fee FROM fills WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+        observation_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM broker_fill_observations WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
+        conn.close()
+
+    assert result.accepted is True
+    assert result.applied is True
+    assert result.action != "recovery_required_fee_pending"
+    assert order_row["status"] == "PARTIAL"
+    assert order_row["qty_filled"] == pytest.approx(0.00059999)
+    assert order_row["last_error"] is None
+    assert fill_row["fill_id"] == "C0101000000983750807"
+    assert fill_row["qty"] == pytest.approx(0.00059999)
+    assert fill_row["price"] == pytest.approx(116_110_000.0)
+    assert fill_row["fee"] == pytest.approx(27.86)
+    assert observation_count["cnt"] == 0
 
 
 def test_myorder_runtime_ingestion_material_zero_fee_marks_recovery_required(tmp_path) -> None:

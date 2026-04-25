@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -133,6 +134,13 @@ def _exact_lot_qty(
         source_mode="exchange",
     )
     return lot_count_to_qty(lot_count=lot_count, lot_size=lot_rules.lot_size)
+
+
+def _incident_paid_fee_fixture() -> dict[str, object]:
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "bithumb" / "live_paid_fee_single_fill_buy_2026_04_24.json"
+    )
+    return json.loads(fixture_path.read_text())
 
 
 
@@ -4022,6 +4030,48 @@ def test_get_fills_aggregate_paid_fee_remains_order_level_candidate(monkeypatch)
     assert fills[0].parse_warnings == ("order_level_fee_candidate:paid_fee",)
 
 
+def test_get_fills_validates_single_fill_order_level_paid_fee_when_checks_pass(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    broker = BithumbBroker()
+    fixture = _incident_paid_fee_fixture()
+    trade = fixture["trade"]
+    payload = {
+        "uuid": "incident-order-rest-1",
+        "client_order_id": "incident-client-rest-1",
+        "state": "done",
+        "side": "bid",
+        "price": str(trade["price"]),
+        "volume": str(trade["volume"]),
+        "remaining_volume": "0",
+        "executed_volume": str(trade["volume"]),
+        "executed_funds": str(trade["funds"]),
+        "paid_fee": str(fixture["order_fee_fields"]["paid_fee"]),
+        "created_at": str(trade["created_at"]),
+        "updated_at": str(trade["created_at"]),
+        "trades": [dict(trade)],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    fills = broker.get_fills(
+        client_order_id="incident-client-rest-1",
+        exchange_order_id="incident-order-rest-1",
+    )
+
+    assert len(fills) == 1
+    assert fills[0].fee == pytest.approx(27.86)
+    assert fills[0].fee_status == "validated_order_level_paid_fee"
+    assert fills[0].fee_source == "order_level_paid_fee"
+    assert fills[0].fee_confidence == "validated"
+    assert fills[0].fee_provenance == "order_level_paid_fee_validated_single_fill"
+    assert fills[0].fee_validation_reason == "order_level_paid_fee_validated_single_fill"
+    assert fills[0].fee_validation_checks["single_fill"] is True
+    assert fills[0].fee_validation_checks["executed_volume_match"] is True
+    assert fills[0].fee_validation_checks["executed_funds_match"] is True
+    assert fills[0].fee_validation_checks["expected_fee_rate_match"] is True
+    assert fills[0].parse_warnings == ("missing_fee_field", "order_level_fee_candidate:paid_fee")
+
+
 def test_get_fills_rejects_when_direct_lookup_has_no_usable_fill_and_scan_is_disabled(monkeypatch):
     _configure_live()
     broker = BithumbBroker()
@@ -4367,6 +4417,49 @@ def test_get_fills_order_level_fee_candidate_is_ambiguous_for_multiple_trade_row
     assert {fill.fee for fill in fills} == {None}
     assert {fill.fee_status for fill in fills} == {"missing"}
     assert all(fill.parse_warnings == ("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee") for fill in fills)
+
+
+def test_get_fills_fee_rate_mismatch_keeps_order_level_paid_fee_pending(monkeypatch):
+    _configure_live()
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "ex-paid-fee-mismatch",
+        "client_order_id": "cid-paid-fee-mismatch",
+        "state": "done",
+        "side": "bid",
+        "price": "116110000",
+        "volume": "0.00059999",
+        "remaining_volume": "0",
+        "executed_volume": "0.00059999",
+        "executed_funds": "69664.8389",
+        "paid_fee": "40.00",
+        "created_at": "2026-04-24T23:57:03+09:00",
+        "updated_at": "2026-04-24T23:57:03+09:00",
+        "trades": [
+            {
+                "uuid": "mismatch-trade-1",
+                "price": "116110000",
+                "volume": "0.00059999",
+                "funds": "69664.8389",
+                "created_at": "2026-04-24T23:57:03+09:00",
+            }
+        ],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    fills = broker.get_fills(
+        client_order_id="cid-paid-fee-mismatch",
+        exchange_order_id="ex-paid-fee-mismatch",
+    )
+
+    assert len(fills) == 1
+    assert fills[0].fee_status == "order_level_candidate"
+    assert fills[0].fee_source == "order_level_paid_fee"
+    assert fills[0].fee_confidence == "ambiguous"
+    assert fills[0].fee_provenance == "order_level_paid_fee_unvalidated"
+    assert fills[0].fee_validation_reason == "expected_fee_rate_mismatch"
+    assert fills[0].fee_validation_checks["expected_fee_rate_match"] is False
 
 
 def test_get_fills_client_order_id_path_does_not_regress_to_done_scan(monkeypatch):

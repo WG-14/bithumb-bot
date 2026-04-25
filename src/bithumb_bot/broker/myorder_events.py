@@ -6,6 +6,8 @@ import json
 import time
 from typing import Any
 
+from ..fee_observation import classify_fee_evaluation, validate_single_fill_order_level_paid_fee
+
 
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
@@ -85,6 +87,12 @@ class NormalizedMyOrderEvent:
     price: float | None
     fee: float | None
     fee_status: str
+    fee_source: str
+    fee_confidence: str
+    accounting_status: str
+    fee_provenance: str
+    fee_validation_reason: str
+    fee_validation_checks: dict[str, bool]
     fee_warning: str | None
     fill_id: str
     dedupe_key: str
@@ -142,6 +150,12 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
     fee_keys = trade_level_fee_keys + order_level_fee_keys
     fee = None
     fee_status = "missing"
+    fee_source = "missing"
+    fee_confidence = "invalid"
+    accounting_status = "fee_pending"
+    fee_provenance = "missing_fee_field"
+    fee_validation_reason = "missing_fee_field"
+    fee_validation_checks: dict[str, bool] = {}
     fee_warning = "missing_fee_field"
     for key in fee_keys:
         if key not in payload:
@@ -149,24 +163,86 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         raw_fee = payload.get(key)
         if raw_fee in (None, ""):
             fee_status = "empty"
+            fee_source = "missing"
+            fee_confidence = "invalid"
+            fee_provenance = f"empty_fee_field:{key}"
+            fee_validation_reason = "empty_fee_field"
             fee_warning = f"empty_fee_field:{key}"
             break
         parsed_fee = _optional_float(raw_fee)
         if parsed_fee is None or parsed_fee < 0.0:
             fee_status = "invalid"
+            fee_source = "missing"
+            fee_confidence = "invalid"
+            fee_provenance = f"invalid_fee_field:{key}"
+            fee_validation_reason = "invalid_fee_field"
             fee_warning = f"invalid_fee_field:{key}"
             break
         fee = float(parsed_fee)
         if fee == 0.0:
             fee_status = "zero_reported"
+            fee_source = "trade_level_fee" if key in trade_level_fee_keys else "order_level_paid_fee"
+            fee_confidence = "invalid"
+            fee_provenance = f"zero_fee_field:{key}"
+            fee_validation_reason = "zero_fee_field"
             fee_warning = f"zero_fee_field:{key}"
         elif key in order_level_fee_keys:
-            fee_status = "order_level_candidate"
-            fee_warning = f"order_level_fee_candidate:{key}"
+            candidate = validate_single_fill_order_level_paid_fee(
+                paid_fee=raw_fee,
+                fill_qty=qty,
+                fill_price=price,
+                fill_funds=(
+                    _optional_float(payload.get("funds"))
+                    or _optional_float(payload.get("executed_funds"))
+                    or ((price or 0.0) * (qty or 0.0) if price is not None and qty is not None else None)
+                ),
+                order_executed_volume=executed_volume,
+                order_executed_funds=_optional_float(payload.get("executed_funds")),
+                single_fill_evidence=(exchange_state == "trade" and bool(_clean_text(payload.get("trade_uuid")))),
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                fill_id=_clean_text(payload.get("trade_uuid") or payload.get("trade_id") or payload.get("fill_id")),
+            )
+            fee_status = candidate.fee_status
+            fee_source = candidate.fee_source
+            fee_confidence = candidate.fee_confidence
+            accounting_status = candidate.accounting_status
+            fee_provenance = candidate.provenance
+            fee_validation_reason = candidate.reason
+            fee_validation_checks = candidate.checks
+            fee_warning = (
+                None
+                if candidate.accounting_status == "accounting_complete"
+                else f"order_level_fee_candidate:{key}"
+            )
         else:
             fee_status = "complete"
+            fee_source = "trade_level_fee"
+            fee_confidence = "authoritative"
+            accounting_status = "accounting_complete"
+            fee_provenance = "trade_level_fee_present"
+            fee_validation_reason = "accounting_complete"
             fee_warning = None
         break
+    if fee_status in {"missing", "empty", "invalid", "zero_reported", "complete"}:
+        evaluation = classify_fee_evaluation(
+            fee=fee,
+            fee_status=fee_status,
+            price=price,
+            qty=qty,
+            fee_source=fee_source,
+            fee_confidence=fee_confidence,
+            provenance=fee_provenance,
+            reason=fee_validation_reason,
+            checks=fee_validation_checks,
+            material_notional_threshold=0.0,
+        )
+        fee_source = evaluation.fee_source
+        fee_confidence = evaluation.fee_confidence
+        accounting_status = evaluation.accounting_status
+        fee_provenance = evaluation.provenance
+        fee_validation_reason = evaluation.reason
+        fee_validation_checks = evaluation.checks
     legacy_fill_id = _clean_text(payload.get("trade_id") or payload.get("fill_id"))
     fill_id = trade_uuid if trade_uuid else legacy_fill_id
     event_ts_ms = _optional_int(
@@ -196,6 +272,12 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         "price": price,
         "fee": fee,
         "fee_status": fee_status,
+        "fee_source": fee_source,
+        "fee_confidence": fee_confidence,
+        "accounting_status": accounting_status,
+        "fee_provenance": fee_provenance,
+        "fee_validation_reason": fee_validation_reason,
+        "fee_validation_checks": fee_validation_checks,
         "fill_id": fill_id,
         "event_ts_ms": event_ts_ms,
         "trade_ts_ms": trade_ts_ms,
@@ -228,6 +310,12 @@ def normalize_myorder_event_payload(payload: dict[str, Any]) -> NormalizedMyOrde
         price=price,
         fee=fee,
         fee_status=fee_status,
+        fee_source=fee_source,
+        fee_confidence=fee_confidence,
+        accounting_status=accounting_status,
+        fee_provenance=fee_provenance,
+        fee_validation_reason=fee_validation_reason,
+        fee_validation_checks=fee_validation_checks,
         fee_warning=fee_warning,
         fill_id=fill_id,
         dedupe_key=dedupe_key,

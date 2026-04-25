@@ -1,0 +1,14 @@
+{
+  "order_fee_fields": {
+    "paid_fee": "27.86"
+  },
+  "trade": {
+    "created_at": "2026-04-24T23:57:03+09:00",
+    "funds": "69664.8389",
+    "market": "KRW-BTC",
+    "price": "116110000",
+    "side": "bid",
+    "uuid": "C0101000000983750807",
+    "volume": "0.00059999"
+  }
+}

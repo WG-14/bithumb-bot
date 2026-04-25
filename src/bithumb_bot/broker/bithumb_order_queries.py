@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ..config import settings
+from ..fee_observation import classify_fee_evaluation, validate_single_fill_order_level_paid_fee
 from .base import BrokerFill, BrokerIdentifierMismatchError, BrokerOrder, BrokerRejectError, BrokerSchemaError, BrokerTemporaryError
 from .order_list_v1 import build_order_list_params, build_recovery_order_list_params, parse_v1_order_list_row
 from .order_lookup_v1 import (
@@ -55,6 +57,41 @@ def _trade_fee_warnings(
     if abs(float(trade_fee) - float(candidate_fee)) > 1e-12:
         return (f"order_level_fee_disagrees:{candidate_warning.split(':', 1)[-1]}",)
     return ()
+
+
+def _build_order_level_paid_fee_evaluation(
+    broker,
+    *,
+    row: dict[str, object],
+    trade: dict[str, object],
+    qty: float | None,
+    price: float | None,
+    trades: list[object],
+    client_order_id: str,
+    exchange_order_id: str,
+) -> object | None:
+    if "paid_fee" not in row:
+        return None
+    fill_funds = None
+    if qty is not None and price is not None:
+        fill_funds = price * qty
+    if "funds" in trade:
+        try:
+            fill_funds = float(trade.get("funds"))
+        except (TypeError, ValueError):
+            fill_funds = fill_funds
+    return validate_single_fill_order_level_paid_fee(
+        paid_fee=row.get("paid_fee"),
+        fill_qty=qty,
+        fill_price=price,
+        fill_funds=fill_funds,
+        order_executed_volume=broker._to_float(row.get("executed_volume"), default=None),
+        order_executed_funds=broker._to_float(row.get("executed_funds"), default=None),
+        single_fill_evidence=(len(trades) == 1),
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        fill_id=str(trade.get("uuid") or trade.get("id") or ""),
+    )
 
 
 def get_order(
@@ -295,14 +332,42 @@ def get_fills(
                 )
                 fee = fee_observation.fee
                 fee_status = fee_observation.status
+                fee_source = "trade_level_fee" if fee_status == "complete" else "missing"
+                fee_confidence = "authoritative" if fee_status == "complete" else "ambiguous"
+                fee_provenance = "trade_level_fee_present" if fee_status == "complete" else "missing_fee_field"
+                fee_validation_reason = "accounting_complete" if fee_status == "complete" else fee_status
+                fee_validation_checks: dict[str, bool] | None = None
                 warnings = [fee_observation.warning] if fee_observation.warning else []
                 if fee is None and fee_status in {"missing", "empty", "invalid", "zero_reported", "unparseable"}:
                     candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
                     if candidate_warning:
                         warnings.append(candidate_warning)
                     if candidate_fee is not None:
-                        fee = candidate_fee
-                        fee_status = "order_level_candidate"
+                        evaluation = _build_order_level_paid_fee_evaluation(
+                            broker,
+                            row=row,
+                            trade=trade,
+                            qty=qty,
+                            price=price,
+                            trades=trades,
+                            client_order_id=(requested.client_order_id or row.get("client_order_id") or ""),
+                            exchange_order_id=str(row.get("uuid") or ""),
+                        )
+                        if evaluation is not None:
+                            fee = evaluation.fee
+                            fee_status = evaluation.fee_status
+                            fee_source = evaluation.fee_source
+                            fee_confidence = evaluation.fee_confidence
+                            fee_provenance = evaluation.provenance
+                            fee_validation_reason = evaluation.reason
+                            fee_validation_checks = evaluation.checks
+                        else:
+                            fee = candidate_fee
+                            fee_status = "order_level_candidate"
+                            fee_source = "order_level_paid_fee"
+                            fee_confidence = "ambiguous"
+                            fee_provenance = "order_level_fee_candidate"
+                            fee_validation_reason = "order_level_fee_candidate"
                     elif strict_fee_parse:
                         warning_suffix = ""
                         if fee_observation.warning and ":" in fee_observation.warning:
@@ -324,6 +389,18 @@ def get_fills(
                         )
                 else:
                     warnings.extend(_trade_fee_warnings(broker, row, trade_fee=fee, trades=trades))
+                evaluation = classify_fee_evaluation(
+                    fee=fee,
+                    fee_status=fee_status,
+                    price=price,
+                    qty=qty,
+                    material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+                    fee_source=fee_source,
+                    fee_confidence=fee_confidence,
+                    provenance=fee_provenance,
+                    reason=fee_validation_reason,
+                    checks=fee_validation_checks,
+                )
                 order_fee_fields = {key: row.get(key) for key in _ORDER_LEVEL_FEE_KEYS if key in row}
                 raw_fill_payload = (
                     {"trade": trade, "order_fee_fields": order_fee_fields}
@@ -345,7 +422,12 @@ def get_fills(
                         qty=float(qty),
                         fee=fee,
                         exchange_order_id=str(row.get("uuid") or ""),
-                        fee_status=fee_status,
+                        fee_status=evaluation.fee_status,
+                        fee_source=evaluation.fee_source,
+                        fee_confidence=evaluation.fee_confidence,
+                        fee_provenance=evaluation.provenance,
+                        fee_validation_reason=evaluation.reason,
+                        fee_validation_checks=evaluation.checks,
                         parse_warnings=tuple(warnings),
                         raw=broker._sanitize_debug_value(raw_fill_payload),
                     )
@@ -380,11 +462,44 @@ def get_fills(
             strict=False,
         )
         aggregate_fee_status = fee_observation.status
+        aggregate_fee_source = "trade_level_fee" if aggregate_fee_status == "complete" else "missing"
+        aggregate_fee_confidence = "authoritative" if aggregate_fee_status == "complete" else "ambiguous"
+        aggregate_fee_provenance = "aggregate_trade_level_fee_present" if aggregate_fee_status == "complete" else "missing_fee_field"
+        aggregate_fee_reason = "accounting_complete" if aggregate_fee_status == "complete" else aggregate_fee_status
+        aggregate_fee_checks: dict[str, bool] | None = None
         aggregate_warnings = [fee_observation.warning] if fee_observation.warning else []
         aggregate_fee_keys = [key for key in _ORDER_LEVEL_AGGREGATE_FEE_KEYS if key in row]
         if fee_observation.fee is not None and fee_observation.status == "complete" and aggregate_fee_keys:
             aggregate_fee_status = "order_level_candidate"
+            aggregate_fee_source = "order_level_paid_fee"
+            aggregate_fee_confidence = "ambiguous"
+            aggregate_fee_provenance = "order_level_paid_fee_aggregate"
+            aggregate_fee_reason = "multi_fill_order_level_fee_ambiguous"
+            aggregate_fee_checks = {
+                "single_fill": False,
+                "paid_fee_present": True,
+                "executed_volume_match": True,
+                "executed_funds_match": True,
+                "expected_fee_rate_match": False,
+                "identifiers_match": bool(
+                    str((requested.client_order_id or row.get("client_order_id") or "")).strip()
+                    and str(normalized.get("uuid") or "").strip()
+                ),
+                "material_notional_suspicious": True,
+            }
             aggregate_warnings.append(f"order_level_fee_candidate:{aggregate_fee_keys[0]}")
+        aggregate_evaluation = classify_fee_evaluation(
+            fee=fee_observation.fee,
+            fee_status=aggregate_fee_status,
+            price=price,
+            qty=qty_filled,
+            material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+            fee_source=aggregate_fee_source,
+            fee_confidence=aggregate_fee_confidence,
+            provenance=aggregate_fee_provenance,
+            reason=aggregate_fee_reason,
+            checks=aggregate_fee_checks,
+        )
         aggregate_client_order_id, aggregate_exchange_order_id = broker._resolve_order_identifiers(
             row,
             fallback_client_order_id=requested.client_order_id or "",
@@ -399,7 +514,12 @@ def get_fills(
                 qty=qty_filled,
                 fee=fee_observation.fee,
                 exchange_order_id=aggregate_exchange_order_id,
-                fee_status=aggregate_fee_status,
+                fee_status=aggregate_evaluation.fee_status,
+                fee_source=aggregate_evaluation.fee_source,
+                fee_confidence=aggregate_evaluation.fee_confidence,
+                fee_provenance=aggregate_evaluation.provenance,
+                fee_validation_reason=aggregate_evaluation.reason,
+                fee_validation_checks=aggregate_evaluation.checks,
                 parse_warnings=tuple(aggregate_warnings),
                 raw=broker._sanitize_debug_value(row),
             )

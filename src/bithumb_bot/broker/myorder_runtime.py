@@ -58,6 +58,11 @@ def _myorder_fee_accounting_complete(event: NormalizedMyOrderEvent) -> bool:
             price=event.price,
             qty=event.qty,
             material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+            fee_source=event.fee_source,
+            fee_confidence=event.fee_confidence,
+            provenance=event.fee_provenance,
+            reason=event.fee_validation_reason,
+            checks=event.fee_validation_checks,
         )
         == "accounting_complete"
     )
@@ -85,10 +90,15 @@ def _record_fee_pending_stream_observation(
         qty=float(event.qty),
         fee=event.fee,
         fee_status=str(event.fee_status or "unknown"),
-        accounting_status="fee_pending",
+        accounting_status=str(event.accounting_status or "fee_pending"),
         source="myorder_private_stream_fee_pending",
         parse_warnings=((event.fee_warning,) if event.fee_warning else ()),
         raw_payload=event.raw_payload,
+        fee_source=event.fee_source,
+        fee_confidence=event.fee_confidence,
+        fee_provenance=event.fee_provenance,
+        fee_validation_reason=event.fee_validation_reason,
+        fee_validation_checks=event.fee_validation_checks,
     )
 
 

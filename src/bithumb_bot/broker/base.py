@@ -56,6 +56,11 @@ class BrokerFill:
     fee: float | None
     exchange_order_id: str | None = None
     fee_status: str = "complete"
+    fee_source: str = "trade_level_fee"
+    fee_confidence: str = "authoritative"
+    fee_provenance: str = "trade_level_fee_present"
+    fee_validation_reason: str = "accounting_complete"
+    fee_validation_checks: dict[str, bool] | None = None
     parse_warnings: tuple[str, ...] = ()
     raw: dict[str, object] | None = None
 

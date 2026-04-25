@@ -187,6 +187,11 @@ def _fill_accounting_status(fill) -> str:
         price=getattr(fill, "price", None),
         qty=getattr(fill, "qty", None),
         material_notional_threshold=float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
+        fee_source=getattr(fill, "fee_source", None),
+        fee_confidence=getattr(fill, "fee_confidence", None),
+        provenance=getattr(fill, "fee_provenance", None),
+        reason=getattr(fill, "fee_validation_reason", None),
+        checks=getattr(fill, "fee_validation_checks", None),
     )
 
 
@@ -222,6 +227,11 @@ def _record_application_fill_observations(
             fee_status=str(getattr(fill, "fee_status", "unknown") or "unknown"),
             accounting_status=accounting_status,
             source=source,
+            fee_source=str(getattr(fill, "fee_source", "unknown") or "unknown"),
+            fee_confidence=str(getattr(fill, "fee_confidence", "unknown") or "unknown"),
+            fee_provenance=str(getattr(fill, "fee_provenance", "") or "") or None,
+            fee_validation_reason=str(getattr(fill, "fee_validation_reason", "") or "") or None,
+            fee_validation_checks=getattr(fill, "fee_validation_checks", None),
             parse_warnings=getattr(fill, "parse_warnings", ()),
             raw_payload=getattr(fill, "raw", None),
         )

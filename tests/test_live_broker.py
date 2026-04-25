@@ -695,6 +695,54 @@ class _OrderLevelFeeCandidateRecoveryBroker(_FakeBroker):
         ]
 
 
+class _ValidatedOrderLevelPaidFeeBroker(_FakeBroker):
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
+        price = float(self._last_price or 100000000.0)
+        qty = float(self._last_qty or 0.01)
+        fee = round(price * qty * float(settings.LIVE_FEE_RATE_ESTIMATE), 2)
+        return [
+            BrokerFill(
+                client_order_id=str(client_order_id or ""),
+                fill_id="C0101000000983750807",
+                fill_ts=1777042623000,
+                price=price,
+                qty=qty,
+                fee=fee,
+                exchange_order_id=exchange_order_id or "ex1",
+                fee_status="validated_order_level_paid_fee",
+                fee_source="order_level_paid_fee",
+                fee_confidence="validated",
+                fee_provenance="order_level_paid_fee_validated_single_fill",
+                fee_validation_reason="order_level_paid_fee_validated_single_fill",
+                fee_validation_checks={
+                    "single_fill": True,
+                    "paid_fee_present": True,
+                    "executed_volume_match": True,
+                    "executed_funds_match": True,
+                    "expected_fee_rate_match": True,
+                    "identifiers_match": True,
+                    "material_notional_suspicious": True,
+                },
+                parse_warnings=("missing_fee_field", "order_level_fee_candidate:paid_fee"),
+                raw={
+                    "trade": {
+                        "uuid": "C0101000000983750807",
+                        "price": str(price),
+                        "volume": str(qty),
+                        "funds": str(price * qty),
+                    },
+                    "order_fee_fields": {"paid_fee": str(fee)},
+                },
+            )
+        ]
+
+
 class _CancelOpenOrdersBroker(_FakeBroker):
     def __init__(self) -> None:
         super().__init__()
@@ -3618,6 +3666,88 @@ def test_live_execute_signal_records_observation_when_fee_pending_blocks_apply(t
     assert observation_summary["fee_status"] == "complete"
     assert observation_summary["source"] == "live_application_fee_pending"
     assert any("event=recovery_required_transition" in msg for msg in notifications)
+
+
+def test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fee(tmp_path, monkeypatch):
+    _stub_live_reference_quote(monkeypatch)
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "START_CASH_KRW", 2_000_000.0)
+    db_path = tmp_path / "validated_paid_fee_apply.sqlite"
+    conn = ensure_db(str(db_path))
+    broker = _ValidatedOrderLevelPaidFeeBroker()
+    rules = order_rules.DerivedOrderConstraints(
+        market_id="KRW-BTC",
+        bid_min_total_krw=5000.0,
+        ask_min_total_krw=5000.0,
+        bid_price_unit=1.0,
+        ask_price_unit=1.0,
+        order_types=("price", "market", "limit"),
+        bid_types=("price",),
+        ask_types=("limit", "market"),
+        order_sides=("bid", "ask"),
+        min_qty=0.0001,
+        qty_step=0.0001,
+        min_notional_krw=5000.0,
+        max_qty_decimals=8,
+    )
+    submit_plan = plan_place_order(
+        broker,
+        intent=OrderIntent(
+            client_order_id="live_validated_paid_fee",
+            market="KRW-BTC",
+            side="BUY",
+            normalized_side="bid",
+            qty=0.01,
+            price=None,
+            created_ts=1000,
+            submit_contract=order_rules.build_buy_price_none_submit_contract(rules=rules),
+            market_price_hint=100000000.0,
+            trace_id="live_validated_paid_fee",
+        ),
+        rules=rules,
+        skip_qty_revalidation=True,
+    )
+    request = _standard_submit_request(
+        conn=conn,
+        submit_plan=submit_plan,
+        effective_rules=rules,
+        client_order_id="live_validated_paid_fee",
+    )
+
+    try:
+        submission = submit_live_order_and_confirm(
+            broker=broker,
+            request=request,
+            intent_key=request.intent_key,
+            strategy_name=request.strategy_name,
+            decision_id=request.decision_id,
+            decision_reason=request.decision_reason,
+            exit_rule_name=request.exit_rule_name,
+        )
+        assert submission is not None
+
+        trade = reconcile_apply_fills_and_refresh(
+            live_module,
+            broker=broker,
+            submission=submission,
+        )
+
+        row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_validated_paid_fee'"
+        ).fetchone()
+        observation_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM broker_fill_observations WHERE client_order_id='live_validated_paid_fee'"
+        ).fetchone()
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
+        conn.close()
+
+    assert trade is not None
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.01)
+    assert row["last_error"] is None
+    assert observation_count["cnt"] == 0
 
 
 def test_submit_evidence_handles_unavailable_optional_fields(monkeypatch, tmp_path):

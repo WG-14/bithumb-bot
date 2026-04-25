@@ -609,8 +609,13 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             qty REAL NOT NULL,
             fee REAL,
             fee_status TEXT NOT NULL,
+            fee_source TEXT NOT NULL DEFAULT 'unknown',
+            fee_confidence TEXT NOT NULL DEFAULT 'unknown',
             accounting_status TEXT NOT NULL,
             source TEXT NOT NULL,
+            fee_provenance TEXT,
+            fee_validation_reason TEXT,
+            fee_validation_checks TEXT,
             parse_warnings TEXT,
             raw_payload TEXT,
             created_ts INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
@@ -776,6 +781,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "broker_fill_observations", "qty", "qty REAL NOT NULL DEFAULT 0")
     _ensure_column(conn, "broker_fill_observations", "fee", "fee REAL")
     _ensure_column(conn, "broker_fill_observations", "fee_status", "fee_status TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "broker_fill_observations", "fee_source", "fee_source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "broker_fill_observations", "fee_confidence", "fee_confidence TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(
         conn,
         "broker_fill_observations",
@@ -783,6 +790,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "accounting_status TEXT NOT NULL DEFAULT 'observed'",
     )
     _ensure_column(conn, "broker_fill_observations", "source", "source TEXT NOT NULL DEFAULT 'unknown'")
+    _ensure_column(conn, "broker_fill_observations", "fee_provenance", "fee_provenance TEXT")
+    _ensure_column(conn, "broker_fill_observations", "fee_validation_reason", "fee_validation_reason TEXT")
+    _ensure_column(conn, "broker_fill_observations", "fee_validation_checks", "fee_validation_checks TEXT")
     _ensure_column(conn, "broker_fill_observations", "parse_warnings", "parse_warnings TEXT")
     _ensure_column(conn, "broker_fill_observations", "raw_payload", "raw_payload TEXT")
 
@@ -3032,8 +3042,13 @@ def record_broker_fill_observation(
     qty: float,
     fee: float | None,
     fee_status: str,
+    fee_source: str = "unknown",
+    fee_confidence: str = "unknown",
     accounting_status: str,
     source: str,
+    fee_provenance: str | None = None,
+    fee_validation_reason: str | None = None,
+    fee_validation_checks: dict[str, object] | None = None,
     parse_warnings: Iterable[str] | str | None = None,
     raw_payload: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
@@ -3044,8 +3059,17 @@ def record_broker_fill_observation(
     if side_text not in {"BUY", "SELL"}:
         raise RuntimeError(f"broker fill observation side is invalid: {side}")
     fee_status_text = str(fee_status or "").strip() or "unknown"
+    fee_source_text = str(fee_source or "").strip() or "unknown"
+    fee_confidence_text = str(fee_confidence or "").strip() or "unknown"
     accounting_status_text = str(accounting_status or "").strip() or "observed"
     source_text = str(source or "").strip() or "unknown"
+    fee_provenance_text = str(fee_provenance or "").strip() or None
+    fee_validation_reason_text = str(fee_validation_reason or "").strip() or None
+    fee_validation_checks_text = (
+        json.dumps(fee_validation_checks, ensure_ascii=False, sort_keys=True)
+        if isinstance(fee_validation_checks, dict)
+        else None
+    )
     warnings_text: str | None
     if parse_warnings is None:
         warnings_text = None
@@ -3066,9 +3090,10 @@ def record_broker_fill_observation(
         """
         INSERT INTO broker_fill_observations(
             event_type, event_ts, client_order_id, exchange_order_id, fill_id,
-            fill_ts, side, price, qty, fee, fee_status, accounting_status,
-            source, parse_warnings, raw_payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            fill_ts, side, price, qty, fee, fee_status, fee_source, fee_confidence,
+            accounting_status, source, fee_provenance, fee_validation_reason,
+            fee_validation_checks, parse_warnings, raw_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             BROKER_FILL_OBSERVATION_EVENT_TYPE,
@@ -3082,8 +3107,13 @@ def record_broker_fill_observation(
             float(qty),
             (float(fee) if fee is not None else None),
             fee_status_text,
+            fee_source_text,
+            fee_confidence_text,
             accounting_status_text,
             source_text,
+            fee_provenance_text,
+            fee_validation_reason_text,
+            fee_validation_checks_text,
             warnings_text,
             raw_payload_text,
         ),
@@ -3097,6 +3127,8 @@ def record_broker_fill_observation(
         "exchange_order_id": str(exchange_order_id or "").strip() or None,
         "fill_id": str(fill_id or "").strip() or None,
         "fee_status": fee_status_text,
+        "fee_source": fee_source_text,
+        "fee_confidence": fee_confidence_text,
         "accounting_status": accounting_status_text,
         "source": source_text,
     }
@@ -3119,7 +3151,8 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
     last = conn.execute(
         """
         SELECT event_ts, client_order_id, exchange_order_id, fill_id, side, price, qty,
-               fee, fee_status, accounting_status, source, parse_warnings
+               fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+               fee_provenance, fee_validation_reason, fee_validation_checks, parse_warnings
         FROM broker_fill_observations
         ORDER BY event_ts DESC, id DESC
         LIMIT 1
@@ -3142,8 +3175,13 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         "last_qty": float(last["qty"]) if last is not None else None,
         "last_fee": float(last["fee"]) if last is not None and last["fee"] is not None else None,
         "last_fee_status": str(last["fee_status"]) if last is not None else None,
+        "last_fee_source": str(last["fee_source"]) if last is not None else None,
+        "last_fee_confidence": str(last["fee_confidence"]) if last is not None else None,
         "last_accounting_status": str(last["accounting_status"]) if last is not None else None,
         "last_source": str(last["source"]) if last is not None else None,
+        "last_fee_provenance": str(last["fee_provenance"]) if last is not None and last["fee_provenance"] is not None else None,
+        "last_fee_validation_reason": str(last["fee_validation_reason"]) if last is not None and last["fee_validation_reason"] is not None else None,
+        "last_fee_validation_checks": str(last["fee_validation_checks"]) if last is not None and last["fee_validation_checks"] is not None else None,
         "last_parse_warnings": str(last["parse_warnings"]) if last is not None and last["parse_warnings"] is not None else None,
     }
 
