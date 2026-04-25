@@ -4073,6 +4073,8 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert metadata["fee_pending_operator_next_action"].startswith("pause additional orders")
     assert report["fill_accounting_root_cause"]["root"] == "fee_finalization_pending"
     assert report["fill_accounting_root_cause"]["principal_applied"] == 1
+    assert report["fill_accounting_root_cause"]["recommended_action"] == "forensic_fee_authority_diagnosis"
+    assert report["fill_accounting_root_cause"]["flatten_as_primary_response"] is False
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
 

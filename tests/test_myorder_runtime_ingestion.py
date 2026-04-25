@@ -376,6 +376,60 @@ def test_myorder_runtime_ingestion_validated_single_fill_paid_fee_applies_ledger
     assert observation_count["cnt"] == 0
 
 
+def test_myorder_runtime_ingestion_validated_single_fill_paid_fee_with_fee_rate_mismatch_stays_accounting_complete(
+    tmp_path,
+) -> None:
+    original_fee_rate = settings.LIVE_FEE_RATE_ESTIMATE
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+    normalized_event = normalize_myorder_event_payload(_incident_runtime_payload())
+    conn = ensure_db(str(tmp_path / "myorder_validated_paid_fee_mismatch.sqlite"))
+    try:
+        create_order(
+            conn=conn,
+            client_order_id="cid-incident-paid-fee",
+            side="BUY",
+            qty_req=0.00059999,
+            price=116_110_000.0,
+            status="NEW",
+        )
+        result = BithumbBroker.ingest_myorder_event_runtime(conn, payload=_incident_runtime_payload())
+        conn.commit()
+
+        order_row = conn.execute(
+            "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fill_id, qty, price, fee, fee_accounting_status FROM fills WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+        observation_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM broker_fill_observations WHERE client_order_id='cid-incident-paid-fee'"
+        ).fetchone()
+    finally:
+        object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", original_fee_rate)
+        conn.close()
+
+    assert result.accepted is True
+    assert result.applied is True
+    assert result.action != "principal_applied_fee_pending"
+    assert order_row["status"] == "PARTIAL"
+    assert order_row["qty_filled"] == pytest.approx(0.00059999)
+    assert order_row["last_error"] is None
+    assert fill_row["fill_id"] == "C0101000000983750807"
+    assert fill_row["qty"] == pytest.approx(0.00059999)
+    assert fill_row["price"] == pytest.approx(116_110_000.0)
+    assert fill_row["fee"] == pytest.approx(27.86)
+    assert fill_row["fee_accounting_status"] == "fee_finalized"
+    assert normalized_event.accounting_status == "accounting_complete"
+    assert normalized_event.fee_status == "validated_order_level_paid_fee"
+    assert normalized_event.fee_source == "order_level_paid_fee"
+    assert normalized_event.fee_confidence == "validated"
+    assert normalized_event.fee_provenance == "order_level_paid_fee_validated_single_fill_fee_rate_warning"
+    assert normalized_event.fee_validation_reason == "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch"
+    assert normalized_event.fee_validation_checks["expected_fee_rate_match"] is False
+    assert normalized_event.fee_validation_checks["expected_fee_rate_warning"] is True
+    assert observation_count["cnt"] == 0
+
+
 def test_myorder_runtime_ingestion_material_zero_fee_marks_recovery_required(tmp_path) -> None:
     object.__setattr__(settings, "MODE", "live")
     conn = ensure_db(str(tmp_path / "myorder_recovery_required.sqlite"))

@@ -1244,15 +1244,20 @@ def cmd_health() -> None:
         observed_fee_bps_text = "-" if observed_fee_bps is None else f"{float(observed_fee_bps):.3f}"
         deviation_bps = fee_rate_drift.get("configured_minus_observed_bps")
         deviation_bps_text = "-" if deviation_bps is None else f"{float(deviation_bps):.3f}"
+        deviation_pct = fee_rate_drift.get("fee_rate_deviation_pct")
+        deviation_pct_text = "-" if deviation_pct is None else f"{float(deviation_pct):.2f}"
         print(
             "  fee_rate_drift="
             f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
             f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
             f"observed_fee_bps_median={observed_fee_bps_text} "
+            f"fee_rate_deviation_pct={deviation_pct_text} "
             f"configured_minus_observed_bps={deviation_bps_text} "
             f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
             f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
-            f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)}"
+            f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
+            f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+            f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
         )
     rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
     if rule_snapshot is not None:
@@ -1511,6 +1516,9 @@ def _fee_rate_drift_diagnostics(
     repair_row = conn.execute(
         "SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs"
     ).fetchone()
+    position_repair_row = conn.execute(
+        "SELECT COUNT(*) AS repair_count FROM position_authority_repairs"
+    ).fetchone()
     observed_fee_bps_median = median(recent_fee_bps) if recent_fee_bps else None
     configured_fee_bps = configured_fee_rate * 10000.0
     deviation_bps = (
@@ -1518,6 +1526,17 @@ def _fee_rate_drift_diagnostics(
         if observed_fee_bps_median is not None
         else None
     )
+    deviation_pct = (
+        ((configured_fee_bps - float(observed_fee_bps_median)) / float(observed_fee_bps_median)) * 100.0
+        if observed_fee_bps_median is not None and abs(float(observed_fee_bps_median)) > 1e-12
+        else None
+    )
+    if fee_pending_count > 0:
+        startup_impact = "active_fee_pending_blocks_resume; fee_rate_drift_alone_remains_diagnostic_only"
+    elif mismatch_count > 0:
+        startup_impact = "diagnostic_only_without_active_fee_pending"
+    else:
+        startup_impact = "no_recent_fee_rate_drift_detected"
     return {
         "configured_fee_rate_estimate": configured_fee_rate,
         "configured_fee_bps": configured_fee_bps,
@@ -1525,10 +1544,15 @@ def _fee_rate_drift_diagnostics(
         "observed_material_fee_sample_count": len(recent_fee_bps),
         "observation_window_count": len(rows),
         "configured_minus_observed_bps": deviation_bps,
+        "fee_rate_deviation_pct": deviation_pct,
         "recent_expected_fee_rate_mismatch_count": mismatch_count,
         "recent_fee_pending_observation_count": fee_pending_count,
         "fee_pending_accounting_repair_count": int(repair_row["repair_count"] or 0) if repair_row else 0,
+        "position_authority_repair_count": int(position_repair_row["repair_count"] or 0)
+        if position_repair_row
+        else 0,
         "material_notional_threshold_krw": material_threshold,
+        "startup_impact": startup_impact,
     }
 
 
@@ -2950,6 +2974,8 @@ def _load_recovery_report(
             "fee_finalized": int(fill_accounting_incident_projection.get("fee_finalized_count") or 0),
         },
         "operator_action": "none",
+        "recommended_action": "none",
+        "flatten_as_primary_response": False,
         "derived_blockers": [],
         "root_chain": [],
     }
@@ -2974,6 +3000,8 @@ def _load_recovery_report(
             "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "wait_for_auto_reconcile_or_review_fee_evidence",
+            "recommended_action": "wait_for_auto_reconcile_or_forensic_fee_authority_diagnosis",
+            "flatten_as_primary_response": False,
             "derived_blockers": derived_blockers,
             "root_chain": [fill_root_cause, *derived_blockers],
         }
@@ -2992,6 +3020,8 @@ def _load_recovery_report(
             "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "review_fee_evidence",
+            "recommended_action": "forensic_fee_authority_diagnosis",
+            "flatten_as_primary_response": False,
             "derived_blockers": derived_blockers,
             "root_chain": [fill_root_cause, *derived_blockers],
         }
@@ -3009,6 +3039,8 @@ def _load_recovery_report(
             "latest_fee_validation_checks": broker_fill_observation_summary.get("last_fee_validation_checks") or "none",
             "accounting_status_counts": fill_root_summary["accounting_status_counts"],
             "operator_action": "none_or_review_fee_evidence",
+            "recommended_action": "forensic_fee_authority_diagnosis",
+            "flatten_as_primary_response": False,
             "derived_blockers": [],
             "root_chain": [fill_root_cause],
         }
@@ -3420,12 +3452,18 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         if fee_rate_drift.get("configured_minus_observed_bps") is None
         else f"{float(fee_rate_drift.get('configured_minus_observed_bps')):.3f}"
     )
+    deviation_pct_text = (
+        "-"
+        if fee_rate_drift.get("fee_rate_deviation_pct") is None
+        else f"{float(fee_rate_drift.get('fee_rate_deviation_pct')):.2f}"
+    )
     print("  [P3.0e1] fee_rate_drift")
     print(
         "    "
         f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
         f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
         f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"fee_rate_deviation_pct={deviation_pct_text} "
         f"configured_minus_observed_bps={deviation_bps_text} "
         f"observed_material_fee_sample_count={int(fee_rate_drift.get('observed_material_fee_sample_count') or 0)} "
         f"observation_window_count={int(fee_rate_drift.get('observation_window_count') or 0)}"
@@ -3435,7 +3473,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
         f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
-        f"material_notional_threshold_krw={float(fee_rate_drift.get('material_notional_threshold_krw') or 0.0):.1f}"
+        f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+        f"material_notional_threshold_krw={float(fee_rate_drift.get('material_notional_threshold_krw') or 0.0):.1f} "
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
     )
     fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
     print("  [P3.0e2] fill_accounting_incidents")
@@ -3460,7 +3500,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"fee_status={fill_root_cause.get('fee_status') or 'none'} "
         f"fee_source={fill_root_cause.get('fee_source') or 'none'} "
         f"fee_confidence={fill_root_cause.get('fee_confidence') or 'none'} "
-        f"operator_action={fill_root_cause.get('operator_action') or 'none'}"
+        f"operator_action={fill_root_cause.get('operator_action') or 'none'} "
+        f"recommended_action={fill_root_cause.get('recommended_action') or 'none'} "
+        f"flatten_as_primary_response={1 if bool(fill_root_cause.get('flatten_as_primary_response')) else 0}"
     )
     print(
         "    "
@@ -4239,14 +4281,19 @@ def cmd_restart_checklist() -> None:
     observed_fee_bps_text = "-" if observed_fee_bps is None else f"{float(observed_fee_bps):.3f}"
     deviation_bps = fee_rate_drift.get("configured_minus_observed_bps")
     deviation_bps_text = "-" if deviation_bps is None else f"{float(deviation_bps):.3f}"
+    deviation_pct = fee_rate_drift.get("fee_rate_deviation_pct")
+    deviation_pct_text = "-" if deviation_pct is None else f"{float(deviation_pct):.2f}"
     print(
         "  "
         f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
         f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"fee_rate_deviation_pct={deviation_pct_text} "
         f"configured_minus_observed_bps={deviation_bps_text} "
         f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
         f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
-        f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)}"
+        f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
+        f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
     )
 
 def _last_reconcile_failed(state) -> bool:
