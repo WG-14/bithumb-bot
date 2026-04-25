@@ -3780,10 +3780,18 @@ def cmd_rebuild_position_authority(
         print(
             "  "
             f"incident_class={assessment.get('incident_class') or 'NONE'} "
+            f"target_lot_provenance_kind={preview.get('target_lot_provenance_kind') or 'unknown'} "
             f"broker_qty_known={1 if bool(preview.get('broker_qty_known')) else 0} "
             f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f} "
             f"remote_open_order_count={int(preview.get('remote_open_order_count') or 0)}"
         )
+        if preview.get("portfolio_anchor_missing_evidence") or preview.get("manual_projection_missing_evidence"):
+            print(
+                "  "
+                "provenance_missing_evidence="
+                f"{'|'.join(str(item) for item in (preview.get('portfolio_anchor_missing_evidence') or []) + (preview.get('manual_projection_missing_evidence') or [])) or 'none'} "
+                f"manual_db_update_unsafe={1 if bool(preview.get('manual_db_update_unsafe')) else 0}"
+            )
         if preview.get("repair_mode") == "full_projection_rebuild":
             print(
                 "  "

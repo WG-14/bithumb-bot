@@ -362,6 +362,11 @@ def test_rebuild_position_authority_preview_shows_full_projection_gate_details(m
             "dust_tracking_lot_count": 14,
             "existing_lot_rows": 14,
             "position_authority_assessment": {"incident_class": "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"},
+            "target_lot_provenance_kind": "portfolio_anchor_projection_lot",
+            "target_lot_source_modes": ["full_projection_rebuild_portfolio_anchor"],
+            "portfolio_anchor_missing_evidence": ["portfolio_anchor_projection_attestation_missing"],
+            "manual_projection_missing_evidence": [],
+            "manual_db_update_unsafe": True,
             "broker_qty_known": True,
             "broker_qty": 0.00099986,
             "remote_open_order_count": 1,
@@ -393,6 +398,9 @@ def test_rebuild_position_authority_preview_shows_full_projection_gate_details(m
     assert "projected_qty_excess=0.000788140000" in out
     assert "lot_row_count=14" in out
     assert "other_active_qty=0.001788000000" in out
+    assert "target_lot_provenance_kind=portfolio_anchor_projection_lot" in out
+    assert "provenance_missing_evidence=portfolio_anchor_projection_attestation_missing" in out
+    assert "manual_db_update_unsafe=1" in out
     assert "portfolio_projection_publication_present=0" in out
     assert "portfolio_projection_repair_event_status=recorded_but_not_current_state_proof" in out
     assert "needs_full_projection_rebuild=1" in out

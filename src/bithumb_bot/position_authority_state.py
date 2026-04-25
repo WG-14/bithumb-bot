@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
 
 from .config import settings
-from .db_core import normalize_asset_qty
+from .db_core import normalize_asset_qty, summarize_fill_accounting_incident_projection
 from .lot_model import build_quantity_contract_snapshot
 from .position_authority_incidents import PORTFOLIO_ANCHORED_PROJECTION_REPAIR_REASON
 
@@ -14,6 +15,34 @@ _EPS = 1e-12
 PARTIAL_CLOSE_RESIDUAL_REPAIR_REASON = "partial_close_residual_authority_normalization"
 HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT = "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
 MATERIALIZED_PROJECTION_FRAGMENTATION = "materialized_projection_fragmentation"
+FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE = "full_projection_rebuild_portfolio_anchor"
+PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE = "portfolio_anchored_repair"
+
+
+@dataclass(frozen=True)
+class TargetLotProvenance:
+    kind: str
+    source_modes: tuple[str, ...]
+    row_count: int
+    fill_qty_invariant_applies: bool
+    attestation_required: bool
+    repair_event_required: bool
+    known: bool
+    fail_closed: bool
+    reason: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "source_modes": list(self.source_modes),
+            "row_count": int(self.row_count),
+            "fill_qty_invariant_applies": bool(self.fill_qty_invariant_applies),
+            "attestation_required": bool(self.attestation_required),
+            "repair_event_required": bool(self.repair_event_required),
+            "known": bool(self.known),
+            "fail_closed": bool(self.fail_closed),
+            "reason": self.reason,
+        }
 
 
 def _residual_qty_tolerance(
@@ -79,6 +108,93 @@ def _row_text(row: Any, key: str, default: str = "") -> str:
     except (KeyError, IndexError, TypeError):
         return default
     return str(value or default)
+
+
+def _classify_target_lot_provenance(
+    conn,
+    *,
+    pair: str,
+    target_trade_id: int,
+) -> TargetLotProvenance:
+    rows = conn.execute(
+        """
+        SELECT lot_rule_source_mode
+        FROM open_position_lots
+        WHERE pair=?
+          AND entry_trade_id=?
+          AND qty_open > 1e-12
+        ORDER BY id ASC
+        """,
+        (str(pair), int(target_trade_id)),
+    ).fetchall()
+    source_modes = tuple(
+        sorted(
+            {
+                str(row["lot_rule_source_mode"] or "").strip()
+                for row in rows
+                if str(row["lot_rule_source_mode"] or "").strip()
+            }
+        )
+    )
+    if not rows:
+        return TargetLotProvenance(
+            kind="missing_target_rows",
+            source_modes=(),
+            row_count=0,
+            fill_qty_invariant_applies=False,
+            attestation_required=False,
+            repair_event_required=False,
+            known=False,
+            fail_closed=False,
+            reason="target open_position_lots rows missing",
+        )
+    if not source_modes or source_modes == ("ledger",):
+        return TargetLotProvenance(
+            kind="fill_native_lot",
+            source_modes=source_modes or ("ledger",),
+            row_count=len(rows),
+            fill_qty_invariant_applies=True,
+            attestation_required=False,
+            repair_event_required=False,
+            known=True,
+            fail_closed=False,
+            reason="fill-native lot rows sourced from accounted lifecycle evidence",
+        )
+    if source_modes == (FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE,):
+        return TargetLotProvenance(
+            kind="portfolio_anchor_projection_lot",
+            source_modes=source_modes,
+            row_count=len(rows),
+            fill_qty_invariant_applies=False,
+            attestation_required=True,
+            repair_event_required=False,
+            known=True,
+            fail_closed=False,
+            reason="full projection rebuild portfolio-anchor rows are current-state projection attestations",
+        )
+    if source_modes == (PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE,):
+        return TargetLotProvenance(
+            kind="manual_external_position_adjustment_lot",
+            source_modes=source_modes,
+            row_count=len(rows),
+            fill_qty_invariant_applies=False,
+            attestation_required=True,
+            repair_event_required=True,
+            known=True,
+            fail_closed=False,
+            reason="manual portfolio-anchored repair rows are projection-only adjustment evidence",
+        )
+    return TargetLotProvenance(
+        kind="unknown_projection_lot",
+        source_modes=source_modes,
+        row_count=len(rows),
+        fill_qty_invariant_applies=False,
+        attestation_required=True,
+        repair_event_required=False,
+        known=False,
+        fail_closed=True,
+        reason="unrecognized or mixed target row provenance requires fail-closed review",
+    )
 
 
 def build_lot_projection_convergence(conn, *, pair: str | None = None) -> dict[str, Any]:
@@ -480,6 +596,11 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     canonical_intended_lot_count = _row_int(latest_buy, "fill_intended_lot_count")
     if canonical_intended_lot_count <= 0:
         canonical_intended_lot_count = _row_int(latest_buy, "order_intended_lot_count")
+    target_lot_provenance = _classify_target_lot_provenance(
+        conn,
+        pair=pair_text,
+        target_trade_id=target_trade_id,
+    )
 
     lot_row = conn.execute(
         """
@@ -588,8 +709,24 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     canonical_executable_qty = normalize_asset_qty(
         float(canonical_lot_size) * float(max(0, canonical_executable_lot_count))
     )
+    open_order_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS open_order_count,
+            COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0) AS recovery_required_count
+        FROM orders
+        WHERE status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'SUBMIT_UNKNOWN',
+                         'RECOVERY_REQUIRED', 'CANCEL_REQUESTED')
+        """
+    ).fetchone()
+    unresolved_open_order_count = _row_int(open_order_row, "open_order_count")
+    recovery_required_count = _row_int(open_order_row, "recovery_required_count")
+    fee_pending_count = int(summarize_fill_accounting_incident_projection(conn).get("active_issue_count") or 0)
+    unresolved_fee_pending = bool(fee_pending_count > 0)
 
     conflicting_dust_authority = bool(
+        target_lot_provenance.fill_qty_invariant_applies
+        and
         lot_row_count > 0
         and target_executable_lot_count <= 0
         and target_dust_lot_count > 0
@@ -753,14 +890,82 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         and abs(target_min_internal_lot_size - canonical_lot_size) <= _EPS
         and abs(target_max_internal_lot_size - canonical_lot_size) <= _EPS
     )
+    portfolio_anchor_missing_evidence: list[str] = []
+    if target_lot_provenance.kind == "portfolio_anchor_projection_lot":
+        if target_lot_provenance.fail_closed:
+            portfolio_anchor_missing_evidence.append("target_row_provenance_unknown")
+        if not bool(projection_convergence.get("converged")):
+            portfolio_anchor_missing_evidence.append(
+                "projection_convergence_required="
+                f"{projection_convergence.get('reason') or 'none'}"
+            )
+        if abs(target_total_qty - portfolio_qty) > _EPS:
+            portfolio_anchor_missing_evidence.append(
+                "portfolio_anchor_target_qty_mismatch="
+                f"target_qty={target_total_qty:.12f},portfolio_qty={portfolio_qty:.12f}"
+            )
+        if not portfolio_projection_publication_present:
+            portfolio_anchor_missing_evidence.append("portfolio_anchor_projection_attestation_missing")
+        if unresolved_open_order_count > 0:
+            portfolio_anchor_missing_evidence.append(
+                f"portfolio_anchor_unresolved_open_orders={unresolved_open_order_count}"
+            )
+        if recovery_required_count > 0:
+            portfolio_anchor_missing_evidence.append(
+                f"portfolio_anchor_recovery_required_orders={recovery_required_count}"
+            )
+        if unresolved_fee_pending:
+            portfolio_anchor_missing_evidence.append(
+                f"portfolio_anchor_fee_pending_count={fee_pending_count}"
+            )
+        if target_executable_lot_count <= 0:
+            if abs(target_open_qty) > _EPS:
+                portfolio_anchor_missing_evidence.append(
+                    "portfolio_anchor_dust_only_projection_has_open_exposure_qty"
+                )
+            if target_dust_qty <= _EPS or target_dust_lot_count <= 0:
+                portfolio_anchor_missing_evidence.append(
+                    "portfolio_anchor_dust_only_projection_missing_dust_tracking_row"
+                )
+    portfolio_anchor_projection_state_converged = bool(
+        target_lot_provenance.kind == "portfolio_anchor_projection_lot"
+        and lot_row_count > 0
+        and not portfolio_anchor_missing_evidence
+    )
+    manual_projection_missing_evidence: list[str] = []
+    if target_lot_provenance.kind == "manual_external_position_adjustment_lot":
+        if not portfolio_projection_repair_recorded:
+            manual_projection_missing_evidence.append("portfolio_projection_repair_event_missing")
+        if not portfolio_projection_publication_present:
+            manual_projection_missing_evidence.append("portfolio_projection_attestation_missing")
+        if not portfolio_projection_state_converged:
+            manual_projection_missing_evidence.append(
+                "portfolio_projection_state_not_converged="
+                f"target_qty={target_total_qty:.12f},"
+                f"target_remainder_qty={portfolio_target_remainder_qty:.12f}"
+            )
     portfolio_projection_repair_event_status = _repair_event_status(
         recorded=portfolio_projection_repair_recorded,
         state_converged=portfolio_projection_state_converged,
     )
     needs_correction = bool(
-        conflicting_dust_authority
-        and not partial_close_residual_candidate
-        and not portfolio_projection_state_converged
+        (
+            target_lot_provenance.kind == "portfolio_anchor_projection_lot"
+            and bool(portfolio_anchor_missing_evidence)
+        )
+        or (
+            target_lot_provenance.kind == "manual_external_position_adjustment_lot"
+            and bool(manual_projection_missing_evidence)
+        )
+        or (
+            target_lot_provenance.fail_closed
+            and lot_row_count > 0
+        )
+        or (
+            conflicting_dust_authority
+            and not partial_close_residual_candidate
+            and not portfolio_projection_state_converged
+        )
     )
     needs_portfolio_projection_repair = bool(portfolio_projection_divergence_candidate)
 
@@ -862,13 +1067,23 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
     ):
         blockers.append(f"sell_after_target_buy={sell_after_count}")
     if (
-        not target_qty_matches_fill
+        target_lot_provenance.fill_qty_invariant_applies
+        and not target_qty_matches_fill
         and not partial_close_residual_candidate
         and not residual_state_converged
         and not needs_portfolio_projection_repair
     ):
         blockers.append(
             f"target_lot_qty_fill_mismatch=target_qty={target_total_qty:.12f},fill_qty={fill_qty:.12f}"
+        )
+    if target_lot_provenance.kind == "portfolio_anchor_projection_lot":
+        blockers.extend(portfolio_anchor_missing_evidence)
+    if target_lot_provenance.kind == "manual_external_position_adjustment_lot":
+        blockers.extend(manual_projection_missing_evidence)
+    if target_lot_provenance.fail_closed and lot_row_count > 0:
+        blockers.append(
+            "unknown_target_row_provenance="
+            f"source_modes={'|'.join(target_lot_provenance.source_modes) or 'none'}"
         )
     if not portfolio_matches_target and not needs_portfolio_projection_repair:
         blockers.append(
@@ -907,6 +1122,8 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         reason = "partial-close residual authority normalization applicable"
     elif safe_to_repair_portfolio_projection:
         reason = "portfolio-anchored projection repair requires broker/portfolio evidence gates"
+    elif portfolio_anchor_projection_state_converged:
+        reason = "portfolio-anchor projection rows are current-state attestations and are converged"
     elif needs_full_projection_rebuild:
         reason = "historical fragmentation requires a full projection rebuild with broker/portfolio evidence gates"
     elif safe_to_correct:
@@ -1034,6 +1251,9 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "portfolio_projection_repair_recorded": portfolio_projection_repair_recorded,
         "portfolio_projection_publication_present": portfolio_projection_publication_present,
         "portfolio_projection_state_converged": portfolio_projection_state_converged,
+        "portfolio_anchor_projection_state_converged": portfolio_anchor_projection_state_converged,
+        "portfolio_anchor_missing_evidence": portfolio_anchor_missing_evidence,
+        "manual_projection_missing_evidence": manual_projection_missing_evidence,
         "projection_convergence": projection_convergence,
         "projection_state_converged": bool(projection_convergence.get("converged")),
         "projection_non_convergence_reason": str(projection_convergence.get("reason") or "none"),
@@ -1043,9 +1263,16 @@ def build_position_authority_assessment(conn, *, pair: str | None = None) -> dic
         "residual_state_converged": residual_state_converged,
         "portfolio_projection_repair_event_status": portfolio_projection_repair_event_status,
         "portfolio_projection_publication_status": projection_publication_status,
+        "target_lot_provenance": target_lot_provenance.as_dict(),
+        "target_lot_provenance_kind": target_lot_provenance.kind,
+        "target_lot_source_modes": list(target_lot_provenance.source_modes),
+        "target_lot_fill_qty_invariant_applies": target_lot_provenance.fill_qty_invariant_applies,
         "other_active_lot_count": other_active_lot_count,
         "other_active_qty": other_active_qty,
         "portfolio_qty": portfolio_qty,
+        "unresolved_open_order_count": unresolved_open_order_count,
+        "recovery_required_count": recovery_required_count,
+        "fee_pending_count": fee_pending_count,
         "blockers": blockers,
         "truth_model": truth_model,
     }

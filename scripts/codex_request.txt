@@ -1,334 +1,371 @@
-You are working in the GitHub repository `WG-14/bithumb-bot`.
+You are Codex working directly in the GitHub repository `WG-14/bithumb-bot`.
 
-Your task is not to apply a narrow symptom patch. Treat the latest EC2 incident as evidence of a broader post-fill state-transition design problem in a live automated trading experiment system. Investigate, verify, modify, and test the repository so that the system becomes more robust, reproducible, observable, and operable.
+Your task is to investigate and implement a structural fix for a live EC2 recovery failure in the Bithumb trading bot. Do not treat the current diagnosis as proven fact. Use it as the starting hypothesis, then verify or falsify it from the repository code, tests, and a minimal reproducible fixture.
 
-Do not assume the diagnosis below is automatically true. Use it as a starting set of hypotheses. Confirm or refute each hypothesis from the repository code, tests, and any available fixtures/log evidence. Preserve safety: do not make changes that blindly trust exchange data, hide uncertainty, or bypass startup/readiness gates.
+## Problem context
 
-Context from the incident:
+A live EC2 bot instance stopped after a final SELL fill. The initial trigger was a fee-pending SELL accounting issue, but that was repaired manually. After that repair:
 
-A live Bithumb KRW-BTC order filled successfully, but the bot halted after one BUY/SELL because fill accounting became fee-pending. EC2 DB/log evidence showed:
+* Orders were no longer unresolved.
+* `recovery_required_count=0`.
+* Broker and local portfolio balances converged.
+* Full projection rebuild succeeded in matching total lot projection to portfolio.
+* Resume was still blocked by:
 
 ```text
-broker_fill_observations:
-  fee=27.86
-  fee_status=order_level_candidate
-  accounting_status=fee_pending
-  parse_warnings=["missing_fee_field", "order_level_fee_candidate:paid_fee"]
-
-raw_payload:
-{
-  "order_fee_fields": {"paid_fee": "27.86"},
-  "trade": {
-    "created_at": "2026-04-24T23:57:03+09:00",
-    "funds": "69664.8389",
-    "market": "KRW-BTC",
-    "price": "116110000",
-    "side": "bid",
-    "uuid": "C0101000000983750807",
-    "volume": "0.00059999"
-  }
-}
+POSITION_AUTHORITY_CORRECTION_REQUIRED
+target_lot_qty_fill_mismatch=target_qty=0.000399850000,fill_qty=0.000599990000
 ```
 
-Manual repair with `fee=27.86` succeeded and accounting converged:
+The relevant live sequence observed on EC2 was:
 
 ```text
-replay_cash=307,223.267
-replay_qty=0.0007998500
-portfolio_cash=307,223.267
-portfolio_qty=0.0007998500
-unresolved_fee_state=0
-accounting_projection_ok=1
+trade 27 BUY  qty=0.00059999 BTC
+trade 28 SELL qty=0.00040000 BTC
+current broker/local BTC balance = 0.00039985 BTC
 ```
 
-But the next readiness blocker became authority projection drift:
+The remaining `open_position_lots` row after full projection rebuild looked like:
 
 ```text
-recovery_stage=AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
-blocking_incident_class=HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-projected_total_qty=0.002587970000
-portfolio_qty=0.000799850000
+entry_trade_id=27
+entry_client_order_id=live_1777042500000_buy_ae2ac30c
+qty_open=0.00039985
+position_state=dust_tracking
+dust_tracking_lot_count=1
+internal_lot_size=0.0004
+lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
+entry_decision_linkage=degraded_recovery_unattributed
 ```
 
-The current high-confidence suspicion is:
+The working hypothesis is:
 
-1. Bithumb is not simply omitting fee data. The bot receives `paid_fee`.
-2. The repository currently treats `paid_fee` as an order-level candidate, not an accounting-authoritative fee.
-3. `order_level_candidate` is not in the accounting-complete fee status set, so normal fills become `fee_pending`.
-4. This turns normal live fills into `RECOVERY_REQUIRED` incidents.
-5. Separately, after fee repair, `open_position_lots` / position authority projection can remain non-converged against canonical portfolio quantity.
+> A `full_projection_rebuild` created a portfolio-anchor projection row that correctly matched current broker/portfolio quantity, but the subsequent readiness/authority assessment treated that synthetic portfolio-anchor row as a normal fill-native BUY residual. It then compared the anchor row’s `qty_open=0.00039985` to the original latest BUY fill quantity `0.00059999`, generated `target_lot_qty_fill_mismatch`, and blocked resume even though broker, accounting, and projection totals had converged.
 
-Repository areas to inspect first:
+Do not blindly patch around `target_lot_qty_fill_mismatch`. The goal is not to suppress a symptom. The goal is to separate truth-source semantics so the recovery system remains safe, reproducible, and operational.
+
+## Repository areas to inspect first
+
+Inspect at least these files:
 
 ```text
-src/bithumb_bot/broker/bithumb_order_queries.py
-src/bithumb_bot/broker/myorder_events.py
-src/bithumb_bot/fee_observation.py
-src/bithumb_bot/broker/live_submission_execution.py
-src/bithumb_bot/recovery.py
-src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/position_authority_state.py
-tests/test_myorder_events.py
-tests/test_myorder_runtime_ingestion.py
-tests/test_bithumb_private_api.py
-tests/test_recovery_restart_regression.py
+src/bithumb_bot/position_authority_repair.py
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/lifecycle.py
+src/bithumb_bot/db_core.py
 tests/test_position_authority_recovery_state.py
-tests/test_accounting_projection.py
+tests/test_operator_commands.py
+tests/test_ops_report.py
 ```
 
-Important constraints:
-
-Do not simply change every `paid_fee` into `complete`.
-Do not weaken readiness gates.
-Do not make multi-fill aggregate `paid_fee` automatically apply to individual fills unless you implement a validated allocation policy with tests.
-Do not hide `fee_pending`; replace unnecessary operator intervention with explicit validation and observable provenance.
-Do not treat historical repair records as proof of current state convergence.
-Do not make `rebuild-position-authority` mutate live state unless the command already supports safe preview/apply semantics and tests prove idempotence.
-
-Primary goal:
-
-Design and implement a fee evidence validation pipeline that can safely auto-promote a single-fill order-level `paid_fee` into accounting-complete evidence when, and only when, the surrounding evidence proves it is safe.
-
-Expected design direction:
-
-Introduce or refactor toward an explicit fee authority model. Avoid leaving accounting eligibility encoded only in a flat `fee_status` string.
-
-A useful model would distinguish:
+Relevant concepts already present in the codebase include:
 
 ```text
-fee_source:
-  trade_level_fee
-  order_level_paid_fee
-  configured_fee_rate
-  operator_confirmed
-  missing
-
-fee_confidence:
-  authoritative
-  validated
-  estimated
-  ambiguous
-  invalid
-
-accounting_eligibility:
-  complete
-  pending
-  blocked
+canonical_truth_source = orders_fills_trades_plus_portfolio
+projection_truth_source = open_position_lots_materialized_projection
+projection_role = rebuildable_materialized_view
+projection_publication_role = current_state_attestation
+lot_rule_source_mode = full_projection_rebuild_portfolio_anchor
 ```
 
-Implement the minimum viable version that fits the existing codebase.
+The design intent appears to be that `open_position_lots` is a materialized projection / executable-authority layer, not necessarily the canonical immutable event log. Verify this from the code before acting.
 
-Required validation policy for the incident class:
+## Hypotheses to verify or falsify
 
-For a REST `/v1/order` or private stream event where trade-level fee is missing but order-level `paid_fee` exists, auto-promote only if all of these are true:
+Keep these as hypotheses, not assumptions.
+
+### Hypothesis A: Portfolio-anchor projection rows are being misclassified as fill-native correction targets
+
+`_replace_with_portfolio_anchored_projection()` appears to create `open_position_lots` rows with:
 
 ```text
-- exactly one fill/trade is present for the order, or the event is otherwise provably single-fill
-- order-level paid_fee is present, finite, non-negative
-- fill volume and order executed_volume match within strict quantity tolerance, when both are available
-- fill funds and order executed_funds match within KRW tolerance, when both are available
-- paid_fee is consistent with the configured or observed fee-rate expectation within a documented KRW rounding/tolerance policy
-- identifiers are consistent: client_order_id, exchange_order_id, fill_id/trade uuid
-- notional is material enough that zero/missing fee would still be suspicious
+lot_rule_source_mode=full_projection_rebuild_portfolio_anchor
 ```
 
-Expected output status/provenance for this case:
+These rows are anchored to a recent BUY only as provenance. Their `qty_open` may represent the current portfolio/broker balance, not the natural residual of that single BUY fill.
+
+Verify whether `build_position_authority_assessment()` later treats such rows as normal fill-native lots and applies fill-native invariants such as:
 
 ```text
-fee_status = validated_order_level_paid_fee
-fee_source = order_level_paid_fee
-fee_confidence = validated
-accounting_status = accounting_complete
-provenance = order_level_paid_fee_validated_single_fill
+target_total_qty == fill_qty
+target_total_qty == expected_residual_qty
 ```
 
-The exact field names may differ if the existing schema makes another naming better, but the semantics must remain explicit and observable.
-
-Multi-fill behavior:
-
-For multiple fills with only aggregate `paid_fee`, keep the result pending unless you implement and test a correct allocation policy. The system should report this as:
+Confirm or refute by building a minimal test scenario and/or by tracing these fields:
 
 ```text
-fee_confidence=ambiguous
-accounting_eligibility=pending
-reason=multi_fill_order_level_fee_ambiguous
+target_trade_id
+target_client_order_id
+target_total_qty
+target_dust_qty
+fill_qty
+portfolio_qty
+projection_convergence.converged
+portfolio_projection_publication_present
+lot_rule_source_mode for the target row
+needs_correction
+safe_to_correct
+blockers
+repair_action_state
+reason
 ```
 
-Do not regress existing safety behavior for ambiguous or invalid fees.
+### Hypothesis B: `full_projection_rebuild` conflates “matching current portfolio quantity” with “reconstructing fill-native position authority”
 
-Required tests:
+Investigate `_apply_full_projection_rebuild()` and `_replace_with_portfolio_anchored_projection()`.
 
-Add a real incident fixture. Create a fixture similar to:
+Verify whether the full rebuild first replays lifecycles, then deletes/replaces `open_position_lots` with a portfolio-anchored projection that is quantity-converged but no longer a true per-fill lifecycle decomposition.
+
+A valid full projection rebuild may still be safe, but only if subsequent readiness logic understands the row’s projection kind and applies projection-specific invariants.
+
+### Hypothesis C: The “latest BUY only” authority assessment is structurally fragile with accumulated residual/dust
+
+`build_position_authority_assessment()` appears to focus on the latest accounted BUY and its rows. This may fail when the current residual portfolio is a combination of older residual plus the latest BUY’s residual.
+
+Reproduce or falsify with a test fixture:
 
 ```text
-tests/fixtures/bithumb/live_paid_fee_single_fill_buy_2026_04_24.json
+prior residual exists, e.g. 0.00019986
+latest BUY qty = 0.00059999, executable_lot_count=1, internal_lot_size=0.0004
+latest SELL qty = 0.00040000
+current portfolio/broker qty = 0.00039985
+full projection rebuild creates one portfolio-anchor dust row
+assessment should not require this portfolio-anchor row’s qty to equal latest BUY fill qty
 ```
 
-with:
+### Hypothesis D: The recovery state machine lacks an actionable “safe_to_apply=false” diagnostic path
 
-```json
-{
-  "order_fee_fields": {"paid_fee": "27.86"},
-  "trade": {
-    "created_at": "2026-04-24T23:57:03+09:00",
-    "funds": "69664.8389",
-    "market": "KRW-BTC",
-    "price": "116110000",
-    "side": "bid",
-    "uuid": "C0101000000983750807",
-    "volume": "0.00059999"
-  }
-}
-```
+When `safe_to_apply=false`, the operator currently gets blocked but may need to read code to understand whether this is:
 
-Add or update tests proving:
+* missing broker evidence,
+* missing projection publication,
+* unsafe open orders,
+* stale repair event,
+* fill-native mismatch,
+* portfolio-anchor projection mismatch,
+* or a code/model limitation.
 
-1. Existing behavior is reproduced before the fix or clearly documented in test history: `paid_fee` was previously classified as `order_level_candidate`.
-2. Single-fill `paid_fee` with matching quantity/funds/expected fee rate is validated and accounting-complete.
-3. `fee_accounting_status` recognizes the new validated status as complete.
-4. `live_submission_execution` does not transition the order to `RECOVERY_REQUIRED` for this validated single-fill `paid_fee` case.
-5. Multi-fill aggregate `paid_fee` remains pending or operator-review-required.
-6. Missing fee remains pending.
-7. Invalid, negative, NaN, unparseable, or suspicious zero fee remains blocked/pending according to existing safety rules.
-8. Fee-rate mismatch beyond tolerance remains operator-review-required.
-9. REST `/v1/order` and private `myOrder` normalization use the same fee authority semantics or have tests documenting why they differ.
-10. Recovery report or broker diagnostics exposes why an order-level fee was auto-validated or why auto-validation failed.
+Inspect `recovery-report`, `restart-checklist`, and health output paths. Improve observability if needed.
 
-Required observability changes:
+## Required design direction
 
-Add structured evidence to broker fill observations or related diagnostic output. At minimum, make it possible to answer from logs/recovery-report:
+Prioritize a design change over a narrow symptom patch.
+
+The system should distinguish at least these row semantics:
 
 ```text
-fee_auto_validation:
-  eligible=true/false
-  result=validated|pending|blocked
-  fee_source=...
-  fee_confidence=...
-  reason=...
-  checks:
-    single_fill=...
-    paid_fee_present=...
-    executed_volume_match=...
-    executed_funds_match=...
-    expected_fee_rate_match=...
-    identifiers_match=...
+fill_native_lot
+  - created from a specific BUY fill’s executable/dust split
+  - fill quantity, lifecycle SELL quantity, and residual quantity are valid invariants
+
+portfolio_anchor_projection_lot
+  - created to attest current broker/portfolio quantity after recovery
+  - entry_trade_id is provenance anchor only
+  - fill quantity equality must not be required
+  - must require strong broker/accounting/projection/publication evidence
+
+manual_external_position_adjustment_lot
+  - created from external adjustment/manual repair
+  - should not be interpreted as a natural BUY-fill residual
 ```
 
-Do not require operators to inspect raw JSON to understand why fee accounting did or did not apply.
+Do not necessarily add a large migration unless necessary. It is acceptable to start by centralizing provenance classification using existing columns such as `lot_rule_source_mode`, but the code must make the semantic split explicit, named, and tested.
 
-Required recovery/readiness work:
+## Minimum expected implementation
 
-Do not stop at the fee fix. Investigate the second blocker class:
+Implement a robust fix that satisfies all of the following:
+
+1. Add or refactor a small explicit helper/model that classifies `open_position_lots` provenance or projection kind, at least recognizing:
 
 ```text
-AUTHORITY_PROJECTION_NON_CONVERGED_PENDING
-projected_total_qty=0.002587970000
-portfolio_qty=0.000799850000
+full_projection_rebuild_portfolio_anchor
+ledger / fill-native rows
+manual/external adjustment rows if already represented
+unknown rows fail closed
 ```
 
-Treat this as a separate hypothesis: `open_position_lots` is a materialized authority projection that can drift from canonical accounting/portfolio after manual repairs, dust handling, partial sells, or historical fragmentation.
+2. Update `build_position_authority_assessment()` so a converged portfolio-anchor projection row is not treated as a fill-native correction target.
 
-Verify from the repository whether:
+A portfolio-anchor projection may be considered converged only under strict conditions. Suggested minimum conditions:
 
 ```text
-- canonical truth is orders/fills/trades plus portfolio
-- open_position_lots is intended as a rebuildable materialized projection
-- repair events are historical evidence, not current-state proof
-- full projection rebuild is idempotent and portfolio-anchored
-- readiness correctly blocks when projection and portfolio do not converge
+target lot row source/provenance is full_projection_rebuild_portfolio_anchor
+projection_convergence.converged is true
+target_total_qty matches portfolio_qty
+portfolio_projection_publication_present is true, or another current-state attestation exists and is verified
+unresolved_open_order_count == 0
+recovery_required_count == 0
+unresolved fee pending state is false
+no executable exposure is being inferred from qty alone
+row remains dust_tracking if executable_lot_count == 0
 ```
 
-Add or update tests for authority projection invariants where feasible:
+Use the repository’s existing available data paths. If not all checks belong inside `position_authority_state.py`, keep the separation clean and document the boundary.
+
+3. Do not globally ignore `target_lot_qty_fill_mismatch`.
+
+For fill-native lots, this mismatch must still block unless a valid partial-close residual normalization applies.
+
+4. Strengthen the full projection rebuild postcondition.
+
+After `_apply_full_projection_rebuild()` publishes a portfolio-anchor projection, it should not leave the system immediately in `AUTHORITY_CORRECTION_PENDING` due to misclassifying its own output.
+
+If the post-assessment still requires correction, the full rebuild should either:
+
+* fail with a precise postcondition error, or
+* classify the portfolio-anchor projection as converged and resume-safe according to the stricter portfolio-anchor invariants.
+
+5. Improve operator diagnostics for `safe_to_apply=false`.
+
+At minimum, ensure the preview/report surfaces:
 
 ```text
-SUM(open_position_lots.qty_open where qty_open > eps)
-  == portfolio.asset_available + portfolio.asset_locked
-  within tolerance
-
-SUM(open_exposure qty) + SUM(dust_tracking qty)
-  == SUM(open_position_lots.qty_open)
-
-sellable_executable_qty <= broker/portfolio asset_available
-
-fills/trades replay portfolio == portfolio table
-
-position authority rebuild is idempotent
-
-repair event recorded != current state converged unless projection actually matches
+target row provenance/projection kind
+whether the blocker is fill-native or portfolio-anchor specific
+which evidence is missing
+whether manual DB update is unsafe
+what command or code path is next
 ```
 
-If a full fix for position authority projection is too large, do not implement a risky partial mutation. Instead, deliver a scoped diagnostic/reporting improvement plus a precise follow-up plan. But do implement the fee authority fix if the hypotheses are confirmed.
+Do not add noisy logs in normal operation. Prefer structured report fields or existing report output.
 
-Required commands to run:
+## Required tests
 
-Run targeted tests first, then broader tests relevant to live recovery:
+Add regression tests before or with the fix. Prefer focused unit/integration tests using the existing test helpers in `tests/test_position_authority_recovery_state.py`.
+
+At minimum add tests equivalent to:
+
+```python
+def test_full_projection_rebuild_portfolio_anchor_does_not_require_fill_qty_match_after_partial_close_with_existing_residual(...):
+    """
+    Reproduce the EC2 failure pattern:
+    - prior residual exists
+    - latest BUY 0.00059999 has one executable lot of 0.0004 and dust remainder
+    - later SELL 0.00040000 closes the executable lot
+    - current portfolio/broker qty is 0.00039985
+    - full projection rebuild creates a portfolio-anchor dust row
+    - build_position_authority_assessment() must not classify it as fill-native target_lot_qty_fill_mismatch
+    - runtime readiness must not enter AUTHORITY_CORRECTION_PENDING solely because of that mismatch
+    """
+```
+
+Also add safety tests:
+
+```python
+def test_portfolio_anchor_projection_still_blocks_without_current_publication_attestation(...):
+    """
+    A portfolio-anchor-looking row without valid current-state publication/attestation must fail closed.
+    """
+
+def test_portfolio_anchor_projection_still_blocks_when_projection_or_portfolio_not_converged(...):
+    """
+    If projection quantity does not match portfolio/broker/accounting evidence, do not treat it as converged.
+    """
+
+def test_fill_native_lot_qty_mismatch_still_blocks(...):
+    """
+    A normal fill-native lot with target/fill mismatch must still produce a blocker.
+    """
+```
+
+If existing test helpers make these exact names impractical, use equivalent names but preserve the scenarios and assertions.
+
+## Recovery and reproducibility improvements
+
+If feasible within the same change, add or sketch a small recovery-case export path. Do not let this distract from the core fix, but leave the repository more operational.
+
+Desired future command shape:
 
 ```bash
-uv run pytest -q tests/test_myorder_events.py
-uv run pytest -q tests/test_myorder_runtime_ingestion.py
-uv run pytest -q tests/test_bithumb_private_api.py -k "fee or paid_fee or order_level_candidate or get_fills"
-uv run pytest -q tests/test_recovery_restart_regression.py
-uv run pytest -q tests/test_position_authority_recovery_state.py
-uv run pytest -q tests/test_accounting_projection.py
+bithumb-bot export-recovery-case --redact-secrets --case-id <id>
 ```
 
-If the test suite is large or slow, run the most relevant subsets first, but report exactly what was and was not run.
-
-Also run static or formatting checks if the repo has them configured. Inspect `pyproject.toml`, CI config, or Makefile to find the canonical commands.
-
-Deliverables:
-
-1. Code changes implementing validated fee evidence handling.
-2. Tests using the real incident fixture and negative cases.
-3. Observability/reporting changes showing fee validation result and failed checks.
-4. A written analysis in the final response that keeps hypotheses distinct from confirmed findings.
-5. A clear statement of what remains unresolved about position authority projection drift, unless fully fixed and tested.
-6. A safe operator note describing how this changes live behavior.
-
-Final report format:
-
-Use this exact structure:
-
-```markdown
-## Summary
-
-## Confirmed Findings
-
-## Refuted or Unconfirmed Hypotheses
-
-## Design Changes Made
-
-## Fee Authority Policy
-
-## Recovery and Readiness Impact
-
-## Position Authority Projection Findings
-
-## Tests Added or Updated
-
-## Commands Run
-
-## Remaining Risks
-
-## Follow-up Work
-```
-
-In `Confirmed Findings`, cite concrete files/functions and explain the pre-change behavior.
-
-In `Design Changes Made`, explain why the change prevents the problem class rather than just suppressing this one incident.
-
-In `Remaining Risks`, explicitly cover multi-fill order-level fee ambiguity and any unresolved projection drift.
-
-In `Follow-up Work`, include longer-term improvements such as:
+Desired output contents:
 
 ```text
-- shared fee authority module across REST and private stream ingestion
-- DB schema columns for fee_source, fee_confidence, validation_checks_json
-- broker-diagnose warning when live fee policy would halt after next fill
-- fee schema drift canary for paid_fee, reserved_fee, remaining_fee, trade.fee, executed_funds, executed_volume
-- idempotent canonical replay-based rebuild of open_position_lots
-- invariant-driven readiness checks after every live fill
+schema version
+subset of orders/fills/trades/portfolio/open_position_lots
+relevant repair/publication tables
+runtime readiness snapshot
+recovery-report JSON
+expected failing blocker
 ```
 
-Be strict: if the repo already has an intended policy that forbids automatic accounting from order-level `paid_fee`, do not silently override it. Document the policy conflict and either implement the safer validated intermediate state or report why the current repo cannot support it safely without a larger design change.
+If implementing this is too large, create a clear TODO or issue-ready note in code/tests/docs explaining where it should live and how it would help convert EC2-only failures into repeatable fixtures.
+
+## Non-goals and safety constraints
+
+Do not:
+
+* simply remove the `target_lot_qty_fill_mismatch` blocker;
+* allow qty-only inference of executable exposure;
+* make resume possible when broker/portfolio/accounting/projection evidence is not converged;
+* add a manual DB UPDATE workaround as the primary fix;
+* weaken fail-closed behavior for unknown row provenance;
+* overfit to exactly `0.00039985` or the specific EC2 order IDs.
+
+The fix must generalize to the problem family:
+
+```text
+fee repair + partial close + accumulated dust/residual + full projection rebuild + broker/portfolio reconciliation
+```
+
+## Suggested commands to run
+
+Use the repository’s normal tooling. At minimum run targeted tests around position authority and operator reports:
+
+```bash
+pytest tests/test_position_authority_recovery_state.py -q
+pytest tests/test_operator_commands.py -q
+pytest tests/test_ops_report.py -q
+```
+
+If the full test suite is practical, also run:
+
+```bash
+pytest -q
+```
+
+If any test is too slow or fails for unrelated environmental reasons, report that clearly and include the exact command/output.
+
+## Final report format
+
+When done, report in this structure:
+
+```text
+Summary
+- What changed
+- Why this is a design fix rather than a symptom suppression
+
+Hypotheses
+- Hypothesis A: confirmed/refuted/partially confirmed, with evidence
+- Hypothesis B: confirmed/refuted/partially confirmed, with evidence
+- Hypothesis C: confirmed/refuted/partially confirmed, with evidence
+- Hypothesis D: confirmed/refuted/partially confirmed, with evidence
+
+Implementation
+- Files changed
+- New/changed concepts or invariants
+- How portfolio-anchor projection rows are now distinguished from fill-native lots
+- Why fill-native target_lot_qty_fill_mismatch remains protected
+
+Tests
+- Tests added
+- Commands run
+- Results
+- Any tests not run and why
+
+Operational impact
+- What an EC2 operator should now see in recovery-report/health/restart-checklist
+- Whether the previous stuck state should become resume-ready or should fail with a clearer blocker
+- Any remaining manual verification steps
+
+Long-term follow-ups
+- Typed projection/provenance schema
+- recovery plan/apply/postcheck standardization
+- export-recovery-case fixture generation
+```
+
+Be explicit about uncertainties. If a hypothesis is not fully proven, keep it as a hypothesis and state what further evidence would prove or disprove it.
 

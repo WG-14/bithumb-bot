@@ -36,6 +36,7 @@ from bithumb_bot.fee_pending_repair import (
 from bithumb_bot.lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from bithumb_bot.oms import set_status
 from bithumb_bot.position_authority_repair import (
+    _replace_with_portfolio_anchored_projection,
     apply_position_authority_rebuild,
     build_position_authority_rebuild_preview,
 )
@@ -54,6 +55,10 @@ LIVE_INCIDENT_STALE_DUST_QTY = 0.001788
 OBSERVED_LIVE_BUY_QTY = 0.00059998
 OBSERVED_LIVE_BUY_FEE = 27.91
 OBSERVED_LIVE_CASH_KRW = 284_169.87556
+EC2_REPRO_PRIOR_BUY_QTY = 0.00059986
+EC2_REPRO_LATEST_BUY_QTY = 0.00059999
+EC2_REPRO_SELL_QTY = 0.0004
+EC2_REPRO_PORTFOLIO_QTY = 0.00039985
 
 
 @pytest.fixture
@@ -606,6 +611,116 @@ def _apply_fee_pending_sell(conn, *, client_order_id: str = "incident_sell", fil
     )
     assert result["applied_fill"] is not None
     conn.commit()
+
+
+def _apply_filled_order(
+    conn,
+    *,
+    client_order_id: str,
+    side: str,
+    qty: float,
+    ts_ms: int,
+    fill_id: str,
+    fee: float = 1.0,
+) -> None:
+    record_order_if_missing(
+        conn,
+        client_order_id=client_order_id,
+        side=side,
+        qty_req=qty,
+        price=PRICE,
+        ts_ms=ts_ms,
+        status="NEW",
+        internal_lot_size=LOT_SIZE,
+        effective_min_trade_qty=0.0002,
+        qty_step=0.0001,
+        min_notional_krw=0.0,
+        intended_lot_count=1,
+        executable_lot_count=1,
+    )
+    apply_fill_and_trade(
+        conn,
+        client_order_id=client_order_id,
+        side=side,
+        fill_id=fill_id,
+        fill_ts=ts_ms + 50,
+        price=PRICE,
+        qty=qty,
+        fee=fee,
+        allow_entry_decision_fallback=False,
+    )
+    set_status(client_order_id, "FILLED", conn=conn)
+
+
+def _materialize_full_rebuild_portfolio_anchor_fixture(
+    conn,
+    *,
+    with_publication: bool,
+) -> dict[str, object]:
+    _apply_filled_order(
+        conn,
+        client_order_id="ec2_prior_buy",
+        side="BUY",
+        qty=EC2_REPRO_PRIOR_BUY_QTY,
+        ts_ms=1_777_042_400_000,
+        fill_id="ec2-prior-buy-fill",
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="ec2_prior_sell",
+        side="SELL",
+        qty=EC2_REPRO_SELL_QTY,
+        ts_ms=1_777_042_410_000,
+        fill_id="ec2-prior-sell-fill",
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="ec2_latest_buy",
+        side="BUY",
+        qty=EC2_REPRO_LATEST_BUY_QTY,
+        ts_ms=1_777_042_500_000,
+        fill_id="ec2-latest-buy-fill",
+    )
+    _apply_filled_order(
+        conn,
+        client_order_id="ec2_latest_sell",
+        side="SELL",
+        qty=EC2_REPRO_SELL_QTY,
+        ts_ms=1_777_042_510_000,
+        fill_id="ec2-latest-sell-fill",
+    )
+    set_portfolio_breakdown(
+        conn,
+        cash_available=settings.START_CASH_KRW,
+        cash_locked=0.0,
+        asset_available=EC2_REPRO_PORTFOLIO_QTY,
+        asset_locked=0.0,
+    )
+    _align_accounting_projection_to_portfolio(conn, portfolio_qty=EC2_REPRO_PORTFOLIO_QTY)
+    rebuild_lifecycle_projections_from_trades(conn, pair=settings.PAIR, allow_entry_decision_fallback=False)
+    anchor = _replace_with_portfolio_anchored_projection(
+        conn,
+        portfolio_qty=EC2_REPRO_PORTFOLIO_QTY,
+        broker_qty=EC2_REPRO_PORTFOLIO_QTY,
+    )
+    if with_publication:
+        record_position_authority_projection_publication(
+            conn,
+            event_ts=1_777_042_520_000,
+            pair=settings.PAIR,
+            target_trade_id=int(anchor["anchor_trade_id"]),
+            source="test_full_projection_rebuild_publish",
+            publish_basis={
+                "event_type": "full_projection_materialized_rebuild",
+                "target_trade_id": int(anchor["anchor_trade_id"]),
+                "portfolio_qty": EC2_REPRO_PORTFOLIO_QTY,
+                "portfolio_anchor_projection": anchor,
+            },
+            note="portfolio-anchor attestation fixture",
+        )
+    conn.commit()
+    _record_portfolio_projection_broker_evidence(broker_qty=EC2_REPRO_PORTFOLIO_QTY)
+    return anchor
 
 
 def test_fee_pending_repaired_buy_materializes_consistent_lot_authority(recovery_db):
@@ -2217,6 +2332,146 @@ def test_recorded_projection_repair_without_publication_full_rebuild_apply_recor
     )
     assert readiness.as_dict()["position_authority_assessment"]["needs_full_projection_rebuild"] is False
     assert readiness.recovery_stage == "RESUME_READY"
+
+
+def test_full_projection_rebuild_portfolio_anchor_does_not_require_fill_qty_match_after_partial_close_with_existing_residual(
+    recovery_db,
+):
+    conn = ensure_db(str(recovery_db))
+    try:
+        anchor = _materialize_full_rebuild_portfolio_anchor_fixture(conn, with_publication=True)
+
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert anchor["portfolio_qty"] == pytest.approx(EC2_REPRO_PORTFOLIO_QTY)
+    assert assessment["target_trade_id"] == anchor["anchor_trade_id"]
+    assert assessment["target_qty"] == pytest.approx(EC2_REPRO_LATEST_BUY_QTY)
+    assert assessment["existing_total_qty"] == pytest.approx(EC2_REPRO_PORTFOLIO_QTY)
+    assert assessment["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
+    assert assessment["target_lot_fill_qty_invariant_applies"] is False
+    assert assessment["portfolio_anchor_projection_state_converged"] is True
+    assert assessment["portfolio_projection_publication_present"] is True
+    assert assessment["needs_correction"] is False
+    assert not any("target_lot_qty_fill_mismatch=" in blocker for blocker in assessment["blockers"])
+    assert readiness.recovery_stage == "RESUME_READY"
+    assert readiness.resume_ready is True
+    assert readiness.resume_blockers == ()
+    assert (
+        readiness.as_dict()["position_authority_assessment"]["target_lot_provenance_kind"]
+        == "portfolio_anchor_projection_lot"
+    )
+
+
+def test_portfolio_anchor_projection_still_blocks_without_current_publication_attestation(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_full_rebuild_portfolio_anchor_fixture(conn, with_publication=False)
+
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert assessment["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
+    assert assessment["portfolio_anchor_projection_state_converged"] is False
+    assert assessment["portfolio_projection_publication_present"] is False
+    assert assessment["needs_correction"] is True
+    assert "portfolio_anchor_projection_attestation_missing" in assessment["blockers"]
+    assert not any("target_lot_qty_fill_mismatch=" in blocker for blocker in assessment["blockers"])
+    assert readiness.recovery_stage == "AUTHORITY_CORRECTION_PENDING"
+    assert readiness.resume_blockers == ("POSITION_AUTHORITY_CORRECTION_REQUIRED",)
+    assert "portfolio_anchor_projection_attestation_missing" in readiness.structured_blockers[0]["detail"]
+
+
+def test_portfolio_anchor_projection_still_blocks_when_projection_or_portfolio_not_converged(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _materialize_full_rebuild_portfolio_anchor_fixture(conn, with_publication=True)
+        conn.execute(
+            """
+            UPDATE open_position_lots
+            SET qty_open=?
+            WHERE lot_rule_source_mode='full_projection_rebuild_portfolio_anchor'
+            """,
+            (0.00039980,),
+        )
+        conn.commit()
+
+        assessment = build_position_authority_assessment(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert assessment["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
+    assert assessment["projection_state_converged"] is False
+    assert assessment["portfolio_anchor_projection_state_converged"] is False
+    assert assessment["needs_correction"] is True
+    assert any("projection_convergence_required=" in blocker for blocker in assessment["blockers"])
+    assert readiness.recovery_stage == "AUTHORITY_CORRECTION_PENDING"
+    assert readiness.resume_ready is False
+
+
+def test_fill_native_lot_qty_mismatch_still_blocks(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn)
+        trade = conn.execute(
+            "SELECT id, ts FROM trades WHERE client_order_id='incident_buy' AND side='BUY'"
+        ).fetchone()
+        assert trade is not None
+        conn.execute("DELETE FROM open_position_lots WHERE entry_trade_id=?", (int(trade["id"]),))
+        conn.execute(
+            """
+            INSERT INTO open_position_lots(
+                pair, entry_trade_id, entry_client_order_id, entry_fill_id, entry_ts, entry_price,
+                qty_open, executable_lot_count, dust_tracking_lot_count, lot_semantic_version,
+                internal_lot_size, lot_min_qty, lot_qty_step, lot_min_notional_krw,
+                lot_max_qty_decimals, lot_rule_source_mode, position_semantic_basis,
+                position_state, entry_fee_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                settings.PAIR,
+                int(trade["id"]),
+                "incident_buy",
+                "fill-23",
+                int(trade["ts"]),
+                PRICE,
+                EC2_REPRO_PORTFOLIO_QTY,
+                0,
+                1,
+                1,
+                LOT_SIZE,
+                0.0002,
+                0.0001,
+                0.0,
+                8,
+                "ledger",
+                "lot-native",
+                "dust_tracking",
+                4.23,
+            ),
+        )
+        set_portfolio_breakdown(
+            conn,
+            cash_available=settings.START_CASH_KRW,
+            cash_locked=0.0,
+            asset_available=EC2_REPRO_PORTFOLIO_QTY,
+            asset_locked=0.0,
+        )
+        conn.commit()
+
+        assessment = build_position_authority_assessment(conn)
+    finally:
+        conn.close()
+
+    assert assessment["target_lot_provenance_kind"] == "fill_native_lot"
+    assert assessment["target_lot_fill_qty_invariant_applies"] is True
+    assert assessment["needs_correction"] is True
+    assert any("target_lot_qty_fill_mismatch=" in blocker for blocker in assessment["blockers"])
 
 
 @pytest.mark.parametrize(

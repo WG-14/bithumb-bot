@@ -357,6 +357,11 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "portfolio_projection_repair_event_status": str(
             authority_assessment.get("portfolio_projection_repair_event_status") or "none"
         ),
+        "target_lot_provenance_kind": str(authority_assessment.get("target_lot_provenance_kind") or "unknown"),
+        "target_lot_source_modes": list(authority_assessment.get("target_lot_source_modes") or []),
+        "portfolio_anchor_missing_evidence": list(authority_assessment.get("portfolio_anchor_missing_evidence") or []),
+        "manual_projection_missing_evidence": list(authority_assessment.get("manual_projection_missing_evidence") or []),
+        "manual_db_update_unsafe": bool(not safe_to_apply),
         "sell_after_target_buy_qty": float(authority_assessment.get("sell_after_target_buy_qty") or 0.0),
         "target_lifecycle_matched_qty": float(authority_assessment.get("target_lifecycle_matched_qty") or 0.0),
         "effective_closed_qty": float(authority_assessment.get("effective_closed_qty") or 0.0),
@@ -635,10 +640,6 @@ def _apply_full_projection_rebuild(conn: sqlite3.Connection, *, note: str | None
             repair_basis=repair_basis,
             repair_mode="full_projection_rebuild",
         )
-        post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
-        repair_basis["position_authority_assessment_after"] = post_assessment
-        if bool(post_assessment.get("needs_full_projection_rebuild")):
-            raise RuntimeError("position authority full projection rebuild did not clear projection readiness block")
         event_ts = int(time.time() * 1000)
         publication = record_position_authority_projection_publication(
             conn,
@@ -650,6 +651,20 @@ def _apply_full_projection_rebuild(conn: sqlite3.Connection, *, note: str | None
             note=note,
         )
         repair_basis["projection_publication"] = publication
+        post_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
+        repair_basis["position_authority_assessment_after"] = post_assessment
+        if (
+            bool(post_assessment.get("needs_full_projection_rebuild"))
+            or bool(post_assessment.get("needs_correction"))
+            or bool(post_assessment.get("needs_portfolio_projection_repair"))
+            or bool(post_assessment.get("needs_residual_normalization"))
+        ):
+            raise RuntimeError(
+                "position authority full projection rebuild postcondition failed: "
+                f"reason={post_assessment.get('reason') or 'unknown'}; "
+                f"provenance={post_assessment.get('target_lot_provenance_kind') or 'unknown'}; "
+                f"blockers={'|'.join(str(item) for item in post_assessment.get('blockers') or []) or 'none'}"
+            )
         repair = record_position_authority_repair(
             conn,
             event_ts=event_ts,
