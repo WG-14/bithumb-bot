@@ -324,23 +324,14 @@ def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete
     finally:
         conn.close()
 
-    assert result.action == "principal_applied_fee_pending"
+    assert result.action == "applied"
     assert order_row["status"] == "PARTIAL"
     assert order_row["qty_filled"] == pytest.approx(0.1)
     assert order_row["last_error"] is None
     assert fill_count == 1
-    assert fill_row["fee"] == pytest.approx(0.0)
-    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
-    assert observation["fee"] == pytest.approx(50.0)
-    assert observation["fee_status"] == "order_level_candidate"
-    assert observation["fee_source"] == "order_level_paid_fee"
-    assert observation["fee_confidence"] == "ambiguous"
-    assert observation["accounting_status"] == "fee_pending"
-    assert observation["source"] == "myorder_private_stream_fee_pending"
-    assert observation["fee_provenance"] == "order_level_paid_fee_unvalidated"
-    assert observation["fee_validation_reason"] == "expected_fee_rate_mismatch"
-    assert '"expected_fee_rate_match": false' in str(observation["fee_validation_checks"]).lower()
-    assert "order_level_fee_candidate:paid_fee" in str(observation["parse_warnings"])
+    assert fill_row["fee"] == pytest.approx(50.0)
+    assert fill_row["fee_accounting_status"] == "fee_finalized"
+    assert observation is None
 
 
 def test_myorder_runtime_ingestion_validated_single_fill_paid_fee_applies_ledger(tmp_path) -> None:
@@ -718,16 +709,11 @@ def test_myorder_paid_fee_fields_remain_fee_pending_fill_observation(tmp_path) -
     finally:
         conn.close()
 
-    assert result.action == "principal_applied_fee_pending"
+    assert result.action == "applied"
     assert fill_count == 1
-    assert fill_row["fee"] == pytest.approx(0.0)
-    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
-    assert observation["fill_id"] == "trade-paid-fee-fields"
-    assert observation["side"] == "SELL"
-    assert observation["fee"] == pytest.approx(50.0)
-    assert observation["fee_status"] == "order_level_candidate"
-    assert observation["accounting_status"] == "fee_pending"
-    assert "paid_fee" in str(observation["raw_payload"])
+    assert fill_row["fee"] == pytest.approx(50.0)
+    assert fill_row["fee_accounting_status"] == "fee_finalized"
+    assert observation is None
 
 
 def test_myorder_stream_and_rest_fill_contract_parity(monkeypatch) -> None:

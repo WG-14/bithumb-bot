@@ -4316,7 +4316,7 @@ def test_get_order_observes_filled_order_when_trade_fee_is_missing_but_order_fee
     ("trade_fee_fields", "order_fee_fields", "strict_error", "expected_fee", "expected_status", "expected_warning"),
     [
         ({"fee": "1.23"}, {"paid_fee": "1.23"}, None, 1.23, "complete", ()),
-        ({}, {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"}, None, 26.86, "order_level_candidate", ("missing_fee_field", "order_level_fee_candidate:paid_fee")),
+        ({}, {"paid_fee": "26.86", "reserved_fee": "26.86", "remaining_fee": "0"}, None, 26.86, "validated_order_level_paid_fee", ("missing_fee_field", "order_level_fee_candidate:paid_fee")),
         ({}, {}, "missing fee field", None, "missing", ("missing_fee_field",)),
         ({"fee": ""}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
         ({"fee": None}, {}, "empty fee field 'fee'", None, "empty", ("empty_fee_field:fee",)),
@@ -4419,9 +4419,9 @@ def test_get_fills_order_level_fee_candidate_is_ambiguous_for_multiple_trade_row
     assert all(fill.parse_warnings == ("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee") for fill in fills)
 
 
-def test_get_fills_fee_rate_mismatch_keeps_order_level_paid_fee_pending(monkeypatch):
+def test_get_fills_fee_rate_mismatch_accepts_validated_order_level_paid_fee_with_warning(monkeypatch):
     _configure_live()
-    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
     broker = BithumbBroker()
     payload = {
         "uuid": "ex-paid-fee-mismatch",
@@ -4454,11 +4454,11 @@ def test_get_fills_fee_rate_mismatch_keeps_order_level_paid_fee_pending(monkeypa
     )
 
     assert len(fills) == 1
-    assert fills[0].fee_status == "order_level_candidate"
+    assert fills[0].fee_status == "validated_order_level_paid_fee"
     assert fills[0].fee_source == "order_level_paid_fee"
-    assert fills[0].fee_confidence == "ambiguous"
-    assert fills[0].fee_provenance == "order_level_paid_fee_unvalidated"
-    assert fills[0].fee_validation_reason == "expected_fee_rate_mismatch"
+    assert fills[0].fee_confidence == "validated"
+    assert fills[0].fee_provenance == "order_level_paid_fee_validated_single_fill_fee_rate_warning"
+    assert fills[0].fee_validation_reason == "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch"
     assert fills[0].fee_validation_checks["expected_fee_rate_match"] is False
 
 

@@ -1975,7 +1975,7 @@ def _fee_pending_metadata_updates(observation_summary: dict[str, int | str]) -> 
         "fee_pending_latest_fee_status": str(observation_summary["fee_pending_latest_fee_status"]),
         "fee_pending_latest_fill_id": str(observation_summary["fee_pending_latest_fill_id"]),
         "fee_pending_operator_next_action": (
-            "await automatic reconcile retry or inspect broker_fill_observations before manual accounting repair"
+            "pause additional orders; inspect broker_fill_observations and fee authority evidence before flatten or manual accounting repair"
         ),
     }
 

@@ -4596,6 +4596,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_gap_accounting_repair_preview",
         "fee_gap_accounting_repair_summary",
         "fee_pending_accounting_repair_summary",
+        "fee_rate_drift_diagnostics",
             "fill_accounting_incident_projection",
             "fill_accounting_root_cause",
             "position_authority_rebuild_preview",
@@ -7494,6 +7495,80 @@ def test_health_and_recovery_report_expose_emergency_flatten_blocker(tmp_path, c
     assert "emergency_flatten_blocked=1" in report_out
     assert "emergency_flatten_block_reason=emergency flatten unresolved" in report_out
     assert "EMERGENCY_FLATTEN_UNRESOLVED" in report_out
+
+
+def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    runtime_state.enable_trading()
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                fee_provenance, fee_validation_reason, fee_validation_checks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "live_1777104360000_buy_aee4c564",
+                "C0101000002949768709",
+                "C0101000000983820316",
+                1_777_104_360_321,
+                "BUY",
+                115_465_000.0,
+                0.00059998,
+                27.71,
+                "validated_order_level_paid_fee",
+                "order_level_paid_fee",
+                "validated",
+                "accounting_complete",
+                "live_application_fee_rate_warning",
+                "order_level_paid_fee_validated_single_fill_fee_rate_warning",
+                "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch",
+                json.dumps(
+                    {
+                        "single_fill": True,
+                        "paid_fee_present": True,
+                        "executed_volume_match": True,
+                        "executed_funds_match": True,
+                        "expected_fee_rate_match": False,
+                        "expected_fee_rate_warning": True,
+                        "identifiers_match": True,
+                        "material_notional_suspicious": True,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "fee_rate_drift=configured_fee_rate_estimate=0.002500" in health_out
+    assert "observed_fee_bps_median=4.000" in health_out
+    assert "recent_expected_fee_rate_mismatch_count=1" in health_out
+
+    cmd_recovery_report(as_json=False)
+    report_out = capsys.readouterr().out
+    assert "[P3.0e1] fee_rate_drift" in report_out
+    assert "configured_fee_rate_estimate=0.002500" in report_out
+    assert "observed_fee_bps_median=4.000" in report_out
+    assert "recent_expected_fee_rate_mismatch_count=1" in report_out
+    assert "fee_pending_accounting_repair_count=0" in report_out
+
+    cmd_restart_checklist()
+    checklist_out = capsys.readouterr().out
+    assert "configured_fee_rate_estimate=0.002500" in checklist_out
+    assert "observed_fee_bps_median=4.000" in checklist_out
+    assert "recent_expected_fee_rate_mismatch_count=1" in checklist_out
 
 
 def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, capsys):

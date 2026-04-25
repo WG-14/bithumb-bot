@@ -238,6 +238,7 @@ def validate_single_fill_order_level_paid_fee(
             fill_funds_value is not None and fill_funds_value >= threshold
         ),
     }
+    checks["expected_fee_rate_warning"] = not bool(checks["expected_fee_rate_match"])
     material_suspicious = bool(checks["material_notional_suspicious"])
 
     if fee_value is None:
@@ -287,17 +288,21 @@ def validate_single_fill_order_level_paid_fee(
             "paid_fee_present",
             "executed_volume_match",
             "executed_funds_match",
-            "expected_fee_rate_match",
             "identifiers_match",
         )
     ):
+        validated_reason = "order_level_paid_fee_validated_single_fill"
+        validated_provenance = "order_level_paid_fee_validated_single_fill"
+        if not checks["expected_fee_rate_match"]:
+            validated_reason = "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch"
+            validated_provenance = "order_level_paid_fee_validated_single_fill_fee_rate_warning"
         return classify_fee_evaluation(
             fee=fee_value,
             fee_status="validated_order_level_paid_fee",
             fee_source="order_level_paid_fee",
             fee_confidence="validated",
-            provenance="order_level_paid_fee_validated_single_fill",
-            reason="order_level_paid_fee_validated_single_fill",
+            provenance=validated_provenance,
+            reason=validated_reason,
             checks=checks,
             material_notional_threshold=threshold,
             price=price_value,
@@ -314,8 +319,6 @@ def validate_single_fill_order_level_paid_fee(
         reason = "executed_volume_mismatch"
     elif not checks["executed_funds_match"]:
         reason = "executed_funds_mismatch"
-    elif not checks["expected_fee_rate_match"]:
-        reason = "expected_fee_rate_mismatch"
     return classify_fee_evaluation(
         fee=fee_value,
         fee_status="order_level_candidate",

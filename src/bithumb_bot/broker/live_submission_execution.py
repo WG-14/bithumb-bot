@@ -273,6 +273,13 @@ def _record_application_fill_observations(
     }
 
 
+def _fill_has_expected_fee_rate_warning(fill) -> bool:
+    checks = getattr(fill, "fee_validation_checks", None)
+    if isinstance(checks, dict):
+        return checks.get("expected_fee_rate_match") is False
+    return False
+
+
 def reconcile_apply_fills_and_refresh(
     live_module,
     *,
@@ -293,6 +300,7 @@ def reconcile_apply_fills_and_refresh(
         policy=FillReadPolicy.OBSERVATION_SALVAGE,
     )
     fee_pending_fills = [fill for fill in fills if _fill_accounting_status(fill) == "fee_pending"]
+    fee_rate_warning_fills = [fill for fill in fills if _fill_has_expected_fee_rate_warning(fill)]
     observation_summary: dict[str, int | str] | None = None
     if fee_pending_fills:
         observation_summary = _record_application_fill_observations(
@@ -302,6 +310,15 @@ def reconcile_apply_fills_and_refresh(
             side=side,
             fills=fills,
             source="live_application_fee_pending",
+        )
+    elif fee_rate_warning_fills:
+        observation_summary = _record_application_fill_observations(
+            conn=conn,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side=side,
+            fills=fills,
+            source="live_application_fee_rate_warning",
         )
 
     try:
@@ -418,7 +435,7 @@ def reconcile_apply_fills_and_refresh(
         if observation_summary is not None:
             live_module.RUN_LOG.warning(
                 format_log_kv(
-                    "[FILL_OBSERVATION] fee-pending broker fill principal applied with fee pending",
+                    "[FILL_OBSERVATION] broker fill diagnostic observation recorded",
                     client_order_id=client_order_id,
                     exchange_order_id=exchange_order_id or live_module.UNSET_EVENT_FIELD,
                     side=side,

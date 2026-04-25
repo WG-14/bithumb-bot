@@ -18,6 +18,7 @@ import math
 import json
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from statistics import median
 from .marketdata import cmd_sync, cmd_ticker, cmd_candles
 from .db_core import (
     compute_accounting_replay,
@@ -758,6 +759,7 @@ def cmd_health() -> None:
     external_position_repair_preview = None
     fee_gap_repair_summary = None
     fee_gap_repair_preview = None
+    fee_rate_drift = None
     conn = ensure_db()
     try:
         row = conn.execute(
@@ -779,6 +781,7 @@ def cmd_health() -> None:
         external_position_repair_preview = build_external_position_accounting_repair_preview(conn)
         fee_gap_repair_summary = get_fee_gap_accounting_repair_summary(conn)
         fee_gap_repair_preview = build_fee_gap_accounting_repair_preview(conn)
+        fee_rate_drift = _fee_rate_drift_diagnostics(conn)
     finally:
         conn.close()
     if row is not None:
@@ -1236,6 +1239,21 @@ def cmd_health() -> None:
     print(f"  last_reconcile_error={health['last_reconcile_error']}")
     print(f"  last_reconcile_reason_code={health['last_reconcile_reason_code']}")
     print(f"  last_reconcile_metadata={health['last_reconcile_metadata']}")
+    if isinstance(fee_rate_drift, dict):
+        observed_fee_bps = fee_rate_drift.get("observed_fee_bps_median")
+        observed_fee_bps_text = "-" if observed_fee_bps is None else f"{float(observed_fee_bps):.3f}"
+        deviation_bps = fee_rate_drift.get("configured_minus_observed_bps")
+        deviation_bps_text = "-" if deviation_bps is None else f"{float(deviation_bps):.3f}"
+        print(
+            "  fee_rate_drift="
+            f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
+            f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
+            f"observed_fee_bps_median={observed_fee_bps_text} "
+            f"configured_minus_observed_bps={deviation_bps_text} "
+            f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
+            f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
+            f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)}"
+        )
     rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
     if rule_snapshot is not None:
         print(
@@ -1433,6 +1451,84 @@ def _ledger_replay(conn: sqlite3.Connection) -> dict[str, object]:
         "diagnostic_event_families": tuple(replay["diagnostic_event_families"]),
         "omitted_event_families": tuple(replay["omitted_event_families"]),
         "consistent": consistent,
+    }
+
+
+def _parse_fee_validation_checks(raw: object) -> dict[str, object]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _fee_rate_drift_diagnostics(
+    conn: sqlite3.Connection,
+    *,
+    observation_limit: int = 100,
+) -> dict[str, object]:
+    configured_fee_rate = float(settings.LIVE_FEE_RATE_ESTIMATE)
+    material_threshold = float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW)
+    rows = conn.execute(
+        """
+        SELECT fee, price, qty, accounting_status, fee_validation_reason, fee_validation_checks
+        FROM broker_fill_observations
+        ORDER BY event_ts DESC, id DESC
+        LIMIT ?
+        """,
+        (max(1, int(observation_limit)),),
+    ).fetchall()
+    recent_fee_bps: list[float] = []
+    mismatch_count = 0
+    fee_pending_count = 0
+    for row in rows:
+        accounting_status = str(row["accounting_status"] or "")
+        if accounting_status == "fee_pending":
+            fee_pending_count += 1
+        checks = _parse_fee_validation_checks(row["fee_validation_checks"])
+        if checks.get("expected_fee_rate_match") is False:
+            mismatch_count += 1
+        elif str(row["fee_validation_reason"] or "") == "expected_fee_rate_mismatch":
+            mismatch_count += 1
+        fee = row["fee"]
+        if fee is None:
+            continue
+        try:
+            fee_value = float(fee)
+            price_value = float(row["price"] or 0.0)
+            qty_value = float(row["qty"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        notional = max(0.0, price_value) * max(0.0, qty_value)
+        if fee_value < 0.0 or notional < material_threshold or notional <= 0.0:
+            continue
+        recent_fee_bps.append((fee_value / notional) * 10000.0)
+
+    repair_row = conn.execute(
+        "SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs"
+    ).fetchone()
+    observed_fee_bps_median = median(recent_fee_bps) if recent_fee_bps else None
+    configured_fee_bps = configured_fee_rate * 10000.0
+    deviation_bps = (
+        configured_fee_bps - float(observed_fee_bps_median)
+        if observed_fee_bps_median is not None
+        else None
+    )
+    return {
+        "configured_fee_rate_estimate": configured_fee_rate,
+        "configured_fee_bps": configured_fee_bps,
+        "observed_fee_bps_median": observed_fee_bps_median,
+        "observed_material_fee_sample_count": len(recent_fee_bps),
+        "observation_window_count": len(rows),
+        "configured_minus_observed_bps": deviation_bps,
+        "recent_expected_fee_rate_mismatch_count": mismatch_count,
+        "recent_fee_pending_observation_count": fee_pending_count,
+        "fee_pending_accounting_repair_count": int(repair_row["repair_count"] or 0) if repair_row else 0,
+        "material_notional_threshold_krw": material_threshold,
     }
 
 
@@ -2628,6 +2724,7 @@ def _load_recovery_report(
         "fee_pending_count": 0,
         "accounting_complete_count": 0,
         "fee_candidate_order_level_count": 0,
+        "expected_fee_rate_mismatch_count": 0,
         "missing_fee_count": 0,
         "zero_reported_fee_count": 0,
         "invalid_fee_count": 0,
@@ -2652,6 +2749,18 @@ def _load_recovery_report(
         "repaired_count": 0,
         "latest_accounting_complete_count": 0,
         "verdicts": [],
+    }
+    fee_rate_drift_diagnostics = {
+        "configured_fee_rate_estimate": float(settings.LIVE_FEE_RATE_ESTIMATE),
+        "configured_fee_bps": float(settings.LIVE_FEE_RATE_ESTIMATE) * 10000.0,
+        "observed_fee_bps_median": None,
+        "observed_material_fee_sample_count": 0,
+        "observation_window_count": 0,
+        "configured_minus_observed_bps": None,
+        "recent_expected_fee_rate_mismatch_count": 0,
+        "recent_fee_pending_observation_count": 0,
+        "fee_pending_accounting_repair_count": 0,
+        "material_notional_threshold_krw": float(settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW),
     }
     accounting_projection = {
         "consistent": False,
@@ -2694,6 +2803,7 @@ def _load_recovery_report(
         runtime_readiness_snapshot = compute_runtime_readiness_snapshot(conn).as_dict()
         broker_fill_observation_summary = get_broker_fill_observation_summary(conn)
         fill_accounting_incident_projection = summarize_fill_accounting_incident_projection(conn)
+        fee_rate_drift_diagnostics = _fee_rate_drift_diagnostics(conn)
         try:
             accounting_projection = compute_accounting_replay(conn)
             cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
@@ -2987,6 +3097,7 @@ def _load_recovery_report(
         "recovery_stage": runtime_readiness_snapshot.get("recovery_stage"),
         "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
+        "fee_rate_drift_diagnostics": fee_rate_drift_diagnostics,
         "fill_accounting_incident_projection": fill_accounting_incident_projection,
         "fill_accounting_root_cause": fill_root_summary,
         "trading_enabled": bool(state.trading_enabled),
@@ -3297,6 +3408,34 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"last_accounting_status={broker_fill_observation_summary.get('last_accounting_status') or 'none'} "
         f"last_source={broker_fill_observation_summary.get('last_source') or 'none'} "
         f"last_fee_validation_reason={broker_fill_observation_summary.get('last_fee_validation_reason') or 'none'}"
+    )
+    fee_rate_drift = report.get("fee_rate_drift_diagnostics") or {}
+    observed_fee_bps_text = (
+        "-"
+        if fee_rate_drift.get("observed_fee_bps_median") is None
+        else f"{float(fee_rate_drift.get('observed_fee_bps_median')):.3f}"
+    )
+    deviation_bps_text = (
+        "-"
+        if fee_rate_drift.get("configured_minus_observed_bps") is None
+        else f"{float(fee_rate_drift.get('configured_minus_observed_bps')):.3f}"
+    )
+    print("  [P3.0e1] fee_rate_drift")
+    print(
+        "    "
+        f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
+        f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
+        f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"configured_minus_observed_bps={deviation_bps_text} "
+        f"observed_material_fee_sample_count={int(fee_rate_drift.get('observed_material_fee_sample_count') or 0)} "
+        f"observation_window_count={int(fee_rate_drift.get('observation_window_count') or 0)}"
+    )
+    print(
+        "    "
+        f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
+        f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
+        f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
+        f"material_notional_threshold_krw={float(fee_rate_drift.get('material_notional_threshold_krw') or 0.0):.1f}"
     )
     fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
     print("  [P3.0e2] fill_accounting_incidents")
@@ -4065,6 +4204,11 @@ def cmd_restart_checklist() -> None:
     blocked = [item for item in checklist if not item[1]]
     readiness_snapshot = compute_runtime_readiness_snapshot()
     tradeability_fields = readiness_snapshot.tradeability_operator_fields
+    conn = ensure_db()
+    try:
+        fee_rate_drift = _fee_rate_drift_diagnostics(conn)
+    finally:
+        conn.close()
 
     print("[RESTART-SAFETY-CHECKLIST]")
     for label, ok, detail in checklist:
@@ -4090,6 +4234,19 @@ def cmd_restart_checklist() -> None:
     print(
         "  "
         f"tradeability_operator_message={tradeability_fields['tradeability_operator_message']}"
+    )
+    observed_fee_bps = fee_rate_drift.get("observed_fee_bps_median")
+    observed_fee_bps_text = "-" if observed_fee_bps is None else f"{float(observed_fee_bps):.3f}"
+    deviation_bps = fee_rate_drift.get("configured_minus_observed_bps")
+    deviation_bps_text = "-" if deviation_bps is None else f"{float(deviation_bps):.3f}"
+    print(
+        "  "
+        f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
+        f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"configured_minus_observed_bps={deviation_bps_text} "
+        f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
+        f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
+        f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)}"
     )
 
 def _last_reconcile_failed(state) -> bool:

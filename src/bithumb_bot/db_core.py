@@ -2618,6 +2618,8 @@ def compute_accounting_replay(conn: sqlite3.Connection) -> dict[str, object]:
             COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
             COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count,
             COALESCE(SUM(CASE WHEN fee_status='order_level_candidate' THEN 1 ELSE 0 END), 0) AS fee_candidate_order_level_count,
+            COALESCE(SUM(CASE WHEN fee_validation_checks LIKE '%"expected_fee_rate_match": false%' THEN 1 ELSE 0 END), 0)
+                AS expected_fee_rate_mismatch_count,
             COALESCE(SUM(CASE WHEN fee_status='missing' THEN 1 ELSE 0 END), 0) AS missing_fee_count,
             COALESCE(SUM(CASE WHEN fee_status='zero_reported' THEN 1 ELSE 0 END), 0) AS zero_reported_fee_count,
             COALESCE(SUM(CASE WHEN fee_status IN ('empty', 'invalid', 'unparseable') THEN 1 ELSE 0 END), 0) AS invalid_fee_count
@@ -3235,6 +3237,8 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
             COALESCE(SUM(CASE WHEN accounting_status='fee_pending' THEN 1 ELSE 0 END), 0) AS fee_pending_count,
             COALESCE(SUM(CASE WHEN accounting_status='accounting_complete' THEN 1 ELSE 0 END), 0) AS accounting_complete_count,
             COALESCE(SUM(CASE WHEN fee_status='order_level_candidate' THEN 1 ELSE 0 END), 0) AS fee_candidate_order_level_count,
+            COALESCE(SUM(CASE WHEN fee_validation_checks LIKE '%"expected_fee_rate_match": false%' THEN 1 ELSE 0 END), 0)
+                AS expected_fee_rate_mismatch_count,
             COALESCE(SUM(CASE WHEN fee_status='missing' THEN 1 ELSE 0 END), 0) AS missing_fee_count,
             COALESCE(SUM(CASE WHEN fee_status='zero_reported' THEN 1 ELSE 0 END), 0) AS zero_reported_fee_count,
             COALESCE(SUM(CASE WHEN fee_status IN ('empty', 'invalid', 'unparseable') THEN 1 ELSE 0 END), 0) AS invalid_fee_count
@@ -3256,6 +3260,7 @@ def get_broker_fill_observation_summary(conn: sqlite3.Connection) -> dict[str, A
         "fee_pending_count": int(row["fee_pending_count"] if row else 0),
         "accounting_complete_count": int(row["accounting_complete_count"] if row else 0),
         "fee_candidate_order_level_count": int(row["fee_candidate_order_level_count"] if row else 0),
+        "expected_fee_rate_mismatch_count": int(row["expected_fee_rate_mismatch_count"] if row else 0),
         "missing_fee_count": int(row["missing_fee_count"] if row else 0),
         "zero_reported_fee_count": int(row["zero_reported_fee_count"] if row else 0),
         "invalid_fee_count": int(row["invalid_fee_count"] if row else 0),
