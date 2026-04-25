@@ -35,7 +35,14 @@ from .execution import LiveFillFeeValidationError, apply_fill_and_trade, order_f
 from .fee_observation import fee_accounting_status
 from .fill_reading import FillReadPolicy, get_broker_fills
 from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
-from .oms import get_open_orders, record_status_transition, set_exchange_order_id, set_status, validate_status_transition
+from .oms import (
+    get_open_orders,
+    record_status_transition,
+    set_exchange_order_id,
+    set_status,
+    synchronize_order_state_invariants,
+    validate_status_transition,
+)
 from . import runtime_state
 from .notifier import format_event, notify
 from .observability import safety_event
@@ -1992,6 +1999,7 @@ def reconcile_with_broker(broker: Broker) -> None:
         "fee_gap_adjustment_latest_event_ts": 0,
     }
     try:
+        synchronize_order_state_invariants(conn)
         init_portfolio(conn)
 
         placeholders = ",".join("?" for _ in LOCAL_RECONCILE_STATUSES)

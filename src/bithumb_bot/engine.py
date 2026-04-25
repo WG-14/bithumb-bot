@@ -617,9 +617,49 @@ def _can_clear_reconcile_failure_halt(*, state, startup_gate_reason: str | None)
     )
 
 
+def _startup_gate_allows_process_auto_recovery(*, state, startup_gate_reason: str | None) -> bool:
+    blocker_code, _ = _classify_startup_gate_reason(startup_gate_reason, state=state)
+    if blocker_code != "FEE_PENDING_AUTO_RECOVERING":
+        return False
+    conn = ensure_db()
+    try:
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+    return bool(
+        state.last_reconcile_status == "ok"
+        and readiness_snapshot.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
+        and readiness_snapshot.run_loop_allowed
+        and int(readiness_snapshot.fee_pending_count or 0) > 0
+        and int(readiness_snapshot.recovery_required_count or 0) == 0
+    )
+
+
 def maybe_clear_stale_initial_reconcile_halt() -> bool:
     runtime_state.refresh_open_order_health()
     state = runtime_state.snapshot()
+
+    if (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == "STARTUP_SAFETY_GATE"
+    ):
+        startup_gate_reason = evaluate_startup_safety_gate()
+        if not _startup_gate_allows_process_auto_recovery(
+            state=runtime_state.snapshot(),
+            startup_gate_reason=startup_gate_reason,
+        ):
+            return False
+        runtime_state.enable_trading()
+        runtime_state.set_resume_gate(blocked=True, reason=startup_gate_reason)
+        _log_loop_event(
+            logging.INFO,
+            "[RUN] startup_gate_auto_recovery_continue",
+            halt_reason_code=state.halt_reason_code or "-",
+            reconcile_reason_code=state.last_reconcile_reason_code or "-",
+            startup_gate_reason=startup_gate_reason or "-",
+        )
+        return True
 
     if not (
         state.halt_new_orders_blocked
@@ -2191,42 +2231,55 @@ def run_loop(short_n: int, long_n: int) -> None:
 
         startup_gate_reason = evaluate_startup_safety_gate()
         if startup_gate_reason is not None:
-            latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
-            startup_open_order_count = _count_open_orders()
-            startup_position_summary = _position_summary()
-            startup_commands = _recommended_operator_commands(
-                reason_code="STARTUP_SAFETY_GATE",
-                startup_gate=True,
-                recovery_required=(state.recovery_required_count > 0),
-                unresolved_count=int(state.unresolved_open_order_count),
-            )
-            notify(
-                safety_event(
-                    "startup_gate_blocked",
-                    alert_kind="startup_gate",
-                    reason_code=STARTUP_BLOCKED,
+            if _startup_gate_allows_process_auto_recovery(
+                state=runtime_state.snapshot(),
+                startup_gate_reason=startup_gate_reason,
+            ):
+                runtime_state.enable_trading()
+                runtime_state.set_resume_gate(blocked=True, reason=startup_gate_reason)
+                _log_loop_event(
+                    logging.WARNING,
+                    "[RUN] startup_gate_degraded_continue",
                     reason=startup_gate_reason,
-                    unresolved_order_count=state.unresolved_open_order_count,
-                    position_may_remain=int(state.halt_position_present),
-                    latest_client_order_id=latest_client_order_id,
-                    latest_exchange_order_id=latest_exchange_order_id,
-                    operator_action_required=1,
-                    operator_next_action="operator must reconcile unresolved orders before startup",
-                    open_order_count=startup_open_order_count,
-                    position_summary=startup_position_summary,
-                    operator_recommended_commands=" | ".join(startup_commands),
-                    operator_compact_summary=_operator_compact_summary(
-                        halt_reason="STARTUP_SAFETY_GATE",
-                        unresolved_order_count=int(state.unresolved_open_order_count),
+                    recovery_stage="ACCOUNTING_AUTO_RECOVERING",
+                )
+            else:
+                latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()
+                startup_open_order_count = _count_open_orders()
+                startup_position_summary = _position_summary()
+                startup_commands = _recommended_operator_commands(
+                    reason_code="STARTUP_SAFETY_GATE",
+                    startup_gate=True,
+                    recovery_required=(state.recovery_required_count > 0),
+                    unresolved_count=int(state.unresolved_open_order_count),
+                )
+                notify(
+                    safety_event(
+                        "startup_gate_blocked",
+                        alert_kind="startup_gate",
+                        reason_code=STARTUP_BLOCKED,
+                        reason=startup_gate_reason,
+                        unresolved_order_count=state.unresolved_open_order_count,
+                        position_may_remain=int(state.halt_position_present),
+                        latest_client_order_id=latest_client_order_id,
+                        latest_exchange_order_id=latest_exchange_order_id,
+                        operator_action_required=1,
+                        operator_next_action="operator must reconcile unresolved orders before startup",
                         open_order_count=startup_open_order_count,
                         position_summary=startup_position_summary,
-                        recommended_commands=startup_commands,
-                    ),
-                    state_to="HALTED",
+                        operator_recommended_commands=" | ".join(startup_commands),
+                        operator_compact_summary=_operator_compact_summary(
+                            halt_reason="STARTUP_SAFETY_GATE",
+                            unresolved_order_count=int(state.unresolved_open_order_count),
+                            open_order_count=startup_open_order_count,
+                            position_summary=startup_position_summary,
+                            recommended_commands=startup_commands,
+                        ),
+                        state_to="HALTED",
+                    )
                 )
-            )
-            _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
-            return
+                _halt_trading(_halt_reason("STARTUP_SAFETY_GATE", startup_gate_reason), unresolved=True)
+                return
 
     sec = parse_interval_sec(settings.INTERVAL)
     _log_loop_event(

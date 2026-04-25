@@ -2566,6 +2566,26 @@ def test_recorded_projection_repair_without_publication_full_rebuild_gates_remai
     assert expected_reason in preview["eligibility_reason"]
 
 
+def test_live_fee_pending_fill_keeps_run_loop_alive_but_blocks_new_entries(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _record_fee_pending_buy(conn, client_order_id="auto_recovering_buy", fill_id="auto-recovering-fill")
+        set_status("auto_recovering_buy", "ACCOUNTING_PENDING", conn=conn)
+        conn.commit()
+        readiness = compute_runtime_readiness_snapshot(conn)
+    finally:
+        conn.close()
+
+    assert readiness.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
+    assert readiness.resume_ready is False
+    assert readiness.run_loop_allowed is True
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.fee_pending_count == 1
+    assert readiness.auto_recovery_count >= 1
+    assert readiness.operator_next_action == "wait_for_auto_reconcile_or_review_fee_evidence"
+
+
 def test_recorded_projection_repair_without_publication_full_rebuild_refuses_remote_open_orders(
     recovery_db,
 ):
@@ -3346,7 +3366,11 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
     ) in cases:
         assert readiness.canonical_state == canonical_state
         assert readiness.residual_class == residual_class
-        assert readiness.run_loop_allowed is readiness.resume_ready
+        if readiness.recovery_stage == "ACCOUNTING_AUTO_RECOVERING":
+            assert readiness.run_loop_allowed is True
+            assert readiness.resume_ready is False
+        else:
+            assert readiness.run_loop_allowed is readiness.resume_ready
         assert readiness.new_entry_allowed is new_entry_allowed
         assert readiness.operator_action_required is operator_action_required
         assert readiness.execution_flat is execution_flat

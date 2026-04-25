@@ -15,7 +15,11 @@ from bithumb_bot.broker.base import (
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import compute_accounting_replay, ensure_db, get_portfolio_breakdown
 from bithumb_bot.dust import build_dust_display_context, build_position_state_model
-from bithumb_bot.engine import evaluate_startup_safety_gate, run_loop
+from bithumb_bot.engine import (
+    evaluate_startup_safety_gate,
+    maybe_clear_stale_initial_reconcile_halt,
+    run_loop,
+)
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from bithumb_bot.oms import set_exchange_order_id, set_status
@@ -1910,7 +1914,7 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert broker.parse_modes
     assert set(broker.parse_modes) == {"salvage"}
     assert row is not None
-    assert row["status"] == "RECOVERY_REQUIRED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert row["exchange_order_id"] == "ex-submit-unknown-missing-fee-fill"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
@@ -1928,6 +1932,76 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
     assert "accounting_pending_orders=1" in str(gate_reason)
+
+
+def test_startup_gate_fee_pending_auto_recovery_clears_persistent_process_pause(isolated_db):
+    conn = ensure_db(str(isolated_db))
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="startup_fee_pending",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=100,
+            status="ACCOUNTING_PENDING",
+        )
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, accounting_status, source, raw_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                101,
+                "startup_fee_pending",
+                "ex-startup-fee-pending",
+                "startup-fee-fill",
+                101,
+                "BUY",
+                100_000_000.0,
+                0.001,
+                None,
+                "missing",
+                "fee_pending",
+                "test_startup_gate_fee_pending",
+                '{"fixture":"startup_fee_pending"}',
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FILL_FEE_PENDING_RECOVERY_REQUIRED",
+        metadata={
+            "fee_pending_auto_recovering": 1,
+            "fee_pending_fill_count": 1,
+            "fee_pending_latest_fee_status": "missing",
+            "fee_pending_latest_fill_id": "startup-fee-fill",
+            "balance_split_mismatch_count": 0,
+        },
+        now_epoch_sec=0.0,
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="startup safety gate",
+        reason_code="STARTUP_SAFETY_GATE",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    cleared = maybe_clear_stale_initial_reconcile_halt()
+    state = runtime_state.snapshot()
+
+    assert cleared is True
+    assert state.trading_enabled is True
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
+    assert state.resume_gate_blocked is True
+    assert "fee_pending_auto_recovering=1" in str(state.resume_gate_reason)
 
 
 def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee_confirmed(isolated_db):

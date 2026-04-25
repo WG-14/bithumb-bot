@@ -14,6 +14,7 @@ from bithumb_bot.oms import (
     record_submit_started,
     set_exchange_order_id,
     set_status,
+    synchronize_order_state_invariants,
     validate_status_transition,
 )
 from bithumb_bot.reason_codes import DUST_RESIDUAL_SUPPRESSED, DUST_RESIDUAL_UNSELLABLE
@@ -326,6 +327,66 @@ def test_recovery_required_not_both_open_and_terminal():
     assert "RECOVERY_REQUIRED" in OPEN_ORDER_STATUSES
     assert "RECOVERY_REQUIRED" not in TERMINAL_ORDER_STATUSES
     assert "ACCOUNTING_PENDING" in OPEN_ORDER_STATUSES
+
+
+def test_synchronize_order_state_invariants_repairs_terminal_pending_intent_and_releases_dedup(tmp_path):
+    db_path = tmp_path / "order_state_invariant_sync.sqlite"
+    conn = ensure_db(str(db_path))
+    try:
+        create_order(
+            client_order_id="o_terminal_stale",
+            side="BUY",
+            qty_req=0.01,
+            price=None,
+            status="PENDING_SUBMIT",
+            local_intent_state="PENDING_SUBMIT",
+            ts_ms=1000,
+            conn=conn,
+        )
+        conn.execute(
+            """
+            INSERT INTO order_intent_dedup(
+                intent_key, symbol, side, strategy_context, intent_type, intent_ts, qty,
+                client_order_id, order_status, created_ts, updated_ts, last_error
+            ) VALUES ('intent-terminal-stale', 'BTC_KRW', 'BUY', 'test', 'entry', 1000, 0.01,
+                      'o_terminal_stale', 'PENDING_SUBMIT', 1000, 1000, NULL)
+            """
+        )
+        add_fill(
+            client_order_id="o_terminal_stale",
+            fill_id="fill-terminal-stale",
+            fill_ts=1001,
+            price=100000000.0,
+            qty=0.01,
+            fee=10.0,
+            conn=conn,
+        )
+        conn.execute(
+            """
+            UPDATE orders
+            SET status='FILLED', local_intent_state='PENDING_SUBMIT'
+            WHERE client_order_id='o_terminal_stale'
+            """
+        )
+        repaired = synchronize_order_state_invariants(conn)
+        row = conn.execute(
+            """
+            SELECT status, local_intent_state
+            FROM orders
+            WHERE client_order_id='o_terminal_stale'
+            """
+        ).fetchone()
+        dedup_row = conn.execute(
+            "SELECT 1 FROM order_intent_dedup WHERE client_order_id='o_terminal_stale'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert repaired["repaired_terminal_local_intent"] == 1
+    assert repaired["released_terminal_dedup"] == 1
+    assert row["status"] == "FILLED"
+    assert row["local_intent_state"] == "FILLED"
+    assert dedup_row is None
 
 
 def test_validate_status_transition_allows_only_whitelisted_paths():

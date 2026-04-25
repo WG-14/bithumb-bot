@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from . import runtime_state
@@ -592,11 +592,27 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             recommended_command = "uv run python bot.py recovery-report"
 
         resume_ready = not blockers
+        run_loop_policy_allowed = bool(
+            resume_ready
+            or stage == "ACCOUNTING_AUTO_RECOVERING"
+            or str(stage).startswith("RESUME_READY")
+        )
         tradeability = classify_canonical_tradeability_state(
             position_state=position_state,
             recovery_state=canonical_recovery,
-            run_loop_allowed=resume_ready,
+            run_loop_allowed=run_loop_policy_allowed,
         )
+        if stage == "ACCOUNTING_AUTO_RECOVERING":
+            reasons = [str(tradeability.why_not or "none")]
+            if "accounting_auto_recovering" not in reasons:
+                reasons.append("accounting_auto_recovering")
+            tradeability = replace(
+                tradeability,
+                new_entry_allowed=False,
+                closeout_allowed=False,
+                why_not=";".join(item for item in reasons if item and item != "none"),
+                operator_next_action="wait_for_auto_reconcile_or_review_fee_evidence",
+            )
         tradeability_operator_fields = build_tradeability_operator_fields(
             tradeability=tradeability,
             dust_fields=dust_context.fields,

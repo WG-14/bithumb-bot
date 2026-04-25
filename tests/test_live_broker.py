@@ -3652,7 +3652,7 @@ def test_live_execute_signal_records_observation_when_fee_pending_blocks_apply(t
     conn.close()
 
     assert row is not None
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert "accounting is fee-pending" in str(row["last_error"])
     assert application_event is not None
     assert application_event["submit_phase"] == "application"
@@ -3744,7 +3744,7 @@ def test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fe
         conn.close()
 
     assert trade is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
+    assert row["status"] == "FILLED"
     assert float(row["qty_filled"]) == pytest.approx(0.01)
     assert row["last_error"] is None
     assert observation_count["cnt"] == 0
@@ -3807,7 +3807,7 @@ def test_reconcile_updates_portfolio(monkeypatch, tmp_path):
     p = conn.execute("SELECT cash_krw, asset_qty FROM portfolio WHERE id=1").fetchone()
     conn.close()
 
-    assert row["status"] == "ACCOUNTING_PENDING"
+    assert row["status"] == "FILLED"
     assert float(p["asset_qty"]) == 0.01
 
 
@@ -4008,7 +4008,7 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     metadata = json.loads(str(state.last_reconcile_metadata))
 
     assert row is not None
-    assert row["status"] == "FILLED"
+    assert row["status"] == "ACCOUNTING_PENDING"
     assert float(row["qty_filled"]) == pytest.approx(0.0)
     assert "accounting is fee-pending" in str(row["last_error"])
     assert fill_count["cnt"] == 0
@@ -4023,7 +4023,7 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     assert metadata["observed_fill_count"] == 1
     assert metadata["fee_pending_fill_count"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
-    assert metadata["fee_pending_operator_next_action"].startswith("inspect broker_fill_observations")
+    assert metadata["fee_pending_operator_next_action"].startswith("await automatic reconcile retry")
 
 
 def test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_authority(tmp_path):
@@ -4633,7 +4633,7 @@ def test_backfill_broker_order_creates_synthetic_lineage_for_local_missing_execu
     assert row["status"] == "FILLED"
     assert row["side"] == "BUY"
     assert row["strategy_name"] == "broker_backfill"
-    assert row["local_intent_state"] == "BACKFILLED_BROKER_OBSERVED"
+    assert row["local_intent_state"] == "FILLED"
     assert float(row["qty_filled"]) == 0.01
     assert {"intent_created", "exchange_order_id_attached", "fill_applied", "status_changed"} <= event_types
     assert fill is not None

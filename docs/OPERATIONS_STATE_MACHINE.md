@@ -81,6 +81,7 @@ Expected flow:
 3. The order transitions to `ACCOUNTING_PENDING`.
 4. New submissions remain blocked by the unresolved-order gate.
 5. The process loop stays alive and reconcile continues retrying safely.
+   `run_loop_allowed=1` is valid while `resume_ready=0` for this state.
 6. If authoritative fee later becomes available, the fill is applied idempotently and the order reaches its terminal accounted state.
 7. If fee attribution remains ambiguous or invalid, operator repair or review is still required.
 
@@ -101,6 +102,8 @@ Safe auto-clear requires all of the following:
 - no hard halt state
 
 If those conditions are not met, the process remains blocked by the normal readiness gate instead of blindly calling `resume`.
+
+When the only active issue is fee/accounting latency in `ACCOUNTING_PENDING`, startup and restart should continue in a degraded auto-recovering mode rather than converting that condition into a hard stopped process. New submissions still remain blocked until accounting converges.
 
 ## Dust-Only Residual
 

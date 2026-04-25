@@ -177,6 +177,92 @@ def validate_status_transition(*, from_status: str, to_status: str) -> tuple[boo
     return False, f"disallowed status transition: {from_status}->{to_status}"
 
 
+def synchronize_order_state_invariants(conn: sqlite3.Connection) -> dict[str, int]:
+    """Repair legacy/stale status mirrors without changing authoritative order outcomes."""
+    terminal_pending_local_intent = conn.execute(
+        """
+        SELECT client_order_id, status
+        FROM orders
+        WHERE status IN ('FILLED', 'FAILED', 'CANCELED')
+          AND COALESCE(local_intent_state, '')='PENDING_SUBMIT'
+        """
+    ).fetchall()
+    repaired_terminal_local_intent = 0
+    if terminal_pending_local_intent:
+        conn.execute(
+            """
+            UPDATE orders
+            SET local_intent_state=status
+            WHERE status IN ('FILLED', 'FAILED', 'CANCELED')
+              AND COALESCE(local_intent_state, '')='PENDING_SUBMIT'
+            """
+        )
+        repaired_terminal_local_intent = len(terminal_pending_local_intent)
+
+    stale_terminal_dedup_rows = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM order_intent_dedup d
+        JOIN orders o ON o.client_order_id = d.client_order_id
+        WHERE o.status IN ('FILLED', 'FAILED', 'CANCELED')
+        """
+    ).fetchone()
+    released_terminal_dedup = int(stale_terminal_dedup_rows["cnt"] or 0) if stale_terminal_dedup_rows else 0
+    if released_terminal_dedup > 0:
+        conn.execute(
+            """
+            DELETE FROM order_intent_dedup
+            WHERE client_order_id IN (
+                SELECT client_order_id
+                FROM orders
+                WHERE status IN ('FILLED', 'FAILED', 'CANCELED')
+            )
+            """
+        )
+
+    active_dedup_mismatches = conn.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM order_intent_dedup d
+        JOIN orders o ON o.client_order_id = d.client_order_id
+        WHERE o.status NOT IN ('FILLED', 'FAILED', 'CANCELED')
+          AND COALESCE(d.order_status, '') != COALESCE(o.status, '')
+        """
+    ).fetchone()
+    synced_active_dedup = int(active_dedup_mismatches["cnt"] or 0) if active_dedup_mismatches else 0
+    if synced_active_dedup > 0:
+        conn.execute(
+            """
+            UPDATE order_intent_dedup
+            SET order_status=(
+                    SELECT o.status
+                    FROM orders o
+                    WHERE o.client_order_id=order_intent_dedup.client_order_id
+                ),
+                updated_ts=?,
+                last_error=(
+                    SELECT o.last_error
+                    FROM orders o
+                    WHERE o.client_order_id=order_intent_dedup.client_order_id
+                )
+            WHERE client_order_id IN (
+                SELECT o.client_order_id
+                FROM orders o
+                WHERE o.client_order_id=order_intent_dedup.client_order_id
+                  AND o.status NOT IN ('FILLED', 'FAILED', 'CANCELED')
+                  AND COALESCE(order_intent_dedup.order_status, '') != COALESCE(o.status, '')
+            )
+            """,
+            (int(time.time() * 1000),),
+        )
+
+    return {
+        "repaired_terminal_local_intent": repaired_terminal_local_intent,
+        "released_terminal_dedup": released_terminal_dedup,
+        "synced_active_dedup": synced_active_dedup,
+    }
+
+
 def _record_order_event(
     conn: sqlite3.Connection,
     *,
