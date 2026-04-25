@@ -23,7 +23,7 @@ from bithumb_bot.engine import (
     evaluate_startup_safety_gate,
     get_health_status,
 )
-from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.execution import apply_fill_and_trade, apply_fill_principal_with_pending_fee, record_order_if_missing
 from bithumb_bot.external_position_repair import (
     apply_external_position_accounting_repair,
     build_external_position_accounting_repair_preview,
@@ -2576,7 +2576,7 @@ def test_live_fee_pending_fill_keeps_run_loop_alive_but_blocks_new_entries(recov
     finally:
         conn.close()
 
-    assert readiness.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
+    assert readiness.recovery_stage == "UNAPPLIED_PRINCIPAL_PENDING"
     assert readiness.resume_ready is False
     assert readiness.run_loop_allowed is True
     assert readiness.new_entry_allowed is False
@@ -3055,7 +3055,7 @@ def test_fee_pending_existing_sell_fee_repair_replays_lifecycle_projection(recov
             intended_lot_count=1,
             executable_lot_count=1,
         )
-        apply_fill_and_trade(
+        apply_fill_principal_with_pending_fee(
             conn,
             client_order_id="fee_sell",
             side="SELL",
@@ -3064,6 +3064,7 @@ def test_fee_pending_existing_sell_fee_repair_replays_lifecycle_projection(recov
             price=PRICE,
             qty=LOT_SIZE,
             fee=0.0,
+            fee_status="zero_reported",
             allow_entry_decision_fallback=False,
         )
         record_broker_fill_observation(
@@ -3396,7 +3397,7 @@ def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomple
             intended_lot_count=1,
             executable_lot_count=1,
         )
-        apply_fill_and_trade(
+        apply_fill_principal_with_pending_fee(
             conn,
             client_order_id="fee_incomplete_existing_fill",
             side="BUY",
@@ -3404,7 +3405,8 @@ def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomple
             fill_ts=1_700_002_000_100,
             price=PRICE,
             qty=LOT_SIZE,
-            fee=0.0,
+            fee=None,
+            fee_status="missing",
         )
         set_status("fee_incomplete_existing_fill", "FILLED", conn=conn)
         record_broker_fill_observation(
@@ -3462,7 +3464,9 @@ def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomple
     finally:
         conn.close()
 
-    assert readiness.fee_pending_count == 1
+    assert readiness.fee_pending_count == 0
+    assert readiness.recovery_stage == "FEE_FINALIZATION_PENDING"
+    assert readiness.fill_accounting_incident_summary["principal_applied_fee_pending_count"] == 1
     assert preview["needs_repair"] is True
     assert preview["safe_to_apply"] is True
     assert preview["repair_mode"] == "complete_existing_fill_fee"

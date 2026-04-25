@@ -1,411 +1,555 @@
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-Treat this as an engineering task to make the live trading bot more robust, reproducible, and operable. Do not reduce this to a narrow symptom patch. The recent EC2 incident should be used as the starting point, but do not assume the current diagnosis is automatically true. Validate or falsify the hypotheses below directly against the repository code and tests.
+Your task is to investigate and implement a structural fix for a repeated live-trading failure pattern observed on EC2. Do not treat the current diagnosis as proven fact. Treat it as a set of hypotheses to verify or falsify directly against the repository code, tests, and available runtime evidence. The goal is not to suppress the immediate symptom, but to evolve this repo into a more robust, reproducible, operable automated trading experiment system.
 
-Context:
+Context source: the current analysis summarized the incident and proposed hypotheses/design direction. Use it as starting context, not as a conclusion. 
 
-The EC2 live bot has repeatedly stopped after exactly one BUY or SELL execution. The operator has had to manually resume the bot and sometimes manually repair the DB. The current observed pattern is:
+The observed operational pattern is:
 
-* A live order is submitted.
-* Broker/exchange fill is observed.
-* Fee/accounting information is incomplete or delayed.
-* The bot promotes this to `RECOVERY_REQUIRED`.
-* Later, fee/accounting repair succeeds.
-* Audit/recovery reports show no active blocking issue.
-* Yet runtime remains paused or requires explicit `resume`.
-* Recent DB rows showed terminal orders such as `FILLED` and `FAILED` while `orders.local_intent_state` remained `PENDING_SUBMIT`.
+* Start the live bot.
+* One BUY or SELL gets filled on Bithumb.
+* The bot stops or becomes non-resumable.
+* The system reports fee pending / accounting pending / `RISK_STATE_MISMATCH`.
+* Operator or GPT-guided recovery uses `fee-pending-accounting-repair`, `rebuild-position-authority`, and sometimes `flatten-position`.
+* Flattening can create another live SELL fill that again enters fee pending, causing the same class of mismatch in the opposite direction.
+* Manual DB edits and repeated repairs have accumulated, making lot projection and recovery state harder to reason about.
 
-Important files and areas to inspect first:
+The most important suspected structural issue is:
+
+> The system currently appears to treat authoritative fee availability as a prerequisite for canonical fill accounting. When Bithumb provides fill principal evidence immediately but fee evidence is missing, ambiguous, or only available at order level, the bot defers applying the entire fill. The exchange balance changes immediately, but local `fills`, `trades`, `portfolio`, `orders.qty_filled`, and lot projection do not. This can produce broker/local mismatch, risk halt, authority projection drift, flatten loops, and repeated manual repair.
+
+Keep this as a hypothesis until verified.
+
+Your work should prioritize design correctness over a narrow symptom patch.
+
+---
+
+## Primary objectives
+
+1. Verify or falsify the root-cause hypotheses below by reading the repo and running targeted tests.
+2. Implement a design change that separates:
+
+   * exchange execution truth,
+   * fill principal accounting,
+   * fee finalization,
+   * position/lot projection,
+   * runtime halt/resume policy.
+3. Ensure fee latency or order-level fee ambiguity does not cause a normal filled BUY/SELL principal to remain unapplied.
+4. Ensure invalid fee evidence still remains safe and observable.
+5. Ensure flatten/closeout is not treated as an accounting recovery tool and does not worsen accounting drift.
+6. Add regression tests that reproduce this incident class.
+7. Improve operator observability so future incidents identify root blockers and derived blockers separately.
+8. Preserve live-trading safety. Do not loosen safety gates by hiding real mismatches.
+
+---
+
+## Files and areas to inspect first
+
+Start by reading and mapping these files:
 
 * `src/bithumb_bot/broker/live_submission_execution.py`
-* `src/bithumb_bot/oms.py`
+* `src/bithumb_bot/broker/myorder_runtime.py`
+* `src/bithumb_bot/execution.py`
+* `src/bithumb_bot/fee_observation.py`
 * `src/bithumb_bot/fee_pending_repair.py`
-* `src/bithumb_bot/recovery.py`
 * `src/bithumb_bot/runtime_readiness.py`
-* `src/bithumb_bot/engine.py`
-* `src/bithumb_bot/app.py`
+* `src/bithumb_bot/recovery.py`
+* `src/bithumb_bot/position_authority_state.py`
+* `src/bithumb_bot/position_authority_repair.py`
+* `src/bithumb_bot/lifecycle.py`
 * `src/bithumb_bot/db_core.py`
-* `tests/test_position_authority_recovery_state.py`
-* `tests/test_operator_commands.py`
-* Any tests covering recovery, restart, ops report, accounting projection, order lifecycle, and runtime readiness.
+* `docs/OPERATIONS_STATE_MACHINE.md`
+* tests involving fee pending, myorder ingestion, recovery, position authority, and external cash adjustments.
 
-Known suspicious findings to verify, not blindly assume:
-
-1. `live_submission_execution.py` appears to treat any fill whose accounting status is `fee_pending` as an application failure and transitions the order to `RECOVERY_REQUIRED`, with a reason like “broker fill observed but accounting is fee-pending.”
-2. `oms.py` appears to include `RECOVERY_REQUIRED` in both open/risky order status sets and terminal status sets, which may give different components inconsistent semantics.
-3. `fee_pending_repair.py` already contains logic to apply fee-pending repairs and transition projected order status, but this appears to be operator-command-oriented rather than a first-class idempotent reconciler in the live run loop.
-4. Runtime readiness often knows the system is safe to resume, for example with no active blockers, no unresolved fee state, converged broker/portfolio/lot projection, and `safe_to_resume=1`, but the live runtime still requires an explicit operator resume.
-5. Terminal orders can retain `local_intent_state=PENDING_SUBMIT`, which suggests the order state model is not being updated atomically or consistently.
-
-Primary objective:
-
-Redesign and implement the smallest coherent change set that prevents this entire class of failures: recoverable exchange/accounting latency must not be escalated into a manual halt/resume cycle unless there is a real unresolved risk or operator-review condition.
-
-Do not merely add a workaround that auto-runs `resume` after the old broken flow. Prefer a state-machine and reconciler design that makes the system correct before it reaches halt/resume.
-
-Working hypotheses to validate or falsify:
-
-Hypothesis 1: Fee-pending is promoted to a hard recovery state too early.
-
-Bithumb fill data may be eventually consistent. The live submission path currently appears to require immediate authoritative fee/accounting data. If a fill is observed but fee is missing/pending, it records a broker fill observation and transitions to `RECOVERY_REQUIRED`. That may be structurally wrong. A fee-pending fill should usually become an accounting-pending state with automatic retry/reconciliation, not an operator recovery incident.
-
-Validation:
-
-* Search for `fee_pending_fills`, `live_application_fee_pending`, `manual fee resolution required before ledger apply`, `LiveFillFeeValidationError`, and `_mark_recovery_required`.
-* Identify every code path that converts fee-missing/fee-pending into `RECOVERY_REQUIRED`, halt, pause, or resume gate.
-* Determine whether the parser is actually failing to read available fee data, or whether the exchange genuinely does not provide authoritative fee immediately.
-* Inspect `broker_fill_observations.raw_payload`, `fee_status`, `fee_source`, `fee_confidence`, and `fee_validation_reason` handling.
-
-Required test:
-
-Create or update a fake broker/live-submission test where:
-
-* First broker read returns a fill with missing or pending fee.
-* The bot records a fee-pending observation.
-* The order is not treated as a hard unresolved recovery blocker.
-* The run loop or accounting reconciler remains able to continue safely.
-* A subsequent broker read returns authoritative fee.
-* The fill is applied idempotently.
-* Final status is terminal/accounted, trading does not require manual resume, and audit passes.
-
-Hypothesis 2: The order state model is not a single coherent state machine.
-
-`orders.status`, `orders.local_intent_state`, `order_intent_dedup.order_status`, `order_events.order_status`, runtime halt state, and recovery counters may be updated independently. This allows contradictory states such as `orders.status='FILLED'` with `local_intent_state='PENDING_SUBMIT'`.
-
-Validation:
-
-* Search all writes to `orders.status`, `orders.local_intent_state`, `order_intent_dedup.order_status`, and `order_events.order_status`.
-* Identify whether `set_status()` updates only `orders.status` and not related intent/dedup/lifecycle fields.
-* Add invariant checks for terminal orders retaining submit-pending local intent state.
-* Determine whether `local_intent_state` is meaningful or redundant. If meaningful, it must be synchronized. If redundant, reduce its operational role or document it clearly.
-
-Required tests:
-
-* A terminal `FILLED` order must not retain `local_intent_state=PENDING_SUBMIT`.
-* A terminal `FAILED`, `REJECTED`, or `CANCELED` order must not retain `local_intent_state=PENDING_SUBMIT`.
-* `order_intent_dedup.order_status` must not disagree with `orders.status` for active dedup rows unless explicitly documented.
-* `audit` or an equivalent invariant test must fail on terminal orders with pending local intent state.
-
-Hypothesis 3: `RECOVERY_REQUIRED` has overloaded semantics.
-
-`RECOVERY_REQUIRED` appears to mean too many things at once: unresolved risky order, terminal historical recovery marker, operator-review-required state, and auto-repairable accounting pending state. If it is both “open” and “terminal,” startup gate and resume logic can disagree.
-
-Validation:
-
-* Search every use of `RECOVERY_REQUIRED` in `src`, `tests`, and `docs`.
-* Classify each use into:
-
-  * submit outcome
-  * accounting pending/recovery
-  * operator halt blocker
-  * terminal historical marker
-  * risk gate condition
-  * report/display state
-* Decide whether `RECOVERY_REQUIRED` must be split into more precise states, or whether its membership in open/terminal sets must be corrected.
-
-Design preference:
-
-Do not let a single string represent both an unresolved live risk and a completed historical repair marker. Introduce clearer distinctions if needed, such as:
-
-* `ACCOUNTING_PENDING`
-* `FEE_PENDING`
-* `AUTO_RECOVERING`
-* `OPERATOR_REVIEW_REQUIRED`
-* `RECOVERY_REPAIRED`
-* `HARD_HALTED`
-
-The exact names may differ, but the semantics must be clear and tested.
-
-Hypothesis 4: Repair succeeds but runtime policy refuses automatic recovery.
-
-Fee-pending repair, fee-gap repair, and position-authority rebuild can make the ledger and lot projections consistent. But runtime policy may still require explicit operator resume even when no blocker remains.
-
-Validation:
-
-* Search for `POSITION_AUTHORITY_REBUILD_COMPLETED`, `explicit resume required`, `resume_now`, `safe_to_resume`, `enable_trading`, and `disable_trading_until`.
-* Trace how readiness snapshots become runtime policy decisions.
-* Determine whether `compute_runtime_readiness_snapshot` and restart/resume eligibility are only report outputs or actually used as policy inputs.
-* Identify conditions under which the bot can safely auto-clear a repair-completed pause.
-
-Required behavior:
-
-If all of the following are true, the bot should not require manual resume:
-
-* `unresolved_open_order_count == 0`
-* `recovery_required_count == 0`
-* `unresolved_fee_state == 0`
-* `fill_accounting_active_issue_count == 0`
-* broker portfolio is converged
-* lot projection is converged
-* `blocking_incident_class == NONE`
-* no operator-review-required state remains
-* no hard risk halt such as kill switch or loss limit is active
-
-Implement this as a principled runtime policy, not as a blind unconditional auto-resume.
-
-Hypothesis 5: Dust/lot accounting flatness and execution flatness are not cleanly separated.
-
-The system may preserve residual BTC as accounting evidence while treating it as execution-flat for new entries. This is acceptable, but only if it does not repeatedly trigger position authority rebuild and explicit resume.
-
-Validation:
-
-* Inspect `position_authority_state`, `position_authority_repair`, `runtime_readiness`, `dust`, and related tests.
-* Verify that `DUST_ONLY_TRACKED` / harmless dust allows new entries, blocks only closeout as appropriate, and does not stop the run loop.
-* Add tests to ensure dust-only tracked state permits continued operation without manual resume when no hard blocker exists.
-
-Design requirements:
-
-1. Separate state axes instead of overloading one order status.
-
-At minimum, distinguish:
-
-* Submission state: intent created, submitting, submitted, acknowledged, rejected, submit unknown.
-* Exchange execution state: open, partial, filled, canceled.
-* Accounting state: not applied, fee pending, applied, repaired, invalid.
-* Operator/risk state: ok, degraded, auto-recovering, operator-review-required, hard-halted.
-
-This does not necessarily require a full DB migration in one PR, but the code paths touched by this incident must move toward these semantics and must not deepen the overload of `RECOVERY_REQUIRED`.
-
-2. Treat fee-pending as asynchronous accounting, not immediate manual recovery.
-
-Preferred flow:
-
-* Broker fill observed with missing/pending fee.
-* Record `broker_fill_observations` with `accounting_status='fee_pending'`.
-* Mark order/accounting as fee/accounting pending, not hard recovery, unless there is another real risk.
-* Retry broker order/fill reads for a bounded time/count.
-* If authoritative fee becomes available, apply fill and trade idempotently.
-* If only order-level fee is available and attribution is unambiguous, apply automatically with clear provenance.
-* If account cash drift can infer fee and there is a single candidate, allow automatic repair with explicit evidence.
-* If attribution is ambiguous, fee is invalid, or drift is large/unexplained, transition to `OPERATOR_REVIEW_REQUIRED`, not a generic overloaded recovery state.
-
-3. Promote fee-pending repair into an idempotent reconciler.
-
-Do not leave `fee_pending_repair.py` as only a manual CLI path. Extract or reuse its core logic in a reconciler that the live run loop/reconcile flow can call safely and repeatedly.
-
-Suggested shape:
-
-```python
-class AccountingReconciler:
-    def reconcile_pending_fees(self, conn, broker) -> ReconcileResult:
-        ...
-```
-
-The exact API may differ, but it must be idempotent, testable, and observable.
-
-4. Make runtime halt policy severity-based.
-
-Use explicit severity levels or equivalent semantics:
-
-* OK: continue normally.
-* DEGRADED: continue but report warnings.
-* AUTO_RECOVERING: retry/reconcile; optionally block new submissions if necessary.
-* OPERATOR_REVIEW_REQUIRED: block new submissions, keep process observable, require operator action.
-* HARD_HALTED: stop trading due to real risk, kill switch, loss limit, irreconcilable broker conflict, or unsafe unknown order.
-
-Recoverable fee/accounting latency must not be treated as hard halt.
-
-5. Preserve safety.
-
-Do not allow duplicate orders, overfills, double application of fills, or silent fee omission. Idempotency is mandatory.
-
-Must-have invariants:
-
-* A fill is applied at most once.
-* A fee repair is applied at most once per fill identity.
-* Terminal order states cannot retain submit-pending local intent.
-* Auto-recovery cannot place a new order while there is an unresolved live order that could still execute.
-* Operator-review-required states must block new submissions.
-* Hard risk states must remain hard blocked.
-* Manual DB edits must not be part of normal recovery.
-
-Implementation scope:
-
-Prefer a coherent, reviewable PR-sized change. If a full multi-axis DB schema migration is too large, implement a compatibility layer that introduces the semantics without breaking existing data.
-
-Acceptable near-term implementation:
-
-* Add helper functions/constants that distinguish:
-
-  * open exchange/order statuses
-  * terminal execution statuses
-  * accounting-pending states
-  * operator-review states
-  * hard-blocking risk states
-* Remove or neutralize the contradiction where `RECOVERY_REQUIRED` is both open and terminal, or explicitly split the uses.
-* Update `set_status` or introduce a single authoritative transition function that synchronizes:
-
-  * `orders.status`
-  * `orders.local_intent_state`
-  * `order_intent_dedup.order_status`
-  * order events
-  * last error
-* Add a startup/audit repair or migration-safe check for stale terminal rows with `local_intent_state=PENDING_SUBMIT`.
-* Convert fee-pending live application handling from immediate hard recovery to pending/reconciler flow.
-* Auto-clear repair-completed runtime pause only when readiness proves there are no active blockers.
-* Add regression tests that reproduce the EC2 pattern.
-
-Tests to add or update:
-
-1. `test_live_fee_pending_fill_does_not_require_manual_resume`
-
-Simulate live order submission where the first fill observation has pending/missing fee. Assert the bot records pending accounting state, does not escalate to manual recovery/hard halt, and later applies the fill when fee appears.
-
-2. `test_terminal_orders_do_not_keep_pending_local_intent_state`
-
-Create FILLED/FAILED/CANCELED/REJECTED transitions and assert `local_intent_state` is terminal or cleared appropriately.
-
-3. `test_repaired_fee_pending_order_is_not_unresolved`
-
-After fee-pending repair applies, assert the order is not counted as unresolved open/recovery-required.
-
-4. `test_dust_only_tracked_allows_new_entry_without_resume`
-
-Use or extend existing EC2 repro constants in `tests/test_position_authority_recovery_state.py`. Assert `DUST_ONLY_TRACKED` with harmless residual allows run loop/new entry and only blocks closeout when appropriate.
-
-5. `test_recovery_required_not_both_open_and_terminal`
-
-Add a semantic test for status classification. A status must not be simultaneously treated as terminal historical state and unresolved open risk unless there is a precise documented reason and the code accounts for it safely.
-
-6. `test_repair_completed_with_no_blockers_auto_clears_pause`
-
-Given completed repair, no unresolved orders, no active accounting issue, converged broker/portfolio/lot state, and no hard risk halt, assert operator resume is not required.
-
-7. Audit/ops/report tests
-
-Ensure reports expose:
-
-* pending fee count
-* auto-recovery count
-* operator-review-required count
-* hard halt reason
-* whether trading is blocked, degraded, or running
-* next action, if any
-
-Observability requirements:
-
-* Log every transition with structured fields:
-
-  * client_order_id
-  * exchange_order_id
-  * fill_id
-  * old/new order status
-  * accounting state
-  * operator/risk state
-  * reason code
-  * whether new submissions are blocked
-  * whether process loop continues
-  * fee source/provenance/confidence
-* When fee-pending occurs, log it as an accounting latency condition, not as an application crash, unless it becomes operator-review-required.
-* When auto-recovery succeeds, log the exact evidence and invariant checks.
-* When operator review is required, print a precise command or report path.
-* Add or update an incident artifact path if the system enters operator-review or hard-halt.
-
-Documentation requirements:
-
-Create or update `docs/OPERATIONS_STATE_MACHINE.md`.
-
-It must define:
-
-* The separate state axes.
-* Which states are terminal.
-* Which states block new orders.
-* Which states allow the process loop to keep running.
-* Which states require operator action.
-* How fee-pending is handled.
-* How dust-only tracked residual is handled.
-* What invariants audit enforces.
-* Recovery commands and when they are appropriate.
-* A note that manual DB editing is not normal recovery; repairs must be event-recorded.
-
-Do not overfit to the single EC2 event. The design must handle the whole class of exchange eventual-consistency and accounting-latency issues.
-
-Safety boundaries:
-
-* Do not weaken checks for overfill, duplicate fill, submit unknown, broker conflicts, loss limits, kill switch, or unknown remote open orders.
-* Do not silently assume zero fee for material live fills.
-* Do not auto-apply ambiguous fee attribution.
-* Do not auto-resume from hard risk halts.
-* Do not remove existing operator commands unless replaced with safer equivalents.
-* Preserve backward compatibility for existing SQLite DBs where possible.
-
-Suggested investigation commands inside the repo:
+Use these searches:
 
 ```bash
-grep -RIn \
-  "fee_pending_fills\|live_application_fee_pending\|manual fee resolution required before ledger apply\|_mark_recovery_required\|LiveFillFeeValidationError" \
-  src tests
-
-grep -RIn \
-  "local_intent_state\|PENDING_SUBMIT\|set_status\|order_intent_dedup\|RECOVERY_REQUIRED" \
-  src tests docs
-
-grep -RIn \
-  "POSITION_AUTHORITY_REBUILD_COMPLETED\|explicit resume required\|resume_now\|safe_to_resume\|enable_trading\|disable_trading_until" \
-  src tests
+rg -n "fee_pending_fills|application_deferred_fee_pending|ACCOUNTING_PENDING|apply_fill_and_trade|LiveFillFeeValidationError|order_level_candidate|validated_order_level_paid_fee|fee_pending_auto_recovering|flatten-position|emergency_flatten|closeout" src tests docs
 ```
 
-Suggested validation commands:
+---
+
+## Hypotheses to verify or falsify
+
+### Hypothesis 1: Fee pending currently blocks principal accounting
+
+Claim: If a live fill has valid `qty`, `price`, `notional`, and identity, but fee is missing or `order_level_candidate`, the system records a diagnostic observation and marks the order `ACCOUNTING_PENDING` without applying principal to `fills`, `trades`, `portfolio`, and `orders.qty_filled`.
+
+Inspect:
+
+* `live_submission_execution.reconcile_apply_fills_and_refresh`
+* `myorder_runtime.ingest_myorder_event`
+* `execution.apply_fill_and_trade`
+* tests asserting `application_deferred_fee_pending` or `accounting_pending_fee_pending`
+
+Verify with tests or a new fixture:
+
+* Simulate a live BUY fill with:
+
+  * valid client order id,
+  * exchange order id,
+  * fill id,
+  * price,
+  * qty,
+  * `fee_status="order_level_candidate"` or `fee_status="missing"`.
+* Confirm whether `portfolio.asset_available` and `orders.qty_filled` remain unchanged before the fix.
+* Confirm broker/local mismatch is possible as a result.
+
+Falsification condition:
+
+* Existing code already applies principal immediately and only leaves fee delta pending. If so, identify the real reason the incident still produced mismatch.
+
+### Hypothesis 2: Order-level fee validation is too brittle for real Bithumb responses
+
+Claim: `validate_single_fill_order_level_paid_fee` may reject or fail to validate real single-fill Bithumb order-level `paid_fee` because one of `expected_fee_rate_match`, `executed_funds_match`, `identifiers_match`, or `single_fill` fails in live payloads.
+
+Inspect:
+
+* `fee_observation.validate_single_fill_order_level_paid_fee`
+* Bithumb broker fill parsing code
+* tests for `order_level_candidate`, `validated_order_level_paid_fee`, and fee rate mismatch.
+
+Add or update tests using a fixture that resembles the incident:
+
+* `qty=0.00059998`
+* `price=115465000`
+* `notional≈69276.691`
+* `fee=27.71`
+* `fee_status="order_level_candidate"` initially
+* order-level `paid_fee` present
+* single fill evidence present if available.
+
+Verify whether the validation should classify this as:
+
+* `validated_order_level_paid_fee`, if evidence is strong enough; or
+* `principal_applied_fee_pending`, if fee confidence is still not final.
+
+Do not force uncertain fee evidence into authoritative accounting without an explicit reason.
+
+### Hypothesis 3: `ACCOUNTING_PENDING` is documented as auto-recovering but operationally becomes a persistent stop
+
+Claim: The docs say `ACCOUNTING_PENDING` should be auto-recovering and the process loop should remain alive, but in practice the user repeatedly needed manual repair.
+
+Inspect:
+
+* `docs/OPERATIONS_STATE_MACHINE.md`
+* `runtime_readiness.compute_runtime_readiness_snapshot`
+* startup/restart gates
+* reconcile retry paths
+* tests around `fee_pending_auto_recovering`.
+
+Verify whether:
+
+* process loop continues in degraded mode,
+* reconcile eventually re-reads fee evidence,
+* no new orders are submitted while principal is unapplied,
+* operator report clearly distinguishes auto-recovering from hard halted.
+
+If not, fix the policy or update the implementation so docs and behavior match.
+
+### Hypothesis 4: Position authority / lot projection is acting as an over-authoritative materialized view
+
+Claim: `open_position_lots` / lot projection can drift from canonical holdings after repeated repairs, and the system treats projection drift as a blocker requiring manual rebuild.
+
+Inspect:
+
+* `position_authority_state.py`
+* `position_authority_repair.py`
+* `lifecycle.py`
+* `runtime_readiness.py`
+* tests under position authority recovery.
+
+Verify whether every principal fill application deterministically updates or rebuilds lot projection. If not, implement either:
+
+* an idempotent projection rebuild after principal application, or
+* a safe incremental update plus invariant check.
+
+Lot projection should be treated as a rebuildable materialized projection, not as a competing source of truth over canonical executed principal.
+
+### Hypothesis 5: Flatten/closeout is being used as recovery and can create new accounting incidents
+
+Claim: `flatten-position` is a live market action, not accounting recovery. When fee pending handling is flawed, flattening a position can create a new SELL with fee pending and cause the same mismatch class again.
+
+Inspect:
+
+* flatten/closeout commands and tests,
+* readiness gates for flatten,
+* closeout paths in recovery and operator commands.
+
+Ensure flatten is only allowed when:
+
+* principal ledger is converged,
+* broker/local asset is converged,
+* no unapplied principal fill exists,
+* no unresolved order exists,
+* sell quantity source is explicit and safe,
+* fee-only pending is understood and will not block principal application.
+
+Do not recommend or encode flatten as a normal response to unapplied principal accounting.
+
+---
+
+## Required design direction
+
+Implement principal-first accounting.
+
+The target flow should be:
+
+```text
+Broker fill observed
+→ validate fill identity, side, price, qty, notional
+→ apply fill principal immediately:
+     - fills/trades or equivalent principal ledger row is recorded
+     - orders.qty_filled is updated
+     - portfolio cash/asset principal is updated
+     - lot projection is updated or rebuilt
+→ classify fee separately:
+     - fee_finalized / validated_order_level_paid_fee
+     - principal_applied_fee_pending
+     - fee_validation_blocked
+→ if fee is finalized later:
+     - apply only the fee delta / finalization event
+     - do not re-apply principal
+```
+
+Do not simply remove fee validation. Invalid fee evidence must remain visible and safe.
+
+Preferred implementation approach:
+
+1. Do not destructively rewrite `apply_fill_and_trade` as the first step.
+2. Add explicit principal-first functionality, for example:
+
+   * `apply_fill_principal_with_pending_fee(...)`
+   * `finalize_fill_fee(...)`
+   * or a cleaner equivalent that fits the repo architecture.
+3. Extend DB schema or event tables if needed:
+
+   * add fee status fields to `fills`, or
+   * add a `fill_fee_events` / `fill_accounting_events` table.
+4. Ensure idempotency:
+
+   * applying the same principal fill twice must be a no-op,
+   * finalizing fee twice must be a no-op or an explicit no-change result,
+   * fee finalization must not duplicate trades or lots.
+5. Preserve replayability:
+
+   * accounting replay should reconstruct portfolio from principal + fee events,
+   * lot projection should be rebuildable from canonical fill/trade events.
+6. Preserve safety:
+
+   * invalid negative fee, invalid price, invalid qty, identity mismatch, and overfill must still block or require operator review.
+   * material zero fee should not be silently accepted as authoritative, but it also should not necessarily block principal if principal evidence is valid. Treat it as `principal_applied_fee_pending` or `fee_validation_blocked` according to evidence quality.
+
+---
+
+## Required readiness policy changes
+
+Split fee/accounting pending states into at least these categories:
+
+```text
+unapplied_principal_pending
+principal_applied_fee_pending
+fee_validation_blocked
+fee_finalized
+```
+
+Policy guidance:
+
+* `unapplied_principal_pending`:
+
+  * hard block new submissions,
+  * auto-reconcile if possible,
+  * operator review if bounded retry fails.
+* `principal_applied_fee_pending`:
+
+  * should not cause broker/local asset mismatch,
+  * should not cause `RISK_STATE_MISMATCH`,
+  * may run in degraded mode,
+  * may block new entries if strategy policy chooses, but should not be treated as a hard accounting inconsistency.
+* `fee_validation_blocked`:
+
+  * operator review required,
+  * principal should already be accounted if identity and principal evidence were valid.
+* `fee_finalized`:
+
+  * normal state.
+
+Update `runtime_readiness.py`, recovery reports, and startup/restart behavior accordingly.
+
+---
+
+## Required observability improvements
+
+Improve reports so operators can see root blockers versus derived blockers.
+
+In `recovery-report`, `health`, or an appropriate reporting module, add a compact root-cause chain such as:
+
+```text
+ROOT: unapplied_principal_fill
+  → broker_local_asset_mismatch
+  → risk_state_mismatch
+  → position_projection_drift
+  → resume_blocked
+```
+
+or, after the fix:
+
+```text
+ROOT: fee_finalization_pending
+  principal_applied=1
+  broker_local_asset_converged=1
+  fee_status=order_level_candidate
+  operator_action=none_or_review_fee_evidence
+```
+
+Expose fee validation diagnostics:
+
+* count by `fee_status`,
+* count by `accounting_status`,
+* failed validation checks,
+* latest fee validation reason,
+* latest source/provenance,
+* whether principal was applied.
+
+The operator should never be led toward flatten when the root issue is unapplied principal accounting.
+
+---
+
+## Required tests
+
+Add regression tests before or alongside the fix. Include tests that fail on current behavior and pass after the design change.
+
+Minimum test cases:
+
+1. Live BUY with order-level candidate fee applies principal immediately.
+
+Expected:
+
+* `orders.qty_filled` increases by fill qty.
+* portfolio asset increases.
+* portfolio cash decreases by notional, with fee handled according to pending/finalization model.
+* broker/local asset convergence is possible.
+* fee state is not lost.
+* no `RISK_STATE_MISMATCH` caused solely by fee latency.
+
+2. Live SELL with order-level candidate fee applies principal immediately.
+
+Expected:
+
+* asset decreases immediately.
+* local holdings converge with broker holdings.
+* fee remains pending/finalizable.
+* no opposite-direction mismatch after flatten/closeout-like SELL.
+
+3. Missing fee for material valid fill does not block principal.
+
+Expected:
+
+* principal applied,
+* fee state is `principal_applied_fee_pending` or equivalent,
+* operator observability contains fee warning,
+* no duplicate fill when fee later finalizes.
+
+4. Invalid fee evidence remains safe.
+
+Cases:
+
+* negative fee,
+* invalid fee string,
+* impossible qty/price,
+* overfill,
+* identity mismatch.
+
+Expected:
+
+* invalid principal evidence blocks principal.
+* invalid fee evidence does not corrupt principal accounting.
+* operator report clearly shows what is blocked and why.
+
+5. Fee finalization is idempotent.
+
+Expected:
+
+* finalizing an already-finalized fee does not duplicate fills/trades/lots.
+* finalizing a pending fee updates only fee delta/status.
+* replay remains stable.
+
+6. MyOrder private stream path matches REST reconciliation path.
+
+Expected:
+
+* `myorder_runtime.ingest_myorder_event` applies principal for valid fill events even when fee is pending.
+* It records fee pending separately.
+* It does not leave terminal executed volume unaccounted.
+
+7. Lot projection converges after principal apply.
+
+Expected:
+
+* after BUY/SELL principal application, `open_position_lots` or its replacement projection converges with canonical holdings.
+* projection rebuild is deterministic.
+* repeated repair/rebuild does not inflate total qty.
+
+8. Flatten is not recovery for unapplied principal.
+
+Expected:
+
+* flatten/closeout command refuses or warns when there is any `unapplied_principal_pending`.
+* flatten is allowed only after principal convergence.
+* flatten SELL uses principal-first accounting.
+
+Run relevant tests:
 
 ```bash
-uv run pytest \
-  tests/test_position_authority_recovery_state.py \
-  tests/test_operator_commands.py \
-  tests/test_recovery_restart_regression.py \
-  tests/test_accounting_projection.py \
-  tests/test_ops_report.py
-
-uv run pytest
+uv run pytest -q tests/test_live_broker.py -k "fee_pending or order_level or principal"
+uv run pytest -q tests/test_myorder_runtime_ingestion.py -k "fee_pending or principal"
+uv run pytest -q tests/test_external_cash_adjustments.py -k "fee_pending or drift"
+uv run pytest -q tests/test_position_authority_recovery_state.py
+uv run pytest -q tests/test_recovery_restart_regression.py -k "fee_pending or startup"
+uv run pytest -q
 ```
 
-If the full test suite is too slow, run the targeted tests first, then run the full suite if feasible.
+Add narrower tests if the existing suite is too slow, but the final report must state exactly what was run.
 
-Final report format:
+---
 
-Return a concise but complete engineering report with these sections:
+## Incident fixture requirement
 
-1. Summary
+Create a reproducible fixture for this incident class if the repo has a fixture convention. Use a sanitized fixture approximating the live case:
 
-State what was changed and why.
+```text
+side=BUY
+price=115465000
+qty=0.00059998
+notional≈69276.691
+fee=27.71
+client_order_id=live_1777104360000_buy_aee4c564
+exchange_order_id=C0101000002949768709
+fill_id=C0101000000983820316
+fee_status=order_level_candidate
+```
 
-2. Hypotheses evaluated
+If including exact live identifiers is inappropriate, use clearly similar synthetic identifiers but preserve the numerical shape.
 
-For each hypothesis, mark one of:
+Use the fixture to reproduce:
 
-* supported
-* partially supported
-* falsified
-* still unresolved
+```text
+Before fix:
+  principal not applied
+  local asset remains stale
+  broker/local mismatch possible
 
-Include evidence from code/tests.
+After fix:
+  principal applied
+  fee pending isolated
+  broker/local asset converged
+```
 
-3. Design changes
+---
 
-Explain the new or revised state semantics and why they prevent the class of incidents.
+## Out of scope unless needed
 
-4. Files changed
+Do not perform a broad rewrite of the trading strategy.
 
-List each changed file and its role.
+Do not loosen risk checks globally.
 
-5. Safety properties preserved
+Do not make flatten automatically run as recovery.
 
-Explicitly confirm duplicate order, overfill, ambiguous fee, hard halt, and operator-review safety.
+Do not hide mismatches by increasing tolerances.
 
-6. Tests
+Do not rely on manual SQLite edits as a normal recovery path.
 
-List tests added/changed and commands run, with pass/fail results.
+Do not assume the prior diagnosis is fully correct; verify it.
 
-7. Operational impact
+---
 
-Explain how the next live fee-pending incident should behave differently:
+## Deliverables
 
-* what gets logged
-* whether trading continues
-* when new submissions are blocked
-* when operator action is required
-* what report/command the operator should use
+Produce a PR or working branch with:
 
-8. Remaining risks / follow-up
+1. Code changes implementing principal-first fill accounting or a clearly justified smaller intermediate step.
+2. DB migration or schema changes if required.
+3. Updated tests and fixtures.
+4. Updated docs/runbook:
 
-List any remaining limitations, especially if a full DB schema migration was deferred.
+   * `OPERATIONS_STATE_MACHINE.md`
+   * operator recovery docs if present.
+5. Improved recovery/health reporting for:
+
+   * root versus derived blockers,
+   * principal-applied status,
+   * fee-only pending status,
+   * fee validation diagnostics.
+6. A final report.
+
+---
+
+## Final report format
+
+In the final response, use this exact structure:
+
+```markdown
+# Summary
+
+- What was changed.
+- What was intentionally not changed.
+
+# Hypotheses Checked
+
+## H1: Fee pending blocks principal accounting
+- Verdict: confirmed / refuted / partially confirmed
+- Evidence:
+- Code/tests touched:
+
+## H2: Order-level fee validation mismatch
+- Verdict:
+- Evidence:
+- Code/tests touched:
+
+## H3: ACCOUNTING_PENDING auto recovery does not complete reliably
+- Verdict:
+- Evidence:
+- Code/tests touched:
+
+## H4: Lot projection drift is a materialized-view consistency problem
+- Verdict:
+- Evidence:
+- Code/tests touched:
+
+## H5: Flatten is being misused as recovery
+- Verdict:
+- Evidence:
+- Code/tests touched:
+
+# Design Implemented
+
+- Principal accounting model:
+- Fee finalization model:
+- Readiness / startup gate model:
+- Lot projection model:
+- Flatten / closeout policy:
+
+# Safety Properties Preserved
+
+- Invalid principal evidence:
+- Invalid fee evidence:
+- Duplicate fill idempotency:
+- Overfill protection:
+- Broker/local convergence:
+
+# Tests Run
+
+Paste exact commands and results.
+
+# Operational Notes
+
+- How to interpret fee-only pending after this change.
+- What operator should do after BUY/SELL with pending fee.
+- What operator should not do.
+- Remaining risks or follow-up issues.
+```
+
+The central priority is this:
+
+> Do not patch around `fee_pending`. Redesign the accounting path so valid exchange execution principal is applied immediately and fee uncertainty is isolated, observable, replayable, and finalizable without producing broker/local position mismatch or flatten loops.
 

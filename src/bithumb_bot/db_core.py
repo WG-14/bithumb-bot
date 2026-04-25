@@ -45,6 +45,9 @@ DIAGNOSTIC_ACCOUNTING_EVENT_FAMILIES = (
 _CASH_QUANTUM = Decimal("0.00000001")
 _ASSET_QUANTUM = Decimal("0.000000000001")
 FEE_ACCOUNTING_COMPLETE_EPS = 1e-12
+FILL_FEE_ACCOUNTING_STATUS_FINALIZED = "fee_finalized"
+FILL_FEE_ACCOUNTING_STATUS_PENDING = "principal_applied_fee_pending"
+FILL_FEE_ACCOUNTING_STATUS_BLOCKED = "fee_validation_blocked"
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,7 @@ class FillAccountingIncidentVerdict:
     final_fee_applied: bool
     authoritative_fill_row_id: int | None
     authoritative_fill_fee: float | None
+    authoritative_fill_fee_accounting_status: str | None
     latest_observation_id: int | None
     latest_observation_event_ts: int | None
     latest_observation_fee_status: str | None
@@ -87,6 +91,7 @@ class FillAccountingIncidentVerdict:
             "final_fee_applied": bool(self.final_fee_applied),
             "authoritative_fill_row_id": self.authoritative_fill_row_id,
             "authoritative_fill_fee": self.authoritative_fill_fee,
+            "authoritative_fill_fee_accounting_status": self.authoritative_fill_fee_accounting_status,
             "latest_observation_id": self.latest_observation_id,
             "latest_observation_event_ts": self.latest_observation_event_ts,
             "latest_observation_fee_status": self.latest_observation_fee_status,
@@ -1408,6 +1413,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             price REAL NOT NULL,
             qty REAL NOT NULL,
             fee REAL NOT NULL DEFAULT 0,
+            fee_accounting_status TEXT NOT NULL DEFAULT 'fee_finalized',
+            observed_fee_status TEXT NOT NULL DEFAULT 'complete',
+            observed_fee_source TEXT NOT NULL DEFAULT 'trade_level_fee',
+            observed_fee_confidence TEXT NOT NULL DEFAULT 'authoritative',
+            observed_fee_provenance TEXT,
+            observed_fee_validation_reason TEXT,
+            observed_fee_validation_checks TEXT,
+            trade_id INTEGER,
             reference_price REAL,
             slippage_bps REAL,
             intended_lot_count INTEGER,
@@ -1419,6 +1432,34 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
     _ensure_column(conn, "fills", "fill_id", "fill_id TEXT")
+    _ensure_column(
+        conn,
+        "fills",
+        "fee_accounting_status",
+        "fee_accounting_status TEXT NOT NULL DEFAULT 'fee_finalized'",
+    )
+    _ensure_column(
+        conn,
+        "fills",
+        "observed_fee_status",
+        "observed_fee_status TEXT NOT NULL DEFAULT 'complete'",
+    )
+    _ensure_column(
+        conn,
+        "fills",
+        "observed_fee_source",
+        "observed_fee_source TEXT NOT NULL DEFAULT 'trade_level_fee'",
+    )
+    _ensure_column(
+        conn,
+        "fills",
+        "observed_fee_confidence",
+        "observed_fee_confidence TEXT NOT NULL DEFAULT 'authoritative'",
+    )
+    _ensure_column(conn, "fills", "observed_fee_provenance", "observed_fee_provenance TEXT")
+    _ensure_column(conn, "fills", "observed_fee_validation_reason", "observed_fee_validation_reason TEXT")
+    _ensure_column(conn, "fills", "observed_fee_validation_checks", "observed_fee_validation_checks TEXT")
+    _ensure_column(conn, "fills", "trade_id", "trade_id INTEGER")
     _ensure_column(conn, "fills", "reference_price", "reference_price REAL")
     _ensure_column(conn, "fills", "slippage_bps", "slippage_bps REAL")
     _ensure_column(conn, "fills", "intended_lot_count", "intended_lot_count INTEGER")
@@ -2122,6 +2163,12 @@ def existing_fill_fee_complete(existing_fill: Any | None) -> bool:
     if existing_fill is None:
         return False
     try:
+        fee_accounting_status = str(existing_fill["fee_accounting_status"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        fee_accounting_status = ""
+    if fee_accounting_status:
+        return fee_accounting_status == FILL_FEE_ACCOUNTING_STATUS_FINALIZED
+    try:
         fee = existing_fill["fee"]
     except (KeyError, IndexError, TypeError):
         fee = None
@@ -2147,7 +2194,11 @@ def load_matching_accounted_fill(
     if fill_id_text:
         row = conn.execute(
             """
-            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
+            SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee,
+                   fee_accounting_status, observed_fee_status, observed_fee_source,
+                   observed_fee_confidence, observed_fee_provenance,
+                   observed_fee_validation_reason, observed_fee_validation_checks,
+                   trade_id
             FROM fills
             WHERE client_order_id=? AND fill_id=?
             LIMIT 1
@@ -2158,13 +2209,33 @@ def load_matching_accounted_fill(
             return row
     return conn.execute(
         """
-        SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee
+        SELECT id, client_order_id, fill_id, fill_ts, price, qty, fee,
+               fee_accounting_status, observed_fee_status, observed_fee_source,
+               observed_fee_confidence, observed_fee_provenance,
+               observed_fee_validation_reason, observed_fee_validation_checks,
+               trade_id
         FROM fills
         WHERE client_order_id=? AND fill_ts=? AND ABS(price-?) < 1e-12 AND ABS(qty-?) < 1e-12
         LIMIT 1
         """,
         (client_order_id_text, int(fill_ts), float(price), float(qty)),
     ).fetchone()
+
+
+def fill_fee_accounting_status(existing_fill: Any | None) -> str:
+    if existing_fill is None:
+        return ""
+    try:
+        status = str(existing_fill["fee_accounting_status"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        status = ""
+    if status:
+        return status
+    return (
+        FILL_FEE_ACCOUNTING_STATUS_FINALIZED
+        if existing_fill_fee_complete(existing_fill)
+        else FILL_FEE_ACCOUNTING_STATUS_PENDING
+    )
 
 
 def _fill_incident_identity(
@@ -2267,6 +2338,7 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
             qty=qty,
         )
         final_fee_applied = existing_fill_fee_complete(existing_fill)
+        authoritative_fill_fee_accounting_status = fill_fee_accounting_status(existing_fill) or None
         repairs = _matching_fee_pending_repairs(
             conn,
             client_order_id=client_order_id,
@@ -2283,8 +2355,16 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
             1 for row in rows if str(row["accounting_status"] or "") == "accounting_complete"
         )
 
-        if latest_accounting_status == "fee_pending" and not final_fee_applied and not repair_present:
-            canonical_state = "active_fee_pending"
+        if existing_fill is None and latest_accounting_status == "fee_pending":
+            canonical_state = "unapplied_principal_pending"
+            incident_scope = "active_blocking"
+            active_issue = True
+        elif authoritative_fill_fee_accounting_status == FILL_FEE_ACCOUNTING_STATUS_PENDING:
+            canonical_state = FILL_FEE_ACCOUNTING_STATUS_PENDING
+            incident_scope = "active_degraded"
+            active_issue = False
+        elif authoritative_fill_fee_accounting_status == FILL_FEE_ACCOUNTING_STATUS_BLOCKED:
+            canonical_state = FILL_FEE_ACCOUNTING_STATUS_BLOCKED
             incident_scope = "active_blocking"
             active_issue = True
         elif latest_accounting_status == "fee_pending" and final_fee_applied:
@@ -2323,6 +2403,7 @@ def build_fill_accounting_incident_projection(conn: sqlite3.Connection) -> list[
                 authoritative_fill_fee=(
                     float(existing_fill["fee"]) if existing_fill is not None and existing_fill["fee"] is not None else None
                 ),
+                authoritative_fill_fee_accounting_status=authoritative_fill_fee_accounting_status,
                 latest_observation_id=int(latest["id"]),
                 latest_observation_event_ts=int(latest["event_ts"] or 0),
                 latest_observation_fee_status=latest_fee_status or None,
@@ -2360,13 +2441,25 @@ def summarize_fill_accounting_incident_projection(conn: sqlite3.Connection) -> d
     active = [v for v in verdicts if v.active_issue]
     stale = [v for v in verdicts if v.canonical_incident_state == "already_accounted_observation_stale"]
     repaired = [v for v in verdicts if v.canonical_incident_state == "repaired"]
+    unapplied = [v for v in verdicts if v.canonical_incident_state == "unapplied_principal_pending"]
+    principal_applied_pending = [
+        v for v in verdicts if v.canonical_incident_state == FILL_FEE_ACCOUNTING_STATUS_PENDING
+    ]
+    fee_validation_blocked = [
+        v for v in verdicts if v.canonical_incident_state == FILL_FEE_ACCOUNTING_STATUS_BLOCKED
+    ]
+    finalized = [v for v in verdicts if v.authoritative_fill_fee_accounting_status == FILL_FEE_ACCOUNTING_STATUS_FINALIZED]
     complete = [
         v for v in verdicts if v.latest_observation_accounting_status == "accounting_complete" and not v.active_issue
     ]
     return {
         "projection_kind": "fill_accounting_incident_projection",
         "incident_count": len(verdicts),
-        "active_fee_pending_count": sum(1 for v in active if v.canonical_incident_state == "active_fee_pending"),
+        "active_fee_pending_count": len(unapplied),
+        "unapplied_principal_pending_count": len(unapplied),
+        "principal_applied_fee_pending_count": len(principal_applied_pending),
+        "fee_validation_blocked_count": len(fee_validation_blocked),
+        "fee_finalized_count": len(finalized),
         "active_issue_count": len(active),
         "already_accounted_observation_stale_count": len(stale),
         "repaired_count": len(repaired),

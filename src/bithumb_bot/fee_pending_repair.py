@@ -16,7 +16,7 @@ from .db_core import (
     record_fee_pending_accounting_repair,
     set_portfolio_breakdown,
 )
-from .execution import apply_fill_and_trade, order_fill_tolerance
+from .execution import apply_fill_and_trade, finalize_fill_fee, order_fill_tolerance
 from .fee_authority import resolve_fee_authority_snapshot
 from .lifecycle import rebuild_lifecycle_projections_from_trades, summarize_position_lots
 from .oms import set_status
@@ -289,42 +289,23 @@ def apply_fee_pending_accounting_repair(
         note=note,
     )
     if str(preview.get("repair_mode")) == "complete_existing_fill_fee":
-        existing_fill_id = int(preview["existing_fill_id"] or 0)
-        if existing_fill_id <= 0:
-            raise RuntimeError("existing fill fee repair missing existing_fill_id")
-        conn.execute(
-            "UPDATE fills SET fee=? WHERE id=?",
-            (float(preview["fee"]), existing_fill_id),
-        )
-        conn.execute(
-            """
-            UPDATE trades
-            SET fee=?
-            WHERE client_order_id=?
-              AND ts=?
-              AND ABS(price-?) < 1e-12
-              AND ABS(qty-?) < 1e-12
-            """,
-            (
-                float(preview["fee"]),
-                str(preview["client_order_id"]),
-                int(preview["fill_ts"]),
-                float(preview["price"]),
-                float(preview["qty"]),
-            ),
-        )
-        replay_after_fee = compute_accounting_replay(conn)
-        set_portfolio_breakdown(
-            conn,
-            cash_available=normalize_cash_amount(replay_after_fee["replay_cash"]),
-            cash_locked=0.0,
-            asset_available=normalize_asset_qty(replay_after_fee["replay_qty"]),
-            asset_locked=0.0,
-        )
         applied = {
             "repair_mode": "complete_existing_fill_fee",
-            "existing_fill_id": existing_fill_id,
-            "fee": float(preview["fee"]),
+            **finalize_fill_fee(
+                conn,
+                client_order_id=str(preview["client_order_id"]),
+                fill_id=str(preview["fill_id"] or "") or None,
+                fill_ts=int(preview["fill_ts"]),
+                price=float(preview["price"]),
+                qty=float(preview["qty"]),
+                fee=float(preview["fee"]),
+                fee_status="operator_confirmed",
+                fee_source="operator_confirmed",
+                fee_confidence="authoritative",
+                fee_provenance=str(preview["fee_provenance"]),
+                fee_validation_reason="operator_confirmed",
+                fee_validation_checks={"operator_confirmed": True},
+            ),
         }
     else:
         applied = apply_fill_and_trade(

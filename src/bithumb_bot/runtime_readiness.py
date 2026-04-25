@@ -288,7 +288,16 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             max_qty_decimals=(None if lot_definition is None else lot_definition.max_qty_decimals),
         )
         fill_accounting_incident_summary = summarize_fill_accounting_incident_projection(conn)
-        fee_pending_count = int(fill_accounting_incident_summary.get("active_issue_count") or 0)
+        unapplied_principal_pending_count = int(
+            fill_accounting_incident_summary.get("unapplied_principal_pending_count") or 0
+        )
+        principal_applied_fee_pending_count = int(
+            fill_accounting_incident_summary.get("principal_applied_fee_pending_count") or 0
+        )
+        fee_validation_blocked_count = int(
+            fill_accounting_incident_summary.get("fee_validation_blocked_count") or 0
+        )
+        fee_pending_count = unapplied_principal_pending_count
         fee_gap_required = _metadata_int(metadata, "fee_gap_recovery_required") > 0
         fee_gap_adjustment_count = _metadata_int(metadata, "fee_gap_adjustment_count")
         fee_gap_adjustment_latest_event_ts = _metadata_int(metadata, "fee_gap_adjustment_latest_event_ts")
@@ -392,18 +401,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         operator_next_action = "resume_now"
         recommended_command = "uv run python bot.py resume"
 
-        if fee_pending_count > 0:
-            stage = "ACCOUNTING_AUTO_RECOVERING"
-            blockers.append("FEE_PENDING_AUTO_RECOVERING")
+        if unapplied_principal_pending_count > 0:
+            stage = "UNAPPLIED_PRINCIPAL_PENDING"
+            blockers.append("UNAPPLIED_PRINCIPAL_PENDING")
             categories.append("accounting_latency")
             operator_next_action = "wait_for_auto_reconcile_or_review_fee_evidence"
             recommended_command = "uv run python bot.py recovery-report"
             structured_blockers.append(
                 _make_structured_blocker(
-                    code="FEE_PENDING_AUTO_RECOVERING",
+                    code="UNAPPLIED_PRINCIPAL_PENDING",
                     category="accounting_latency",
                     stage=stage,
-                    detail="fee-pending fill accounting is auto-recovering; new submissions stay blocked until accounting converges",
+                    detail="broker fill principal is still unapplied; new submissions and closeout remain blocked until principal accounting converges",
                     operator_next_action=operator_next_action,
                     recommended_command=recommended_command,
                     projection_convergence=projection_convergence,
@@ -411,6 +420,30 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
                     authority_assessment=authority_assessment,
                 )
             )
+        elif fee_validation_blocked_count > 0:
+            stage = "FEE_VALIDATION_BLOCKED"
+            blockers.append("FEE_VALIDATION_BLOCKED")
+            categories.append("accounting_truth")
+            operator_next_action = "review_fee_evidence"
+            recommended_command = "uv run python bot.py recovery-report"
+            structured_blockers.append(
+                _make_structured_blocker(
+                    code="FEE_VALIDATION_BLOCKED",
+                    category="accounting_truth",
+                    stage=stage,
+                    detail="principal is applied but fee validation is blocked; operator review is required before new submissions resume",
+                    operator_next_action=operator_next_action,
+                    recommended_command=recommended_command,
+                    projection_convergence=projection_convergence,
+                    authority_truth_model=authority_truth_model,
+                    authority_assessment=authority_assessment,
+                )
+            )
+        elif principal_applied_fee_pending_count > 0:
+            stage = "FEE_FINALIZATION_PENDING"
+            categories.append("accounting_latency")
+            operator_next_action = "wait_for_auto_reconcile_or_review_fee_evidence"
+            recommended_command = "uv run python bot.py recovery-report"
         elif bool(authority_assessment.get("needs_residual_normalization")):
             stage = "AUTHORITY_RESIDUAL_NORMALIZATION_PENDING"
             blockers.append("POSITION_AUTHORITY_RESIDUAL_NORMALIZATION_REQUIRED")
@@ -594,7 +627,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         resume_ready = not blockers
         run_loop_policy_allowed = bool(
             resume_ready
-            or stage == "ACCOUNTING_AUTO_RECOVERING"
+            or stage in {"UNAPPLIED_PRINCIPAL_PENDING", "FEE_FINALIZATION_PENDING"}
             or str(stage).startswith("RESUME_READY")
         )
         tradeability = classify_canonical_tradeability_state(
@@ -602,16 +635,37 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             recovery_state=canonical_recovery,
             run_loop_allowed=run_loop_policy_allowed,
         )
-        if stage == "ACCOUNTING_AUTO_RECOVERING":
+        if stage == "UNAPPLIED_PRINCIPAL_PENDING":
             reasons = [str(tradeability.why_not or "none")]
-            if "accounting_auto_recovering" not in reasons:
-                reasons.append("accounting_auto_recovering")
+            if "unapplied_principal_pending" not in reasons:
+                reasons.append("unapplied_principal_pending")
             tradeability = replace(
                 tradeability,
                 new_entry_allowed=False,
                 closeout_allowed=False,
                 why_not=";".join(item for item in reasons if item and item != "none"),
                 operator_next_action="wait_for_auto_reconcile_or_review_fee_evidence",
+            )
+        elif stage == "FEE_FINALIZATION_PENDING":
+            reasons = [str(tradeability.why_not or "none")]
+            if "fee_finalization_pending" not in reasons:
+                reasons.append("fee_finalization_pending")
+            tradeability = replace(
+                tradeability,
+                new_entry_allowed=False,
+                why_not=";".join(item for item in reasons if item and item != "none"),
+                operator_next_action="wait_for_auto_reconcile_or_review_fee_evidence",
+            )
+        elif stage == "FEE_VALIDATION_BLOCKED":
+            reasons = [str(tradeability.why_not or "none")]
+            if "fee_validation_blocked" not in reasons:
+                reasons.append("fee_validation_blocked")
+            tradeability = replace(
+                tradeability,
+                new_entry_allowed=False,
+                closeout_allowed=False,
+                why_not=";".join(item for item in reasons if item and item != "none"),
+                operator_next_action="review_fee_evidence",
             )
         tradeability_operator_fields = build_tradeability_operator_fields(
             tradeability=tradeability,
@@ -633,7 +687,10 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             lot_snapshot=lot_snapshot,
             reconcile_metadata=metadata,
             fee_pending_count=fee_pending_count,
-            auto_recovery_count=max(accounting_pending_count, fee_pending_count),
+            auto_recovery_count=max(
+                accounting_pending_count,
+                unapplied_principal_pending_count + principal_applied_fee_pending_count,
+            ),
             fill_accounting_incident_summary=fill_accounting_incident_summary,
             fee_gap_recovery_required=fee_gap_required,
             fee_gap_resume_blocking=fee_gap_policy.resume_blocking,

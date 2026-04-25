@@ -5,7 +5,7 @@ import sqlite3
 
 from ..config import settings
 from ..db_core import mark_private_stream_event_applied, record_broker_fill_observation, record_private_stream_event
-from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance
+from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, apply_fill_principal_with_pending_fee, order_fill_tolerance
 from ..fee_observation import fee_accounting_status
 from ..oms import record_status_transition, set_exchange_order_id, set_status
 from .myorder_events import NormalizedMyOrderEvent, normalize_myorder_event_payload
@@ -171,40 +171,54 @@ def ingest_myorder_event(
                 exchange_order_id=exchange_order_id,
                 side=side,
             )
-            reason = (
-                "myorder fill accounting is fee-pending; "
-                f"exchange_order_id={exchange_order_id or '<none>'}; "
-                f"fill_id={event.fill_id}; fee_status={event.fee_status}; "
-                "automatic reconcile retry will continue until fee evidence is complete"
+            trade = apply_fill_principal_with_pending_fee(
+                conn,
+                client_order_id=client_order_id,
+                side=side,
+                fill_id=event.fill_id,
+                fill_ts=int(event.fill_ts_ms),
+                price=float(event.price),
+                qty=float(event.qty),
+                fee=event.fee,
+                fee_status=event.fee_status,
+                fee_source=event.fee_source,
+                fee_confidence=event.fee_confidence,
+                fee_provenance=event.fee_provenance,
+                fee_validation_reason=event.fee_validation_reason,
+                fee_validation_checks=event.fee_validation_checks,
+                strategy_name=strategy_name,
+                note="myorder private stream",
+                allow_entry_decision_fallback=False,
             )
-            current_status = str(row["status"] or "")
-            record_status_transition(
-                client_order_id,
-                from_status=current_status,
-                to_status="ACCOUNTING_PENDING",
-                reason=reason,
-                conn=conn,
-            )
-            set_status(
-                client_order_id,
-                "ACCOUNTING_PENDING",
-                last_error=reason,
-                conn=conn,
-            )
+            fee_accounting_status = str((trade or {}).get("fee_accounting_status") or "principal_applied_fee_pending")
+            refreshed_order = conn.execute(
+                "SELECT qty_req, qty_filled FROM orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            next_status = str(event.status or row["status"] or "PARTIAL")
+            if refreshed_order is not None:
+                qty_req = float(refreshed_order["qty_req"] or 0.0)
+                qty_filled = float(refreshed_order["qty_filled"] or 0.0)
+                fill_tol = order_fill_tolerance(qty_req if qty_req > 0 else qty_filled)
+                if qty_req > 0 and qty_filled >= qty_req - fill_tol:
+                    next_status = "FILLED"
+                elif qty_filled > fill_tol:
+                    next_status = "PARTIAL"
+            set_status(client_order_id, next_status, conn=conn)
             mark_private_stream_event_applied(
                 conn,
                 dedupe_key=event.dedupe_key,
                 applied=True,
-                applied_status="accounting_pending_fee_pending",
+                applied_status=fee_accounting_status,
             )
             return MyOrderIngestResult(
                 dedupe_key=event.dedupe_key,
                 accepted=True,
                 applied=True,
-                action="accounting_pending_fee_pending",
+                action=fee_accounting_status,
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
-                status="ACCOUNTING_PENDING",
+                status=next_status,
             )
         try:
             trade = apply_fill_and_trade(

@@ -9,6 +9,7 @@ from bithumb_bot.broker.bithumb import BithumbBroker
 from bithumb_bot.broker.myorder_events import normalize_myorder_event_payload
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
+from bithumb_bot.execution import apply_fill_and_trade
 from bithumb_bot.oms import create_order
 
 
@@ -229,6 +230,9 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
         order_row = conn.execute(
             "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-entry-missing-fee'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='cid-entry-missing-fee'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='cid-entry-missing-fee'"
         ).fetchone()["cnt"]
@@ -252,13 +256,15 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
 
     assert result.accepted is True
     assert result.applied is True
-    assert result.action == "recovery_required_fee_pending"
-    assert result.status == "RECOVERY_REQUIRED"
-    assert order_row["status"] == "RECOVERY_REQUIRED"
-    assert order_row["qty_filled"] == pytest.approx(0.0)
-    assert "fee-pending" in str(order_row["last_error"])
-    assert fill_count == 0
-    assert trade_count == 0
+    assert result.action == "principal_applied_fee_pending"
+    assert result.status == "PARTIAL"
+    assert order_row["status"] == "PARTIAL"
+    assert order_row["qty_filled"] == pytest.approx(0.1)
+    assert order_row["last_error"] is None
+    assert fill_count == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert trade_count == 1
     assert observation is not None
     assert observation["fill_id"] == "fill-missing-fee"
     assert observation["fee"] is None
@@ -271,7 +277,7 @@ def test_myorder_runtime_ingestion_missing_fee_records_pending_observation_witho
     assert observation["fee_validation_reason"] == "missing_fee_field"
     assert "missing_fee_field" in str(observation["parse_warnings"])
     assert int(stream_row["applied"]) == 1
-    assert stream_row["applied_status"] == "recovery_required_fee_pending"
+    assert stream_row["applied_status"] == "principal_applied_fee_pending"
 
 
 def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete(tmp_path) -> None:
@@ -301,6 +307,9 @@ def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete
         order_row = conn.execute(
             "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-entry-paid-fee'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='cid-entry-paid-fee'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='cid-entry-paid-fee'"
         ).fetchone()["cnt"]
@@ -315,11 +324,13 @@ def test_myorder_runtime_ingestion_paid_fee_candidate_is_not_accounting_complete
     finally:
         conn.close()
 
-    assert result.action == "recovery_required_fee_pending"
-    assert order_row["status"] == "RECOVERY_REQUIRED"
-    assert order_row["qty_filled"] == pytest.approx(0.0)
-    assert "fee_status=order_level_candidate" in str(order_row["last_error"])
-    assert fill_count == 0
+    assert result.action == "principal_applied_fee_pending"
+    assert order_row["status"] == "PARTIAL"
+    assert order_row["qty_filled"] == pytest.approx(0.1)
+    assert order_row["last_error"] is None
+    assert fill_count == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
     assert observation["fee"] == pytest.approx(50.0)
     assert observation["fee_status"] == "order_level_candidate"
     assert observation["fee_source"] == "order_level_paid_fee"
@@ -402,6 +413,9 @@ def test_myorder_runtime_ingestion_material_zero_fee_marks_recovery_required(tmp
         order_row = conn.execute(
             "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='cid-entry-live-zero-fee'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='cid-entry-live-zero-fee'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='cid-entry-live-zero-fee'"
         ).fetchone()["cnt"]
@@ -417,12 +431,14 @@ def test_myorder_runtime_ingestion_material_zero_fee_marks_recovery_required(tmp
 
     assert result.accepted is True
     assert result.applied is True
-    assert result.action == "recovery_required_fee_pending"
-    assert result.status == "RECOVERY_REQUIRED"
-    assert order_row["status"] == "RECOVERY_REQUIRED"
-    assert order_row["qty_filled"] == pytest.approx(0.0)
-    assert "fee_status=zero_reported" in str(order_row["last_error"])
-    assert fill_count == 0
+    assert result.action == "fee_validation_blocked"
+    assert result.status == "PARTIAL"
+    assert order_row["status"] == "PARTIAL"
+    assert order_row["qty_filled"] == pytest.approx(0.1)
+    assert order_row["last_error"] is None
+    assert fill_count == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "fee_validation_blocked"
     assert observation is not None
     assert observation["fee"] == pytest.approx(0.0)
     assert observation["fee_status"] == "zero_reported"
@@ -650,6 +666,24 @@ def test_myorder_paid_fee_fields_remain_fee_pending_fill_observation(tmp_path) -
     try:
         create_order(
             conn=conn,
+            client_order_id="cid-paid-fee-seed-buy",
+            side="BUY",
+            qty_req=0.1,
+            price=100_000_000.0,
+            status="FILLED",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="cid-paid-fee-seed-buy",
+            side="BUY",
+            fill_id="seed-buy-fill",
+            fill_ts=1710000000001,
+            price=100_000_000.0,
+            qty=0.1,
+            fee=0.0,
+        )
+        create_order(
+            conn=conn,
             client_order_id="cid-paid-fee-fields",
             side="SELL",
             qty_req=0.1,
@@ -675,14 +709,19 @@ def test_myorder_paid_fee_fields_remain_fee_pending_fill_observation(tmp_path) -
             WHERE client_order_id='cid-paid-fee-fields'
             """
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='cid-paid-fee-fields'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='cid-paid-fee-fields'"
         ).fetchone()["cnt"]
     finally:
         conn.close()
 
-    assert result.action == "recovery_required_fee_pending"
-    assert fill_count == 0
+    assert result.action == "principal_applied_fee_pending"
+    assert fill_count == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
     assert observation["fill_id"] == "trade-paid-fee-fields"
     assert observation["side"] == "SELL"
     assert observation["fee"] == pytest.approx(50.0)

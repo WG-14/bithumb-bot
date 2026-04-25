@@ -1227,6 +1227,13 @@ def add_fill(
     price: float,
     qty: float,
     fee: float = 0.0,
+    fee_accounting_status: str = "fee_finalized",
+    observed_fee_status: str = "complete",
+    observed_fee_source: str = "trade_level_fee",
+    observed_fee_confidence: str = "authoritative",
+    observed_fee_provenance: str | None = None,
+    observed_fee_validation_reason: str | None = None,
+    observed_fee_validation_checks: dict[str, object] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     own_conn = conn is None
@@ -1289,13 +1296,20 @@ def add_fill(
                 price,
                 qty,
                 fee,
+                fee_accounting_status,
+                observed_fee_status,
+                observed_fee_source,
+                observed_fee_confidence,
+                observed_fee_provenance,
+                observed_fee_validation_reason,
+                observed_fee_validation_checks,
                 reference_price,
                 slippage_bps,
                 intended_lot_count,
                 executable_lot_count,
                 internal_lot_size
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 client_order_id,
@@ -1304,6 +1318,17 @@ def add_fill(
                 float(price),
                 float(qty),
                 float(fee),
+                str(fee_accounting_status or "fee_finalized"),
+                str(observed_fee_status or "complete"),
+                str(observed_fee_source or "trade_level_fee"),
+                str(observed_fee_confidence or "authoritative"),
+                (str(observed_fee_provenance).strip() if observed_fee_provenance else None),
+                (str(observed_fee_validation_reason).strip() if observed_fee_validation_reason else None),
+                (
+                    json.dumps(observed_fee_validation_checks, ensure_ascii=False, sort_keys=True)
+                    if isinstance(observed_fee_validation_checks, dict)
+                    else None
+                ),
                 (float(reference_price) if reference_price is not None else None),
                 (float(slippage_bps) if slippage_bps is not None else None),
                 intended_lot_count,

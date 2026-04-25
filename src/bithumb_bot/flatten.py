@@ -15,6 +15,7 @@ from .marketdata import fetch_orderbook_top, validated_best_quote_prices
 from .notifier import notify
 from .observability import safety_event
 from .position_state_snapshot import build_canonical_position_snapshot
+from .runtime_readiness import compute_runtime_readiness_snapshot
 from .execution import record_order_if_missing
 from .oms import (
     payload_fingerprint,
@@ -321,6 +322,21 @@ def flatten_btc_position(*, broker, dry_run: bool = False, trigger: str = "opera
     conn = ensure_db()
     try:
         init_portfolio(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        unapplied_principal_pending_count = int(
+            (readiness.fill_accounting_incident_summary or {}).get("unapplied_principal_pending_count") or 0
+        )
+        if unapplied_principal_pending_count > 0:
+            return {
+                "status": "blocked",
+                "reason": "unapplied_principal_pending",
+                "recovery_stage": readiness.recovery_stage,
+                "unapplied_principal_pending_count": unapplied_principal_pending_count,
+                "recommended_command": "uv run python bot.py recovery-report",
+                "closeout_allowed": False,
+                "dry_run": int(bool(dry_run)),
+                "trigger": trigger,
+            }
         row = conn.execute("SELECT asset_qty FROM portfolio WHERE id=1").fetchone()
         qty = float(row["asset_qty"] if row is not None else 0.0)
         snapshot = build_canonical_position_snapshot(

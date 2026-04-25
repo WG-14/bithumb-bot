@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from ..config import settings
 from ..db_core import record_broker_fill_observation
-from ..execution import LiveFillFeeValidationError, apply_fill_and_trade
+from ..execution import LiveFillFeeValidationError, apply_fill_and_trade, apply_fill_principal_with_pending_fee
 from ..fee_observation import fee_accounting_status
 from ..fill_reading import FillReadPolicy, get_broker_fills
 from ..notifier import format_event, notify
@@ -293,6 +293,7 @@ def reconcile_apply_fills_and_refresh(
         policy=FillReadPolicy.OBSERVATION_SALVAGE,
     )
     fee_pending_fills = [fill for fill in fills if _fill_accounting_status(fill) == "fee_pending"]
+    observation_summary: dict[str, int | str] | None = None
     if fee_pending_fills:
         observation_summary = _record_application_fill_observations(
             conn=conn,
@@ -302,54 +303,6 @@ def reconcile_apply_fills_and_refresh(
             fills=fills,
             source="live_application_fee_pending",
         )
-        from_status = str(order.status or "NEW")
-        reason = (
-            "live application deferred ledger apply: broker fill observed but accounting is fee-pending; "
-            f"exchange_order_id={exchange_order_id or live_module.UNSET_EVENT_FIELD}; "
-            f"fill_id={fee_pending_fills[0].fill_id}; "
-            f"fee_status={observation_summary['latest_fee_status']}; "
-            "automatic reconcile retry will continue until fee evidence is complete"
-        )
-        live_module._mark_accounting_pending(
-            conn=conn,
-            client_order_id=client_order_id,
-            side=side,
-            from_status=from_status,
-            reason=reason,
-        )
-        update_order_intent_dedup(
-            conn,
-            intent_key=submission.intent_key,
-            client_order_id=client_order_id,
-            order_status="ACCOUNTING_PENDING",
-        )
-        exc = LiveFillFeeValidationError(reason)
-        _record_application_phase(
-            submission=submission,
-            order_status="ACCOUNTING_PENDING",
-            execution_state="application_deferred_fee_pending",
-            submission_reason_code="application_deferred_fee_pending",
-            broker_response_summary=(
-                "application_exception=LiveFillFeeValidationError;"
-                f"error={reason};observed_fill_count={observation_summary['observation_count']};"
-                f"fee_pending_fill_count={observation_summary['fee_pending_count']}"
-            ),
-            error=exc,
-        )
-        conn.commit()
-        live_module.RUN_LOG.error(
-            format_log_kv(
-                "[FILL_OBSERVATION] fee-pending broker fill observed before accounting apply",
-                client_order_id=client_order_id,
-                exchange_order_id=exchange_order_id or live_module.UNSET_EVENT_FIELD,
-                side=side,
-                observed_fill_count=observation_summary["observation_count"],
-                fee_pending_fill_count=observation_summary["fee_pending_count"],
-                latest_fee_status=observation_summary["latest_fee_status"],
-                order_status="ACCOUNTING_PENDING",
-            )
-        )
-        return None
 
     try:
         fills_to_apply = live_module._aggregate_fills_for_apply(
@@ -400,23 +353,48 @@ def reconcile_apply_fills_and_refresh(
     try:
         trade = None
         for fill in fills_to_apply:
-            trade = apply_fill_and_trade(
-                conn,
-                client_order_id=client_order_id,
-                side=side,
-                fill_id=fill.fill_id,
-                fill_ts=fill.fill_ts,
-                price=fill.price,
-                qty=fill.qty,
-                fee=fill.fee,
-                strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
-                entry_decision_id=(submission.decision_id if side == "BUY" else None),
-                exit_decision_id=(submission.decision_id if side == "SELL" else None),
-                exit_reason=(submission.decision_reason if side == "SELL" else None),
-                exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
-                note=f"live exchange_order_id={exchange_order_id}",
-                signal_ts=int(submission.ts),
-            ) or trade
+            if _fill_accounting_status(fill) == "fee_pending":
+                trade = apply_fill_principal_with_pending_fee(
+                    conn,
+                    client_order_id=client_order_id,
+                    side=side,
+                    fill_id=fill.fill_id,
+                    fill_ts=fill.fill_ts,
+                    price=fill.price,
+                    qty=fill.qty,
+                    fee=getattr(fill, "fee", None),
+                    fee_status=getattr(fill, "fee_status", "unknown"),
+                    fee_source=getattr(fill, "fee_source", None),
+                    fee_confidence=getattr(fill, "fee_confidence", None),
+                    fee_provenance=getattr(fill, "fee_provenance", None),
+                    fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                    fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                    strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
+                    entry_decision_id=(submission.decision_id if side == "BUY" else None),
+                    exit_decision_id=(submission.decision_id if side == "SELL" else None),
+                    exit_reason=(submission.decision_reason if side == "SELL" else None),
+                    exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
+                    note=f"live exchange_order_id={exchange_order_id}",
+                    signal_ts=int(submission.ts),
+                ) or trade
+            else:
+                trade = apply_fill_and_trade(
+                    conn,
+                    client_order_id=client_order_id,
+                    side=side,
+                    fill_id=fill.fill_id,
+                    fill_ts=fill.fill_ts,
+                    price=fill.price,
+                    qty=fill.qty,
+                    fee=fill.fee,
+                    strategy_name=(submission.strategy_name or settings.STRATEGY_NAME),
+                    entry_decision_id=(submission.decision_id if side == "BUY" else None),
+                    exit_decision_id=(submission.decision_id if side == "SELL" else None),
+                    exit_reason=(submission.decision_reason if side == "SELL" else None),
+                    exit_rule_name=(submission.exit_rule_name if side == "SELL" else None),
+                    note=f"live exchange_order_id={exchange_order_id}",
+                    signal_ts=int(submission.ts),
+                ) or trade
 
         refreshed = broker.get_order(
             client_order_id=client_order_id,
@@ -437,6 +415,19 @@ def reconcile_apply_fills_and_refresh(
             broker_response_summary=f"application_status={refreshed.status}",
         )
         conn.commit()
+        if observation_summary is not None:
+            live_module.RUN_LOG.warning(
+                format_log_kv(
+                    "[FILL_OBSERVATION] fee-pending broker fill principal applied with fee pending",
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id or live_module.UNSET_EVENT_FIELD,
+                    side=side,
+                    observed_fill_count=observation_summary["observation_count"],
+                    fee_pending_fill_count=observation_summary["fee_pending_count"],
+                    latest_fee_status=observation_summary["latest_fee_status"],
+                    order_status=str(refreshed.status),
+                )
+            )
         return trade
     except Exception as exc:
         _record_application_phase(

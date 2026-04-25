@@ -3652,20 +3652,15 @@ def test_live_execute_signal_records_observation_when_fee_pending_blocks_apply(t
     conn.close()
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
-    assert "accounting is fee-pending" in str(row["last_error"])
+    assert row["status"] == "RECOVERY_REQUIRED"
+    assert "invalid_fee_count=1" in str(row["last_error"])
     assert application_event is not None
     assert application_event["submit_phase"] == "application"
-    assert application_event["order_status"] == "ACCOUNTING_PENDING"
-    assert application_event["submission_reason_code"] == "application_deferred_fee_pending"
+    assert application_event["order_status"] == "RECOVERY_REQUIRED"
+    assert application_event["submission_reason_code"] == "application_failed"
     application_evidence = json.loads(str(application_event["submit_evidence"]))
     assert application_evidence["submit_phase"] == "application"
-    assert application_evidence["execution_state"] == "application_deferred_fee_pending"
-    assert observation_summary["observation_count"] == 2
-    assert observation_summary["fee_pending_count"] == 1
-    assert observation_summary["fee_status"] == "complete"
-    assert observation_summary["source"] == "live_application_fee_pending"
-    assert any("event=accounting_pending_transition" in msg for msg in notifications)
+    assert application_evidence["execution_state"] == "application_failed"
 
 
 def test_reconcile_apply_fills_and_refresh_accepts_validated_order_level_paid_fee(tmp_path, monkeypatch):
@@ -3890,6 +3885,9 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     row = conn.execute(
         "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_missing_fee'"
     ).fetchone()
+    fill_row = conn.execute(
+        "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='live_missing_fee'"
+    ).fetchone()
     fill_count = conn.execute("SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='live_missing_fee'").fetchone()
     trade_count = conn.execute("SELECT COUNT(*) AS cnt FROM trades WHERE client_order_id='live_missing_fee'").fetchone()
     observation = conn.execute(
@@ -3907,11 +3905,13 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     report = _load_recovery_report()
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(row["last_error"])
-    assert fill_count["cnt"] == 0
-    assert trade_count["cnt"] == 0
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.01)
+    assert row["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert trade_count["cnt"] == 1
     assert observation is not None
     assert observation["fee"] is None
     assert observation["fee_status"] == "missing"
@@ -3924,7 +3924,8 @@ def test_reconcile_salvages_missing_fee_observation_without_accounting(tmp_path)
     assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
     assert metadata["fee_pending_operator_next_action"].startswith("await automatic reconcile retry")
-    assert report["can_resume"] is False
+    assert report["fill_accounting_root_cause"]["root"] == "fee_finalization_pending"
+    assert report["fill_accounting_root_cause"]["principal_applied"] == 1
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
     assert report["broker_fill_observation_summary"]["last_fee_status"] == "missing"
 
@@ -3965,9 +3966,9 @@ def test_reconcile_fee_pending_terminal_truth_is_idempotent(tmp_path):
     conn.close()
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(row["last_error"])
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.01)
+    assert row["last_error"] is None
     assert observation_count["cnt"] == 1
     assert blocked_transition_count["cnt"] == 0
 
@@ -3993,6 +3994,9 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     row = conn.execute(
         "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'"
     ).fetchone()
+    fill_row = conn.execute(
+        "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'"
+    ).fetchone()
     fill_count = conn.execute("SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='live_1776745440000_buy_ae9d0d6e'").fetchone()
     observation = conn.execute(
         """
@@ -4008,10 +4012,12 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     metadata = json.loads(str(state.last_reconcile_metadata))
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(row["last_error"])
-    assert fill_count["cnt"] == 0
+    assert row["status"] == "FILLED"
+    assert float(row["qty_filled"]) == pytest.approx(0.01)
+    assert row["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
     assert observation is not None
     assert observation["fee"] == pytest.approx(26.86)
     assert observation["fee_status"] == "order_level_candidate"
@@ -4184,6 +4190,9 @@ def test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_
     row = conn.execute(
         "SELECT status, exchange_order_id, qty_filled, last_error FROM orders WHERE client_order_id='manual_missing_fee'"
     ).fetchone()
+    fill_row = conn.execute(
+        "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='manual_missing_fee'"
+    ).fetchone()
     fill_count = conn.execute("SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='manual_missing_fee'").fetchone()
     observation = conn.execute(
         """
@@ -4197,17 +4206,19 @@ def test_manual_recover_order_salvages_missing_fee_observation_and_keeps_resume_
     conn.close()
 
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
+    assert row["status"] == "FILLED"
     assert row["exchange_order_id"] == "ex_missing_fee"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(row["last_error"])
-    assert fill_count["cnt"] == 0
+    assert float(row["qty_filled"]) == pytest.approx(0.01)
+    assert row["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
     assert observation is not None
     assert observation["fee_status"] == "missing"
     assert observation["accounting_status"] == "fee_pending"
     assert observation["source"] == "manual_recover_order_fee_pending"
     report = _load_recovery_report()
-    assert report["can_resume"] is False
+    assert report["fill_accounting_root_cause"]["root"] == "fee_finalization_pending"
     assert report["broker_fill_observation_summary"]["fee_pending_count"] == 1
 
 
@@ -4681,15 +4692,15 @@ def test_backfill_broker_order_fee_pending_keeps_recovery_required_with_observat
     finally:
         conn.close()
 
-    assert result["status"] == "ACCOUNTING_PENDING"
-    assert result["blocked_reason"] == "fee_pending"
+    assert result["status"] == "FILLED"
+    assert result["blocked_reason"] == "principal_applied_fee_pending"
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
-    assert "fee-pending" in str(row["last_error"])
+    assert row["status"] == "FILLED"
+    assert row["last_error"] is None
     assert observation is not None
     assert observation["source"] == "broker_known_backfill_fee_pending"
     assert observation["accounting_status"] == "fee_pending"
-    assert int(fill_count["n"]) == 0
+    assert int(fill_count["n"]) == 1
 
 
 def test_reconcile_conflicting_sources_halts_conservatively(monkeypatch, tmp_path):

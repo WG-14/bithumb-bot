@@ -2643,6 +2643,10 @@ def _load_recovery_report(
         "projection_kind": "fill_accounting_incident_projection",
         "incident_count": 0,
         "active_fee_pending_count": 0,
+        "unapplied_principal_pending_count": 0,
+        "principal_applied_fee_pending_count": 0,
+        "fee_validation_blocked_count": 0,
+        "fee_finalized_count": 0,
         "active_issue_count": 0,
         "already_accounted_observation_stale_count": 0,
         "repaired_count": 0,
@@ -2812,6 +2816,52 @@ def _load_recovery_report(
         broker_qty_known and abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(portfolio_qty)) <= 1e-12
     )
     lot_projection_converged = bool(lot_projection.get("converged"))
+    fill_root_cause = "none"
+    fill_root_summary = {
+        "root": "none",
+        "principal_applied": 0,
+        "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
+        "fee_status": broker_fill_observation_summary.get("last_fee_status") or "none",
+        "operator_action": "none",
+        "derived_blockers": [],
+    }
+    if int(fill_accounting_incident_projection.get("unapplied_principal_pending_count") or 0) > 0:
+        derived_blockers: list[str] = []
+        if not broker_portfolio_converged:
+            derived_blockers.append("broker_local_asset_mismatch")
+        if not lot_projection_converged:
+            derived_blockers.append("position_projection_drift")
+        if not bool(runtime_readiness_snapshot.get("resume_ready")):
+            derived_blockers.append("resume_blocked")
+        fill_root_cause = "unapplied_principal_fill"
+        fill_root_summary = {
+            "root": fill_root_cause,
+            "principal_applied": 0,
+            "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
+            "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "operator_action": "wait_for_auto_reconcile_or_review_fee_evidence",
+            "derived_blockers": derived_blockers,
+        }
+    elif int(fill_accounting_incident_projection.get("fee_validation_blocked_count") or 0) > 0:
+        fill_root_cause = "fee_validation_blocked"
+        fill_root_summary = {
+            "root": fill_root_cause,
+            "principal_applied": 1,
+            "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
+            "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "operator_action": "review_fee_evidence",
+            "derived_blockers": ["resume_blocked"],
+        }
+    elif int(fill_accounting_incident_projection.get("principal_applied_fee_pending_count") or 0) > 0:
+        fill_root_cause = "fee_finalization_pending"
+        fill_root_summary = {
+            "root": fill_root_cause,
+            "principal_applied": 1,
+            "broker_local_asset_converged": 1 if broker_portfolio_converged else 0,
+            "fee_status": broker_fill_observation_summary.get("last_fee_status") or "unknown",
+            "operator_action": "none_or_review_fee_evidence",
+            "derived_blockers": [],
+        }
     blocking_incident_class = (
         str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
     )
@@ -2898,6 +2948,7 @@ def _load_recovery_report(
         "recovery_blocker_categories": runtime_readiness_snapshot.get("blocker_categories"),
         "broker_fill_observation_summary": broker_fill_observation_summary,
         "fill_accounting_incident_projection": fill_accounting_incident_projection,
+        "fill_accounting_root_cause": fill_root_summary,
         "trading_enabled": bool(state.trading_enabled),
         "trading_state": (
             "blocked"

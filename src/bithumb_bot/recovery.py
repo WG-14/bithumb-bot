@@ -31,7 +31,13 @@ from .db_core import (
     set_portfolio_breakdown,
 )
 from .dust import build_dust_display_context, build_position_state_model, classify_dust_residual, dust_qty_gap_tolerance
-from .execution import LiveFillFeeValidationError, apply_fill_and_trade, order_fill_tolerance, record_order_if_missing
+from .execution import (
+    LiveFillFeeValidationError,
+    apply_fill_and_trade,
+    apply_fill_principal_with_pending_fee,
+    order_fill_tolerance,
+    record_order_if_missing,
+)
 from .fee_observation import fee_accounting_status
 from .fill_reading import FillReadPolicy, get_broker_fills
 from .lifecycle import mark_harmless_dust_positions, summarize_position_lots
@@ -1064,24 +1070,42 @@ def _apply_recent_fills(
                 fills=[fill],
                 source="reconcile_recent_activity_fee_pending",
             )
-            _mark_accounting_pending_with_reason(
+            apply_fill_principal_with_pending_fee(
                 conn,
                 client_order_id=local_id,
                 side=str(local["side"]),
-                from_status=str(local["status"]),
-                reason=(
-                    "recent broker fill observed but accounting is fee-pending; "
-                    f"exchange_order_id={remote_exchange_id or '<none>'}; "
-                    f"fill_id={fill.fill_id}; "
-                    f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                    "automatic reconcile retry will continue until fee evidence is complete"
-                ),
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=getattr(fill, "fee", None),
+                fee_status=getattr(fill, "fee_status", "unknown"),
+                fee_source=getattr(fill, "fee_source", None),
+                fee_confidence=getattr(fill, "fee_confidence", None),
+                fee_provenance=getattr(fill, "fee_provenance", None),
+                fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                note=f"reconcile recent exchange_order_id={remote_exchange_id or '<none>'}",
+                allow_entry_decision_fallback=False,
             )
             updates = _fee_pending_metadata_updates(observation_summary)
             if fee_pending_updates is None:
                 fee_pending_updates = updates
             else:
                 _merge_fee_pending_metadata(fee_pending_updates, updates)
+            applied = True
+            order_row = conn.execute(
+                "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
+                (local_id,),
+            ).fetchone()
+            if order_row is not None:
+                next_status = _status_after_recent_fill_replay(
+                    current_status=str(order_row["status"]),
+                    qty_req=float(order_row["qty_req"]),
+                    qty_filled=float(order_row["qty_filled"]),
+                )
+                if next_status is not None:
+                    set_status(local_id, next_status, conn=conn)
             continue
 
         try:
@@ -1352,22 +1376,39 @@ def _try_resolve_submit_unknown_from_recent_activity(
                 fills=list(interpretation.matched_fills),
                 source="reconcile_recent_activity_fee_pending",
             )
-            _mark_accounting_pending_with_reason(
+            apply_fill_principal_with_pending_fee(
                 conn,
                 client_order_id=client_order_id,
                 side=side,
-                from_status="SUBMIT_UNKNOWN",
-                reason=(
-                    "submit_unknown recent broker fill observed but accounting is fee-pending; "
-                    f"exchange_order_id={matched_exchange_order_id or '<none>'}; "
-                    f"fill_id={fill.fill_id}; "
-                    f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                    "automatic reconcile retry will continue until fee evidence is complete"
-                ),
+                fill_id=fill.fill_id,
+                fill_ts=fill.fill_ts,
+                price=fill.price,
+                qty=fill.qty,
+                fee=getattr(fill, "fee", None),
+                fee_status=getattr(fill, "fee_status", "unknown"),
+                fee_source=getattr(fill, "fee_source", None),
+                fee_confidence=getattr(fill, "fee_confidence", None),
+                fee_provenance=getattr(fill, "fee_provenance", None),
+                fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                note=f"reconcile submit_unknown recent exchange_order_id={matched_exchange_order_id or '<none>'}",
+                allow_entry_decision_fallback=False,
             )
+            order_row = conn.execute(
+                "SELECT status, qty_req, qty_filled FROM orders WHERE client_order_id=?",
+                (client_order_id,),
+            ).fetchone()
+            if order_row is not None:
+                next_status = _status_after_recent_fill_replay(
+                    current_status=str(order_row["status"]),
+                    qty_req=float(order_row["qty_req"]),
+                    qty_filled=float(order_row["qty_filled"]),
+                )
+                if next_status is not None:
+                    set_status(client_order_id, next_status, conn=conn)
             return SubmitUnknownResolution(
                 True,
-                False,
+                True,
                 client_order_id,
                 matched_exchange_order_id,
                 reason_code=REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED,
@@ -1822,12 +1863,6 @@ def _fill_fee_accounting_status(fill: BrokerFill) -> str:
 
 
 def _fill_fee_is_accounting_complete(fill: BrokerFill) -> bool:
-    fee_status = str(getattr(fill, "fee_status", "complete") or "").strip()
-    if fee_status in {"complete", "operator_confirmed"} and fill.fee is not None:
-        try:
-            return float(fill.fee) >= 0.0
-        except (TypeError, ValueError):
-            return False
     return _fill_fee_accounting_status(fill) == "accounting_complete"
 
 
@@ -2196,22 +2231,44 @@ def reconcile_with_broker(broker: Broker) -> None:
                     fills=fills,
                     source="reconcile_fee_pending",
                 )
-                _mark_accounting_pending_with_reason(
-                    conn,
-                    client_order_id=oid,
-                    side=str(row["side"]),
-                    from_status=remote.status,
-                    reason=(
-                        "reconcile deferred ledger apply: broker fill observed but accounting is fee-pending; "
-                        f"exchange_order_id={remote.exchange_order_id or '<none>'}; "
-                        f"fill_id={fee_pending_fill.fill_id}; "
-                        f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                        "automatic reconcile retry will continue until fee evidence is complete"
-                    ),
-                )
+                for fill in fills:
+                    if _fill_fee_is_accounting_complete(fill):
+                        apply_fill_and_trade(
+                            conn,
+                            client_order_id=oid,
+                            side=row["side"],
+                            fill_id=fill.fill_id,
+                            fill_ts=fill.fill_ts,
+                            price=fill.price,
+                            qty=fill.qty,
+                            fee=fill.fee,
+                            note=f"reconcile exchange_order_id={remote.exchange_order_id}",
+                            allow_entry_decision_fallback=False,
+                        )
+                    else:
+                        apply_fill_principal_with_pending_fee(
+                            conn,
+                            client_order_id=oid,
+                            side=row["side"],
+                            fill_id=fill.fill_id,
+                            fill_ts=fill.fill_ts,
+                            price=fill.price,
+                            qty=fill.qty,
+                            fee=getattr(fill, "fee", None),
+                            fee_status=getattr(fill, "fee_status", "unknown"),
+                            fee_source=getattr(fill, "fee_source", None),
+                            fee_confidence=getattr(fill, "fee_confidence", None),
+                            fee_provenance=getattr(fill, "fee_provenance", None),
+                            fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                            fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                            note=f"reconcile exchange_order_id={remote.exchange_order_id}",
+                            allow_entry_decision_fallback=False,
+                        )
                 _merge_fee_pending_metadata(metadata, _fee_pending_metadata_updates(observation_summary))
                 if reason_code == REASON_RECONCILE_OK:
                     reason_code = REASON_FILL_FEE_PENDING_RECOVERY_REQUIRED
+                if defer_terminal_fill_status:
+                    set_status(oid, remote.status, conn=conn)
                 continue
             fill_apply_blocked = False
             for fill in fills:
@@ -2661,7 +2718,7 @@ def recover_order_with_exchange_id(
             )
         fee_pending_fill = next((fill for fill in fills if not _fill_fee_is_accounting_complete(fill)), None)
         if fee_pending_fill is not None:
-            observation_summary = _record_fee_pending_observations(
+            _record_fee_pending_observations(
                 conn,
                 client_order_id=client_order_id,
                 side=side,
@@ -2669,19 +2726,40 @@ def recover_order_with_exchange_id(
                 fills=fills,
                 source="manual_recover_order_fee_pending",
             )
-            reason = (
-                "manual recovery blocked: fill accounting is fee-pending; "
-                f"exchange_order_id={resolved_exchange_order_id}; "
-                f"fill_id={fee_pending_fill.fill_id}; "
-                f"fee_status={observation_summary['fee_pending_latest_fee_status']}"
-            )
-            _mark_accounting_pending_with_reason(
-                conn,
-                client_order_id=client_order_id,
-                side=side,
-                from_status="RECOVERY_REQUIRED",
-                reason=reason,
-            )
+            for fill in fills:
+                if _fill_fee_is_accounting_complete(fill):
+                    apply_fill_and_trade(
+                        conn,
+                        client_order_id=client_order_id,
+                        side=side,
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=fill.fee,
+                        note=f"manual recovery exchange_order_id={resolved_exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+                else:
+                    apply_fill_principal_with_pending_fee(
+                        conn,
+                        client_order_id=client_order_id,
+                        side=side,
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=getattr(fill, "fee", None),
+                        fee_status=getattr(fill, "fee_status", "unknown"),
+                        fee_source=getattr(fill, "fee_source", None),
+                        fee_confidence=getattr(fill, "fee_confidence", None),
+                        fee_provenance=getattr(fill, "fee_provenance", None),
+                        fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                        fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                        note=f"manual recovery exchange_order_id={resolved_exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+            set_status(client_order_id, remote.status, conn=conn)
             conn.commit()
             return
         for fill in fills:
@@ -2829,7 +2907,7 @@ def backfill_broker_order_with_exchange_id(
 
         fee_pending_fill = next((fill for fill in fills if not _fill_fee_is_accounting_complete(fill)), None)
         if fee_pending_fill is not None:
-            observation_summary = _record_fee_pending_observations(
+            _record_fee_pending_observations(
                 conn,
                 client_order_id=client_order_id,
                 side=side,
@@ -2837,28 +2915,55 @@ def backfill_broker_order_with_exchange_id(
                 fills=fills,
                 source="broker_known_backfill_fee_pending",
             )
-            reason = (
-                "broker-known backfill blocked: broker fill observed but accounting is fee-pending; "
-                f"exchange_order_id={resolved_exchange_order_id}; "
-                f"fill_id={fee_pending_fill.fill_id}; "
-                f"fee_status={observation_summary['fee_pending_latest_fee_status']}; "
-                "automatic reconcile retry will continue until fee evidence is complete"
-            )
-            _mark_accounting_pending_with_reason(
-                conn,
-                client_order_id=client_order_id,
-                side=side,
-                from_status="RECOVERY_REQUIRED",
-                reason=reason,
-            )
+            applied_fill_count = 0
+            for fill in fills:
+                if _fill_fee_is_accounting_complete(fill):
+                    apply_fill_and_trade(
+                        conn,
+                        client_order_id=client_order_id,
+                        side=side,
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=fill.fee,
+                        note=f"broker-known backfill exchange_order_id={resolved_exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+                else:
+                    apply_fill_principal_with_pending_fee(
+                        conn,
+                        client_order_id=client_order_id,
+                        side=side,
+                        fill_id=fill.fill_id,
+                        fill_ts=fill.fill_ts,
+                        price=fill.price,
+                        qty=fill.qty,
+                        fee=getattr(fill, "fee", None),
+                        fee_status=getattr(fill, "fee_status", "unknown"),
+                        fee_source=getattr(fill, "fee_source", None),
+                        fee_confidence=getattr(fill, "fee_confidence", None),
+                        fee_provenance=getattr(fill, "fee_provenance", None),
+                        fee_validation_reason=getattr(fill, "fee_validation_reason", None),
+                        fee_validation_checks=getattr(fill, "fee_validation_checks", None),
+                        note=f"broker-known backfill exchange_order_id={resolved_exchange_order_id}",
+                        allow_entry_decision_fallback=False,
+                    )
+                applied_fill_count += 1
+            remote_status = str(remote.status or "").upper()
+            if remote_status == "CANCELLED":
+                remote_status = "CANCELED"
+            if remote_status == "REJECTED":
+                remote_status = "FAILED"
+            set_status(client_order_id, remote_status, conn=conn)
             conn.commit()
             return {
                 "client_order_id": client_order_id,
                 "exchange_order_id": resolved_exchange_order_id,
-                "status": "ACCOUNTING_PENDING",
+                "status": remote_status,
                 "fill_count": len(fills),
-                "applied_fill_count": 0,
-                "blocked_reason": "fee_pending",
+                "applied_fill_count": applied_fill_count,
+                "blocked_reason": "principal_applied_fee_pending",
             }
 
         applied_fill_count = 0

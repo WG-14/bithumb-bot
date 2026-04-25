@@ -628,9 +628,9 @@ def _startup_gate_allows_process_auto_recovery(*, state, startup_gate_reason: st
         conn.close()
     return bool(
         state.last_reconcile_status == "ok"
-        and readiness_snapshot.recovery_stage == "ACCOUNTING_AUTO_RECOVERING"
+        and readiness_snapshot.recovery_stage in {"UNAPPLIED_PRINCIPAL_PENDING", "FEE_FINALIZATION_PENDING"}
         and readiness_snapshot.run_loop_allowed
-        and int(readiness_snapshot.fee_pending_count or 0) > 0
+        and int(readiness_snapshot.auto_recovery_count or 0) > 0
         and int(readiness_snapshot.recovery_required_count or 0) == 0
     )
 
@@ -891,6 +891,8 @@ def evaluate_startup_safety_gate() -> str | None:
         reasons.append("external_position_accounting_repair_required=portfolio/replay mismatch after external position change")
     if readiness_snapshot.recovery_stage == "ACCOUNTING_REPLAY_MISMATCH_PENDING":
         reasons.append("accounting_replay_mismatch_review_required=portfolio and replay remain split")
+    if readiness_snapshot.recovery_stage == "FEE_VALIDATION_BLOCKED":
+        reasons.append("fee_validation_blocked=principal_applied_operator_review_required")
     if str(normalized_position.authority_gap_reason or "") == "authority_missing_recovery_required":
         reasons.append(
             "position_authority_gap="
@@ -2241,7 +2243,7 @@ def run_loop(short_n: int, long_n: int) -> None:
                     logging.WARNING,
                     "[RUN] startup_gate_degraded_continue",
                     reason=startup_gate_reason,
-                    recovery_stage="ACCOUNTING_AUTO_RECOVERING",
+                    recovery_stage="FEE_AUTO_RECOVERY_DEGRADED",
                 )
             else:
                 latest_client_order_id, latest_exchange_order_id = _latest_order_identifiers()

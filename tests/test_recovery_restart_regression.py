@@ -1862,7 +1862,7 @@ def test_submit_unknown_timeout_metadata_recent_fill_only_resolves_on_restart(is
     assert gate_reason is None
 
 
-def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(isolated_db):
+def test_submit_unknown_recent_fill_missing_fee_applies_principal_with_pending_fee(isolated_db):
     conn = ensure_db(str(isolated_db))
     try:
         record_order_if_missing(
@@ -1892,6 +1892,9 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
         row = conn.execute(
             "SELECT status, exchange_order_id, last_error, qty_filled FROM orders WHERE client_order_id='submit_timeout_restart'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='submit_timeout_restart'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='submit_timeout_restart'"
         ).fetchone()
@@ -1914,11 +1917,13 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert broker.parse_modes
     assert set(broker.parse_modes) == {"salvage"}
     assert row is not None
-    assert row["status"] == "ACCOUNTING_PENDING"
+    assert row["status"] == "FILLED"
     assert row["exchange_order_id"] == "ex-submit-unknown-missing-fee-fill"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(row["last_error"])
-    assert fill_count["cnt"] == 0
+    assert float(row["qty_filled"]) == pytest.approx(1.0)
+    assert row["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
     assert observation is not None
     assert observation["fill_id"] == "submit_unknown_missing_fee_fill"
     assert observation["fee"] is None
@@ -1931,7 +1936,7 @@ def test_submit_unknown_recent_fill_missing_fee_observes_without_ledger_apply(is
     assert metadata["fee_pending_fill_count"] == 1
     assert metadata["fee_pending_auto_recovering"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "missing"
-    assert "accounting_pending_orders=1" in str(gate_reason)
+    assert gate_reason is None
 
 
 def test_startup_gate_fee_pending_auto_recovery_clears_persistent_process_pause(isolated_db):
@@ -2029,6 +2034,9 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
         order = conn.execute(
             "SELECT status, last_error, qty_filled FROM orders WHERE client_order_id='known_fee_candidate'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='known_fee_candidate'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) AS cnt FROM fills WHERE client_order_id='known_fee_candidate'"
         ).fetchone()
@@ -2056,11 +2064,13 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert broker.parse_modes
     assert set(broker.parse_modes) == {"salvage"}
     assert order is not None
-    assert order["status"] == "ACCOUNTING_PENDING"
-    assert float(order["qty_filled"]) == pytest.approx(0.0)
-    assert "accounting is fee-pending" in str(order["last_error"])
-    assert fill_count["cnt"] == 0
-    assert trade_count["cnt"] == 0
+    assert order["status"] == "FILLED"
+    assert float(order["qty_filled"]) == pytest.approx(1.0)
+    assert order["last_error"] is None
+    assert fill_count["cnt"] == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "principal_applied_fee_pending"
+    assert trade_count["cnt"] == 1
     assert adjustment_count["cnt"] == 0
     assert observation is not None
     assert observation["fill_id"] == "known_order_level_fee_candidate_fill"
@@ -2078,7 +2088,7 @@ def test_known_recent_fill_order_level_fee_candidate_stays_observation_until_fee
     assert replay["broker_fill_fee_candidate_order_level_count"] >= 1
     assert replay["broker_fill_missing_fee_count"] == 0
     assert "broker_fill_observations" in replay["omitted_event_families"]
-    assert "accounting_pending_orders=1" in str(gate_reason)
+    assert "fee_pending_auto_recovering=1" in str(gate_reason)
 
 
 def test_submit_unknown_weak_order_correlation_on_restart_escalates(isolated_db):
@@ -2685,6 +2695,9 @@ def test_reconcile_recent_sell_zero_fee_blocks_ledger_and_sets_recovery_required
         row = conn.execute(
             "SELECT status, qty_filled, last_error FROM orders WHERE client_order_id='reconcile_sell_zero_fee'"
         ).fetchone()
+        fill_row = conn.execute(
+            "SELECT fee, fee_accounting_status FROM fills WHERE client_order_id='reconcile_sell_zero_fee'"
+        ).fetchone()
         fill_count = conn.execute(
             "SELECT COUNT(*) FROM fills WHERE client_order_id='reconcile_sell_zero_fee'"
         ).fetchone()[0]
@@ -2697,15 +2710,14 @@ def test_reconcile_recent_sell_zero_fee_blocks_ledger_and_sets_recovery_required
     state = runtime_state.snapshot()
     assert row is not None
     assert row["status"] == "FILLED"
-    assert float(row["qty_filled"]) == pytest.approx(0.0)
-    assert "fee validation" in str(row["last_error"])
-    assert "manual recovery required" in str(row["last_error"])
-    assert fill_count == 0
-    assert trade_count == 0
-    assert state.last_reconcile_reason_code == "FEE_GAP_RECOVERY_REQUIRED"
-    assert state.last_reconcile_metadata is not None
-    assert '"fee_gap_recovery_required": 1' in state.last_reconcile_metadata
-    assert evaluate_startup_safety_gate() is not None
+    assert float(row["qty_filled"]) == pytest.approx(0.1)
+    assert row["last_error"] is None
+    assert fill_count == 1
+    assert fill_row["fee"] == pytest.approx(0.0)
+    assert fill_row["fee_accounting_status"] == "fee_validation_blocked"
+    assert trade_count == 1
+    assert state.last_reconcile_reason_code == "FILL_FEE_PENDING_RECOVERY_REQUIRED"
+    assert "fee_validation_blocked=" in str(evaluate_startup_safety_gate())
 
 
 def test_reconcile_failure_after_local_write_records_original_error_without_locked_db(isolated_db):
