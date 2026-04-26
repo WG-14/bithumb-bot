@@ -879,6 +879,7 @@ def cmd_health() -> None:
     else:
         resume_safety = "safe"
 
+    recovery_policy = build_recovery_policy_from_report(_load_recovery_report())
     recommended_commands = "uv run python bot.py recovery-report"
     if health["startup_gate_reason"]:
         halt_reason_for_summary = "STARTUP_SAFETY_GATE"
@@ -900,6 +901,11 @@ def cmd_health() -> None:
         recommended_commands = "uv run python bot.py recovery-report"
     elif halt_reason_for_summary == "KILL_SWITCH":
         recommended_commands = "uv run python bot.py recovery-report | uv run python bot.py resume"
+
+    if bool(recovery_policy.get("accounting_root_cause_unresolved")):
+        recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
+    elif bool(recovery_policy.get("flatten_primary_recommendation")):
+        recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
 
     has_critical_state = bool(
         health["startup_gate_reason"]
@@ -1267,6 +1273,20 @@ def cmd_health() -> None:
             f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
             f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
         )
+    print(
+        "  recovery_policy="
+        f"primary_incident_class={recovery_policy.get('primary_incident_class') or 'RECOVERY_READINESS'} "
+        f"recommended_mode={recovery_policy.get('recommended_mode') or 'recovery'} "
+        "accounting_root_cause_unresolved="
+        f"{1 if bool(recovery_policy.get('accounting_root_cause_unresolved')) else 0} "
+        f"accounting_evidence_reliable={1 if bool(recovery_policy.get('accounting_evidence_reliable')) else 0} "
+        f"actual_executable_exposure={1 if bool(recovery_policy.get('actual_executable_exposure')) else 0} "
+        f"additional_orders_allowed={1 if bool(recovery_policy.get('additional_orders_allowed')) else 0} "
+        "flatten_primary_recommendation="
+        f"{1 if bool(recovery_policy.get('flatten_primary_recommendation')) else 0} "
+        f"recommended_action={recovery_policy.get('recommended_action') or 'none'} "
+        f"recommended_command={recovery_policy.get('recommended_command') or 'none'}"
+    )
     rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
     if rule_snapshot is not None:
         print(
@@ -3573,6 +3593,7 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         return
 
     print("[REPAIR-PLAN]")
+    print("  preview_mode=read_only_non_mutating")
     print(
         "  "
         f"plan_id={plan.get('plan_id') or 'none'} "
@@ -3594,6 +3615,7 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         f"recommended_action={plan.get('recommended_action') or 'none'} "
         f"recommended_command={plan.get('recommended_command') or 'none'}"
     )
+    print("[POSITION-PROJECTION]")
     print(
         "  "
         f"canonical_portfolio_qty={float(plan.get('canonical_portfolio_qty') or 0.0):.12f} "

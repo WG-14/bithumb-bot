@@ -7683,6 +7683,17 @@ def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_
     assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in checklist_out
     assert "recommended_command=uv run python bot.py repair-plan" in checklist_out
 
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in health_out
+    assert "recommended_mode=forensic_accounting" in health_out
+    assert "accounting_root_cause_unresolved=1" in health_out
+    assert "additional_orders_allowed=0" in health_out
+    assert "flatten_primary_recommendation=0" in health_out
+    assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in health_out
+    assert "recommended_command=uv run python bot.py repair-plan" in health_out
+    assert "next_commands=uv run python bot.py repair-plan" in health_out
+
 
 def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp_path, capsys):
     _set_tmp_db(tmp_path)
@@ -7733,11 +7744,13 @@ def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp
     cmd_repair_plan(as_json=False)
     out = capsys.readouterr().out
     assert "[REPAIR-PLAN]" in out
+    assert "preview_mode=read_only_non_mutating" in out
     assert "plan_id=" in out
     assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in out
     assert "recommended_mode=forensic_accounting" in out
     assert "additional_orders_allowed=0" in out
     assert "flatten_primary_recommendation=0" in out
+    assert "[POSITION-PROJECTION]" in out
     assert "source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events" in out
     assert "projection_kind=open_position_lots" in out
     assert "rebuildable=1" in out
