@@ -20,11 +20,14 @@ class FeeEvaluation:
     fee_status: str
     fee_source: str
     fee_confidence: str
+    fee_authority: str
+    accounting_decision: str
     accounting_eligibility: str
     accounting_status: str
     provenance: str
     reason: str
     checks: dict[str, bool]
+    diagnostic_flags: tuple[str, ...]
 
 
 def _to_float(value: object) -> float | None:
@@ -88,11 +91,14 @@ def classify_fee_evaluation(
             fee_status=status,
             fee_source=source,
             fee_confidence=("invalid" if confidence == "unknown" else confidence),
+            fee_authority="invalid_or_unparseable",
+            accounting_decision="pending_fee_validation",
             accounting_eligibility="blocked",
             accounting_status="fee_pending",
             provenance=provenance_text,
             reason=("invalid_fee_value" if reason_text == "unknown" else reason_text),
             checks=check_map,
+            diagnostic_flags=(),
         )
     if fee_value is not None and fee_value < 0.0:
         return FeeEvaluation(
@@ -100,11 +106,14 @@ def classify_fee_evaluation(
             fee_status=status,
             fee_source=source,
             fee_confidence=("invalid" if confidence == "unknown" else confidence),
+            fee_authority="invalid_or_unparseable",
+            accounting_decision="pending_fee_validation",
             accounting_eligibility="blocked",
             accounting_status="fee_pending",
             provenance=provenance_text,
             reason=("negative_fee_blocked" if reason_text == "unknown" else reason_text),
             checks=check_map,
+            diagnostic_flags=(),
         )
 
     notional = 0.0
@@ -121,17 +130,22 @@ def classify_fee_evaluation(
             fee_status=status,
             fee_source=(source if source != "unknown" else "trade_level_fee"),
             fee_confidence=("invalid" if confidence == "unknown" else confidence),
+            fee_authority="invalid_or_unparseable",
+            accounting_decision="pending_fee_validation",
             accounting_eligibility="blocked",
             accounting_status="fee_pending",
             provenance=provenance_text,
             reason=("material_zero_fee_reported" if reason_text == "unknown" else reason_text),
             checks=check_map,
+            diagnostic_flags=(),
         )
 
     if status in ACCOUNTING_COMPLETE_FEE_STATUSES and fee_value is not None:
         resolved_source = source
         resolved_confidence = confidence
         resolved_provenance = provenance_text
+        fee_authority = "exchange_trade_level_fee"
+        diagnostic_flags: tuple[str, ...] = ()
         if status == "complete":
             resolved_source = resolved_source if resolved_source != "unknown" else "trade_level_fee"
             resolved_confidence = resolved_confidence if resolved_confidence != "unknown" else "authoritative"
@@ -144,6 +158,7 @@ def classify_fee_evaluation(
             resolved_provenance = (
                 resolved_provenance if resolved_provenance != "unknown" else "operator_confirmed"
             )
+            fee_authority = "operator_confirmed"
         elif status == "validated_order_level_paid_fee":
             resolved_source = resolved_source if resolved_source != "unknown" else "order_level_paid_fee"
             resolved_confidence = resolved_confidence if resolved_confidence != "unknown" else "validated"
@@ -152,16 +167,22 @@ def classify_fee_evaluation(
                 if resolved_provenance != "unknown"
                 else "order_level_paid_fee_validated_single_fill"
             )
+            fee_authority = "exchange_order_paid_fee_single_fill"
+            if check_map.get("expected_fee_rate_warning"):
+                diagnostic_flags = ("expected_fee_rate_mismatch",)
         return FeeEvaluation(
             fee=fee_value,
             fee_status=status,
             fee_source=resolved_source,
             fee_confidence=resolved_confidence,
+            fee_authority=fee_authority,
+            accounting_decision="finalize",
             accounting_eligibility="complete",
             accounting_status="accounting_complete",
             provenance=resolved_provenance,
             reason=("accounting_complete" if reason_text == "unknown" else reason_text),
             checks=check_map,
+            diagnostic_flags=diagnostic_flags,
         )
 
     if status in {"invalid", "unparseable"}:
@@ -178,11 +199,14 @@ def classify_fee_evaluation(
         fee_status=status,
         fee_source=source,
         fee_confidence=confidence,
+        fee_authority="configured_estimate_or_missing_fee",
+        accounting_decision="pending_fee_validation",
         accounting_eligibility=eligibility,
         accounting_status="fee_pending",
         provenance=provenance_text,
         reason=reason_text,
         checks=check_map,
+        diagnostic_flags=(),
     )
 
 

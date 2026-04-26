@@ -7556,7 +7556,9 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "observed_fee_bps_median=4.000" in health_out
     assert "fee_rate_deviation_pct=525.02" in health_out
     assert "recent_expected_fee_rate_mismatch_count=1" in health_out
+    assert "expected_fee_rate_warning_count=1" in health_out
     assert "position_authority_repair_count=0" in health_out
+    assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in health_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in health_out
 
     cmd_recovery_report(as_json=False)
@@ -7566,8 +7568,10 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "observed_fee_bps_median=4.000" in report_out
     assert "fee_rate_deviation_pct=525.02" in report_out
     assert "recent_expected_fee_rate_mismatch_count=1" in report_out
+    assert "expected_fee_rate_warning_count=1" in report_out
     assert "fee_pending_accounting_repair_count=0" in report_out
     assert "position_authority_repair_count=0" in report_out
+    assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in report_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in report_out
 
     cmd_restart_checklist()
@@ -7576,7 +7580,9 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "observed_fee_bps_median=4.000" in checklist_out
     assert "fee_rate_deviation_pct=525.02" in checklist_out
     assert "recent_expected_fee_rate_mismatch_count=1" in checklist_out
+    assert "expected_fee_rate_warning_count=1" in checklist_out
     assert "position_authority_repair_count=0" in checklist_out
+    assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in checklist_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in checklist_out
 
 

@@ -1253,10 +1253,12 @@ def cmd_health() -> None:
             f"observed_fee_bps_median={observed_fee_bps_text} "
             f"fee_rate_deviation_pct={deviation_pct_text} "
             f"configured_minus_observed_bps={deviation_bps_text} "
+            f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
             f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
             f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
             f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
             f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+            f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
             f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
         )
     rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
@@ -3382,10 +3384,12 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(
         "    "
         f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
+        f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
         f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
         f"material_notional_threshold_krw={float(fee_rate_drift.get('material_notional_threshold_krw') or 0.0):.1f} "
+        f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
         f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
     )
     fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
@@ -4201,9 +4205,11 @@ def cmd_restart_checklist() -> None:
         f"fee_rate_deviation_pct={deviation_pct_text} "
         f"configured_minus_observed_bps={deviation_bps_text} "
         f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
+        f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
         f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
+        f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
         f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
     )
 

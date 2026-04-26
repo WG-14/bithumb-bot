@@ -80,6 +80,8 @@ def test_validate_single_fill_order_level_paid_fee_accepts_exchange_paid_fee_des
     assert evaluation.accounting_status == "accounting_complete"
     assert evaluation.fee_status == "validated_order_level_paid_fee"
     assert evaluation.fee == pytest.approx(paid_fee)
+    assert evaluation.fee_authority == "exchange_order_paid_fee_single_fill"
+    assert evaluation.accounting_decision == "finalize"
     assert evaluation.checks["single_fill"] is True
     assert evaluation.checks["executed_volume_match"] is True
     assert evaluation.checks["executed_funds_match"] is True
@@ -88,6 +90,7 @@ def test_validate_single_fill_order_level_paid_fee_accepts_exchange_paid_fee_des
     assert evaluation.checks["identifiers_match"] is True
     assert evaluation.reason == "order_level_paid_fee_validated_single_fill_expected_fee_rate_mismatch"
     assert evaluation.provenance == "order_level_paid_fee_validated_single_fill_fee_rate_warning"
+    assert evaluation.diagnostic_flags == ("expected_fee_rate_mismatch",)
 
 
 def test_validate_single_fill_order_level_paid_fee_keeps_principal_path_pending_when_funds_do_not_match() -> None:
@@ -109,6 +112,8 @@ def test_validate_single_fill_order_level_paid_fee_keeps_principal_path_pending_
 
     assert evaluation.accounting_status == "fee_pending"
     assert evaluation.accounting_eligibility == "pending"
+    assert evaluation.fee_authority == "configured_estimate_or_missing_fee"
+    assert evaluation.accounting_decision == "pending_fee_validation"
     assert evaluation.fee_status == "order_level_candidate"
     assert evaluation.reason == "executed_funds_mismatch"
     assert evaluation.checks["single_fill"] is True
@@ -236,5 +241,7 @@ def test_validate_single_fill_order_level_paid_fee_keeps_unsafe_cases_pending(
     evaluation = validate_single_fill_order_level_paid_fee(**kwargs)
 
     assert evaluation.accounting_status == "fee_pending"
+    assert evaluation.fee_authority in {"configured_estimate_or_missing_fee", "invalid_or_unparseable"}
+    assert evaluation.accounting_decision == "pending_fee_validation"
     assert evaluation.fee_status == "order_level_candidate"
     assert evaluation.reason == expected_reason
