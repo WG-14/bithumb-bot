@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from bithumb_bot import runtime_state
 from bithumb_bot.app import _ledger_replay, _load_recovery_report, main as app_main
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import (
@@ -24,6 +25,7 @@ from bithumb_bot.fee_pending_repair import (
     apply_fee_pending_accounting_repair,
     build_fee_pending_accounting_repair_preview,
 )
+from bithumb_bot.repair_plan import build_repair_plan_preview_from_report
 from bithumb_bot.reporting import fetch_cash_drift_report
 from bithumb_bot.runtime_readiness import compute_runtime_readiness_snapshot
 
@@ -670,3 +672,65 @@ def test_fee_pending_repair_complete_incident_is_historical_not_active(projectio
     assert replay["broker_fill_latest_unresolved_fee_pending_count"] == 0
     assert replay["fill_accounting_repaired_incident_count"] == 1
     assert readiness.fee_pending_count == 0
+
+
+def test_repair_plan_treats_open_position_lots_as_rebuildable_projection(projection_db):
+    conn = ensure_db(str(projection_db))
+    try:
+        init_portfolio(conn)
+        record_order_if_missing(
+            conn,
+            client_order_id="projection_authority_buy",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=1_700_000_000_000,
+            status="NEW",
+        )
+        apply_fill_and_trade(
+            conn,
+            client_order_id="projection_authority_buy",
+            side="BUY",
+            fill_id="projection_authority_buy_fill",
+            fill_ts=1_700_000_000_100,
+            price=100_000_000.0,
+            qty=0.001,
+            fee=50.0,
+            note="projection authority fixture buy",
+        )
+        conn.execute("DELETE FROM open_position_lots")
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="RECONCILE_OK",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "balance_observed_ts_ms": 1_700_000_000_200,
+            "dust_residual_present": 0,
+            "dust_state": "no_dust",
+            "dust_policy_reason": "no_dust_residual",
+            "dust_broker_qty": 0.001,
+            "dust_local_qty": 0.001,
+            "dust_delta_qty": 0.0,
+            "dust_min_qty": 0.0001,
+            "dust_min_notional_krw": 5000.0,
+            "dust_broker_qty_is_dust": 0,
+            "dust_local_qty_is_dust": 0,
+            "dust_qty_gap_small": 1,
+        },
+    )
+
+    report = _load_recovery_report()
+    plan = build_repair_plan_preview_from_report(report)
+
+    assert plan["projection_kind"] == "open_position_lots"
+    assert plan["rebuildable"] is True
+    assert plan["source_of_truth"] == "fills+trades+fee_adjustments+external_adjustments+repair_events"
+    assert plan["flatten_primary_recommendation"] is False
+    assert any(
+        candidate["name"] == "rebuild-position-authority" and candidate["needed"]
+        for candidate in plan["candidate_repairs"]
+    )

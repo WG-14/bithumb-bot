@@ -20,6 +20,7 @@ from bithumb_bot.app import (
     cmd_flatten_position,
     cmd_cancel_open_orders,
     cmd_reconcile,
+    cmd_repair_plan,
     cmd_recover_order,
     cmd_recovery_report,
     cmd_risk_report,
@@ -4548,6 +4549,7 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
     payload = json.loads(out.strip().splitlines()[-1])
 
     assert set(payload.keys()) == {
+        "mode",
         "broker_recent_orders_snapshot_error",
         "balance_split_mismatch_summary",
         "dust_classification",
@@ -4598,8 +4600,9 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "fee_pending_accounting_repair_summary",
         "fee_rate_drift_diagnostics",
             "fill_accounting_incident_projection",
-            "fill_accounting_root_cause",
-            "position_authority_rebuild_preview",
+        "fill_accounting_root_cause",
+        "recovery_policy",
+        "position_authority_rebuild_preview",
             "position_authority_repair_summary",
                 "broker_fill_observation_summary",
         "runtime_readiness",
@@ -7602,6 +7605,166 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in checklist_out
     assert "operator_action=review_fee_diagnostics" in checklist_out
     assert "recommended_command=uv run python bot.py fee-diagnostics" in checklist_out
+
+
+def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_active_accounting_root_cause(
+    tmp_path, capsys
+):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    runtime_state.enable_trading()
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                fee_provenance, fee_validation_reason, fee_validation_checks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "live_pending_buy",
+                "C0101000002949768709",
+                "C0101000000983820316",
+                1_777_104_360_321,
+                "BUY",
+                115_465_000.0,
+                0.00059998,
+                None,
+                "order_level_candidate",
+                "order_level_paid_fee",
+                "ambiguous",
+                "fee_pending",
+                "live_application_fee_pending",
+                "order_level_paid_fee_candidate",
+                "pending_fee_validation",
+                json.dumps({"single_fill": True}, sort_keys=True),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = _load_recovery_report()
+    policy = report["recovery_policy"]
+    assert policy["primary_incident_class"] == "ACCOUNTING_ROOT_CAUSE"
+    assert policy["recommended_mode"] == "forensic_accounting"
+    assert policy["accounting_root_cause_unresolved"] is True
+    assert policy["accounting_evidence_reliable"] is False
+    assert policy["additional_orders_allowed"] is False
+    assert policy["flatten_primary_recommendation"] is False
+    assert policy["recommended_action"] == "collect_broker_fill_evidence_and_build_repair_plan"
+    assert policy["recommended_command"] == "uv run python bot.py repair-plan"
+    assert report["fill_accounting_root_cause"]["flatten_as_primary_response"] is False
+
+    cmd_recovery_report(as_json=False)
+    report_out = capsys.readouterr().out
+    assert "[P3.0e4] recovery_policy" in report_out
+    assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in report_out
+    assert "recommended_mode=forensic_accounting" in report_out
+    assert "accounting_root_cause_unresolved=1" in report_out
+    assert "accounting_evidence_reliable=0" in report_out
+    assert "additional_orders_allowed=0" in report_out
+    assert "flatten_primary_recommendation=0" in report_out
+    assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in report_out
+    assert "recommended_command=uv run python bot.py repair-plan" in report_out
+
+    cmd_restart_checklist()
+    checklist_out = capsys.readouterr().out
+    assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in checklist_out
+    assert "recommended_mode=forensic_accounting" in checklist_out
+    assert "accounting_root_cause_unresolved=1" in checklist_out
+    assert "accounting_evidence_reliable=0" in checklist_out
+    assert "additional_orders_allowed=0" in checklist_out
+    assert "flatten_primary_recommendation=0" in checklist_out
+    assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in checklist_out
+    assert "recommended_command=uv run python bot.py repair-plan" in checklist_out
+
+
+def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp_path, capsys):
+    _set_tmp_db(tmp_path)
+    object.__setattr__(settings, "MODE", "live")
+    runtime_state.enable_trading()
+
+    conn = ensure_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                fee_provenance, fee_validation_reason, fee_validation_checks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "live_pending_buy",
+                "C0101000002949768709",
+                "C0101000000983820316",
+                1_777_104_360_321,
+                "BUY",
+                115_465_000.0,
+                0.00059998,
+                None,
+                "order_level_candidate",
+                "order_level_paid_fee",
+                "ambiguous",
+                "fee_pending",
+                "live_application_fee_pending",
+                "order_level_paid_fee_candidate",
+                "pending_fee_validation",
+                json.dumps({"single_fill": True}, sort_keys=True),
+            ),
+        )
+        before = {
+            "fee_pending_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM fee_pending_accounting_repairs").fetchone()["cnt"],
+            "fee_gap_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM fee_gap_accounting_repairs").fetchone()["cnt"],
+            "manual_flat_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM manual_flat_accounting_repairs").fetchone()["cnt"],
+            "position_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"],
+            "external_position_adjustments": conn.execute("SELECT COUNT(*) AS cnt FROM external_position_adjustments").fetchone()["cnt"],
+        }
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_repair_plan(as_json=False)
+    out = capsys.readouterr().out
+    assert "[REPAIR-PLAN]" in out
+    assert "plan_id=" in out
+    assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in out
+    assert "recommended_mode=forensic_accounting" in out
+    assert "additional_orders_allowed=0" in out
+    assert "flatten_primary_recommendation=0" in out
+    assert "source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events" in out
+    assert "projection_kind=open_position_lots" in out
+    assert "rebuildable=1" in out
+    assert "candidate_repairs:" in out
+    assert "name=fee-pending-accounting-repair needed=1 active_issue=1 safe_to_apply=0" in out
+    assert "name=fee-gap-accounting-repair" in out
+    assert "name=manual-flat-accounting-repair" in out
+    assert "name=rebuild-position-authority" in out
+    assert "preconditions=" in out
+    assert "touched_tables=" in out
+    assert "expected_after=" in out
+    assert "idempotency_key=" in out
+    assert "rollback_or_backup=" in out
+    assert "why_safe=" in out
+
+    conn = ensure_db()
+    try:
+        after = {
+            "fee_pending_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM fee_pending_accounting_repairs").fetchone()["cnt"],
+            "fee_gap_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM fee_gap_accounting_repairs").fetchone()["cnt"],
+            "manual_flat_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM manual_flat_accounting_repairs").fetchone()["cnt"],
+            "position_repairs": conn.execute("SELECT COUNT(*) AS cnt FROM position_authority_repairs").fetchone()["cnt"],
+            "external_position_adjustments": conn.execute("SELECT COUNT(*) AS cnt FROM external_position_adjustments").fetchone()["cnt"],
+        }
+    finally:
+        conn.close()
+    assert after == before
 
 
 def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, capsys):

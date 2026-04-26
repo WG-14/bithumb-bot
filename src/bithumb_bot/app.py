@@ -92,6 +92,7 @@ from .external_position_repair import (
 )
 from .markets import canonical_market_with_raw
 from .position_state_snapshot import build_canonical_position_snapshot
+from .repair_plan import build_recovery_policy_from_report, build_repair_plan_preview_from_report
 from .reason_codes import DUST_RESIDUAL_UNSELLABLE
 from .dust import build_dust_display_context, build_position_state_model, format_flat_start_reason_with_dust
 from .reporting import (
@@ -2973,7 +2974,8 @@ def _load_recovery_report(
         else recommended_command
     )
 
-    return {
+    report = {
+        "mode": settings.MODE,
         "unresolved_count": unresolved_count,
         "recovery_required_count": recovery_required_count,
         "submit_unknown_count": submit_unknown_count,
@@ -3084,6 +3086,8 @@ def _load_recovery_report(
         "broker_recent_orders_snapshot_error": broker_snapshot_error,
         "recent_external_cash_adjustment": recent_external_cash_adjustment,
     }
+    report["recovery_policy"] = build_recovery_policy_from_report(report)
+    return report
 
 
 def cmd_recovery_report(*, as_json: bool = False) -> None:
@@ -3435,6 +3439,25 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"{' -> '.join(str(item) for item in (fill_root_cause.get('root_chain') or [])) or 'none'} "
         f"latest_fee_validation_reason={fill_root_cause.get('latest_fee_validation_reason') or 'none'}"
     )
+    recovery_policy = report.get("recovery_policy") or {}
+    print("  [P3.0e4] recovery_policy")
+    print(
+        "    "
+        f"primary_incident_class={recovery_policy.get('primary_incident_class') or 'RECOVERY_READINESS'} "
+        f"recommended_mode={recovery_policy.get('recommended_mode') or 'recovery'} "
+        "accounting_root_cause_unresolved="
+        f"{1 if bool(recovery_policy.get('accounting_root_cause_unresolved')) else 0} "
+        f"accounting_evidence_reliable={1 if bool(recovery_policy.get('accounting_evidence_reliable')) else 0} "
+        f"actual_executable_exposure={1 if bool(recovery_policy.get('actual_executable_exposure')) else 0} "
+        f"additional_orders_allowed={1 if bool(recovery_policy.get('additional_orders_allowed')) else 0} "
+        "flatten_primary_recommendation="
+        f"{1 if bool(recovery_policy.get('flatten_primary_recommendation')) else 0}"
+    )
+    print(
+        "    "
+        f"recommended_action={recovery_policy.get('recommended_action') or 'none'} "
+        f"recommended_command={recovery_policy.get('recommended_command') or 'none'}"
+    )
     print("  [P3.1] remote_known_unresolved_verification")
     print(f"    summary={report['remote_known_unresolved_verification_summary']}")
     print("  [P4] last_reconcile_summary")
@@ -3540,6 +3563,72 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
                     f"reason={candidate['match_reason']}"
                 )
         print(f"      next_action={item['next_action_hint']}")
+
+
+def cmd_repair_plan(*, as_json: bool = False) -> None:
+    report = _load_recovery_report()
+    plan = build_repair_plan_preview_from_report(report)
+    if as_json:
+        print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
+        return
+
+    print("[REPAIR-PLAN]")
+    print(
+        "  "
+        f"plan_id={plan.get('plan_id') or 'none'} "
+        f"mode={plan.get('mode') or settings.MODE} "
+        f"primary_incident_class={plan.get('primary_incident_class') or 'RECOVERY_READINESS'} "
+        f"recommended_mode={plan.get('recommended_mode') or 'recovery'}"
+    )
+    print(
+        "  "
+        "accounting_root_cause_unresolved="
+        f"{1 if bool(plan.get('accounting_root_cause_unresolved')) else 0} "
+        f"accounting_evidence_reliable={1 if bool(plan.get('accounting_evidence_reliable')) else 0} "
+        f"additional_orders_allowed={1 if bool(plan.get('additional_orders_allowed')) else 0} "
+        "flatten_primary_recommendation="
+        f"{1 if bool(plan.get('flatten_primary_recommendation')) else 0}"
+    )
+    print(
+        "  "
+        f"recommended_action={plan.get('recommended_action') or 'none'} "
+        f"recommended_command={plan.get('recommended_command') or 'none'}"
+    )
+    print(
+        "  "
+        f"canonical_portfolio_qty={float(plan.get('canonical_portfolio_qty') or 0.0):.12f} "
+        f"broker_qty={float(plan.get('broker_qty') or 0.0):.12f} "
+        f"open_position_lots_projected_qty={float(plan.get('open_position_lots_projected_qty') or 0.0):.12f} "
+        f"broker_portfolio_converged={1 if bool(plan.get('broker_portfolio_converged')) else 0} "
+        f"projection_converged={1 if bool(plan.get('projection_converged')) else 0}"
+    )
+    print(
+        "  "
+        f"source_of_truth={plan.get('source_of_truth') or 'unknown'} "
+        f"projection_kind={plan.get('projection_kind') or 'unknown'} "
+        f"rebuildable={1 if bool(plan.get('rebuildable')) else 0} "
+        f"safe_to_rebuild={1 if bool(plan.get('safe_to_rebuild')) else 0} "
+        f"reason={plan.get('reason') or 'none'}"
+    )
+    print("  candidate_repairs:")
+    for candidate in plan.get("candidate_repairs") or []:
+        print(
+            "    - "
+            f"name={candidate.get('name') or 'unknown'} "
+            f"needed={1 if bool(candidate.get('needed')) else 0} "
+            f"active_issue={1 if bool(candidate.get('active_issue')) else 0} "
+            f"safe_to_apply={1 if bool(candidate.get('safe_to_apply')) else 0}"
+        )
+        print(f"      preconditions={candidate.get('preconditions') or 'none'}")
+        print(
+            "      touched_tables="
+            f"{'|'.join(str(item) for item in (candidate.get('touched_tables') or [])) or 'none'}"
+        )
+        print(f"      expected_after={candidate.get('expected_after') or 'none'}")
+        print(f"      idempotency_key={candidate.get('idempotency_key') or 'none'}")
+        print(f"      rollback_or_backup={candidate.get('rollback_or_backup') or 'none'}")
+        print(f"      why_safe={candidate.get('why_safe') or 'none'}")
+        print(f"      recommended_command={candidate.get('recommended_command') or 'none'}")
 
 
 def _load_json_object_arg(value: str | None, *, field_name: str, allow_none: bool = False) -> dict[str, object] | None:
@@ -4176,6 +4265,7 @@ def cmd_restart_checklist() -> None:
         fee_rate_drift = _fee_rate_drift_diagnostics(conn)
     finally:
         conn.close()
+    recovery_policy = (_load_recovery_report().get("recovery_policy") or {})
 
     print("[RESTART-SAFETY-CHECKLIST]")
     for label, ok, detail in checklist:
@@ -4227,6 +4317,19 @@ def cmd_restart_checklist() -> None:
         f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'} "
         f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
         f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
+    )
+    print(
+        "  "
+        f"primary_incident_class={recovery_policy.get('primary_incident_class') or 'RECOVERY_READINESS'} "
+        f"recommended_mode={recovery_policy.get('recommended_mode') or 'recovery'} "
+        "accounting_root_cause_unresolved="
+        f"{1 if bool(recovery_policy.get('accounting_root_cause_unresolved')) else 0} "
+        f"accounting_evidence_reliable={1 if bool(recovery_policy.get('accounting_evidence_reliable')) else 0} "
+        f"additional_orders_allowed={1 if bool(recovery_policy.get('additional_orders_allowed')) else 0} "
+        "flatten_primary_recommendation="
+        f"{1 if bool(recovery_policy.get('flatten_primary_recommendation')) else 0} "
+        f"recommended_action={recovery_policy.get('recommended_action') or 'none'} "
+        f"recommended_command={recovery_policy.get('recommended_command') or 'none'}"
     )
 
 def _last_reconcile_failed(state) -> bool:
@@ -5006,6 +5109,12 @@ def main(argv: list[str] | None = None) -> int:
         description="Show unresolved/recovery-required orders and resume blockers.",
     )
     recovery_report.add_argument("--json", action="store_true")
+    repair_plan = sub.add_parser(
+        "repair-plan",
+        help="show non-mutating accounting recovery plan preview",
+        description="Aggregate existing recovery and repair previews into one operator-oriented plan.",
+    )
+    repair_plan.add_argument("--json", action="store_true")
     sub.add_parser(
         "restart-checklist",
         help="print restart safety checklist before resume",
@@ -5363,6 +5472,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_reconcile()
     elif args.cmd == "recovery-report":
         cmd_recovery_report(as_json=bool(args.json))
+    elif args.cmd == "repair-plan":
+        cmd_repair_plan(as_json=bool(args.json))
     elif args.cmd == "restart-checklist":
         cmd_restart_checklist()
     elif args.cmd == "recover-order":
