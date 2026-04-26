@@ -20,8 +20,16 @@ from .marketdata import cmd_sync
 from .strategy import create_strategy
 from .broker.bithumb import BithumbBroker, build_broker_with_auth_diagnostics
 from .broker.base import BrokerError
-from .db_core import ensure_db, get_external_cash_adjustment_summary
+from .db_core import (
+    compute_accounting_replay,
+    ensure_db,
+    get_external_cash_adjustment_summary,
+    get_portfolio_breakdown,
+    portfolio_asset_total,
+    portfolio_cash_total,
+)
 from .db_core import record_strategy_decision
+from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_repair import build_fee_gap_accounting_repair_preview
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
 from .manual_flat_repair import build_manual_flat_accounting_repair_preview
@@ -71,6 +79,13 @@ STARTUP_RECOVERY_GATE_PREFIX = "startup safety gate"
 CLEANUP_REVALIDATION_MAX_ATTEMPTS = 2
 CLEANUP_REVALIDATION_POSITION_EPS = 1e-12
 RUN_LOG = logging.getLogger("bithumb_bot.run")
+STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES = {
+    "FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED",
+    "MANUAL_RECOVERY_COMPLETED",
+    "POSITION_AUTHORITY_REBUILD_COMPLETED",
+    "RECENT_FILL_APPLIED",
+    "RECONCILE_OK",
+}
 def compute_signal(
     conn,
     short_n: int,
@@ -724,9 +739,107 @@ def maybe_clear_stale_live_execution_broker_halt(*, startup_gate_reason: str | N
     )
     return True
 
+
+def _can_clear_stale_risk_state_mismatch_halt(*, state, startup_gate_reason: str | None) -> bool:
+    if state.last_reconcile_status != "ok":
+        return False
+    reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
+    if reconcile_reason_code not in STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES:
+        return False
+    if startup_gate_reason or state.emergency_flatten_blocked:
+        return False
+    if _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata) > 0:
+        return False
+
+    conn = ensure_db()
+    try:
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+        accounting_projection = compute_accounting_replay(conn)
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        external_position_preview = build_external_position_accounting_repair_preview(conn)
+    finally:
+        conn.close()
+
+    broker_evidence = readiness_snapshot.broker_position_evidence
+    projection_convergence = readiness_snapshot.projection_convergence
+    authority_assessment = readiness_snapshot.position_authority_assessment
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
+    broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
+    portfolio_qty = float(projection_convergence.get("portfolio_qty") or 0.0)
+    portfolio_cash = portfolio_cash_total(
+        cash_available=float(cash_available),
+        cash_locked=float(cash_locked),
+    )
+    accounting_portfolio_qty = portfolio_asset_total(
+        asset_available=float(asset_available),
+        asset_locked=float(asset_locked),
+    )
+    accounting_projection_ok = bool(
+        abs(float(accounting_projection.get("replay_cash") or 0.0) - portfolio_cash) <= 1e-8
+        and abs(float(accounting_projection.get("replay_qty") or 0.0) - accounting_portfolio_qty) <= 1e-12
+    )
+    broker_portfolio_converged = bool(
+        broker_qty_known and abs(broker_qty - portfolio_qty) <= 1e-12
+    )
+    authority_gap_reason = str(readiness_snapshot.position_state.normalized_exposure.authority_gap_reason or "")
+
+    return bool(
+        accounting_projection_ok
+        and int(readiness_snapshot.fee_pending_count or 0) == 0
+        and int(readiness_snapshot.open_order_count or 0) == 0
+        and int(readiness_snapshot.recovery_required_count or 0) == 0
+        and not bool(readiness_snapshot.fee_gap_resume_blocking)
+        and bool(projection_convergence.get("converged"))
+        and not bool(authority_assessment.get("needs_correction"))
+        and not bool(authority_assessment.get("needs_residual_normalization"))
+        and not bool(authority_assessment.get("needs_full_projection_rebuild"))
+        and not bool(authority_assessment.get("needs_portfolio_projection_repair"))
+        and authority_gap_reason != "authority_missing_recovery_required"
+        and not bool(external_position_preview.get("needs_repair"))
+        and bool(broker_evidence.get("balance_snapshot_available_for_health"))
+        and not bool(broker_evidence.get("balance_source_stale"))
+        and broker_portfolio_converged
+    )
+
+
+def maybe_clear_stale_risk_state_mismatch_halt(*, startup_gate_reason: str | None = None) -> bool:
+    runtime_state.refresh_open_order_health()
+    state = runtime_state.snapshot()
+
+    if not (
+        state.halt_new_orders_blocked
+        and state.halt_state_unresolved
+        and state.halt_reason_code == RISK_STATE_MISMATCH
+    ):
+        return False
+
+    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
+    if not _can_clear_stale_risk_state_mismatch_halt(
+        state=runtime_state.snapshot(),
+        startup_gate_reason=gate_reason,
+    ):
+        return False
+
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason=state.last_disable_reason,
+        halt_new_orders_blocked=False,
+        unresolved=False,
+    )
+    runtime_state.set_resume_gate(blocked=False, reason=None)
+    _log_loop_event(
+        logging.INFO,
+        "[RUN] stale_risk_state_mismatch_halt_cleared",
+        halt_reason_code=state.halt_reason_code or "-",
+        reconcile_reason_code=state.last_reconcile_reason_code or "-",
+    )
+    return True
+
 def get_health_status() -> dict[str, float | int | bool | str | None]:
     maybe_clear_stale_initial_reconcile_halt()
-    maybe_clear_stale_live_execution_broker_halt()
+    startup_gate_reason = evaluate_startup_safety_gate()
+    maybe_clear_stale_live_execution_broker_halt(startup_gate_reason=startup_gate_reason)
+    maybe_clear_stale_risk_state_mismatch_halt(startup_gate_reason=startup_gate_reason)
     state = runtime_state.snapshot()
     return {
         "last_candle_age_sec": state.last_candle_age_sec,
@@ -977,6 +1090,7 @@ def evaluate_resume_eligibility() -> tuple[bool, list[ResumeBlocker]]:
     maybe_clear_stale_initial_reconcile_halt()
     startup_gate_reason = evaluate_startup_safety_gate()
     maybe_clear_stale_live_execution_broker_halt(startup_gate_reason=startup_gate_reason)
+    maybe_clear_stale_risk_state_mismatch_halt(startup_gate_reason=startup_gate_reason)
     startup_gate_reason = evaluate_startup_safety_gate()
     state = runtime_state.snapshot()
 

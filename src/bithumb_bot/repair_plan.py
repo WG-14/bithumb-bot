@@ -59,6 +59,9 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         and _truthy(report.get("lot_projection_converged"))
     )
     actual_executable_exposure = bool(normalized_exposure.get("has_executable_exposure"))
+    run_loop_allowed = bool(runtime_readiness.get("run_loop_allowed"))
+    position_management_allowed = bool(runtime_readiness.get("position_management_allowed"))
+    new_entry_allowed = bool(runtime_readiness.get("new_entry_allowed"))
     closeout_allowed = bool(runtime_readiness.get("closeout_allowed"))
 
     recommended_mode = "recovery"
@@ -73,13 +76,12 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         primary_incident_class = "ACCOUNTING_ROOT_CAUSE"
         recommended_action = "collect_broker_fill_evidence_and_build_repair_plan"
         recommended_command = "uv run python bot.py repair-plan"
-    elif actual_executable_exposure and accounting_evidence_reliable and closeout_allowed:
-        recommended_mode = "market_risk"
-        primary_incident_class = "MARKET_RISK_EXPOSURE"
-        additional_orders_allowed = True
-        flatten_primary_recommendation = True
-        recommended_action = "review_executable_exposure_and_consider_flatten"
-        recommended_command = "uv run python bot.py flatten-position"
+    elif actual_executable_exposure and accounting_evidence_reliable and run_loop_allowed and position_management_allowed:
+        recommended_mode = "position_management"
+        primary_incident_class = "CANONICAL_OPEN_POSITION"
+        additional_orders_allowed = bool(new_entry_allowed)
+        recommended_action = "resume_position_management"
+        recommended_command = "uv run python bot.py resume"
 
     incident_reasons: list[str] = []
     if active_fill_issue_count > 0:
@@ -101,6 +103,7 @@ def build_recovery_policy_from_report(report: dict[str, Any]) -> dict[str, Any]:
         "accounting_root_cause_unresolved": bool(accounting_root_cause_unresolved),
         "accounting_evidence_reliable": bool(accounting_evidence_reliable),
         "actual_executable_exposure": bool(actual_executable_exposure),
+        "position_management_allowed": bool(position_management_allowed),
         "additional_orders_allowed": bool(additional_orders_allowed),
         "flatten_primary_recommendation": bool(flatten_primary_recommendation),
         "flatten_not_primary": bool(not flatten_primary_recommendation),
@@ -230,6 +233,7 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "accounting_root_cause_unresolved": bool(policy["accounting_root_cause_unresolved"]),
         "accounting_evidence_reliable": bool(policy["accounting_evidence_reliable"]),
         "actual_executable_exposure": bool(policy["actual_executable_exposure"]),
+        "position_management_allowed": bool(policy["position_management_allowed"]),
         "additional_orders_allowed": bool(policy["additional_orders_allowed"]),
         "flatten_primary_recommendation": bool(policy["flatten_primary_recommendation"]),
         "flatten_not_primary": bool(policy["flatten_not_primary"]),

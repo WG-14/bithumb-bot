@@ -55,6 +55,7 @@ class RuntimeReadinessSnapshot:
     canonical_state: str
     residual_class: str
     run_loop_allowed: bool
+    position_management_allowed: bool
     new_entry_allowed: bool
     closeout_allowed: bool
     effective_flat: bool
@@ -112,6 +113,7 @@ class RuntimeReadinessSnapshot:
             "canonical_state": self.canonical_state,
             "residual_class": self.residual_class,
             "run_loop_allowed": bool(self.run_loop_allowed),
+            "position_management_allowed": bool(self.position_management_allowed),
             "new_entry_allowed": bool(self.new_entry_allowed),
             "closeout_allowed": bool(self.closeout_allowed),
             "effective_flat": bool(self.effective_flat),
@@ -797,16 +799,22 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             dust_fields=dust_context.fields,
         )
 
+        next_action = operator_next_action
+        if (
+            resume_ready
+            and stage != "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
+            and str(tradeability.operator_next_action) == "resume_position_management"
+        ):
+            next_action = tradeability.operator_next_action
+        elif tradeability.operator_action_required and resume_ready:
+            next_action = tradeability.operator_next_action
+
         return RuntimeReadinessSnapshot(
             recovery_stage=stage,
             resume_ready=resume_ready,
             resume_blockers=tuple(blockers),
             blocker_categories=tuple(dict.fromkeys(categories)),
-            operator_next_action=(
-                operator_next_action
-                if not tradeability.operator_action_required or not resume_ready
-                else tradeability.operator_next_action
-            ),
+            operator_next_action=next_action,
             recommended_command=recommended_command,
             position_state=position_state,
             lot_snapshot=lot_snapshot,
@@ -831,6 +839,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             canonical_state=canonical_recovery.canonical_state,
             residual_class=tradeability.residual_class,
             run_loop_allowed=tradeability.run_loop_allowed,
+            position_management_allowed=tradeability.position_management_allowed,
             new_entry_allowed=tradeability.new_entry_allowed,
             closeout_allowed=tradeability.closeout_allowed,
             effective_flat=tradeability.effective_flat,

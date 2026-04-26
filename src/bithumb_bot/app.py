@@ -904,6 +904,8 @@ def cmd_health() -> None:
 
     if bool(recovery_policy.get("accounting_root_cause_unresolved")):
         recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
+    elif str(recovery_policy.get("recommended_mode") or "") == "position_management":
+        recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
     elif bool(recovery_policy.get("flatten_primary_recommendation")):
         recommended_commands = str(recovery_policy.get("recommended_command") or recommended_commands)
 
@@ -1014,6 +1016,7 @@ def cmd_health() -> None:
         f"residual_class={readiness_snapshot.residual_class} "
         f"strategy_tradeability_state={readiness_snapshot.tradeability_operator_fields['strategy_tradeability_state']} "
         f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+        f"position_management_allowed={1 if readiness_snapshot.position_management_allowed else 0} "
         f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
         f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
         f"execution_flat={1 if readiness_snapshot.execution_flat else 0} "
@@ -1515,6 +1518,7 @@ def _print_recovery_policy_summary(prefix: str, recovery_policy: dict[str, objec
         f"{1 if bool(recovery_policy.get('accounting_root_cause_unresolved')) else 0} "
         f"accounting_evidence_reliable={1 if bool(recovery_policy.get('accounting_evidence_reliable')) else 0} "
         f"actual_executable_exposure={1 if bool(recovery_policy.get('actual_executable_exposure')) else 0} "
+        f"position_management_allowed={1 if bool(recovery_policy.get('position_management_allowed')) else 0} "
         f"additional_orders_allowed={1 if bool(recovery_policy.get('additional_orders_allowed')) else 0} "
         "flatten_primary_recommendation="
         f"{1 if bool(recovery_policy.get('flatten_primary_recommendation')) else 0} "
@@ -2905,16 +2909,27 @@ def _load_recovery_report(
 
     runtime_stage = str(runtime_readiness_snapshot.get("recovery_stage") or "")
     readiness_has_deferred_debt = runtime_stage == "RESUME_READY_WITH_DEFERRED_HISTORICAL_DEBT"
-    report_operator_next_action = (
-        str(runtime_readiness_snapshot.get("operator_next_action") or operator_next_action)
-        if bool(resume_allowed) and readiness_has_deferred_debt
-        else operator_next_action
+    position_management_resume_ready = bool(
+        resume_allowed
+        and runtime_readiness_snapshot.get("position_management_allowed")
+        and str(runtime_readiness_snapshot.get("canonical_state") or "") == "OPEN_EXECUTABLE"
+        and not readiness_has_deferred_debt
     )
-    report_recommended_next_action = (
-        "Resume may manage the open executable position; repair deferred historical fee-gap debt after flatten/closeout."
-        if bool(resume_allowed) and readiness_has_deferred_debt
-        else recommended_next_action
-    )
+    report_operator_next_action = operator_next_action
+    report_recommended_next_action = recommended_next_action
+    if position_management_resume_ready:
+        report_operator_next_action = str(
+            runtime_readiness_snapshot.get("operator_next_action") or "resume_position_management"
+        )
+        report_recommended_next_action = (
+            "Canonical open exposure is present and accounted. Resume in position-management mode; "
+            "new entries remain blocked unless risk policy explicitly allows them."
+        )
+    elif bool(resume_allowed) and readiness_has_deferred_debt:
+        report_operator_next_action = str(runtime_readiness_snapshot.get("operator_next_action") or operator_next_action)
+        report_recommended_next_action = (
+            "Resume may manage the open executable position; repair deferred historical fee-gap debt after flatten/closeout."
+        )
     lot_projection = runtime_readiness_snapshot.get("projection_convergence") or {}
     broker_position_evidence = dict(runtime_readiness_snapshot.get("broker_position_evidence") or {})
     broker_qty = float(position_authority_rebuild_preview.get("broker_qty") or 0.0)
@@ -3021,13 +3036,11 @@ def _load_recovery_report(
     blocking_incident_class = (
         str((runtime_readiness_snapshot.get("position_authority_assessment") or {}).get("incident_class") or "NONE")
     )
-    report_recommended_command = (
-        str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
-        if (
-            bool(resume_allowed) and readiness_has_deferred_debt
-        ) or blocking_incident_class == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT"
-        else recommended_command
-    )
+    report_recommended_command = recommended_command
+    if position_management_resume_ready or (
+        bool(resume_allowed) and readiness_has_deferred_debt
+    ) or blocking_incident_class == "HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT":
+        report_recommended_command = str(runtime_readiness_snapshot.get("recommended_command") or recommended_command)
 
     report = {
         "mode": settings.MODE,
@@ -3662,6 +3675,7 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         f"{1 if bool(plan.get('accounting_root_cause_unresolved')) else 0} "
         f"accounting_evidence_reliable={1 if bool(plan.get('accounting_evidence_reliable')) else 0} "
         f"actual_executable_exposure={1 if bool(plan.get('actual_executable_exposure')) else 0} "
+        f"position_management_allowed={1 if bool(plan.get('position_management_allowed')) else 0} "
         f"additional_orders_allowed={1 if bool(plan.get('additional_orders_allowed')) else 0} "
         "flatten_primary_recommendation="
         f"{1 if bool(plan.get('flatten_primary_recommendation')) else 0} "
@@ -3862,6 +3876,7 @@ def cmd_manual_flat_accounting_repair(*, apply: bool = False, confirm: bool = Fa
             f"canonical_state={readiness_snapshot.canonical_state} "
             f"residual_class={readiness_snapshot.residual_class} "
             f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+            f"position_management_allowed={1 if readiness_snapshot.position_management_allowed else 0} "
             f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
             f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
             f"execution_flat={1 if readiness_snapshot.execution_flat else 0} "
@@ -3955,6 +3970,7 @@ def cmd_external_position_accounting_repair(*, apply: bool = False, confirm: boo
             f"canonical_state={readiness_snapshot.canonical_state} "
             f"residual_class={readiness_snapshot.residual_class} "
             f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
+            f"position_management_allowed={1 if readiness_snapshot.position_management_allowed else 0} "
             f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
             f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0}"
         )
@@ -4404,6 +4420,7 @@ def cmd_restart_checklist() -> None:
         "resume_scope=process_loop_only "
         f"run_loop_allowed={1 if readiness_snapshot.run_loop_allowed else 0} "
         f"trading_allowed={1 if tradeability_fields['trading_allowed'] else 0} "
+        f"position_management_allowed={1 if readiness_snapshot.position_management_allowed else 0} "
         f"new_entry_allowed={1 if readiness_snapshot.new_entry_allowed else 0} "
         f"closeout_allowed={1 if readiness_snapshot.closeout_allowed else 0} "
         f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0}"

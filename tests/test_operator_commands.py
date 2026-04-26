@@ -78,6 +78,8 @@ def _restore_settings_state(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MODE", "paper")
     object.__setattr__(settings, "MODE", "paper")
+    monkeypatch.setattr("bithumb_bot.app.write_json_atomic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("bithumb_bot.reporting.write_json_atomic", lambda *_args, **_kwargs: None)
 
     try:
         yield
@@ -4760,7 +4762,8 @@ def test_recovery_report_blocker_summary_view_for_submit_unknown(tmp_path):
     assert view[0]["recommended_next_action"] == "uv run python bot.py reconcile"
 
 
-def test_build_resume_guidance_prefers_manual_recovery_required_over_dust_review() -> None:
+def test_build_resume_guidance_prefers_manual_recovery_required_over_dust_review(tmp_path) -> None:
+    _set_tmp_db(tmp_path)
     blockers = [
         ResumeBlocker(
             code="HARMLESS_DUST_POLICY_REVIEW_REQUIRED",
@@ -6559,7 +6562,10 @@ def test_restart_checklist_scopes_safe_to_resume_when_sub_min_tracked_dust_allow
 
     assert "safe_to_resume=1" in out
     assert "resume_scope=process_loop_only" in out
-    assert "run_loop_allowed=1 trading_allowed=1 new_entry_allowed=1 closeout_allowed=0" in out
+    assert (
+        "run_loop_allowed=1 trading_allowed=1 position_management_allowed=0 "
+        "new_entry_allowed=1 closeout_allowed=0"
+    ) in out
     assert "operator_action_required=0" in out
     assert "canonical_state=DUST_ONLY_TRACKED residual_class=HARMLESS_DUST_TREAT_AS_FLAT" in out
     assert "trading_block_reason=closeout_blocked:dust_only_remainder" in out
@@ -7702,7 +7708,7 @@ def test_fee_pending_history_is_diagnostic_only_across_operator_surfaces(tmp_pat
     cmd_repair_plan(as_json=True)
     repair_plan = json.loads(capsys.readouterr().out)
     assert repair_plan["accounting_root_cause_unresolved"] is False
-    assert repair_plan["recommended_action"] == "resume_now"
+    assert repair_plan["recommended_action"] == "resume_position_management"
 
     app_main(["audit-ledger"])
     audit_out = capsys.readouterr().out
@@ -7917,7 +7923,7 @@ def test_repair_plan_help_declares_read_only_non_mutating_preview(capsys):
     assert "read-only non-mutating plan" in out
 
 
-def test_repair_plan_preview_surfaces_market_risk_mode_when_accounting_is_reliable(monkeypatch, capsys):
+def test_repair_plan_preview_surfaces_position_management_mode_when_accounting_is_reliable(monkeypatch, capsys):
     report = {
         "mode": "live",
         "portfolio_qty": 0.25,
@@ -7927,6 +7933,9 @@ def test_repair_plan_preview_surfaces_market_risk_mode_when_accounting_is_reliab
         "accounting_projection_ok": True,
         "runtime_readiness": {
             "normalized_exposure": {"has_executable_exposure": True},
+            "run_loop_allowed": True,
+            "position_management_allowed": True,
+            "new_entry_allowed": False,
             "closeout_allowed": True,
             "projection_convergence": {
                 "projected_total_qty": 0.25,
@@ -7957,17 +7966,18 @@ def test_repair_plan_preview_surfaces_market_risk_mode_when_accounting_is_reliab
     assert "[REPAIR-PLAN]" in out
     assert "preview_mode=read_only_non_mutating" in out
     assert "mode=live" in out
-    assert "primary_incident_class=MARKET_RISK_EXPOSURE" in out
-    assert "recommended_mode=market_risk" in out
+    assert "primary_incident_class=CANONICAL_OPEN_POSITION" in out
+    assert "recommended_mode=position_management" in out
     assert "accounting_root_cause_unresolved=0" in out
     assert "accounting_evidence_reliable=1" in out
     assert "actual_executable_exposure=1" in out
-    assert "additional_orders_allowed=1" in out
-    assert "flatten_primary_recommendation=1" in out
-    assert "flatten_not_primary=0" in out
+    assert "position_management_allowed=1" in out
+    assert "additional_orders_allowed=0" in out
+    assert "flatten_primary_recommendation=0" in out
+    assert "flatten_not_primary=1" in out
     assert "non_mutating_preview=1" in out
-    assert "recommended_action=review_executable_exposure_and_consider_flatten" in out
-    assert "recommended_command=uv run python bot.py flatten-position" in out
+    assert "recommended_action=resume_position_management" in out
+    assert "recommended_command=uv run python bot.py resume" in out
     assert "incident_reasons=none" in out
     assert "[POSITION-PROJECTION]" in out
     assert "canonical_portfolio_qty=0.250000000000" in out

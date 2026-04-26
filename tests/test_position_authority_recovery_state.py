@@ -826,7 +826,7 @@ def test_incident_residual_is_created_at_buy_ingestion_then_left_by_sell_matchin
         == "below_internal_lot_boundary_tracked_residue_entry_allowed"
     )
     assert readiness.as_dict()["run_loop_scope"] == "process_resume_only"
-    assert readiness.as_dict()["trading_permission_scope"] == "new_entry_or_closeout"
+    assert readiness.as_dict()["trading_permission_scope"] == "new_entry_or_position_management"
     assert readiness.as_dict()["trading_allowed"] is True
     assert readiness.as_dict()["trading_block_reason"] == "closeout_blocked:dust_only_remainder"
     assert readiness.as_dict() == replay.as_dict()
@@ -3432,12 +3432,13 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
         conn.close()
 
     cases = [
-        (flat, flat_fee_gap, "FLAT", "NONE", True, True, True, False),
+        (flat, flat_fee_gap, "FLAT", "NONE", False, True, True, True, False),
         (
             open_readiness,
             open_fee_gap,
             "OPEN_EXECUTABLE",
             "EXECUTABLE_OPEN_EXPOSURE",
+            True,
             False,
             False,
             False,
@@ -3448,6 +3449,7 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
             dust_fee_gap,
             "DUST_ONLY_TRACKED",
             "HARMLESS_DUST_TREAT_AS_FLAT",
+            False,
             True,
             False,
             True,
@@ -3461,6 +3463,7 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
             False,
             False,
             False,
+            False,
             True,
         ),
     ]
@@ -3469,6 +3472,7 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
         fee_gap,
         canonical_state,
         residual_class,
+        position_management_allowed,
         execution_flat,
         accounting_flat,
         new_entry_allowed,
@@ -3481,6 +3485,7 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
             assert readiness.resume_ready is False
         else:
             assert readiness.run_loop_allowed is readiness.resume_ready
+        assert readiness.position_management_allowed is position_management_allowed
         assert readiness.new_entry_allowed is new_entry_allowed
         assert readiness.operator_action_required is operator_action_required
         assert readiness.execution_flat is execution_flat
@@ -3489,6 +3494,104 @@ def test_recovery_policy_cross_module_consistency_for_representative_states(reco
         assert fee_gap["canonical_state"] == canonical_state
         assert fee_gap["execution_flat"] is execution_flat
         assert fee_gap["accounting_flat"] is accounting_flat
+
+
+def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position_management(
+    recovery_db, monkeypatch, capsys
+):
+    monkeypatch.setattr("bithumb_bot.app.write_json_atomic", lambda *_args, **_kwargs: None)
+    conn = ensure_db(str(recovery_db))
+    try:
+        _apply_fee_pending_buy(conn, client_order_id="ec2_carry_buy", fill_id="ec2-carry-fill")
+        conn.commit()
+    finally:
+        conn.close()
+
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="POSITION_AUTHORITY_REBUILD_COMPLETED",
+        metadata={
+            "balance_split_mismatch_count": 0,
+            "balance_source": "accounts_v1_rest_snapshot",
+            "balance_observed_ts_ms": 1_777_104_360_500,
+            "balance_asset_ts_ms": 1_777_104_360_500,
+            "balance_source_base_currency": "BTC",
+            "balance_source_quote_currency": "KRW",
+            "broker_asset_qty": FILL_QTY,
+            "broker_asset_available": FILL_QTY,
+            "broker_asset_locked": 0.0,
+            "broker_cash_available": 0.0,
+            "broker_cash_locked": 0.0,
+        },
+        now_epoch_sec=1.0,
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="RISK_STATE_MISMATCH cash_delta=69623.301030 asset_delta=-0.000599990000",
+        reason_code="RISK_STATE_MISMATCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    resume_allowed, blockers = evaluate_resume_eligibility()
+    state = runtime_state.snapshot()
+    report = _load_recovery_report()
+
+    assert resume_allowed is True
+    assert blockers == []
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
+    assert report["runtime_readiness"]["canonical_state"] == "OPEN_EXECUTABLE"
+    assert report["runtime_readiness"]["run_loop_allowed"] is True
+    assert report["runtime_readiness"]["position_management_allowed"] is True
+    assert report["runtime_readiness"]["new_entry_allowed"] is False
+    assert report["runtime_readiness"]["closeout_allowed"] is True
+    assert report["recovery_policy"]["primary_incident_class"] == "CANONICAL_OPEN_POSITION"
+    assert report["recovery_policy"]["recommended_mode"] == "position_management"
+    assert report["recovery_policy"]["position_management_allowed"] is True
+    assert report["recovery_policy"]["flatten_primary_recommendation"] is False
+    assert report["operator_next_action"] == "resume_position_management"
+    assert report["recommended_command"] == "uv run python bot.py resume"
+
+    app_main(["restart-checklist"])
+    checklist_out = capsys.readouterr().out
+    assert (
+        "safe_to_resume=1" in checklist_out
+        or "position_management_allowed=1" in checklist_out
+    )
+    assert "run_loop_allowed=1" in checklist_out
+    assert "position_management_allowed=1" in checklist_out
+    assert "new_entry_allowed=0" in checklist_out
+    assert "closeout_allowed=1" in checklist_out
+    assert "primary_incident_class=CANONICAL_OPEN_POSITION" in checklist_out
+    assert "recommended_mode=position_management" in checklist_out
+    assert "recommended_action=resume_position_management" in checklist_out
+    assert "recommended_command=uv run python bot.py resume" in checklist_out
+    assert "flatten_primary_recommendation=0" in checklist_out
+
+    app_main(["recovery-report"])
+    report_out = capsys.readouterr().out
+    assert "recommended_action=resume_position_management" in report_out
+    assert "recommended_command=uv run python bot.py resume" in report_out
+    assert "flatten_primary_recommendation=0" in report_out
+
+    app_main(["repair-plan"])
+    repair_plan_out = capsys.readouterr().out
+    assert "primary_incident_class=CANONICAL_OPEN_POSITION" in repair_plan_out
+    assert "recommended_mode=position_management" in repair_plan_out
+    assert "position_management_allowed=1" in repair_plan_out
+    assert "recommended_action=resume_position_management" in repair_plan_out
+    assert "recommended_command=uv run python bot.py resume" in repair_plan_out
+    assert "flatten_primary_recommendation=0" in repair_plan_out
+
+    app_main(["health"])
+    health_out = capsys.readouterr().out
+    assert "run_loop_allowed=1" in health_out
+    assert "position_management_allowed=1" in health_out
+    assert "new_entry_allowed=0" in health_out
+    assert "closeout_allowed=1" in health_out
+    assert "recommended_action=resume_position_management" in health_out
+    assert "recommended_command=uv run python bot.py resume" in health_out
 
 
 def test_fee_pending_repair_remains_applicable_when_fill_exists_but_fee_incomplete(recovery_db):

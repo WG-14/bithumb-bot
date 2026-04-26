@@ -34,6 +34,7 @@ class CanonicalTradeabilityState:
     canonical_state: str
     residual_class: str
     run_loop_allowed: bool
+    position_management_allowed: bool
     new_entry_allowed: bool
     closeout_allowed: bool
     execution_flat: bool
@@ -48,6 +49,7 @@ class CanonicalTradeabilityState:
             "canonical_state": self.canonical_state,
             "residual_class": self.residual_class,
             "run_loop_allowed": bool(self.run_loop_allowed),
+            "position_management_allowed": bool(self.position_management_allowed),
             "new_entry_allowed": bool(self.new_entry_allowed),
             "closeout_allowed": bool(self.closeout_allowed),
             "execution_flat": bool(self.execution_flat),
@@ -82,6 +84,8 @@ def build_tradeability_operator_fields(
         strategy_tradeability_state = "run_loop_blocked"
     elif tradeability.new_entry_allowed:
         strategy_tradeability_state = "reentry_allowed"
+    elif tradeability.position_management_allowed:
+        strategy_tradeability_state = "position_management_allowed"
     elif tradeability.closeout_allowed:
         strategy_tradeability_state = "closeout_allowed"
     else:
@@ -111,9 +115,15 @@ def build_tradeability_operator_fields(
             "Non-executable residue exists without normal SELL authority; operator recovery review is required."
         )
     elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
-        residue_policy_message = (
-            "Executable open exposure remains; manage the open position or flatten through the normal SELL authority path."
-        )
+        if tradeability.run_loop_allowed and tradeability.position_management_allowed:
+            residue_policy_message = (
+                "Canonical executable exposure is accounted and may resume in position-management mode; "
+                "new entries remain controlled separately from normal exit authority."
+            )
+        else:
+            residue_policy_message = (
+                "Executable open exposure remains; manage the open position or flatten through the normal SELL authority path."
+            )
     else:
         residue_policy_message = "Tradeability policy is unknown; review recovery report before trading."
 
@@ -134,10 +144,12 @@ def build_tradeability_operator_fields(
 
     return {
         "run_loop_scope": "process_resume_only",
-        "trading_permission_scope": "new_entry_or_closeout",
+        "trading_permission_scope": "new_entry_or_position_management",
         "strategy_tradeability_state": strategy_tradeability_state,
+        "position_management_policy_state": "allowed" if tradeability.position_management_allowed else "blocked",
         "entry_policy_state": "allowed" if tradeability.new_entry_allowed else "blocked",
         "closeout_policy_state": "allowed" if tradeability.closeout_allowed else "blocked",
+        "position_management_allowed": bool(tradeability.position_management_allowed),
         "trading_allowed": bool(tradeability.new_entry_allowed or tradeability.closeout_allowed),
         "trading_block_reason": str(tradeability.why_not or "none"),
         "dust_display_scope": "broker_reconcile_signal",
@@ -194,6 +206,7 @@ def classify_canonical_tradeability_state(
     else:
         residual_class = "NON_EXECUTABLE_RESIDUE_REQUIRES_OPERATOR_ACTION"
 
+    position_management_allowed = bool(run_loop_allowed and has_executable and exit_allowed)
     new_entry_allowed = bool(run_loop_allowed and entry_allowed)
     closeout_allowed = bool(run_loop_allowed and exit_allowed)
     operator_action_required = False
@@ -215,7 +228,11 @@ def classify_canonical_tradeability_state(
         operator_action_required = True
         operator_next_action = "review_non_executable_residue"
     elif residual_class == "EXECUTABLE_OPEN_EXPOSURE":
-        operator_next_action = "manage_or_flatten_open_position"
+        operator_next_action = (
+            "resume_position_management"
+            if position_management_allowed
+            else "manage_or_flatten_open_position"
+        )
     elif residual_class in {
         "HARMLESS_DUST_TREAT_AS_FLAT",
         "TRACKED_ACCOUNTING_RESIDUE_REENTRY_ALLOWED",
@@ -234,6 +251,7 @@ def classify_canonical_tradeability_state(
         canonical_state=str(recovery_state.canonical_state),
         residual_class=residual_class,
         run_loop_allowed=bool(run_loop_allowed),
+        position_management_allowed=position_management_allowed,
         new_entry_allowed=new_entry_allowed,
         closeout_allowed=closeout_allowed,
         execution_flat=bool(recovery_state.execution_flat),

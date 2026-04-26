@@ -736,10 +736,13 @@ def test_repair_plan_treats_open_position_lots_as_rebuildable_projection(project
     )
 
 
-def test_recovery_policy_allows_flatten_only_for_market_risk_with_reliable_accounting() -> None:
+def test_recovery_policy_prefers_position_management_resume_for_reliable_open_exposure() -> None:
     report = {
         "runtime_readiness": {
             "normalized_exposure": {"has_executable_exposure": True},
+            "run_loop_allowed": True,
+            "position_management_allowed": True,
+            "new_entry_allowed": False,
             "closeout_allowed": True,
         },
         "accounting_projection_ok": True,
@@ -754,16 +757,17 @@ def test_recovery_policy_allows_flatten_only_for_market_risk_with_reliable_accou
 
     policy = build_recovery_policy_from_report(report)
 
-    assert policy["primary_incident_class"] == "MARKET_RISK_EXPOSURE"
-    assert policy["recommended_mode"] == "market_risk"
+    assert policy["primary_incident_class"] == "CANONICAL_OPEN_POSITION"
+    assert policy["recommended_mode"] == "position_management"
     assert policy["accounting_root_cause_unresolved"] is False
     assert policy["accounting_evidence_reliable"] is True
     assert policy["actual_executable_exposure"] is True
-    assert policy["additional_orders_allowed"] is True
-    assert policy["flatten_primary_recommendation"] is True
-    assert policy["flatten_not_primary"] is False
-    assert policy["recommended_action"] == "review_executable_exposure_and_consider_flatten"
-    assert policy["recommended_command"] == "uv run python bot.py flatten-position"
+    assert policy["position_management_allowed"] is True
+    assert policy["additional_orders_allowed"] is False
+    assert policy["flatten_primary_recommendation"] is False
+    assert policy["flatten_not_primary"] is True
+    assert policy["recommended_action"] == "resume_position_management"
+    assert policy["recommended_command"] == "uv run python bot.py resume"
 
 
 def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
