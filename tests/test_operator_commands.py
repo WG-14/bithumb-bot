@@ -7806,6 +7806,76 @@ def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp
     assert after == before
 
 
+def test_repair_plan_help_declares_read_only_non_mutating_preview(capsys):
+    with pytest.raises(SystemExit) as exc:
+        app_main(["repair-plan", "--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage: bithumb-bot repair-plan" in out
+    assert "read-only non-mutating plan" in out
+
+
+def test_repair_plan_preview_surfaces_market_risk_mode_when_accounting_is_reliable(monkeypatch, capsys):
+    report = {
+        "mode": "live",
+        "portfolio_qty": 0.25,
+        "broker_qty": 0.25,
+        "broker_portfolio_converged": True,
+        "lot_projection_converged": True,
+        "accounting_projection_ok": True,
+        "runtime_readiness": {
+            "normalized_exposure": {"has_executable_exposure": True},
+            "closeout_allowed": True,
+            "projection_convergence": {
+                "projected_total_qty": 0.25,
+                "reason": "converged",
+            },
+        },
+        "fill_accounting_incident_projection": {"active_issue_count": 0},
+        "fee_gap_accounting_repair_preview": {
+            "needs_repair": False,
+            "active_issue": False,
+            "resume_blocking": False,
+        },
+        "manual_flat_accounting_repair_preview": {"needs_repair": False},
+        "external_position_accounting_repair_preview": {"needs_repair": False},
+        "position_authority_rebuild_preview": {
+            "needs_rebuild": False,
+            "safe_to_apply": False,
+            "eligibility_reason": "rebuild not required",
+            "recommended_command": "uv run python bot.py rebuild-position-authority",
+        },
+        "fee_rate_drift_diagnostics": {"recent_expected_fee_rate_mismatch_count": 0},
+    }
+    monkeypatch.setattr(app_module, "_load_recovery_report", lambda: report)
+
+    cmd_repair_plan(as_json=False)
+
+    out = capsys.readouterr().out
+    assert "[REPAIR-PLAN]" in out
+    assert "preview_mode=read_only_non_mutating" in out
+    assert "mode=live" in out
+    assert "primary_incident_class=MARKET_RISK_EXPOSURE" in out
+    assert "recommended_mode=market_risk" in out
+    assert "accounting_root_cause_unresolved=0" in out
+    assert "accounting_evidence_reliable=1" in out
+    assert "actual_executable_exposure=1" in out
+    assert "additional_orders_allowed=1" in out
+    assert "flatten_primary_recommendation=1" in out
+    assert "flatten_not_primary=0" in out
+    assert "non_mutating_preview=1" in out
+    assert "recommended_action=review_executable_exposure_and_consider_flatten" in out
+    assert "recommended_command=uv run python bot.py flatten-position" in out
+    assert "incident_reasons=none" in out
+    assert "[POSITION-PROJECTION]" in out
+    assert "canonical_portfolio_qty=0.250000000000" in out
+    assert "broker_qty=0.250000000000" in out
+    assert "open_position_lots_projected_qty=0.250000000000" in out
+    assert "broker_portfolio_converged=1" in out
+    assert "projection_converged=1" in out
+
+
 def test_health_and_recovery_report_include_dust_residual_metadata(tmp_path, capsys):
     _set_tmp_db(tmp_path)
     runtime_state.record_reconcile_result(

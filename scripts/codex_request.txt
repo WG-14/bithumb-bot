@@ -2,14 +2,14 @@ Use the attached incident-analysis context as background, but do **not** treat i
 
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The repo has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous fee-authority patch mechanically. The fee-authority path appears substantially improved, and the current repo appears to include a `repair_plan.py` model plus `cmd_repair_plan` wiring. Your task is to verify that the new repair-plan/recovery-policy layer is fully wired into CLI, recovery-report, restart-checklist, health surfaces, and tests.
+The repo has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous fee-authority patch mechanically. The fee-authority path appears substantially improved, and the current repo appears to include `repair_plan.py` plus `cmd_repair_plan` wiring. Your task is to verify that the already-added repair-plan/recovery-policy layer fully penetrates the CLI, `recovery-report`, `restart-checklist`, `health`, and tests.
 
-The next goal is not to introduce a new concept. The next goal is to make the already-added repair-plan/recovery policy actually operational.
+The next patch should **not** be “add repair-plan as a concept.” That appears to already exist. The next patch should make the repair-plan/recovery policy operational, visible, test-locked, and safe for live operators.
 
 Keep the priority sharp:
 
 ```text
-The repo should move from:
+Move the repo from:
   fee validation bug fixed, but operator still has to infer recovery actions
 
 to:
@@ -63,11 +63,11 @@ actual Bithumb paid fee rate      = 0.0004
 → accounting/recovery cascade
 ```
 
-But do **not** reduce the fix to `LIVE_FEE_RATE_ESTIMATE=0.0004`. That is required operational hygiene, not the repository-level fix. The repository-level fix is that coherent exchange `paid_fee` must outrank configured estimates for settlement accounting, and accounting-root-cause incidents must not default to flatten.
+But do **not** reduce the fix to `LIVE_FEE_RATE_ESTIMATE=0.0004`. That is required EC2 operational hygiene, not the repository-level fix. The repository-level fix is that coherent exchange `paid_fee` must outrank configured estimates for settlement accounting, and accounting-root-cause incidents must not default to flatten.
 
 ## Current repo state to verify
 
-Verify the following from the current repo before changing anything.
+Verify all of this directly from the current repo before changing anything.
 
 ### 1. Fee authority appears substantially improved
 
@@ -118,7 +118,7 @@ build_recovery_policy_from_report(report)
 build_repair_plan_preview_from_report(report)
 ```
 
-Expected fields:
+Expected policy fields:
 
 ```text
 primary_incident_class
@@ -143,7 +143,7 @@ If accounting_root_cause_unresolved:
   additional_orders_allowed=False
   flatten_primary_recommendation=False
   recommended_action="collect_broker_fill_evidence_and_build_repair_plan"
-  recommended_command="uv run python bot.py repair-plan"
+  recommended_command includes "repair-plan"
 ```
 
 Expected market-risk policy:
@@ -155,10 +155,10 @@ If actual_executable_exposure and accounting_evidence_reliable and closeout_allo
   additional_orders_allowed=True
   flatten_primary_recommendation=True
   recommended_action="review_executable_exposure_and_consider_flatten"
-  recommended_command="uv run python bot.py flatten-position"
+  recommended_command includes "flatten-position"
 ```
 
-Do not assume this is fully wired into CLI/recovery-report/restart-checklist just because the model exists. Verify operator surfaces.
+Do not assume this is fully wired into CLI, `recovery-report`, `restart-checklist`, or `health` just because the model exists. Verify operator surfaces.
 
 ### 3. `repair-plan` CLI appears to exist but needs hard verification
 
@@ -215,7 +215,7 @@ candidate_repairs:
     recommended_command=...
 ```
 
-If the payload exists internally but the CLI output is incomplete or hard to read, improve the formatting.
+If the payload exists internally but the CLI output is incomplete, hidden, or hard to read, improve the formatting.
 
 ### 4. `repair-plan` should aggregate existing repair candidates
 
@@ -304,7 +304,7 @@ into:
 
 ### Hypothesis B — Recovery has started separating accounting-root-cause from market-risk
 
-`repair_plan.py` appears to make this distinction, but it may not yet be fully wired into CLI/recovery-report/restart-checklist.
+`repair_plan.py` appears to make this distinction, but it may not yet be fully wired into CLI, `recovery-report`, `restart-checklist`, or `health`.
 
 Verification target for accounting-root-cause state:
 
@@ -344,7 +344,7 @@ If not fully wired, wire it.
 
 ### Hypothesis C — Repair-plan preview exists internally but needs CLI/operator-surface hardening
 
-The current repo appears to have `cmd_repair_plan` wiring and tests importing it, but the operator-facing output must be verified.
+The current repo appears to have `cmd_repair_plan` wiring, but the operator-facing output must be verified.
 
 Verification target:
 
@@ -857,5 +857,15 @@ When finished, produce a report with exactly these sections:
    - Follow-up issues recommended.
 ```
 
-The next patch should not be “add repair-plan as a concept.” That appears to already exist. The next patch should ensure the already-added repair-plan/recovery policy fully penetrates the CLI, recovery-report, restart-checklist, health surfaces, and tests.
+The goal is not to add another isolated repair command. The goal is to make the current recovery system able to say, consistently and visibly:
+
+```text
+This is an accounting-root-cause incident.
+Do not flatten as the first response.
+Do not create new orders.
+Here is the evidence.
+Here is the non-mutating repair plan.
+Here is why the plan is safe.
+Here is how to verify it before live restart.
+```
 

@@ -5119,7 +5119,10 @@ def main(argv: list[str] | None = None) -> int:
     repair_plan = sub.add_parser(
         "repair-plan",
         help="show non-mutating accounting recovery plan preview",
-        description="Aggregate existing recovery and repair previews into one operator-oriented plan.",
+        description=(
+            "Aggregate existing recovery and repair previews into one operator-oriented, "
+            "read-only non-mutating plan."
+        ),
     )
     repair_plan.add_argument("--json", action="store_true")
     sub.add_parser(
