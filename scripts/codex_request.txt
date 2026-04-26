@@ -4,7 +4,7 @@ You are working in the GitHub repository `WG-14/bithumb-bot`.
 
 The repository has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous patch mechanically. Your task is to verify, harden, and extend the current implementation so `WG-14/bithumb-bot` becomes a more robust, reproducible, and operable automated-trading experiment system.
 
-Keep the priority sharp: the central goal is **not** to make a fee mismatch disappear. The central goal is to make the system robust against fee-estimate drift by treating coherent exchange-provided `paid_fee` as settlement authority, preserving mismatch diagnostics, preventing accounting/lot/recovery cascades, surfacing fee-rate drift to operators, and stopping flatten from being the default response to accounting-root-cause incidents.
+Keep the priority sharp: the central goal is **not** to make a fee mismatch disappear. The central goal is to make the system robust against fee-estimate drift by treating coherent exchange-provided `paid_fee` as settlement authority, preserving mismatch diagnostics, preventing accounting/lot/recovery cascades, surfacing fee-rate drift to operators on the surfaces they actually use, and stopping flatten from being the default response to accounting-root-cause incidents.
 
 ## Incident context
 
@@ -74,7 +74,8 @@ live_submission_execution.py:
   not live_application_fee_pending.
   accounting can continue through finalized accounting instead of pending-fee path.
 
-fee-diagnostics / reporting.py:
+reporting.py / fee-diagnostics:
+  build_fee_rate_drift_diagnostics exists.
   FEE-RATE-DRIFT output exposes configured vs observed fee drift,
   including configured_fee_rate, configured_fee_bps,
   observed_fee_bps_median, observed_fee_sample_count,
@@ -82,6 +83,10 @@ fee-diagnostics / reporting.py:
   expected_fee_rate_warning_count, fee_pending_count,
   fee_pending_accounting_repair_count, position_authority_repair_count,
   diagnostic_only_vs_startup_blocking, and startup_impact.
+
+app.py / health:
+  build_fee_rate_drift_diagnostics appears to be imported and partially connected to cmd_health.
+  Verify actual operator-facing output, not just variable existence.
 
 tests:
   tests/test_fee_observation.py covers incident-shaped single-fill paid_fee cases.
@@ -134,6 +139,7 @@ src/bithumb_bot/execution.py
 src/bithumb_bot/runtime_readiness.py
 src/bithumb_bot/recovery.py
 src/bithumb_bot/reporting.py
+src/bithumb_bot/app.py
 tests/test_fee_observation.py
 tests/test_myorder_runtime_ingestion.py
 tests/test_live_broker.py
@@ -178,7 +184,7 @@ diagnostic_only_vs_startup_blocking
 startup_impact
 ```
 
-If these fields are currently only in `fee-diagnostics`, decide whether they should also appear in `health`, `recovery-report`, and/or `restart-checklist`. Do not leave fee-rate drift invisible on the surfaces operators normally check before restarting live.
+If these fields are currently only in `fee-diagnostics`, add or improve output on `health`, `recovery-report`, and/or `restart-checklist`. Do not leave fee-rate drift invisible on the surfaces operators normally check before restarting live.
 
 Also verify whether recovery suppresses flatten as the primary recommendation when the dominant issue is accounting/fee-authority root cause rather than actual executable market exposure.
 

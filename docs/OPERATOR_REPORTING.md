@@ -196,6 +196,9 @@ Use `fee-diagnostics` to review live fill fee behavior.
 
 Useful outputs:
 
+- Configured fee rate and `configured_fee_bps`
+- Observed fee sample count and `observed_fee_bps_median`
+- `fee_pending_count` versus drift-only warning counts
 - Average fee rate
 - Zero-fee fill count
 - Mean and median fee bps

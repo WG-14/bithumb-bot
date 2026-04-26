@@ -7554,11 +7554,13 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     health_out = capsys.readouterr().out
     assert "configured_fee_rate=0.002500" in health_out
     assert "fee_rate_drift=configured_fee_rate=0.002500 configured_fee_rate_estimate=0.002500" in health_out
+    assert "configured_fee_bps=25.000" in health_out
     assert "observed_fee_bps_median=4.000" in health_out
     assert "observed_fee_sample_count=1" in health_out
     assert "fee_rate_deviation_pct=525.02" in health_out
     assert "recent_expected_fee_rate_mismatch_count=1" in health_out
     assert "expected_fee_rate_warning_count=1" in health_out
+    assert "fee_pending_count=0" in health_out
     assert "position_authority_repair_count=0" in health_out
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in health_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in health_out
@@ -7570,11 +7572,13 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "[P3.0e1] fee_rate_drift" in report_out
     assert "configured_fee_rate=0.002500" in report_out
     assert "configured_fee_rate_estimate=0.002500" in report_out
+    assert "configured_fee_bps=25.000" in report_out
     assert "observed_fee_bps_median=4.000" in report_out
     assert "observed_fee_sample_count=1" in report_out
     assert "fee_rate_deviation_pct=525.02" in report_out
     assert "recent_expected_fee_rate_mismatch_count=1" in report_out
     assert "expected_fee_rate_warning_count=1" in report_out
+    assert "fee_pending_count=0" in report_out
     assert "fee_pending_accounting_repair_count=0" in report_out
     assert "position_authority_repair_count=0" in report_out
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in report_out
@@ -7586,11 +7590,13 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     checklist_out = capsys.readouterr().out
     assert "configured_fee_rate=0.002500" in checklist_out
     assert "configured_fee_rate_estimate=0.002500" in checklist_out
+    assert "configured_fee_bps=25.000" in checklist_out
     assert "observed_fee_bps_median=4.000" in checklist_out
     assert "observed_fee_sample_count=1" in checklist_out
     assert "fee_rate_deviation_pct=525.02" in checklist_out
     assert "recent_expected_fee_rate_mismatch_count=1" in checklist_out
     assert "expected_fee_rate_warning_count=1" in checklist_out
+    assert "fee_pending_count=0" in checklist_out
     assert "position_authority_repair_count=0" in checklist_out
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in checklist_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in checklist_out
