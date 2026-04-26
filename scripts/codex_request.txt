@@ -1,22 +1,23 @@
-Use the attached incident-analysis context as background, but do not treat it as proven fact. Verify it directly from `WG-14/bithumb-bot`. 
+Use the attached incident-analysis context as background, but do **not** treat it as proven fact. Verify it directly from `WG-14/bithumb-bot`. 
 
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The repo has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous fee-authority patch mechanically. The fee-authority path appears substantially improved. The newest patch also appears to introduce a `repair_plan.py` layer that starts separating accounting-root-cause incidents from market-risk incidents.
+The repo has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous fee-authority patch mechanically. The fee-authority path appears substantially improved, and the current repo appears to include a `repair_plan.py` model plus `cmd_repair_plan` wiring. Your task is to verify that the new repair-plan/recovery-policy layer is fully wired into CLI, recovery-report, restart-checklist, health surfaces, and tests.
 
-Your task is to verify, harden, and finish that recovery-system evolution.
+The next goal is not to introduce a new concept. The next goal is to make the already-added repair-plan/recovery policy actually operational.
 
 Keep the priority sharp:
 
 ```text
 The repo should move from:
-  one wrong fee estimate can destabilize accounting and trigger flatten/manual repair loops
+  fee validation bug fixed, but operator still has to infer recovery actions
 
 to:
   exchange paid_fee is settlement authority when coherent,
   fee-estimate drift is visible diagnostics,
   accounting-root-cause incidents do not recommend flatten by default,
-  repair paths are auditable and reproducible,
+  repair-plan gives a readable non-mutating plan,
+  recovery-report and restart-checklist show the same policy,
   open_position_lots is treated as a rebuildable projection rather than canonical truth.
 ```
 
@@ -62,15 +63,15 @@ actual Bithumb paid fee rate      = 0.0004
 → accounting/recovery cascade
 ```
 
-But do **not** reduce the fix to `LIVE_FEE_RATE_ESTIMATE=0.0004`. That is operational hygiene, not the repository-level fix. The repository-level fix is that coherent exchange `paid_fee` must outrank configured estimates for settlement accounting.
+But do **not** reduce the fix to `LIVE_FEE_RATE_ESTIMATE=0.0004`. That is required operational hygiene, not the repository-level fix. The repository-level fix is that coherent exchange `paid_fee` must outrank configured estimates for settlement accounting, and accounting-root-cause incidents must not default to flatten.
 
-## Current patch state to verify
+## Current repo state to verify
 
-Verify this from the current repo before making further changes.
+Verify the following from the current repo before changing anything.
 
-### Fee authority appears substantially improved
+### 1. Fee authority appears substantially improved
 
-`FeeEvaluation` appears to include explicit semantic fields:
+`FeeEvaluation` should include explicit semantic fields:
 
 ```python
 fee_authority
@@ -94,7 +95,7 @@ LIVE_FEE_RATE_ESTIMATE mismatch
 → not fee_pending by itself
 ```
 
-Verify in:
+Verify through:
 
 ```text
 src/bithumb_bot/fee_observation.py
@@ -108,16 +109,16 @@ tests/test_bithumb_private_api.py
 tests/test_live_broker.py
 ```
 
-### `repair_plan.py` appears to introduce the right policy model
+### 2. `repair_plan.py` appears to introduce the right policy model
 
-The latest repo appears to include `src/bithumb_bot/repair_plan.py` with:
+Verify `src/bithumb_bot/repair_plan.py`, especially:
 
-```text
+```python
 build_recovery_policy_from_report(report)
 build_repair_plan_preview_from_report(report)
 ```
 
-This appears to compute:
+Expected fields:
 
 ```text
 primary_incident_class
@@ -133,7 +134,7 @@ recommended_command
 incident_reasons
 ```
 
-Expected policy:
+Expected accounting-root-cause policy:
 
 ```text
 If accounting_root_cause_unresolved:
@@ -143,7 +144,11 @@ If accounting_root_cause_unresolved:
   flatten_primary_recommendation=False
   recommended_action="collect_broker_fill_evidence_and_build_repair_plan"
   recommended_command="uv run python bot.py repair-plan"
+```
 
+Expected market-risk policy:
+
+```text
 If actual_executable_exposure and accounting_evidence_reliable and closeout_allowed:
   recommended_mode="market_risk"
   primary_incident_class="MARKET_RISK_EXPOSURE"
@@ -153,11 +158,68 @@ If actual_executable_exposure and accounting_evidence_reliable and closeout_allo
   recommended_command="uv run python bot.py flatten-position"
 ```
 
-Verify this behavior from code and tests.
+Do not assume this is fully wired into CLI/recovery-report/restart-checklist just because the model exists. Verify operator surfaces.
 
-### `repair-plan` preview appears to aggregate repair candidates
+### 3. `repair-plan` CLI appears to exist but needs hard verification
 
-`build_repair_plan_preview_from_report()` appears to aggregate:
+Verify:
+
+```bash
+uv run bithumb-bot repair-plan --help
+MODE=live uv run bithumb-bot repair-plan
+```
+
+The command must be read-only by default and clearly say it is a non-mutating preview.
+
+Required operator output:
+
+```text
+[REPAIR-PLAN]
+  plan_id=...
+  mode=live
+  primary_incident_class=...
+  recommended_mode=...
+  accounting_root_cause_unresolved=...
+  accounting_evidence_reliable=...
+  actual_executable_exposure=...
+  additional_orders_allowed=...
+  flatten_primary_recommendation=...
+  flatten_not_primary=...
+  recommended_action=...
+  recommended_command=...
+  non_mutating_preview=1
+
+[POSITION-PROJECTION]
+  source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events
+  projection_kind=open_position_lots
+  canonical_portfolio_qty=...
+  broker_qty=...
+  open_position_lots_projected_qty=...
+  broker_portfolio_converged=...
+  projection_converged=...
+  rebuildable=1
+  safe_to_rebuild=...
+  reason=...
+
+candidate_repairs:
+  - name=...
+    needed=...
+    active_issue=...
+    safe_to_apply=...
+    preconditions=...
+    touched_tables=...
+    expected_after=...
+    idempotency_key=...
+    rollback_or_backup=...
+    why_safe=...
+    recommended_command=...
+```
+
+If the payload exists internally but the CLI output is incomplete or hard to read, improve the formatting.
+
+### 4. `repair-plan` should aggregate existing repair candidates
+
+Verify that `build_repair_plan_preview_from_report()` aggregates, where applicable:
 
 ```text
 fee-pending-accounting-repair
@@ -183,30 +245,40 @@ why_safe
 recommended_command
 ```
 
-Verify this and ensure it is actually surfaced to operators, not just computed internally.
+The goal is to stop the operator from guessing between multiple separate repair commands.
 
-### Projection semantics appear to be introduced
+### 5. Projection semantics must be end-to-end
 
-The repair-plan payload appears to include:
+Verify that `open_position_lots` is treated as a rebuildable projection, not canonical settlement truth.
+
+Expected model:
 
 ```text
-canonical_portfolio_qty
-broker_qty
-open_position_lots_projected_qty
-broker_portfolio_converged
-projection_converged
-source_of_truth="fills+trades+fee_adjustments+external_adjustments+repair_events"
-projection_kind="open_position_lots"
-rebuildable=True
-safe_to_rebuild
-reason
+canonical truth:
+  fills
+  trades
+  fee finalization / adjustment events
+  external adjustments
+  repair events
+
+projection:
+  open_position_lots
 ```
 
-Verify that `open_position_lots` is treated as a rebuildable projection and not as canonical settlement truth.
+Expected projection-drift behavior:
+
+```text
+broker_portfolio_converged=1
+canonical_portfolio_qty == broker_qty
+open_position_lots_projected_qty != canonical_portfolio_qty
+→ projection_drift incident
+→ candidate_repairs includes rebuild-position-authority
+→ flatten_primary_recommendation=0
+```
 
 ## Working hypotheses to verify or falsify
 
-Keep these as hypotheses until code/tests prove them.
+Keep these as hypotheses until repo evidence proves them.
 
 ### Hypothesis A — Fee authority problem is mostly fixed
 
@@ -234,7 +306,7 @@ into:
 
 `repair_plan.py` appears to make this distinction, but it may not yet be fully wired into CLI/recovery-report/restart-checklist.
 
-Verification target:
+Verification target for accounting-root-cause state:
 
 ```text
 accounting_root_cause_unresolved=1
@@ -245,19 +317,34 @@ maybe actual_executable_exposure=1
 → additional_orders_allowed=0
 → flatten_primary_recommendation=0
 → recommended_action=collect_broker_fill_evidence_and_build_repair_plan
+→ recommended_command includes repair-plan
+```
+
+Verification target for market-risk state:
+
+```text
+actual_executable_exposure=1
+accounting_evidence_reliable=1
+closeout_allowed=1
+no unresolved fee/accounting blockers
+→ primary_incident_class=MARKET_RISK_EXPOSURE
+→ recommended_mode=market_risk
+→ additional_orders_allowed=1
+→ flatten_primary_recommendation=1
+→ recommended_command includes flatten-position
 ```
 
 Falsification condition:
 
 ```text
-recovery-report / restart-checklist still recommends flatten as primary action in that state.
+recovery-report / restart-checklist still recommends flatten as primary action when accounting_root_cause_unresolved=1.
 ```
 
 If not fully wired, wire it.
 
 ### Hypothesis C — Repair-plan preview exists internally but needs CLI/operator-surface hardening
 
-`repair_plan.py` may compute the right payload, but the repo must expose it to operators as a readable non-mutating command.
+The current repo appears to have `cmd_repair_plan` wiring and tests importing it, but the operator-facing output must be verified.
 
 Verification target:
 
@@ -266,56 +353,23 @@ uv run bithumb-bot repair-plan --help
 MODE=live uv run bithumb-bot repair-plan
 ```
 
-Required operator output:
-
-```text
-[REPAIR-PLAN]
-  plan_id=...
-  mode=live
-  primary_incident_class=ACCOUNTING_ROOT_CAUSE
-  recommended_mode=forensic_accounting
-  accounting_root_cause_unresolved=1
-  accounting_evidence_reliable=0
-  additional_orders_allowed=0
-  flatten_primary_recommendation=0
-  recommended_action=collect_broker_fill_evidence_and_build_repair_plan
-  recommended_command=uv run python bot.py repair-plan
-
-[POSITION-PROJECTION]
-  source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events
-  projection_kind=open_position_lots
-  canonical_portfolio_qty=...
-  broker_qty=...
-  open_position_lots_projected_qty=...
-  projection_converged=...
-  rebuildable=1
-  safe_to_rebuild=...
-
-candidate_repairs:
-  - name=...
-    needed=...
-    active_issue=...
-    safe_to_apply=...
-    preconditions=...
-    touched_tables=...
-    expected_after=...
-    idempotency_key=...
-    rollback_or_backup=...
-    why_safe=...
-    recommended_command=...
-```
-
 Falsification condition:
 
 ```text
-The command and tests already exist and produce readable non-mutating output.
+The command and tests already exist and produce readable non-mutating output with:
+  plan_id
+  policy summary
+  projection summary
+  candidate repairs
+  why_safe
+  non_mutating_preview=1
 ```
 
 If missing or weak, add it.
 
 ### Hypothesis D — Projection semantics are present but need end-to-end tests
 
-The repair-plan payload declares `open_position_lots` as projection, but recovery must not treat projection drift as market-risk exposure.
+The repair-plan payload may declare `open_position_lots` as projection, but recovery must not treat projection drift as market-risk exposure.
 
 Verification target:
 
@@ -340,17 +394,13 @@ If missing, add tests.
 
 ### 1. Finish wiring repair-plan policy into operator surfaces
 
-If `repair_plan.py` exists but is not surfaced, add or finish:
+If `repair_plan.py` exists but is not fully surfaced, finish:
 
 ```bash
 bithumb-bot repair-plan
 ```
 
-The command must be read-only by default and clearly say it is a non-mutating preview.
-
-If `repair-plan` already exists, verify its output includes all required policy and candidate fields. Improve formatting if necessary.
-
-Also surface the policy summary in:
+Also surface the same policy summary in:
 
 ```text
 recovery-report
@@ -363,11 +413,15 @@ Minimum required surface:
 ```text
 primary_incident_class=ACCOUNTING_ROOT_CAUSE
 recommended_mode=forensic_accounting
+accounting_root_cause_unresolved=1
+accounting_evidence_reliable=0
 additional_orders_allowed=0
 flatten_primary_recommendation=0
 recommended_action=collect_broker_fill_evidence_and_build_repair_plan
 recommended_command=uv run python bot.py repair-plan
 ```
+
+Do not leave the policy trapped inside `repair_plan.py` only.
 
 ### 2. Suppress flatten as primary recommendation during accounting-root-cause incidents
 
@@ -418,8 +472,6 @@ repair-plan
 
 ### 3. Make repair-plan candidate output useful enough for operators
 
-The goal is to stop the operator from guessing between multiple repair commands.
-
 Each candidate repair must include:
 
 ```text
@@ -448,20 +500,6 @@ rebuild-position-authority
 Do not implement `repair-apply --plan-id` unless the current repo infrastructure makes that small and safe. The immediate goal is a robust non-mutating preview.
 
 ### 4. Make `open_position_lots` projection semantics explicit end-to-end
-
-The system must distinguish:
-
-```text
-canonical truth:
-  fills
-  trades
-  fee finalization/adjustment events
-  external adjustments
-  repair events
-
-projection:
-  open_position_lots
-```
 
 Projection drift should route to repair-plan / rebuild-position-authority, not flatten.
 
@@ -535,7 +573,7 @@ test_recovery_report_surfaces_forensic_accounting_mode
 test_restart_checklist_surfaces_forensic_accounting_mode
 ```
 
-Required assertions for negative case:
+Required assertions for accounting-root-cause case:
 
 ```text
 accounting_root_cause_unresolved=1
@@ -576,6 +614,7 @@ Required output fields:
 ```text
 [REPAIR-PLAN]
 plan_id=
+mode=
 primary_incident_class=
 recommended_mode=
 accounting_root_cause_unresolved=
@@ -584,6 +623,7 @@ additional_orders_allowed=
 flatten_primary_recommendation=
 recommended_action=
 recommended_command=
+non_mutating_preview=1
 
 [POSITION-PROJECTION]
 source_of_truth=
@@ -817,15 +857,5 @@ When finished, produce a report with exactly these sections:
    - Follow-up issues recommended.
 ```
 
-The goal is to evolve `WG-14/bithumb-bot` from a collection of safe individual repair commands into a recovery system that can clearly say:
-
-```text
-This is an accounting-root-cause incident.
-Do not flatten as the first response.
-Do not create new orders.
-Here is the evidence.
-Here is the non-mutating repair plan.
-Here is why the plan is safe.
-Here is how to verify it before live restart.
-```
+The next patch should not be “add repair-plan as a concept.” That appears to already exist. The next patch should ensure the already-added repair-plan/recovery policy fully penetrates the CLI, recovery-report, restart-checklist, health surfaces, and tests.
 

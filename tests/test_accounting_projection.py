@@ -761,6 +761,7 @@ def test_recovery_policy_allows_flatten_only_for_market_risk_with_reliable_accou
     assert policy["actual_executable_exposure"] is True
     assert policy["additional_orders_allowed"] is True
     assert policy["flatten_primary_recommendation"] is True
+    assert policy["flatten_not_primary"] is False
     assert policy["recommended_action"] == "review_executable_exposure_and_consider_flatten"
     assert policy["recommended_command"] == "uv run python bot.py flatten-position"
 
@@ -800,12 +801,18 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
     assert policy["accounting_root_cause_unresolved"] is True
     assert policy["accounting_evidence_reliable"] is False
     assert policy["flatten_primary_recommendation"] is False
+    assert policy["flatten_not_primary"] is True
     assert policy["recommended_mode"] == "forensic_accounting"
+    assert policy["incident_reasons"] == ["open_position_lots_projection_drift"]
     assert plan["broker_portfolio_converged"] is True
     assert plan["projection_converged"] is False
     assert plan["canonical_portfolio_qty"] == pytest.approx(0.25)
     assert plan["broker_qty"] == pytest.approx(0.25)
     assert plan["open_position_lots_projected_qty"] == pytest.approx(0.1)
+    assert plan["actual_executable_exposure"] is True
+    assert plan["flatten_not_primary"] is True
+    assert plan["incident_reasons"] == ["open_position_lots_projection_drift"]
+    assert plan["non_mutating_preview"] is True
     assert any(
         candidate["name"] == "rebuild-position-authority" and candidate["needed"] and candidate["safe_to_apply"]
         for candidate in plan["candidate_repairs"]

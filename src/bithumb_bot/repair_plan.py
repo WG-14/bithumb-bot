@@ -229,10 +229,13 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "recommended_mode": str(policy["recommended_mode"]),
         "accounting_root_cause_unresolved": bool(policy["accounting_root_cause_unresolved"]),
         "accounting_evidence_reliable": bool(policy["accounting_evidence_reliable"]),
+        "actual_executable_exposure": bool(policy["actual_executable_exposure"]),
         "additional_orders_allowed": bool(policy["additional_orders_allowed"]),
         "flatten_primary_recommendation": bool(policy["flatten_primary_recommendation"]),
+        "flatten_not_primary": bool(policy["flatten_not_primary"]),
         "recommended_action": str(policy["recommended_action"]),
         "recommended_command": str(policy["recommended_command"]),
+        "incident_reasons": list(policy["incident_reasons"]),
         "canonical_portfolio_qty": _float(report.get("portfolio_qty")),
         "broker_qty": _float(report.get("broker_qty")),
         "open_position_lots_projected_qty": _float(
@@ -245,6 +248,7 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "rebuildable": True,
         "safe_to_rebuild": bool((report.get("position_authority_rebuild_preview") or {}).get("safe_to_apply")),
         "reason": projection_reason,
+        "non_mutating_preview": True,
         "candidate_repairs": _candidate_repairs_from_report(report, policy),
     }
     plan_basis = {

@@ -7506,6 +7506,7 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0025)
     object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
     runtime_state.enable_trading()
+    monkeypatch.setattr("bithumb_bot.app.write_json_atomic", lambda *_args, **_kwargs: None)
 
     conn = ensure_db()
     try:
@@ -7568,6 +7569,8 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in health_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in health_out
     assert "operator_action=review_fee_diagnostics" in health_out
+    assert "fee_rate_drift_summary=diagnostic_only configured_fee_bps=25.000 observed_fee_bps_median=4.000" in health_out
+    assert "action=review_fee_diagnostics" in health_out
     assert "recommended_command=uv run python bot.py fee-diagnostics" in health_out
 
     cmd_recovery_report(as_json=False)
@@ -7587,6 +7590,8 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in report_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in report_out
     assert "operator_action=review_fee_diagnostics" in report_out
+    assert "fee_rate_drift_summary=diagnostic_only configured_fee_bps=25.000 observed_fee_bps_median=4.000" in report_out
+    assert "action=review_fee_diagnostics" in report_out
     assert "recommended_command=uv run python bot.py fee-diagnostics" in report_out
 
     cmd_restart_checklist()
@@ -7604,15 +7609,18 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in checklist_out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in checklist_out
     assert "operator_action=review_fee_diagnostics" in checklist_out
+    assert "fee_rate_drift_summary=diagnostic_only configured_fee_bps=25.000 observed_fee_bps_median=4.000" in checklist_out
+    assert "action=review_fee_diagnostics" in checklist_out
     assert "recommended_command=uv run python bot.py fee-diagnostics" in checklist_out
 
 
 def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_active_accounting_root_cause(
-    tmp_path, capsys
+    tmp_path, monkeypatch, capsys
 ):
     _set_tmp_db(tmp_path)
     object.__setattr__(settings, "MODE", "live")
     runtime_state.enable_trading()
+    monkeypatch.setattr("bithumb_bot.app.write_json_atomic", lambda *_args, **_kwargs: None)
 
     conn = ensure_db()
     try:
@@ -7656,8 +7664,10 @@ def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_
     assert policy["accounting_evidence_reliable"] is False
     assert policy["additional_orders_allowed"] is False
     assert policy["flatten_primary_recommendation"] is False
+    assert policy["flatten_not_primary"] is True
     assert policy["recommended_action"] == "collect_broker_fill_evidence_and_build_repair_plan"
     assert policy["recommended_command"] == "uv run python bot.py repair-plan"
+    assert "fill_accounting_incident_active" in policy["incident_reasons"]
     assert report["fill_accounting_root_cause"]["flatten_as_primary_response"] is False
 
     cmd_recovery_report(as_json=False)
@@ -7667,10 +7677,13 @@ def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_
     assert "recommended_mode=forensic_accounting" in report_out
     assert "accounting_root_cause_unresolved=1" in report_out
     assert "accounting_evidence_reliable=0" in report_out
+    assert "actual_executable_exposure=0" in report_out
     assert "additional_orders_allowed=0" in report_out
     assert "flatten_primary_recommendation=0" in report_out
+    assert "flatten_not_primary=1" in report_out
     assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in report_out
     assert "recommended_command=uv run python bot.py repair-plan" in report_out
+    assert "incident_reasons=fill_accounting_incident_active" in report_out
 
     cmd_restart_checklist()
     checklist_out = capsys.readouterr().out
@@ -7678,20 +7691,26 @@ def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_
     assert "recommended_mode=forensic_accounting" in checklist_out
     assert "accounting_root_cause_unresolved=1" in checklist_out
     assert "accounting_evidence_reliable=0" in checklist_out
+    assert "actual_executable_exposure=0" in checklist_out
     assert "additional_orders_allowed=0" in checklist_out
     assert "flatten_primary_recommendation=0" in checklist_out
+    assert "flatten_not_primary=1" in checklist_out
     assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in checklist_out
     assert "recommended_command=uv run python bot.py repair-plan" in checklist_out
+    assert "incident_reasons=fill_accounting_incident_active" in checklist_out
 
     cmd_health()
     health_out = capsys.readouterr().out
     assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in health_out
     assert "recommended_mode=forensic_accounting" in health_out
     assert "accounting_root_cause_unresolved=1" in health_out
+    assert "actual_executable_exposure=0" in health_out
     assert "additional_orders_allowed=0" in health_out
     assert "flatten_primary_recommendation=0" in health_out
+    assert "flatten_not_primary=1" in health_out
     assert "recommended_action=collect_broker_fill_evidence_and_build_repair_plan" in health_out
     assert "recommended_command=uv run python bot.py repair-plan" in health_out
+    assert "incident_reasons=fill_accounting_incident_active" in health_out
     assert "next_commands=uv run python bot.py repair-plan" in health_out
 
 
@@ -7748,8 +7767,14 @@ def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp
     assert "plan_id=" in out
     assert "primary_incident_class=ACCOUNTING_ROOT_CAUSE" in out
     assert "recommended_mode=forensic_accounting" in out
+    assert "accounting_root_cause_unresolved=1" in out
+    assert "accounting_evidence_reliable=0" in out
+    assert "actual_executable_exposure=0" in out
     assert "additional_orders_allowed=0" in out
     assert "flatten_primary_recommendation=0" in out
+    assert "flatten_not_primary=1" in out
+    assert "non_mutating_preview=1" in out
+    assert "incident_reasons=fill_accounting_incident_active" in out
     assert "[POSITION-PROJECTION]" in out
     assert "source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events" in out
     assert "projection_kind=open_position_lots" in out
@@ -7758,6 +7783,7 @@ def test_repair_plan_preview_is_non_mutating_and_lists_accounting_candidates(tmp
     assert "name=fee-pending-accounting-repair needed=1 active_issue=1 safe_to_apply=0" in out
     assert "name=fee-gap-accounting-repair" in out
     assert "name=manual-flat-accounting-repair" in out
+    assert "name=external-position-accounting-repair" in out
     assert "name=rebuild-position-authority" in out
     assert "preconditions=" in out
     assert "touched_tables=" in out
