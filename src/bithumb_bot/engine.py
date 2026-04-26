@@ -86,6 +86,196 @@ STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES = {
     "RECENT_FILL_APPLIED",
     "RECONCILE_OK",
 }
+
+
+def _risk_state_mismatch_recent_context(state) -> bool:
+    return bool(
+        state.halt_reason_code == RISK_STATE_MISMATCH
+        or RISK_STATE_MISMATCH in str(state.last_disable_reason or "")
+    )
+
+
+def _stale_risk_state_mismatch_reason_code_allowed(
+    *,
+    reconcile_reason_code: str,
+    readiness_snapshot,
+) -> bool:
+    if reconcile_reason_code in STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES:
+        return True
+    if reconcile_reason_code != "FEE_GAP_RECOVERY_REQUIRED":
+        return False
+    fee_gap_incident = readiness_snapshot.fee_gap_incident
+    return bool(
+        fee_gap_incident.incident_kind == "historical_fee_gap_repaired"
+        and not fee_gap_incident.active_issue
+        and not fee_gap_incident.policy.resume_blocking
+    )
+
+
+def _evaluate_stale_risk_state_mismatch_halt(
+    *,
+    state,
+    startup_gate_reason: str | None,
+) -> dict[str, object]:
+    candidate = bool(_risk_state_mismatch_recent_context(state))
+    reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
+    blockers: list[str] = []
+    readiness_snapshot = None
+    fee_gap_active_issue = False
+    fee_gap_resume_blocking = False
+    reason_code_allowed = False
+    accounting_projection_ok = False
+    broker_portfolio_converged = False
+    broker_qty_known = False
+    balance_source_stale = False
+    if state.last_reconcile_status != "ok":
+        blockers.append(f"last_reconcile_status={state.last_reconcile_status or 'none'}")
+    if startup_gate_reason:
+        blockers.append(f"startup_gate_blocked:{startup_gate_reason}")
+    if state.emergency_flatten_blocked:
+        blockers.append("emergency_flatten_unresolved")
+    if _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata) > 0:
+        blockers.append("balance_split_mismatch")
+
+    conn = ensure_db()
+    try:
+        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
+        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
+        external_position_preview = build_external_position_accounting_repair_preview(conn)
+        risky_state = collect_risky_order_state(
+            conn,
+            now_ms=int(time.time() * 1000),
+            max_open_order_age_sec=max(1, int(settings.MAX_OPEN_ORDER_AGE_SEC)),
+        )
+        try:
+            accounting_projection = compute_accounting_replay(conn)
+        except RuntimeError:
+            accounting_projection = None
+    finally:
+        conn.close()
+
+    fee_gap_incident = readiness_snapshot.fee_gap_incident
+    fee_gap_active_issue = bool(fee_gap_incident.active_issue)
+    fee_gap_resume_blocking = bool(fee_gap_incident.policy.resume_blocking)
+    reason_code_allowed = _stale_risk_state_mismatch_reason_code_allowed(
+        reconcile_reason_code=reconcile_reason_code,
+        readiness_snapshot=readiness_snapshot,
+    )
+
+    broker_evidence = readiness_snapshot.broker_position_evidence
+    projection_convergence = readiness_snapshot.projection_convergence
+    authority_assessment = readiness_snapshot.position_authority_assessment
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
+    balance_source_stale = bool(broker_evidence.get("balance_source_stale"))
+    broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
+    portfolio_qty = float(projection_convergence.get("portfolio_qty") or 0.0)
+    portfolio_cash = portfolio_cash_total(
+        cash_available=float(cash_available),
+        cash_locked=float(cash_locked),
+    )
+    accounting_portfolio_qty = portfolio_asset_total(
+        asset_available=float(asset_available),
+        asset_locked=float(asset_locked),
+    )
+    accounting_projection_ok = bool(
+        accounting_projection is not None
+        and abs(float(accounting_projection.get("replay_cash") or 0.0) - portfolio_cash) <= 1e-8
+        and abs(float(accounting_projection.get("replay_qty") or 0.0) - accounting_portfolio_qty) <= 1e-12
+    )
+    broker_portfolio_converged = bool(
+        broker_qty_known and abs(broker_qty - portfolio_qty) <= 1e-12
+    )
+    authority_gap_reason = str(readiness_snapshot.position_state.normalized_exposure.authority_gap_reason or "")
+    metadata = readiness_snapshot.reconcile_metadata
+    submit_unknown_unresolved = int(metadata.get("submit_unknown_unresolved", 0) or 0)
+    remote_open_order_found = int(metadata.get("remote_open_order_found", 0) or 0)
+    source_conflict_halt = int(metadata.get("source_conflict_halt", 0) or 0)
+    submit_unknown_without_exchange_count = int(
+        risky_state.get("submit_unknown_without_exchange_id_count", 0) or 0
+    )
+    stray_remote_open_count = int(risky_state.get("stray_remote_open_order_count", 0) or 0)
+
+    if not accounting_projection_ok:
+        blockers.append("accounting_projection_not_converged")
+    if int(readiness_snapshot.fee_pending_count or 0) > 0:
+        blockers.append(f"fee_pending_count={int(readiness_snapshot.fee_pending_count or 0)}")
+    if int(readiness_snapshot.open_order_count or 0) > 0:
+        blockers.append(f"open_order_count={int(readiness_snapshot.open_order_count or 0)}")
+    if int(readiness_snapshot.recovery_required_count or 0) > 0:
+        blockers.append(f"recovery_required_count={int(readiness_snapshot.recovery_required_count or 0)}")
+    if fee_gap_active_issue:
+        blockers.append("fee_gap_active_issue")
+    if fee_gap_resume_blocking:
+        blockers.append("fee_gap_resume_blocking")
+    if not bool(projection_convergence.get("converged")):
+        blockers.append(f"lot_projection_not_converged:{projection_convergence.get('reason') or 'none'}")
+    if bool(authority_assessment.get("needs_correction")):
+        blockers.append("position_authority_correction_required")
+    if bool(authority_assessment.get("needs_residual_normalization")):
+        blockers.append("position_authority_residual_normalization_required")
+    if bool(authority_assessment.get("needs_full_projection_rebuild")):
+        blockers.append("position_authority_full_projection_rebuild_required")
+    if bool(authority_assessment.get("needs_portfolio_projection_repair")):
+        blockers.append("position_authority_projection_repair_required")
+    if authority_gap_reason == "authority_missing_recovery_required":
+        blockers.append("position_authority_gap_missing")
+    if bool(external_position_preview.get("needs_repair")):
+        blockers.append("external_position_accounting_repair_required")
+    if not bool(broker_evidence.get("balance_snapshot_available_for_health")):
+        blockers.append("balance_snapshot_missing_for_health")
+    if balance_source_stale:
+        blockers.append("balance_snapshot_stale")
+    if not broker_qty_known:
+        blockers.append("broker_qty_unknown")
+    if not broker_portfolio_converged:
+        blockers.append("broker_portfolio_not_converged")
+    if submit_unknown_unresolved > 0:
+        blockers.append(f"submit_unknown_unresolved={submit_unknown_unresolved}")
+    if remote_open_order_found > 0:
+        blockers.append(f"remote_open_order_found={remote_open_order_found}")
+    if source_conflict_halt > 0:
+        blockers.append(f"source_conflict_halt={source_conflict_halt}")
+    if submit_unknown_without_exchange_count > 0:
+        blockers.append(
+            f"submit_unknown_without_exchange_id={submit_unknown_without_exchange_count}"
+        )
+    if stray_remote_open_count > 0:
+        blockers.append(f"stray_remote_open_orders={stray_remote_open_count}")
+
+    current_evidence_converged = bool(candidate and not blockers)
+    halt_reason_current_evidence = (
+        "stale"
+        if candidate and current_evidence_converged
+        else ("current" if candidate else "not_applicable")
+    )
+    return {
+        "stale_halt_clear_candidate": candidate,
+        "stale_halt_clear_allowed": bool(candidate and current_evidence_converged),
+        "stale_halt_clear_blockers": blockers,
+        "stale_halt_clear_reason_code_allowed": bool(reason_code_allowed),
+        "stale_halt_clear_current_evidence_converged": current_evidence_converged,
+        "halt_reason_current_evidence": halt_reason_current_evidence,
+        "fee_gap_resume_blocking": fee_gap_resume_blocking,
+        "fee_gap_active_issue": fee_gap_active_issue,
+        "stale_halt_clear_reconcile_reason_code": reconcile_reason_code or "none",
+        "stale_halt_clear_last_reconcile_status": str(state.last_reconcile_status or "none"),
+        "stale_halt_clear_accounting_projection_ok": accounting_projection_ok,
+        "stale_halt_clear_broker_portfolio_converged": broker_portfolio_converged,
+        "stale_halt_clear_lot_projection_converged": bool(projection_convergence.get("converged")),
+        "stale_halt_clear_broker_qty_known": broker_qty_known,
+        "stale_halt_clear_balance_source_stale": balance_source_stale,
+    }
+
+
+def get_stale_risk_state_mismatch_halt_diagnostics(
+    *,
+    startup_gate_reason: str | None = None,
+) -> dict[str, object]:
+    gate_reason = startup_gate_reason if startup_gate_reason is not None else evaluate_startup_safety_gate()
+    return _evaluate_stale_risk_state_mismatch_halt(
+        state=runtime_state.snapshot(),
+        startup_gate_reason=gate_reason,
+    )
 def compute_signal(
     conn,
     short_n: int,
@@ -741,65 +931,11 @@ def maybe_clear_stale_live_execution_broker_halt(*, startup_gate_reason: str | N
 
 
 def _can_clear_stale_risk_state_mismatch_halt(*, state, startup_gate_reason: str | None) -> bool:
-    if state.last_reconcile_status != "ok":
-        return False
-    reconcile_reason_code = str(state.last_reconcile_reason_code or "").strip()
-    if reconcile_reason_code not in STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES:
-        return False
-    if startup_gate_reason or state.emergency_flatten_blocked:
-        return False
-    if _reconcile_balance_split_mismatch_count(state.last_reconcile_metadata) > 0:
-        return False
-
-    conn = ensure_db()
-    try:
-        readiness_snapshot = compute_runtime_readiness_snapshot(conn)
-        accounting_projection = compute_accounting_replay(conn)
-        cash_available, cash_locked, asset_available, asset_locked = get_portfolio_breakdown(conn)
-        external_position_preview = build_external_position_accounting_repair_preview(conn)
-    finally:
-        conn.close()
-
-    broker_evidence = readiness_snapshot.broker_position_evidence
-    projection_convergence = readiness_snapshot.projection_convergence
-    authority_assessment = readiness_snapshot.position_authority_assessment
-    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
-    broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
-    portfolio_qty = float(projection_convergence.get("portfolio_qty") or 0.0)
-    portfolio_cash = portfolio_cash_total(
-        cash_available=float(cash_available),
-        cash_locked=float(cash_locked),
+    diagnostics = _evaluate_stale_risk_state_mismatch_halt(
+        state=state,
+        startup_gate_reason=startup_gate_reason,
     )
-    accounting_portfolio_qty = portfolio_asset_total(
-        asset_available=float(asset_available),
-        asset_locked=float(asset_locked),
-    )
-    accounting_projection_ok = bool(
-        abs(float(accounting_projection.get("replay_cash") or 0.0) - portfolio_cash) <= 1e-8
-        and abs(float(accounting_projection.get("replay_qty") or 0.0) - accounting_portfolio_qty) <= 1e-12
-    )
-    broker_portfolio_converged = bool(
-        broker_qty_known and abs(broker_qty - portfolio_qty) <= 1e-12
-    )
-    authority_gap_reason = str(readiness_snapshot.position_state.normalized_exposure.authority_gap_reason or "")
-
-    return bool(
-        accounting_projection_ok
-        and int(readiness_snapshot.fee_pending_count or 0) == 0
-        and int(readiness_snapshot.open_order_count or 0) == 0
-        and int(readiness_snapshot.recovery_required_count or 0) == 0
-        and not bool(readiness_snapshot.fee_gap_resume_blocking)
-        and bool(projection_convergence.get("converged"))
-        and not bool(authority_assessment.get("needs_correction"))
-        and not bool(authority_assessment.get("needs_residual_normalization"))
-        and not bool(authority_assessment.get("needs_full_projection_rebuild"))
-        and not bool(authority_assessment.get("needs_portfolio_projection_repair"))
-        and authority_gap_reason != "authority_missing_recovery_required"
-        and not bool(external_position_preview.get("needs_repair"))
-        and bool(broker_evidence.get("balance_snapshot_available_for_health"))
-        and not bool(broker_evidence.get("balance_source_stale"))
-        and broker_portfolio_converged
-    )
+    return bool(diagnostics["stale_halt_clear_allowed"])
 
 
 def maybe_clear_stale_risk_state_mismatch_halt(*, startup_gate_reason: str | None = None) -> bool:

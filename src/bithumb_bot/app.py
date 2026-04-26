@@ -47,6 +47,7 @@ from .engine import (
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
     get_health_status,
+    get_stale_risk_state_mismatch_halt_diagnostics,
     maybe_clear_stale_initial_reconcile_halt,
     perform_panic_stop_cleanup,
 )
@@ -851,6 +852,13 @@ def cmd_health() -> None:
     resume_blocker_codes = [str(blocker.code) for blocker in resume_blockers]
     resume_blocker_reason_codes = [str(getattr(blocker, "reason_code", blocker.code)) for blocker in resume_blockers]
     health = get_health_status()
+    stale_halt_clear_diagnostics = get_stale_risk_state_mismatch_halt_diagnostics(
+        startup_gate_reason=(
+            str(health["startup_gate_reason"])
+            if health.get("startup_gate_reason")
+            else None
+        )
+    )
     state_label = "running"
     if bool(health["halt_new_orders_blocked"]):
         state_label = "halted"
@@ -1024,6 +1032,25 @@ def cmd_health() -> None:
         f"effective_flat={1 if readiness_snapshot.effective_flat else 0} "
         f"operator_action_required={1 if readiness_snapshot.operator_action_required else 0} "
         f"why_not={readiness_snapshot.why_not}"
+    )
+    print(
+        "    "
+        "stale_halt_clear_candidate="
+        f"{1 if bool(stale_halt_clear_diagnostics.get('stale_halt_clear_candidate')) else 0} "
+        "stale_halt_clear_allowed="
+        f"{1 if bool(stale_halt_clear_diagnostics.get('stale_halt_clear_allowed')) else 0} "
+        "stale_halt_clear_current_evidence_converged="
+        f"{1 if bool(stale_halt_clear_diagnostics.get('stale_halt_clear_current_evidence_converged')) else 0} "
+        "stale_halt_clear_reason_code_allowed="
+        f"{1 if bool(stale_halt_clear_diagnostics.get('stale_halt_clear_reason_code_allowed')) else 0} "
+        f"halt_reason_current_evidence={stale_halt_clear_diagnostics.get('halt_reason_current_evidence') or 'not_applicable'}"
+    )
+    print(
+        "    "
+        f"fee_gap_active_issue={1 if bool(stale_halt_clear_diagnostics.get('fee_gap_active_issue')) else 0} "
+        f"fee_gap_resume_blocking={1 if bool(stale_halt_clear_diagnostics.get('fee_gap_resume_blocking')) else 0} "
+        "stale_halt_clear_blockers="
+        f"{', '.join(str(item) for item in stale_halt_clear_diagnostics.get('stale_halt_clear_blockers') or []) or 'none'}"
     )
     print(f"    resume_safety={resume_safety}")
     print(
@@ -2612,6 +2639,7 @@ def _load_recovery_report(
     resume_blocked_reason = guidance.resume_blocked_reason
     active_blocker_summary = guidance.active_blocker_summary
     risk_level = guidance.risk_level
+    stale_halt_clear_diagnostics = get_stale_risk_state_mismatch_halt_diagnostics()
 
     state = runtime_state.snapshot()
     blocker_summary_view = guidance.blocker_summary_view
@@ -3103,6 +3131,7 @@ def _load_recovery_report(
         "position_authority_rebuild_preview": position_authority_rebuild_preview,
         "position_authority_repair_summary": position_authority_repair_summary,
         "runtime_readiness": runtime_readiness_snapshot,
+        "stale_halt_clear_diagnostics": stale_halt_clear_diagnostics,
         "pending_fee_count": int(fill_accounting_incident_projection.get("active_fee_pending_count") or 0),
         "auto_recovery_count": int(runtime_readiness_snapshot.get("auto_recovery_count") or 0),
         "operator_review_required_count": recovery_required_count,
@@ -3272,6 +3301,26 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print(f"    primary_blocker_reason_code={report['primary_blocker_reason_code']}")
     print(f"    emergency_flatten_blocked={1 if bool(report.get('emergency_flatten_blocked')) else 0}")
     print(f"    emergency_flatten_block_reason={report.get('emergency_flatten_block_reason') or 'none'}")
+    stale_halt = report.get("stale_halt_clear_diagnostics") or {}
+    print(
+        "    stale_halt_clear_candidate="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_candidate')) else 0} "
+        "stale_halt_clear_allowed="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_allowed')) else 0} "
+        "stale_halt_clear_current_evidence_converged="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_current_evidence_converged')) else 0} "
+        f"halt_reason_current_evidence={stale_halt.get('halt_reason_current_evidence') or 'not_applicable'}"
+    )
+    print(
+        "    stale_halt_clear_reason_code_allowed="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_reason_code_allowed')) else 0} "
+        f"fee_gap_active_issue={1 if bool(stale_halt.get('fee_gap_active_issue')) else 0} "
+        f"fee_gap_resume_blocking={1 if bool(stale_halt.get('fee_gap_resume_blocking')) else 0}"
+    )
+    print(
+        "    stale_halt_clear_blockers="
+        f"{', '.join(str(item) for item in stale_halt.get('stale_halt_clear_blockers') or []) or 'none'}"
+    )
     for blocker in blockers:
         print(
             "    - "
@@ -4408,7 +4457,9 @@ def cmd_restart_checklist() -> None:
         fee_rate_drift = _fee_rate_drift_diagnostics(conn)
     finally:
         conn.close()
-    recovery_policy = (_load_recovery_report().get("recovery_policy") or {})
+    report = _load_recovery_report()
+    recovery_policy = (report.get("recovery_policy") or {})
+    stale_halt = report.get("stale_halt_clear_diagnostics") or {}
 
     print("[RESTART-SAFETY-CHECKLIST]")
     for label, ok, detail in checklist:
@@ -4435,6 +4486,25 @@ def cmd_restart_checklist() -> None:
     print(
         "  "
         f"tradeability_operator_message={tradeability_fields['tradeability_operator_message']}"
+    )
+    print(
+        "  "
+        "stale_halt_clear_candidate="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_candidate')) else 0} "
+        "stale_halt_clear_allowed="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_allowed')) else 0} "
+        "stale_halt_clear_current_evidence_converged="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_current_evidence_converged')) else 0} "
+        f"halt_reason_current_evidence={stale_halt.get('halt_reason_current_evidence') or 'not_applicable'}"
+    )
+    print(
+        "  "
+        "stale_halt_clear_reason_code_allowed="
+        f"{1 if bool(stale_halt.get('stale_halt_clear_reason_code_allowed')) else 0} "
+        f"fee_gap_active_issue={1 if bool(stale_halt.get('fee_gap_active_issue')) else 0} "
+        f"fee_gap_resume_blocking={1 if bool(stale_halt.get('fee_gap_resume_blocking')) else 0} "
+        "stale_halt_clear_blockers="
+        f"{', '.join(str(item) for item in stale_halt.get('stale_halt_clear_blockers') or []) or 'none'}"
     )
     _print_fee_rate_drift_summary("  ", fee_rate_drift)
     _print_recovery_policy_summary("  ", recovery_policy)

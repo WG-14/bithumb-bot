@@ -3541,11 +3541,18 @@ def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position
     assert blockers == []
     assert state.halt_new_orders_blocked is False
     assert state.halt_state_unresolved is False
+    assert report["resume_blockers"] == []
+    assert "HALT_RISK_OPEN_POSITION" not in report["resume_blockers"]
     assert report["runtime_readiness"]["canonical_state"] == "OPEN_EXECUTABLE"
     assert report["runtime_readiness"]["run_loop_allowed"] is True
     assert report["runtime_readiness"]["position_management_allowed"] is True
     assert report["runtime_readiness"]["new_entry_allowed"] is False
     assert report["runtime_readiness"]["closeout_allowed"] is True
+    assert report["stale_halt_clear_diagnostics"]["stale_halt_clear_candidate"] is True
+    assert report["stale_halt_clear_diagnostics"]["stale_halt_clear_allowed"] is True
+    assert report["stale_halt_clear_diagnostics"]["stale_halt_clear_current_evidence_converged"] is True
+    assert report["stale_halt_clear_diagnostics"]["halt_reason_current_evidence"] == "stale"
+    assert report["stale_halt_clear_diagnostics"]["stale_halt_clear_blockers"] == []
     assert report["recovery_policy"]["primary_incident_class"] == "CANONICAL_OPEN_POSITION"
     assert report["recovery_policy"]["recommended_mode"] == "position_management"
     assert report["recovery_policy"]["position_management_allowed"] is True
@@ -3563,6 +3570,10 @@ def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position
     assert "position_management_allowed=1" in checklist_out
     assert "new_entry_allowed=0" in checklist_out
     assert "closeout_allowed=1" in checklist_out
+    assert "stale_halt_clear_candidate=1" in checklist_out
+    assert "stale_halt_clear_allowed=1" in checklist_out
+    assert "halt_reason_current_evidence=stale" in checklist_out
+    assert "stale_halt_clear_blockers=none" in checklist_out
     assert "primary_incident_class=CANONICAL_OPEN_POSITION" in checklist_out
     assert "recommended_mode=position_management" in checklist_out
     assert "recommended_action=resume_position_management" in checklist_out
@@ -3574,6 +3585,10 @@ def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position
     assert "recommended_action=resume_position_management" in report_out
     assert "recommended_command=uv run python bot.py resume" in report_out
     assert "flatten_primary_recommendation=0" in report_out
+    assert "stale_halt_clear_candidate=1" in report_out
+    assert "stale_halt_clear_allowed=1" in report_out
+    assert "halt_reason_current_evidence=stale" in report_out
+    assert "stale_halt_clear_blockers=none" in report_out
 
     app_main(["repair-plan"])
     repair_plan_out = capsys.readouterr().out
@@ -3590,6 +3605,10 @@ def test_canonical_open_exposure_clears_stale_risk_mismatch_and_resumes_position
     assert "position_management_allowed=1" in health_out
     assert "new_entry_allowed=0" in health_out
     assert "closeout_allowed=1" in health_out
+    assert "stale_halt_clear_candidate=1" in health_out
+    assert "stale_halt_clear_allowed=1" in health_out
+    assert "halt_reason_current_evidence=stale" in health_out
+    assert "stale_halt_clear_blockers=none" in health_out
     assert "recommended_action=resume_position_management" in health_out
     assert "recommended_command=uv run python bot.py resume" in health_out
 

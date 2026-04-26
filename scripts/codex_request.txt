@@ -1,4 +1,4 @@
-Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The latest EC2 logs and repo inspection indicate that fee/accounting/broker-evidence/lot-projection issues are mostly resolved; the remaining blocker is runtime policy: the bot still cannot resume with a clean, canonical open position because a stale `RISK_STATE_MISMATCH` halt latch and `HALT_RISK_OPEN_POSITION` policy treat normal open exposure as non-resumable. 
+Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The latest EC2 diagnosis is now narrower than before: fee/accounting/broker-evidence/lot-projection convergence appears to be successful, but runtime permission still fails because stale halt clearance and open-exposure tradeability policy do not convert current clean evidence into `run_loop_allowed=1`. 
 
 You are working in the GitHub repository:
 
@@ -8,141 +8,120 @@ WG-14/bithumb-bot
 
 ## Mission
 
-Do **not** solve this by flattening the current BTC position, using `resume --force`, loosening all halt gates, deleting lots, hiding blockers, or adding another manual DB repair path.
+Do **not** solve this by flattening the current BTC position, using `resume --force`, deleting lots, hiding blockers, loosening all halt gates, or adding another manual DB repair path.
 
-The goal is to make the bot safer and more operational by allowing it to resume in a **position-management mode** when it already holds a broker-confirmed, accounting-confirmed, projection-confirmed open position.
+The goal is to make the bot stricter about the right thing: **current active danger**, not the mere existence of a correctly accounted open position.
 
 Core principle:
 
 ```text
-Open exposure present
-≠ unsafe
-≠ must flatten
-≠ cannot run
+Current evidence converged
+→ stale halt should be revalidated
+→ clean open exposure should become position-management-ready
 ```
 
-A normal automated trading bot must be able to restart with an existing canonical position and continue managing that position. It may block additional BUY entries while a position is open, but it should not require manual flattening before it can run.
+The current problem is not fee repair, not broker balance visibility, and not lot projection drift. The remaining issue is that runtime policy does not turn verified convergence into safe runtime permission.
 
-## Current EC2 state to preserve as incident fixture
+## Current EC2 state to preserve as an incident fixture
 
-Latest observed state:
+The latest EC2 state shows the important accounting and evidence surfaces are now mostly converged:
 
 ```text
-accounting_projection_ok=true
-broker_portfolio_converged=true
-broker_qty_known=true
-broker_qty=0.00079982
-broker_qty_evidence_source=accounts_v1_rest_snapshot
-asset_available=0.00079982
-asset_locked=0.0
+accounting_projection_ok=1
+broker_portfolio_converged=1
+lot_projection_converged=1
+unresolved_fee_state=0
+fill_accounting_active_issue_count=0
 blocking_incident_class=NONE
-active fee pending=0
-unresolved order=0
-lot projection converged
 ```
 
-Previously blocking issues are no longer the core blocker:
+Broker evidence is also materially complete:
 
 ```text
-fee_pending 반복
-broker evidence propagation 누락
-open_position_lots projection drift
+broker_asset_qty=0.00079982
+broker_asset_available=0.00079982
+broker_asset_locked=0.0
+broker_cash_available=306916.10493
+balance_source_base_currency=BTC
+balance_source_quote_currency=KRW
+balance_source_stale=false
 ```
 
-Current failure:
+But runtime still blocks:
 
 ```text
 can_resume=false
-active_blocker_summary=HALT_STATE_UNRESOLVED | HALT_RISK_OPEN_POSITION
+blockers=HALT_STATE_UNRESOLVED, HALT_RISK_OPEN_POSITION
 halt_reason_code=RISK_STATE_MISMATCH
+strategy_tradeability_state=run_loop_blocked
+run_loop_allowed=0
+position_management_allowed=0
+new_entry_allowed=0
+closeout_allowed=0
+```
+
+The likely current runtime state is:
+
+```text
 canonical_state=OPEN_EXECUTABLE
-closeout_policy_state=blocked
-entry_policy_state=blocked
+has_executable=1
+exit_allowed=1
+current BTC position=0.00079982
+executable exposure roughly=0.00040000
+tracked remainder/dust roughly=0.00039982
 ```
 
-Important current behavior:
-
-```text
-OPEN_EXECUTABLE + broker/portfolio/replay/projection 정상
-→ can_resume=false
-→ stale RISK_STATE_MISMATCH halt remains
-→ HALT_RISK_OPEN_POSITION is triggered because open exposure exists
-→ recommended_next_action includes flatten-position
-```
-
-Historical halt reason still attached:
-
-```text
-RISK_STATE_MISMATCH
-cash_delta=69623.301030
-asset_delta=-0.000599990000
-```
-
-But current evidence shows:
-
-```text
-broker_portfolio_converged=true
-accounting_projection_ok=true
-broker_qty_known=true
-lot_projection_converged=true
-unresolved_fee_state=false
-unresolved_open_order_count=0
-recovery_required_count=0
-startup_gate_reason=None
-```
-
-This suggests the mismatch is stale historical evidence, not a current mismatch.
+This should not require manual flattening if broker/portfolio/replay/projection evidence is current and coherent.
 
 ## Files and code paths to inspect first
 
-Inspect these files and nearby tests:
+Inspect these files and related tests:
 
 ```text
 src/bithumb_bot/engine.py
 src/bithumb_bot/recovery_policy.py
 src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/app.py
-src/bithumb_bot/runtime_state.py
-src/bithumb_bot/position_state_snapshot.py
-src/bithumb_bot/flatten.py
 src/bithumb_bot/recovery.py
 src/bithumb_bot/repair_plan.py
+src/bithumb_bot/runtime_state.py
+src/bithumb_bot/position_state_snapshot.py
+src/bithumb_bot/app.py
+src/bithumb_bot/flatten.py
 
 tests/test_operator_commands.py
-tests/test_accounting_projection.py
 tests/test_runtime_readiness.py
 tests/test_recovery_report.py
 tests/test_position_authority_recovery_state.py
+tests/test_accounting_projection.py
 tests/test_live_broker.py
 ```
 
 Search directly for:
 
 ```text
+STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES
+maybe_clear_stale_risk_state_mismatch_halt
+_can_clear_stale_risk_state_mismatch_halt
 RISK_STATE_MISMATCH
+FEE_GAP_RECOVERY_REQUIRED
 HALT_STATE_UNRESOLVED
 HALT_RISK_OPEN_POSITION
-OPEN_EXECUTABLE
-EXECUTABLE_OPEN_EXPOSURE
 CanonicalTradeabilityState
 classify_canonical_tradeability_state
 build_tradeability_operator_fields
-evaluate_resume_eligibility
-build_resume_guidance
-maybe_clear_stale_initial_reconcile_halt
-maybe_clear_stale_live_execution_broker_halt
 run_loop_allowed
 position_management_allowed
 new_entry_allowed
 closeout_allowed
 exit_allowed
 flatten_primary_recommendation
-flatten-position
+recovery-report
+restart-checklist
 ```
 
 ## Repo facts to verify
 
-`recovery_policy.py` already has `CanonicalTradeabilityState` and separates:
+`recovery_policy.py` already has a useful policy structure. It defines `CanonicalTradeabilityState` and separates:
 
 ```text
 run_loop_allowed
@@ -151,178 +130,228 @@ new_entry_allowed
 closeout_allowed
 ```
 
-It also has logic where `EXECUTABLE_OPEN_EXPOSURE` can produce a position-management message if `run_loop_allowed and position_management_allowed`. In `classify_canonical_tradeability_state()`, `position_management_allowed` is effectively:
+It also supports an `EXECUTABLE_OPEN_EXPOSURE` case where, if `run_loop_allowed and position_management_allowed`, the operator message says the bot may resume in position-management mode.
+
+The effective policy appears to be:
 
 ```text
 position_management_allowed = run_loop_allowed and has_executable and exit_allowed
 ```
 
-The EC2 state has `has_executable_exposure=1` and `exit_allowed=1`, but `position_management_allowed=0` because `run_loop_allowed=0`. Therefore the likely immediate blocker is not open exposure itself, but the stale halt latch keeping `run_loop_allowed` false.
+The EC2 state has `has_executable=1` and `exit_allowed=1`, but `position_management_allowed=0`. Therefore the immediate blocker is likely `run_loop_allowed=0`, not open exposure itself.
 
-Verify this directly before patching.
+`engine.py` already appears to contain stale `RISK_STATE_MISMATCH` clear logic:
+
+```text
+STALE_RISK_STATE_MISMATCH_CLEAR_RECONCILE_REASON_CODES = {
+  FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED,
+  MANUAL_RECOVERY_COMPLETED,
+  POSITION_AUTHORITY_REBUILD_COMPLETED,
+  RECENT_FILL_APPLIED,
+  RECONCILE_OK,
+}
+```
+
+It also contains:
+
+```text
+maybe_clear_stale_risk_state_mismatch_halt()
+_can_clear_stale_risk_state_mismatch_halt()
+```
+
+So the issue is probably **not** that stale-risk clear logic is absent. The current failure is likely that the clear predicate does not accept the current EC2 state.
+
+The most suspicious EC2 value is:
+
+```text
+last_reconcile_status=ok
+last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
+```
+
+But the same logs indicate the fee gap is historical/repaired and no longer resume-blocking:
+
+```text
+fee_gap_accounting_repair_incident=historical_fee_gap_repaired
+active_issue=0
+resume_blocking=0
+matching fee-gap accounting repair already recorded
+```
+
+Therefore the strongest current hypothesis is:
+
+```text
+The stale RISK_STATE_MISMATCH clear path exists,
+but last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED is not in the clear whitelist,
+even when the fee-gap incident is historical/repaired and no longer resume-blocking.
+```
+
+Verify this directly.
 
 ## Working hypotheses
 
 Keep these as hypotheses until confirmed or falsified in code and tests.
 
-### Hypothesis A — stale `RISK_STATE_MISMATCH` halt latch remains after verified convergence
+### Hypothesis A — stale `RISK_STATE_MISMATCH` clear condition does not cover repaired historical fee-gap context
 
-The strongest current hypothesis is that the bot keeps a historical `RISK_STATE_MISMATCH` halt even after the underlying mismatch has been repaired.
+The clear function exists, but the reason-code whitelist is too narrow. The current EC2 state has `last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED`, and this blocks stale halt clear even though:
+
+```text
+fee_gap_active_issue=false
+fee_gap_resume_blocking=false
+fee_gap_repaired=true
+accounting_projection_ok=true
+broker_portfolio_converged=true
+lot_projection_converged=true
+broker_qty_known=true
+open_orders=0
+unresolved_fee_state=false
+recovery_required_count=0
+```
 
 Verification target:
 
 ```text
-Find where RISK_STATE_MISMATCH halt is created.
-Find where halt_state_unresolved is cleared.
-Find whether RISK_STATE_MISMATCH can be cleared after:
+Create a test around _can_clear_stale_risk_state_mismatch_halt() or the public surface that triggers it.
+
+Fixture:
+  halt_reason_code=RISK_STATE_MISMATCH
+  halt_state_unresolved=true
   last_reconcile_status=ok
-  last_reconcile_reason_code=POSITION_AUTHORITY_REBUILD_COMPLETED
-  broker_portfolio_converged=true
+  last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
+  fee_gap_active_issue=false
+  fee_gap_resume_blocking=false
+  fee_gap_repaired=true
   accounting_projection_ok=true
+  broker_portfolio_converged=true
   lot_projection_converged=true
   broker_qty_known=true
-  broker snapshot not stale
-  startup_gate_reason=None
+  broker snapshot stale=false
+  open_orders=0
   unresolved_fee_state=false
-  unresolved_open_order_count=0
   recovery_required_count=0
-  remote_open_order_count=0
+  submit_unknown=0
   canonical_state=OPEN_EXECUTABLE
 ```
 
-Expected if confirmed:
+Expected desired behavior:
 
 ```text
-RISK_STATE_MISMATCH remains unresolved even though current broker/portfolio/replay/projection evidence is coherent.
+stale halt clear allowed
+halt_state_unresolved=false
+run_loop_allowed=true
 ```
 
 Falsification condition:
 
 ```text
-If a real current broker/portfolio mismatch remains, broker snapshot is stale, unresolved order exists, active fee pending exists, projection drift remains, submit_unknown exists, kill switch is active, loss limit is active, or panic stop is active, then halt must remain.
+If FEE_GAP_RECOVERY_REQUIRED is active, resume_blocking=true, active_issue=true, current broker/portfolio mismatch exists, active fee pending exists, projection drift exists, unresolved order exists, broker snapshot is stale/missing, submit_unknown exists, or risk/loss/panic state is active, then halt must remain blocked.
 ```
 
-### Hypothesis B — clean `OPEN_EXECUTABLE` is not promoted to position-management-ready
+### Hypothesis B — clean `OPEN_EXECUTABLE` already has partial policy support but is unreachable because stale halt keeps `run_loop_allowed=false`
 
-The bot already has policy fields for position-management, but the EC2 state still results in:
-
-```text
-run_loop_allowed=0
-position_management_allowed=0
-closeout_policy_state=blocked
-entry_policy_state=blocked
-```
+The current repo likely already supports `position_management_allowed` if `run_loop_allowed=true`, `has_executable=true`, and `exit_allowed=true`.
 
 Verification target:
 
 ```text
-Create or find a fixture where:
-  canonical_state=OPEN_EXECUTABLE
-  broker_portfolio_converged=true
-  accounting_projection_ok=true
-  lot_projection_converged=true
-  broker_qty_known=true
-  active fee=0
-  open orders=0
-  risk breach=0
+Create a direct policy fixture for recovery_policy.py:
 
-Confirm whether the policy outputs:
+Given:
   run_loop_allowed=true
-  position_management_allowed=true
+  has_executable=true
   exit_allowed=true
-  new_entry_allowed=false or risk-controlled
-```
+  canonical_state=OPEN_EXECUTABLE
 
-Expected if confirmed:
-
-```text
-There is no effective OPEN_POSITION_READY state, or it is unreachable because stale halt keeps run_loop_allowed=false.
+Expected:
+  position_management_allowed=true
+  operator_next_action=resume_position_management
+  strategy_tradeability_state=position_management_allowed
 ```
 
 Falsification condition:
 
 ```text
-If the strategy intentionally forbids position carry across restart, that policy must be explicit, configurable, documented, and tested. Otherwise this is a runtime policy bug.
+If run_loop_allowed=true still produces position_management_allowed=false, then recovery_policy.py itself needs additional modification.
 ```
 
-### Hypothesis C — `flatten-position` is still recommended for clean canonical open exposure
+### Hypothesis C — `HALT_RISK_OPEN_POSITION` is still over-applied to clean open exposure
 
-Current recovery output still surfaces `flatten-position` as a recommended next action for `HALT_RISK_OPEN_POSITION`.
+The current logs show `HALT_RISK_OPEN_POSITION` even though other surfaces show no active order, fee, broker, or projection blocker.
 
 Verification target:
 
 ```text
-Find where HALT_RISK_OPEN_POSITION sets recommended_next_action=flatten-position.
-Check whether this path distinguishes clean canonical open exposure from emergency/risk exposure.
+Find where HALT_RISK_OPEN_POSITION ResumeBlocker is created.
+Find whether it is triggered solely because position_present=true or canonical_state=OPEN_EXECUTABLE.
+Find whether it checks current active blockers:
+  broker mismatch
+  active fee issue
+  unresolved order
+  submit_unknown
+  projection drift
+  stale broker snapshot
+  kill switch
+  loss limit
+  panic stop
 ```
 
-Expected if confirmed:
+Expected desired behavior:
 
 ```text
-Clean canonical open exposure can still be routed toward emergency flatten instead of position-management resume.
+Clean canonical open exposure does not emit HALT_RISK_OPEN_POSITION.
+HALT_RISK_OPEN_POSITION only appears when open exposure is combined with a current unresolved risk/evidence blocker.
 ```
 
 Falsification condition:
 
 ```text
-If flatten is only mentioned as emergency-available but not primary/recommended, then this may be an operator wording bug instead of policy bug.
+If actual local or remote open orders are still present, or broker/portfolio mismatch still exists, then HALT_RISK_OPEN_POSITION may be correct.
 ```
 
-### Hypothesis D — the higher-level root cause is policy granularity mismatch
+### Hypothesis D — higher-level root cause is policy convergence failure after evidence convergence
 
-Earlier work addressed evidence granularity:
+The bot has gradually improved evidence convergence:
 
 ```text
 historical fee_pending ≠ active blocker
 order-level paid_fee ≠ per-fill fee without allocation
-accounts snapshot visible ≠ formal rebuild evidence
+accounts snapshot visible ≠ formal broker rebuild evidence
 open_position_lots ≠ canonical truth
 ```
 
-The current failure is policy granularity:
+The remaining issue is policy convergence:
 
 ```text
-open exposure present
-≠ unsafe
-≠ must flatten
-≠ cannot run
+current evidence converged
+≠ stale halt cleared
+≠ clean open exposure promoted to position-management-ready
 ```
 
 Verification target:
 
 ```text
-Check whether the bot has explicit tradeability states that separate:
-  FLAT_READY
-  OPEN_POSITION_READY
-  FORENSIC_BLOCKED
-  EMERGENCY_FLATTEN_ONLY
-  PANIC_STOPPED
-```
-
-Expected if confirmed:
-
-```text
-Policy is still driven by a mixture of booleans and blocker codes that do not fully distinguish clean canonical exposure from unsafe unresolved exposure.
+Check whether health, recovery-report, restart-checklist, repair-plan, and audit-ledger agree on:
+  current evidence converged
+  stale halt clear status
+  HALT_RISK_OPEN_POSITION status
+  run_loop_allowed
+  position_management_allowed
+  new_entry_allowed
+  exit/closeout allowed
+  flatten recommendation
 ```
 
 ## Required design changes
 
-### 1. Add safe stale `RISK_STATE_MISMATCH` revalidation and clear policy
+### 1. Change stale halt clear predicate from reason-whitelist-centered to active-blocker-absence-centered
 
-`RISK_STATE_MISMATCH` must not become a permanent blocker after the mismatch has been repaired. Add or update a safe revalidation path that clears a stale `RISK_STATE_MISMATCH` only when current evidence proves the system is coherent.
+Do not rely primarily on `last_reconcile_reason_code` whitelist. Reason codes can remain useful diagnostic context, but stale halt clear should be governed by current active evidence.
 
-Candidate clear conditions:
+Desired predicate shape:
 
 ```text
 halt_reason_code == RISK_STATE_MISMATCH
-halt_state_unresolved == true
 last_reconcile_status == ok
-last_reconcile_reason_code in {
-  POSITION_AUTHORITY_REBUILD_COMPLETED,
-  RECONCILE_OK,
-  FEE_PENDING_ACCOUNTING_REPAIR_COMPLETED,
-  MANUAL_RECOVERY_COMPLETED
-}
 startup_gate_reason is None
 accounting_projection_ok == true
 broker_portfolio_converged == true
@@ -333,169 +362,144 @@ unresolved_fee_state == false
 unresolved_open_order_count == 0
 recovery_required_count == 0
 remote_open_order_count == 0
-submit_unknown == 0
+submit_unknown_count == 0
+fee_gap_resume_blocking == false
+external_position_repair_needed == false
+position_authority_repair_needed == false
+risk_loss_breach == false
+kill_switch == false
+panic_stop == false
 ```
 
-Canonical open exposure must **not** by itself prevent stale halt clear.
-
-Continue to block if any current risk/evidence issue remains:
+Allow stale halt clear even when:
 
 ```text
-current broker/portfolio mismatch
-active fee pending
-unresolved local/remote order
-submit_unknown
-projection drift
-broker snapshot missing/stale
-kill switch
-daily loss limit
-position loss limit
-panic stop
-source conflict
-operator panic/disable reason that requires manual clearance
+last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
 ```
 
-Expected result:
+only if the fee-gap incident is historical/repaired and non-blocking:
 
 ```text
-A historical RISK_STATE_MISMATCH caused by an earlier cash/asset delta is cleared after verified convergence.
+fee_gap_active_issue=false
+fee_gap_resume_blocking=false
+matching fee-gap accounting repair already recorded
 ```
 
-Do not clear true risk halts or active mismatches.
+Continue to block if:
 
-### 2. Add or expose an explicit `OPEN_POSITION_READY` / position-management resume mode
+```text
+fee_gap_active_issue=true
+fee_gap_resume_blocking=true
+current broker/portfolio mismatch exists
+active fee pending exists
+projection drift exists
+unresolved order exists
+submit_unknown exists
+broker snapshot stale/missing
+kill switch/loss limit/panic stop active
+source conflict active
+```
 
-A clean open position should be a normal operational state.
+Do **not** clear true risk halts. This change is only for stale `RISK_STATE_MISMATCH` after verified convergence.
 
-For this state:
+### 2. Add clear failure observability
+
+When `RISK_STATE_MISMATCH` remains unresolved, operator output must explain why.
+
+Add fields to `health`, `recovery-report`, `restart-checklist`, or a shared diagnostic object:
+
+```text
+stale_halt_clear_candidate=true/false
+stale_halt_clear_allowed=true/false
+stale_halt_clear_blockers=[...]
+stale_halt_clear_reason_code_allowed=true/false
+stale_halt_clear_current_evidence_converged=true/false
+halt_reason_current_evidence=stale/current
+fee_gap_resume_blocking=true/false
+fee_gap_active_issue=true/false
+```
+
+For the current EC2 case, expected diagnostic before the fix would be something like:
+
+```text
+stale_halt_clear_candidate=true
+current_evidence_converged=true
+fee_gap_resume_blocking=false
+stale_halt_clear_blockers=last_reconcile_reason_code_not_whitelisted:FEE_GAP_RECOVERY_REQUIRED
+```
+
+After the fix, this should become:
+
+```text
+stale_halt_clear_candidate=true
+current_evidence_converged=true
+fee_gap_resume_blocking=false
+stale_halt_clear_allowed=true
+halt_reason_current_evidence=stale
+```
+
+### 3. Promote clean `OPEN_EXECUTABLE` to position-management-ready once stale halt clears
+
+After stale halt is cleared, the current clean open position should produce:
 
 ```text
 canonical_state=OPEN_EXECUTABLE
-broker_portfolio_converged=true
-accounting_projection_ok=true
-lot_projection_converged=true
-broker_qty_known=true
-unresolved_fee_state=false
-open_orders=0
-recovery_required=0
-risk breach=0
-exit_allowed=true
-```
-
-Expected policy output:
-
-```text
 tradeability_state=OPEN_POSITION_READY or equivalent
-strategy_tradeability_state=position_management_allowed or equivalent
-run_loop_allowed=true
-position_management_allowed=true
-exit_allowed=true
-new_entry_allowed=false or strategy/risk-controlled
-closeout_allowed=true if normal exit authority is available
-flatten_primary_recommendation=false
+run_loop_allowed=1
+position_management_allowed=1
+exit_allowed=1
+closeout_allowed=1 if normal exit authority is available
+new_entry_allowed=0 or strategy/risk-controlled
+flatten_primary_recommendation=0
 recommended_action=resume_position_management
 recommended_command=uv run python bot.py resume
 ```
 
-This is not `resume --force`. It is normal resume after current evidence has been verified.
+This is not `resume --force`. It is normal resume based on current verified evidence.
 
-### 3. Separate run-loop permission from new-entry permission
+### 4. Redefine `HALT_RISK_OPEN_POSITION`
 
-Do not require the bot to be flat before the run loop can operate.
+`HALT_RISK_OPEN_POSITION` must not mean “there is open exposure.”
 
-Expected semantics:
-
-```text
-run_loop_allowed:
-  process can run and evaluate strategy/risk/exit logic
-
-position_management_allowed:
-  existing canonical position may be managed
-
-new_entry_allowed:
-  new BUY entries may be placed
-
-exit_allowed / closeout_allowed:
-  existing position may be reduced or exited through normal strategy/SELL authority
-
-emergency_flatten_allowed:
-  emergency exposure reduction path is available
-
-flatten_primary_recommendation:
-  flatten is the primary recommended next action only for true emergency/risk states
-```
-
-For clean open exposure:
+It should mean:
 
 ```text
-run_loop_allowed=true
-position_management_allowed=true
-exit_allowed=true
-new_entry_allowed=false unless strategy explicitly permits pyramiding
-emergency_flatten_allowed=true
-flatten_primary_recommendation=false
+open exposure exists
+AND current unresolved risk/evidence blocker exists
 ```
 
-### 4. Restrict `HALT_RISK_OPEN_POSITION` and flatten recommendation
-
-`HALT_RISK_OPEN_POSITION` must not be emitted merely because open exposure exists.
-
-Do not recommend `flatten-position` as the next action when all of the following are true:
+Examples where it may be valid:
 
 ```text
-canonical open exposure exists
-broker_portfolio_converged=true
-accounting_projection_ok=true
-lot_projection_converged=true
-broker_qty_known=true
-active fee issue=0
-open orders=0
-risk breach=0
+open exposure + current broker/portfolio mismatch
+open exposure + stale/missing broker snapshot
+open exposure + unresolved local or remote order
+open exposure + submit_unknown
+open exposure + active fee pending
+open exposure + projection drift
+open exposure + kill switch/loss limit/panic stop
 ```
 
-Flatten may be primary only for:
+Examples where it must not be emitted:
 
 ```text
-kill switch
-daily loss limit
-position loss limit
-panic stop
-explicit operator flatten request
-normal position-management path impossible and emergency exposure reduction is required
+open exposure + broker/portfolio/replay/projection converged + active risk none
 ```
 
-Operator-facing guidance for clean open exposure should say:
+For clean canonical open exposure, guidance should say:
 
 ```text
 Canonical open exposure is present and accounted.
 Resume in position-management mode is allowed.
-New entries are blocked until the existing position is closed or risk policy allows additional entries.
-Emergency flatten is available but not recommended as the primary action.
+New entries are blocked or strategy-controlled while the existing position is open.
+Emergency flatten is available but not the primary recommendation.
 ```
 
-If blocked, guidance must say the actual blocker:
+### 5. Keep fail-closed behavior for unsafe states
 
-```text
-current broker mismatch
-active fee issue
-unresolved order
-projection drift
-stale/missing broker snapshot
-risk loss limit
-panic stop
-```
+Do not weaken safety.
 
-not merely:
-
-```text
-open exposure exists
-```
-
-### 5. Preserve fail-closed behavior for unsafe open exposure
-
-Do not loosen safety gates globally.
-
-Still block run/resume if any of these are true:
+Continue to block run/resume if any active blocker exists:
 
 ```text
 broker/portfolio mismatch
@@ -511,92 +515,125 @@ panic stop
 source conflict
 ```
 
-In those cases, `recovery-report`, `repair-plan`, `restart-checklist`, and `health` should point to diagnosis/repair or emergency action according to cause.
-
 ## Required tests
 
-Add incident-shaped regression tests. Use EC2 values where useful.
+Add incident-shaped regression tests.
 
-### Test 1 — stale `RISK_STATE_MISMATCH` clears after verified convergence
+### Test 1 — repaired historical `FEE_GAP_RECOVERY_REQUIRED` clears stale `RISK_STATE_MISMATCH`
 
 Fixture:
 
 ```text
 halt_reason_code=RISK_STATE_MISMATCH
 halt_state_unresolved=true
-last_disable_reason contains old:
-  cash_delta=69623.301030
-  asset_delta=-0.000599990000
 last_reconcile_status=ok
-last_reconcile_reason_code=POSITION_AUTHORITY_REBUILD_COMPLETED
-startup_gate_reason=None
+last_reconcile_reason_code=FEE_GAP_RECOVERY_REQUIRED
+fee_gap_active_issue=false
+fee_gap_resume_blocking=false
+fee_gap_repaired=true
 accounting_projection_ok=true
 broker_portfolio_converged=true
 lot_projection_converged=true
 broker_qty_known=true
-broker snapshot stale=false
+broker_snapshot_stale=false
+open_orders=0
 unresolved_fee_state=false
-unresolved_open_order_count=0
 recovery_required_count=0
-remote_open_order_count=0
+submit_unknown=0
 canonical_state=OPEN_EXECUTABLE
-open exposure exists
 ```
 
 Expected:
 
 ```text
+stale halt clear allowed
 halt_state_unresolved=false
-halt_blocked=false
-resume no longer blocked by stale RISK_STATE_MISMATCH
-open exposure does not prevent stale halt clear
+run_loop_allowed=true
 ```
 
-### Test 2 — canonical open exposure allows position-management resume
+### Test 2 — active fee-gap still blocks stale halt clear
+
+Same fixture as Test 1, but:
+
+```text
+fee_gap_active_issue=true
+or fee_gap_resume_blocking=true
+```
+
+Expected:
+
+```text
+halt remains unresolved
+run_loop_allowed=false
+stale_halt_clear_blockers includes fee_gap
+```
+
+### Test 3 — clean `OPEN_EXECUTABLE` becomes position-management-ready
 
 Fixture:
 
 ```text
 canonical_state=OPEN_EXECUTABLE
-total_qty=0.00079982
-executable_exposure_qty=0.00040000
+run_loop_allowed=true
+has_executable=true
+exit_allowed=true
 broker/portfolio/replay/projection all match
-broker_qty_known=true
 active fee issue=0
 open orders=0
 risk breach=0
-exit_allowed=true
 ```
 
 Expected:
 
 ```text
-run_loop_allowed=true
 position_management_allowed=true
 exit_allowed=true
-new_entry_allowed=false or risk-controlled
+new_entry_allowed=false or strategy-controlled
+operator_next_action=resume_position_management
 flatten_primary_recommendation=false
-recommended_action=resume_position_management
-recommended_command=uv run python bot.py resume
 ```
 
-### Test 3 — unsafe open exposure remains blocked
+### Test 4 — clean open exposure does not emit `HALT_RISK_OPEN_POSITION`
+
+Fixture:
+
+```text
+OPEN_EXECUTABLE
+broker_portfolio_converged=true
+accounting_projection_ok=true
+lot_projection_converged=true
+broker_qty_known=true
+active fee issue=0
+open orders=0
+submit_unknown=0
+risk breach=0
+```
+
+Expected:
+
+```text
+HALT_RISK_OPEN_POSITION absent
+recommended_command != flatten-position
+flatten_primary_recommendation=false
+```
+
+### Test 5 — unsafe open exposure remains blocked
 
 Use variants:
 
 ```text
-broker mismatch
+current broker mismatch
 active fee pending
 unresolved order
 remote open order
-submit_unknown
 projection drift
 broker snapshot stale
-broker snapshot missing
+submit_unknown
 kill switch
 daily loss limit
 position loss limit
 panic stop
+source conflict
 ```
 
 Expected:
@@ -608,104 +645,43 @@ recommended_action=diagnose/repair/emergency depending on cause
 flatten primary only for true emergency/risk policy states
 ```
 
-### Test 4 — clean open exposure must not recommend flatten
+### Test 6 — stale halt diagnostics explain why clear failed
 
-Fixture:
+Fixture where clear fails because of one active blocker.
+
+Expected output fields include:
 
 ```text
-OPEN_EXECUTABLE
-broker_portfolio_converged=true
-accounting_projection_ok=true
-lot_projection_converged=true
-no active risk breach
+stale_halt_clear_candidate=true
+stale_halt_clear_allowed=false
+stale_halt_clear_blockers=[specific blocker]
+halt_reason_current_evidence=current
 ```
 
-Expected:
+### Test 7 — recovery surfaces agree
+
+For clean canonical open exposure with stale halt resolved:
 
 ```text
-recommended_command != flatten-position
-flatten_primary_recommendation=false
-HALT_RISK_OPEN_POSITION is not emitted solely because open exposure exists
-```
-
-### Test 5 — true risk state can still recommend flatten
-
-For:
-
-```text
-position_loss_limit
-daily_loss_limit
-kill_switch
-panic stop
-explicit operator emergency flatten
-```
-
-Expected:
-
-```text
-flatten-position may be recommended
-emergency path remains guarded
-```
-
-### Test 6 — recovery surfaces agree
-
-For clean canonical open exposure, these surfaces must agree:
-
-```text
-restart-checklist
 recovery-report
-repair-plan
+restart-checklist
 health
+repair-plan
 audit-ledger
 ```
 
 Expected consistency:
 
 ```text
-can_resume=true or position_management_resume_allowed=true
+halt_state_unresolved=false
+HALT_STATE_UNRESOLVED absent
+HALT_RISK_OPEN_POSITION absent
 run_loop_allowed=true
 position_management_allowed=true
 exit_allowed=true
-new_entry_allowed=false or risk-controlled
+new_entry_allowed=false or strategy-controlled
 flatten_primary_recommendation=false
-blocking_incident_class=NONE
-no HALT_STATE_UNRESOLVED
-no HALT_RISK_OPEN_POSITION solely from clean exposure
 recommended_action=resume_position_management
-```
-
-### Test 7 — flat clean state still allows normal entry
-
-Fixture:
-
-```text
-canonical_state=FLAT or DUST_ONLY_READY
-no active blockers
-```
-
-Expected:
-
-```text
-run_loop_allowed=true
-new_entry_allowed=true
-position_management_allowed=false or irrelevant
-```
-
-### Test 8 — true risk halts are not cleared by this policy
-
-Fixture variants:
-
-```text
-halt_reason_code=KILL_SWITCH
-halt_reason_code=DAILY_LOSS_LIMIT
-halt_reason_code=POSITION_LOSS_LIMIT
-halt_reason_code=PANIC_STOP
-```
-
-Expected:
-
-```text
-halt remains blocked unless the repo already has an explicit operator-controlled clear policy
 ```
 
 ## Verification commands
@@ -713,9 +689,9 @@ halt remains blocked unless the repo already has an explicit operator-controlled
 Run targeted tests first:
 
 ```bash
-uv run pytest tests/test_operator_commands.py -k "restart_checklist or recovery_report or resume or halt or open_exposure or flatten"
-uv run pytest tests/test_runtime_readiness.py -k "open_exposure or resume or tradeability or halt"
-uv run pytest tests/test_recovery_report.py -k "open_exposure or flatten or resume"
+uv run pytest tests/test_operator_commands.py -k "risk_state_mismatch or halt or open_exposure or restart_checklist or recovery_report or flatten"
+uv run pytest tests/test_runtime_readiness.py -k "halt or open_exposure or tradeability or resume"
+uv run pytest tests/test_recovery_report.py -k "halt or open_exposure or fee_gap or flatten"
 uv run pytest tests/test_position_authority_recovery_state.py -k "open_exposure or tradeability or resume"
 uv run pytest tests/test_accounting_projection.py -k "projection or open_exposure or position"
 ```
@@ -727,9 +703,9 @@ uv run pytest tests/test_operator_commands.py
 uv run pytest tests/test_accounting_projection.py
 ```
 
-If some modules or test names do not exist, search the test suite and run the closest matching tests.
+If modules or test names differ, search the test suite and run the closest relevant tests.
 
-If a command fails, report:
+If any command fails, report:
 
 ```text
 exact command
@@ -755,26 +731,24 @@ MODE=live uv run bithumb-bot repair-plan --json
 MODE=live uv run bithumb-bot audit-ledger
 ```
 
-Expected for the current EC2 state:
+Expected:
 
 ```text
-accounting_projection_ok=true
-broker_portfolio_converged=true
-broker_qty_known=true
-lot_projection_converged=true
-active fee issue=0
-unresolved order=0
-startup_gate=0
-canonical_state=OPEN_EXECUTABLE
-open exposure present
+accounting_projection_ok=1
+broker_portfolio_converged=1
+lot_projection_converged=1
+broker_qty_known=1
+unresolved_fee_state=0
+open_orders=0
+recovery_required_count=0
 halt_state_unresolved=false
 HALT_STATE_UNRESOLVED absent
 HALT_RISK_OPEN_POSITION absent for clean exposure
-run_loop_allowed=true
-position_management_allowed=true
-exit_allowed=true
-new_entry_allowed=false or strategy/risk-controlled
-flatten_primary_recommendation=false
+run_loop_allowed=1
+position_management_allowed=1
+exit_allowed=1
+new_entry_allowed=0 or strategy-controlled
+flatten_primary_recommendation=0
 recommended_action=resume_position_management
 recommended_command=uv run python bot.py resume
 ```
@@ -788,7 +762,7 @@ MODE=live uv run bithumb-bot resume
 Expected after resume:
 
 ```text
-bot can run with the existing 0.00079982 BTC position
+bot runs with existing 0.00079982 BTC position
 new BUY entries are blocked or risk-controlled while position is open
 normal SELL/exit evaluation remains available through strategy/run-loop authority
 emergency flatten remains available but is not the default recommendation
@@ -799,12 +773,12 @@ emergency flatten remains available but is not the default recommendation
 Do:
 
 ```text
-- Revalidate and clear stale RISK_STATE_MISMATCH only after verified convergence.
-- Add or expose OPEN_POSITION_READY / position-management resume mode.
-- Separate run loop permission from new-entry permission.
-- Allow normal exit/SELL management for existing canonical positions.
+- Fix stale RISK_STATE_MISMATCH clear predicate so it uses current active evidence, not only reason-code whitelist.
+- Allow historical/repaired non-blocking FEE_GAP_RECOVERY_REQUIRED context to clear stale RISK_STATE_MISMATCH.
+- Add observability for stale halt clear blockers.
+- Promote clean OPEN_EXECUTABLE to position-management-ready once run loop is safe.
+- Ensure HALT_RISK_OPEN_POSITION is not emitted solely because open exposure exists.
 - Keep emergency flatten available but not primary for clean canonical exposure.
-- Make recovery-report / restart-checklist / repair-plan / health consistent.
 - Add incident-fixture regression tests.
 ```
 
@@ -818,6 +792,7 @@ Do not:
 - Ignore active fee pending.
 - Ignore unresolved orders.
 - Ignore projection drift.
+- Ignore stale/missing broker snapshot.
 - Treat open_position_lots as canonical truth.
 - Make flatten-position the normal position-management mechanism.
 - Add manual DB update workarounds.
@@ -844,7 +819,7 @@ Discuss, but do not necessarily fully implement unless small and natural:
    ALLOW_EXIT_WHILE_OPEN=true
    ALLOW_EMERGENCY_FLATTEN=true
 
-3. Recovery-policy evidence graph:
+3. Recovery-policy convergence graph:
    current evidence
    stale evidence
    active blockers
@@ -867,19 +842,20 @@ When finished, produce a report with exactly these sections:
 ```text
 1. Summary
    - What changed.
+   - Why this fixes stale halt clearance instead of bypassing gates.
    - Why this avoids requiring manual flatten of a canonical position.
-   - Why this is safer than forcing resume or bypassing halt gates.
 
 2. Hypothesis results
-   - Hypothesis A: stale RISK_STATE_MISMATCH halt latch not revalidated — confirmed / falsified / partially confirmed.
-   - Hypothesis B: clean OPEN_EXECUTABLE not promoted to position-management-ready — confirmed / falsified / partially confirmed.
-   - Hypothesis C: flatten-position still recommended for clean canonical exposure — confirmed / falsified / partially confirmed.
-   - Hypothesis D: higher-level policy granularity mismatch — confirmed / falsified / partially confirmed.
+   - Hypothesis A: stale RISK_STATE_MISMATCH clear condition does not cover repaired historical fee-gap context — confirmed / falsified / partially confirmed.
+   - Hypothesis B: clean OPEN_EXECUTABLE policy exists but is unreachable due to run_loop_allowed=false — confirmed / falsified / partially confirmed.
+   - Hypothesis C: HALT_RISK_OPEN_POSITION is over-applied to clean open exposure — confirmed / falsified / partially confirmed.
+   - Hypothesis D: higher-level policy convergence failure after evidence convergence — confirmed / falsified / partially confirmed.
 
 3. Design assessment
-   - New or updated tradeability states.
-   - How canonical open exposure is distinguished from unsafe open exposure.
-   - How new-entry permission differs from position-management permission.
+   - Stale halt clear model after the patch.
+   - How current active blockers differ from historical/repaired reason codes.
+   - How canonical open exposure becomes position-management-ready.
+   - When HALT_RISK_OPEN_POSITION is still valid.
    - When flatten-position is still recommended.
    - What still fails closed.
 
@@ -891,12 +867,13 @@ When finished, produce a report with exactly these sections:
 
 5. Tests
    - Tests added/updated.
-   - Stale halt clear tests.
-   - Canonical open exposure resume tests.
-   - Unsafe open exposure blocked tests.
-   - Flatten recommendation tests.
+   - Historical repaired fee-gap stale halt clear tests.
+   - Active fee-gap block tests.
+   - Clean OPEN_EXECUTABLE position-management tests.
+   - HALT_RISK_OPEN_POSITION suppression tests for clean exposure.
+   - Unsafe exposure blocked tests.
+   - Stale halt clear observability tests.
    - Cross-surface consistency tests.
-   - Regression tests for true risk halts.
 
 6. Verification
    - Commands run.
@@ -910,5 +887,5 @@ When finished, produce a report with exactly these sections:
    - Expected behavior on the next strategy SELL/exit decision.
 ```
 
-The goal is not to make the bot less strict. The goal is to make it strict about the right thing: current evidence of danger, not the mere existence of a correctly accounted open position.
+The goal is not to make the bot less strict. The goal is to make it strict about **current active blockers**, not stale historical reason codes or the mere existence of a correctly accounted open position.
 

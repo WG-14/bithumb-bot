@@ -48,6 +48,7 @@ from bithumb_bot.engine import (
     evaluate_restart_readiness,
     evaluate_resume_eligibility,
     evaluate_startup_safety_gate,
+    get_stale_risk_state_mismatch_halt_diagnostics,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
 from bithumb_bot.fee_pending_repair import apply_fee_pending_accounting_repair
@@ -124,6 +125,54 @@ def _set_tmp_db(tmp_path, monkeypatch: pytest.MonkeyPatch | None = None):
         os.environ["RUN_LOCK_PATH"] = run_lock_path
     object.__setattr__(settings, "DB_PATH", db_path)
     object.__setattr__(app_module.settings, "DB_PATH", db_path)
+
+
+def _stub_stale_halt_readiness(
+    *,
+    fee_gap_incident_kind: str,
+    fee_gap_active_issue: bool,
+    fee_gap_resume_blocking: bool,
+):
+    return SimpleNamespace(
+        recovery_stage="RESUME_READY",
+        fee_pending_count=0,
+        open_order_count=0,
+        recovery_required_count=0,
+        fee_gap_incident=SimpleNamespace(
+            incident_kind=fee_gap_incident_kind,
+            resolution_state=("repaired" if not fee_gap_active_issue else "unresolved"),
+            active_issue=fee_gap_active_issue,
+            policy=SimpleNamespace(resume_blocking=fee_gap_resume_blocking),
+        ),
+        broker_position_evidence={
+            "broker_qty_known": True,
+            "broker_qty": 0.0004,
+            "balance_snapshot_available_for_health": True,
+            "balance_source_stale": False,
+        },
+        projection_convergence={
+            "portfolio_qty": 0.0004,
+            "converged": True,
+            "reason": "converged",
+        },
+        position_authority_assessment={
+            "needs_correction": False,
+            "needs_residual_normalization": False,
+            "needs_full_projection_rebuild": False,
+            "needs_portfolio_projection_repair": False,
+        },
+        position_state=SimpleNamespace(
+            normalized_exposure=SimpleNamespace(
+                authority_gap_reason="",
+                terminal_state="open_exposure",
+            )
+        ),
+        reconcile_metadata={
+            "submit_unknown_unresolved": 0,
+            "remote_open_order_found": 0,
+            "source_conflict_halt": 0,
+        },
+    )
 
 
 def _patch_cash_drift_broker(monkeypatch: pytest.MonkeyPatch, *, cash_available: float, cash_locked: float = 0.0):
@@ -4607,8 +4656,9 @@ def test_recovery_report_json_snapshot_schema_is_stable(tmp_path, capsys):
         "recovery_policy",
         "position_authority_rebuild_preview",
             "position_authority_repair_summary",
-                "broker_fill_observation_summary",
+        "broker_fill_observation_summary",
         "runtime_readiness",
+        "stale_halt_clear_diagnostics",
         "pending_fee_count",
         "auto_recovery_count",
         "operator_review_required_count",
@@ -4724,6 +4774,7 @@ def test_recovery_report_json_snapshot_has_required_fields(tmp_path, capsys):
     assert payload["blockers"]
     assert payload["blockers"][0]["code"]
     assert isinstance(payload["blockers"][0]["overridable"], bool)
+    assert isinstance(payload["stale_halt_clear_diagnostics"], dict)
     assert "total=" in payload["blocker_summary"]
     assert "non_overridable=" in payload["blocker_summary"]
     assert payload["active_blocker_summary"]
@@ -5143,6 +5194,122 @@ def test_recovery_report_surfaces_fee_gap_contamination_as_distinct_blocker(tmp_
     assert report["runtime_readiness"]["fee_gap_incident"]["resolution_state"] == "unresolved"
     assert report["runtime_readiness"]["fee_gap_incident"]["active_issue"] is True
     assert report["fee_gap_accounting_repair_preview"]["incident_kind"] == "active_fee_gap_unrepaired"
+
+
+def test_stale_risk_state_mismatch_clears_for_historical_repaired_fee_gap_context(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path, monkeypatch)
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={"balance_split_mismatch_count": 0},
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="RISK_STATE_MISMATCH historical fee gap already repaired",
+        reason_code="RISK_STATE_MISMATCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_runtime_readiness_snapshot",
+        lambda _conn=None: _stub_stale_halt_readiness(
+            fee_gap_incident_kind="historical_fee_gap_repaired",
+            fee_gap_active_issue=False,
+            fee_gap_resume_blocking=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_accounting_replay",
+        lambda _conn: {"replay_cash": 100.0, "replay_qty": 0.0004},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.get_portfolio_breakdown",
+        lambda _conn: (100.0, 0.0, 0.0004, 0.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.build_external_position_accounting_repair_preview",
+        lambda _conn: {"needs_repair": False},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.collect_risky_order_state",
+        lambda *_args, **_kwargs: {
+            "submit_unknown_without_exchange_id_count": 0,
+            "stray_remote_open_order_count": 0,
+        },
+    )
+
+    diagnostics = get_stale_risk_state_mismatch_halt_diagnostics(startup_gate_reason=None)
+    resume_allowed, blockers = evaluate_resume_eligibility()
+    state = runtime_state.snapshot()
+
+    assert diagnostics["stale_halt_clear_candidate"] is True
+    assert diagnostics["stale_halt_clear_allowed"] is True
+    assert diagnostics["stale_halt_clear_current_evidence_converged"] is True
+    assert diagnostics["stale_halt_clear_reason_code_allowed"] is True
+    assert diagnostics["halt_reason_current_evidence"] == "stale"
+    assert diagnostics["fee_gap_active_issue"] is False
+    assert diagnostics["fee_gap_resume_blocking"] is False
+    assert diagnostics["stale_halt_clear_blockers"] == []
+    assert resume_allowed is True
+    assert blockers == []
+    assert state.halt_new_orders_blocked is False
+    assert state.halt_state_unresolved is False
+
+
+def test_stale_risk_state_mismatch_keeps_active_fee_gap_blocker_visible(tmp_path, monkeypatch):
+    _set_tmp_db(tmp_path, monkeypatch)
+    runtime_state.record_reconcile_result(
+        success=True,
+        reason_code="FEE_GAP_RECOVERY_REQUIRED",
+        metadata={"balance_split_mismatch_count": 0},
+    )
+    runtime_state.disable_trading_until(
+        float("inf"),
+        reason="RISK_STATE_MISMATCH active fee gap still unresolved",
+        reason_code="RISK_STATE_MISMATCH",
+        halt_new_orders_blocked=True,
+        unresolved=True,
+    )
+
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_runtime_readiness_snapshot",
+        lambda _conn=None: _stub_stale_halt_readiness(
+            fee_gap_incident_kind="active_fee_gap_unrepaired",
+            fee_gap_active_issue=True,
+            fee_gap_resume_blocking=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.compute_accounting_replay",
+        lambda _conn: {"replay_cash": 100.0, "replay_qty": 0.0004},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.get_portfolio_breakdown",
+        lambda _conn: (100.0, 0.0, 0.0004, 0.0),
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.build_external_position_accounting_repair_preview",
+        lambda _conn: {"needs_repair": False},
+    )
+    monkeypatch.setattr(
+        "bithumb_bot.engine.collect_risky_order_state",
+        lambda *_args, **_kwargs: {
+            "submit_unknown_without_exchange_id_count": 0,
+            "stray_remote_open_order_count": 0,
+        },
+    )
+
+    diagnostics = get_stale_risk_state_mismatch_halt_diagnostics(startup_gate_reason=None)
+
+    assert diagnostics["stale_halt_clear_candidate"] is True
+    assert diagnostics["stale_halt_clear_allowed"] is False
+    assert diagnostics["stale_halt_clear_current_evidence_converged"] is False
+    assert diagnostics["halt_reason_current_evidence"] == "current"
+    assert diagnostics["fee_gap_active_issue"] is True
+    assert diagnostics["fee_gap_resume_blocking"] is True
+    assert "fee_gap_active_issue" in diagnostics["stale_halt_clear_blockers"]
+    assert "fee_gap_resume_blocking" in diagnostics["stale_halt_clear_blockers"]
 
 
 def test_recovery_report_surfaces_position_authority_gap_as_distinct_blocker(tmp_path):
