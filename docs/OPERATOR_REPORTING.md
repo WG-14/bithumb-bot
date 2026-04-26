@@ -202,6 +202,15 @@ Useful outputs:
 - Estimated fee-rate gap
 - Recent round-trip fee total
 - Gross vs net PnL comparison
+- Drift operator guidance such as `operator_action=review_fee_diagnostics`
+- A command hint such as `recommended_command=uv run python bot.py fee-diagnostics`
+
+If `health`, `recovery-report`, or `restart-checklist` shows fee-rate drift with
+`diagnostic_only_vs_startup_blocking=diagnostic_only`, treat that as a planning
+and operator-config warning, not settlement failure. Coherent exchange
+`paid_fee` remains accounting authority; the next step is to review
+`fee-diagnostics`, confirm the configured baseline, and only then decide whether
+the live env needs correction.
 
 Example:
 

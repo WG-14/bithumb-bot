@@ -161,6 +161,8 @@ def build_fee_rate_drift_diagnostics(
         "material_notional_threshold_krw": material_threshold,
         "startup_impact": "no_recent_fee_rate_drift_detected",
         "diagnostic_only_vs_startup_blocking": "none",
+        "operator_action": "none",
+        "recommended_command": "none",
     }
     if not hasattr(conn, "execute"):
         return empty_result
@@ -223,12 +225,18 @@ def build_fee_rate_drift_diagnostics(
     if fee_pending_count > 0:
         startup_impact = "active_fee_pending_blocks_resume; fee_rate_drift_alone_remains_diagnostic_only"
         impact_class = "startup_blocking_due_to_active_fee_pending"
+        operator_action = "resolve_fee_pending_before_resume"
+        recommended_command = "uv run python bot.py recovery-report"
     elif mismatch_count > 0:
         startup_impact = "diagnostic_only_without_active_fee_pending"
         impact_class = "diagnostic_only"
+        operator_action = "review_fee_diagnostics"
+        recommended_command = "uv run python bot.py fee-diagnostics"
     else:
         startup_impact = "no_recent_fee_rate_drift_detected"
         impact_class = "none"
+        operator_action = "none"
+        recommended_command = "none"
     return {
         "configured_fee_rate": configured_fee_rate,
         "configured_fee_rate_estimate": configured_fee_rate,
@@ -250,6 +258,8 @@ def build_fee_rate_drift_diagnostics(
         "material_notional_threshold_krw": material_threshold,
         "startup_impact": startup_impact,
         "diagnostic_only_vs_startup_blocking": impact_class,
+        "operator_action": operator_action,
+        "recommended_command": recommended_command,
     }
 
 
@@ -2479,7 +2489,9 @@ def cmd_fee_diagnostics(
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
         f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
-        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'} "
+        f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
+        f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
     )
     print("\n[ROUNDTRIP-FEE-AND-PNL]")
     print(

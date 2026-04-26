@@ -1248,9 +1248,11 @@ def cmd_health() -> None:
         deviation_pct_text = "-" if deviation_pct is None else f"{float(deviation_pct):.2f}"
         print(
             "  fee_rate_drift="
+            f"configured_fee_rate={float(fee_rate_drift.get('configured_fee_rate') or 0.0):.6f} "
             f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
             f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
             f"observed_fee_bps_median={observed_fee_bps_text} "
+            f"observed_fee_sample_count={int(fee_rate_drift.get('observed_fee_sample_count') or 0)} "
             f"fee_rate_deviation_pct={deviation_pct_text} "
             f"configured_minus_observed_bps={deviation_bps_text} "
             f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
@@ -1259,7 +1261,9 @@ def cmd_health() -> None:
             f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
             f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
             f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
-            f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
+            f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'} "
+            f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
+            f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
         )
     rule_snapshot = get_cached_order_rule_snapshot(settings.PAIR)
     if rule_snapshot is not None:
@@ -3373,9 +3377,11 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
     print("  [P3.0e1] fee_rate_drift")
     print(
         "    "
+        f"configured_fee_rate={float(fee_rate_drift.get('configured_fee_rate') or 0.0):.6f} "
         f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
         f"configured_fee_bps={float(fee_rate_drift.get('configured_fee_bps') or 0.0):.3f} "
         f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"observed_fee_sample_count={int(fee_rate_drift.get('observed_fee_sample_count') or 0)} "
         f"fee_rate_deviation_pct={deviation_pct_text} "
         f"configured_minus_observed_bps={deviation_bps_text} "
         f"observed_material_fee_sample_count={int(fee_rate_drift.get('observed_material_fee_sample_count') or 0)} "
@@ -3390,7 +3396,9 @@ def cmd_recovery_report(*, as_json: bool = False) -> None:
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
         f"material_notional_threshold_krw={float(fee_rate_drift.get('material_notional_threshold_krw') or 0.0):.1f} "
         f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
-        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'} "
+        f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
+        f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
     )
     fill_accounting_incident_projection = report.get("fill_accounting_incident_projection") or {}
     print("  [P3.0e2] fill_accounting_incidents")
@@ -4200,8 +4208,10 @@ def cmd_restart_checklist() -> None:
     deviation_pct_text = "-" if deviation_pct is None else f"{float(deviation_pct):.2f}"
     print(
         "  "
+        f"configured_fee_rate={float(fee_rate_drift.get('configured_fee_rate') or 0.0):.6f} "
         f"configured_fee_rate_estimate={float(fee_rate_drift.get('configured_fee_rate_estimate') or 0.0):.6f} "
         f"observed_fee_bps_median={observed_fee_bps_text} "
+        f"observed_fee_sample_count={int(fee_rate_drift.get('observed_fee_sample_count') or 0)} "
         f"fee_rate_deviation_pct={deviation_pct_text} "
         f"configured_minus_observed_bps={deviation_bps_text} "
         f"recent_expected_fee_rate_mismatch_count={int(fee_rate_drift.get('recent_expected_fee_rate_mismatch_count') or 0)} "
@@ -4210,7 +4220,9 @@ def cmd_restart_checklist() -> None:
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
         f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "
-        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'}"
+        f"startup_impact={fee_rate_drift.get('startup_impact') or 'unknown'} "
+        f"operator_action={fee_rate_drift.get('operator_action') or 'unknown'} "
+        f"recommended_command={fee_rate_drift.get('recommended_command') or 'none'}"
     )
 
 def _last_reconcile_failed(state) -> bool:

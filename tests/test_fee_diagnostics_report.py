@@ -212,6 +212,8 @@ def test_fee_diagnostics_exposes_fee_rate_drift_operational_fields(tmp_path, mon
     assert "position_authority_repair_count=0" in out
     assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in out
     assert "startup_impact=diagnostic_only_without_active_fee_pending" in out
+    assert "operator_action=review_fee_diagnostics" in out
+    assert "recommended_command=uv run python bot.py fee-diagnostics" in out
 
     cmd_fee_diagnostics(as_json=True)
     payload = json.loads(capsys.readouterr().out)
@@ -224,6 +226,8 @@ def test_fee_diagnostics_exposes_fee_rate_drift_operational_fields(tmp_path, mon
     assert payload["fee_rate_drift"]["fee_pending_accounting_repair_count"] == 0
     assert payload["fee_rate_drift"]["position_authority_repair_count"] == 0
     assert payload["fee_rate_drift"]["diagnostic_only_vs_startup_blocking"] == "diagnostic_only"
+    assert payload["fee_rate_drift"]["operator_action"] == "review_fee_diagnostics"
+    assert payload["fee_rate_drift"]["recommended_command"] == "uv run python bot.py fee-diagnostics"
 
 
 def test_fee_diagnostics_default_estimate_uses_live_fee_rate_in_live_mode(monkeypatch):
