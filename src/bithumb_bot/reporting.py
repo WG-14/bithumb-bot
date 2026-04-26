@@ -155,8 +155,15 @@ def build_fee_rate_drift_diagnostics(
         "expected_fee_rate_warning_count": 0,
         "recent_expected_fee_rate_mismatch_count": 0,
         "fee_pending_count": 0,
+        "fee_pending_count_semantics": "historical_observation_count_deprecated",
+        "historical_fee_pending_observation_count": 0,
         "recent_fee_pending_observation_count": 0,
+        "active_unresolved_fee_pending_count": 0,
+        "repaired_fee_pending_incident_count": 0,
         "fee_pending_accounting_repair_count": 0,
+        "unresolved_fee_state": False,
+        "fill_accounting_active_issue_count": 0,
+        "broker_fill_latest_unresolved_fee_pending_count": 0,
         "position_authority_repair_count": 0,
         "material_notional_threshold_krw": material_threshold,
         "startup_impact": "no_recent_fee_rate_drift_detected",
@@ -180,11 +187,11 @@ def build_fee_rate_drift_diagnostics(
         return empty_result
     recent_fee_bps: list[float] = []
     mismatch_count = 0
-    fee_pending_count = 0
+    recent_fee_pending_count = 0
     for row in rows:
         accounting_status = str(row["accounting_status"] or "")
         if accounting_status == "fee_pending":
-            fee_pending_count += 1
+            recent_fee_pending_count += 1
         checks = _parse_fee_validation_checks(row["fee_validation_checks"])
         if checks.get("expected_fee_rate_match") is False:
             mismatch_count += 1
@@ -205,11 +212,29 @@ def build_fee_rate_drift_diagnostics(
         recent_fee_bps.append((fee_value / notional) * 10000.0)
 
     try:
+        accounting_replay = compute_accounting_replay(conn)
+    except sqlite3.Error:
+        accounting_replay = {}
+    try:
         repair_row = conn.execute("SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs").fetchone()
         position_repair_row = conn.execute("SELECT COUNT(*) AS repair_count FROM position_authority_repairs").fetchone()
     except sqlite3.Error:
         repair_row = None
         position_repair_row = None
+
+    historical_fee_pending_count = int(accounting_replay.get("broker_fill_fee_pending_count") or 0)
+    unresolved_fee_state = bool(accounting_replay.get("unresolved_fee_state"))
+    fill_accounting_active_issue_count = int(accounting_replay.get("fill_accounting_active_issue_count") or 0)
+    latest_unresolved_fee_pending_count = int(
+        accounting_replay.get("broker_fill_latest_unresolved_fee_pending_count") or 0
+    )
+    repaired_fee_pending_incident_count = int(accounting_replay.get("fill_accounting_repaired_incident_count") or 0)
+    fee_pending_accounting_repair_count = int(repair_row["repair_count"] or 0) if repair_row else 0
+    active_unresolved_fee_pending_count = max(
+        latest_unresolved_fee_pending_count,
+        fill_accounting_active_issue_count,
+        1 if unresolved_fee_state else 0,
+    )
     observed_fee_bps_median = median(recent_fee_bps) if recent_fee_bps else None
     configured_fee_bps = configured_fee_rate * 10000.0
     deviation_bps = (
@@ -222,12 +247,21 @@ def build_fee_rate_drift_diagnostics(
         if observed_fee_bps_median is not None and abs(float(observed_fee_bps_median)) > 1e-12
         else None
     )
-    if fee_pending_count > 0:
-        startup_impact = "active_fee_pending_blocks_resume; fee_rate_drift_alone_remains_diagnostic_only"
+    has_diagnostic_history = any(
+        (
+            mismatch_count > 0,
+            recent_fee_pending_count > 0,
+            historical_fee_pending_count > 0,
+            repaired_fee_pending_incident_count > 0,
+            fee_pending_accounting_repair_count > 0,
+        )
+    )
+    if active_unresolved_fee_pending_count > 0:
+        startup_impact = "active_fee_pending_blocks_resume"
         impact_class = "startup_blocking_due_to_active_fee_pending"
         operator_action = "resolve_fee_pending_before_resume"
         recommended_command = "uv run python bot.py recovery-report"
-    elif mismatch_count > 0:
+    elif has_diagnostic_history:
         startup_impact = "diagnostic_only_without_active_fee_pending"
         impact_class = "diagnostic_only"
         operator_action = "review_fee_diagnostics"
@@ -249,9 +283,16 @@ def build_fee_rate_drift_diagnostics(
         "fee_rate_deviation_pct": deviation_pct,
         "expected_fee_rate_warning_count": mismatch_count,
         "recent_expected_fee_rate_mismatch_count": mismatch_count,
-        "fee_pending_count": fee_pending_count,
-        "recent_fee_pending_observation_count": fee_pending_count,
-        "fee_pending_accounting_repair_count": int(repair_row["repair_count"] or 0) if repair_row else 0,
+        "fee_pending_count": historical_fee_pending_count,
+        "fee_pending_count_semantics": "historical_observation_count_deprecated",
+        "historical_fee_pending_observation_count": historical_fee_pending_count,
+        "recent_fee_pending_observation_count": recent_fee_pending_count,
+        "active_unresolved_fee_pending_count": active_unresolved_fee_pending_count,
+        "repaired_fee_pending_incident_count": repaired_fee_pending_incident_count,
+        "fee_pending_accounting_repair_count": fee_pending_accounting_repair_count,
+        "unresolved_fee_state": unresolved_fee_state,
+        "fill_accounting_active_issue_count": fill_accounting_active_issue_count,
+        "broker_fill_latest_unresolved_fee_pending_count": latest_unresolved_fee_pending_count,
         "position_authority_repair_count": int(position_repair_row["repair_count"] or 0)
         if position_repair_row
         else 0,
@@ -2414,11 +2455,6 @@ def cmd_fee_diagnostics(
             "total_fee": summary.total_fee_recent_fills,
             "total_notional": summary.total_notional_recent_fills,
         },
-        "fee_model_validation": {
-            "estimated_fee_rate": summary.estimated_fee_rate,
-            "estimated_minus_actual_bps": summary.estimated_minus_actual_bps,
-            "fee_authority": fee_authority_payload,
-        },
         "fee_rate_drift": fee_rate_drift,
         "roundtrip": {
             "total_fee": summary.roundtrip_fee_total,
@@ -2428,6 +2464,34 @@ def cmd_fee_diagnostics(
         },
         "notes": summary.notes,
     }
+    fee_model_validation_source = str(
+        (fee_authority_payload or {}).get("fee_source")
+        or ("manual_override" if estimated_fee_rate is not None else ("paper_default" if settings.MODE != "live" else "manual_or_paper"))
+    )
+    fee_model_validation: dict[str, object] = {
+        "configured_fee_rate": float(fee_rate_drift.get("configured_fee_rate") or 0.0),
+        "configured_fee_bps": float(fee_rate_drift.get("configured_fee_bps") or 0.0),
+        "estimated_fee_rate": summary.estimated_fee_rate,
+        "estimated_fee_rate_source": fee_model_validation_source,
+        "estimated_fee_rate_semantics": (
+            "exchange_chance_doc_diagnostic_not_configured_live_fee"
+            if fee_model_validation_source == "chance_doc"
+            else "diagnostic_estimate_not_settlement_authority"
+        ),
+        "estimated_minus_actual_bps": summary.estimated_minus_actual_bps,
+        "fee_model_validation_source": fee_model_validation_source,
+        "settlement_authority": "exchange_paid_fee_when_coherent",
+        "operator_note": (
+            "chance_doc_fee_rate_is_diagnostic_not_settlement_authority"
+            if fee_model_validation_source == "chance_doc"
+            else "fee_model_estimate_is_diagnostic_not_settlement_authority"
+        ),
+        "fee_authority": fee_authority_payload,
+    }
+    if fee_model_validation_source == "chance_doc":
+        fee_model_validation["exchange_chance_doc_fee_rate"] = summary.estimated_fee_rate
+        fee_model_validation["exchange_chance_doc_fee_bps"] = summary.estimated_fee_rate * 10000.0
+    payload["fee_model_validation"] = fee_model_validation
 
     write_json_atomic(PATH_MANAGER.fee_diagnostics_report_path(), payload)
 
@@ -2459,10 +2523,22 @@ def cmd_fee_diagnostics(
     print("\n[FEE-MODEL-VALIDATION]")
     print(
         "  "
+        f"configured_fee_rate={float(fee_model_validation.get('configured_fee_rate') or 0.0):.6f} "
+        f"configured_fee_bps={float(fee_model_validation.get('configured_fee_bps') or 0.0):.3f} "
         f"estimated_fee_rate={summary.estimated_fee_rate:.6f} "
+        f"estimated_fee_rate_source={fee_model_validation.get('estimated_fee_rate_source') or 'unknown'} "
+        f"estimated_fee_rate_semantics={fee_model_validation.get('estimated_fee_rate_semantics') or 'unknown'} "
         f"estimated_minus_actual_bps={_fmt_rate(summary.estimated_minus_actual_bps, as_bps=True)} "
-        f"fee_authority_source={str((fee_authority_payload or {}).get('fee_source') or 'manual_or_paper')}"
+        f"fee_authority_source={fee_model_validation.get('fee_model_validation_source') or 'unknown'}"
     )
+    if fee_model_validation.get("exchange_chance_doc_fee_rate") is not None:
+        print(
+            "  "
+            f"exchange_chance_doc_fee_rate={float(fee_model_validation.get('exchange_chance_doc_fee_rate') or 0.0):.6f} "
+            f"exchange_chance_doc_fee_bps={float(fee_model_validation.get('exchange_chance_doc_fee_bps') or 0.0):.3f} "
+            f"settlement_authority={fee_model_validation.get('settlement_authority') or 'unknown'} "
+            f"operator_note={fee_model_validation.get('operator_note') or 'none'}"
+        )
     observed_fee_bps_text = (
         "-"
         if fee_rate_drift.get("observed_fee_bps_median") is None
@@ -2485,7 +2561,15 @@ def cmd_fee_diagnostics(
     print(
         "  "
         f"expected_fee_rate_warning_count={int(fee_rate_drift.get('expected_fee_rate_warning_count') or 0)} "
+        f"active_unresolved_fee_pending_count={int(fee_rate_drift.get('active_unresolved_fee_pending_count') or 0)} "
+        f"historical_fee_pending_observation_count={int(fee_rate_drift.get('historical_fee_pending_observation_count') or 0)} "
+        f"recent_fee_pending_observation_count={int(fee_rate_drift.get('recent_fee_pending_observation_count') or 0)} "
+        f"repaired_fee_pending_incident_count={int(fee_rate_drift.get('repaired_fee_pending_incident_count') or 0)} "
+        f"broker_fill_latest_unresolved_fee_pending_count={int(fee_rate_drift.get('broker_fill_latest_unresolved_fee_pending_count') or 0)} "
+        f"fill_accounting_active_issue_count={int(fee_rate_drift.get('fill_accounting_active_issue_count') or 0)} "
+        f"unresolved_fee_state={1 if bool(fee_rate_drift.get('unresolved_fee_state')) else 0} "
         f"fee_pending_count={int(fee_rate_drift.get('fee_pending_count') or 0)} "
+        f"fee_pending_count_semantics={fee_rate_drift.get('fee_pending_count_semantics') or 'unknown'} "
         f"fee_pending_accounting_repair_count={int(fee_rate_drift.get('fee_pending_accounting_repair_count') or 0)} "
         f"position_authority_repair_count={int(fee_rate_drift.get('position_authority_repair_count') or 0)} "
         f"diagnostic_only_vs_startup_blocking={fee_rate_drift.get('diagnostic_only_vs_startup_blocking') or 'unknown'} "

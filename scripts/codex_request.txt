@@ -2,778 +2,528 @@ Use the attached incident-analysis context as background, but do **not** treat i
 
 You are working in the GitHub repository `WG-14/bithumb-bot`.
 
-The repo has already been patched multiple times after an EC2 live-trading accounting incident. Your task is **not** to repeat the previous fee-authority patch mechanically. The fee-authority path appears substantially improved, and the current repo appears to include `repair_plan.py` plus `cmd_repair_plan` wiring. Your task is to verify that the already-added repair-plan/recovery-policy layer fully penetrates the CLI, `recovery-report`, `restart-checklist`, `health`, and tests.
+The repo has already been patched multiple times after an EC2 live-trading accounting incident. The previous fee-authority and recovery-plan work appears to have substantially improved the core trading/accounting path. Do **not** repeat those patches mechanically. This task is narrower and more important operationally: fix the remaining **operator-facing diagnostic consistency bug** where `fee-diagnostics` reports historical `fee_pending` observations as if they were active startup blockers.
 
-The next patch should **not** be “add repair-plan as a concept.” That appears to already exist. The next patch should make the repair-plan/recovery policy operational, visible, test-locked, and safe for live operators.
-
-Keep the priority sharp:
+The central priority is:
 
 ```text
-Move the repo from:
-  fee validation bug fixed, but operator still has to infer recovery actions
-
-to:
-  exchange paid_fee is settlement authority when coherent,
-  fee-estimate drift is visible diagnostics,
-  accounting-root-cause incidents do not recommend flatten by default,
-  repair-plan gives a readable non-mutating plan,
-  recovery-report and restart-checklist show the same policy,
-  open_position_lots is treated as a rebuildable projection rather than canonical truth.
+Observed historically
+≠ active unresolved
+≠ startup blocker
 ```
+
+The next patch must make that distinction explicit in code, output, and tests.
 
 ## Incident context
 
-On EC2, live trading repeatedly entered this failure cycle after real Bithumb BUY/SELL fills:
+On EC2, the live system now appears accounting-ready according to `audit-ledger`, `repair-plan`, and `health`, but `fee-diagnostics` still reports an active fee-pending startup blocker.
+
+Observed EC2 state:
 
 ```text
-Bithumb order fills successfully
-→ local fee validation classifies the fill as fee_pending
-→ local fills/trades/portfolio/lot accounting becomes incomplete or inconsistent
-→ broker/local portfolio mismatch appears
-→ startup/resume gates block live
-→ recovery suggests flatten or manual repair
-→ flatten itself creates another real fill
-→ that fill goes through the same fee/accounting failure path
-→ operator manually repairs fee/principal/lot state and sometimes bot_health
+broker_fill_observations.accounting_status='fee_pending' rows = 13
+fee_pending_accounting_repair_count = 8
+fill_accounting_repaired_incident_count = 8
+
+broker_fill_latest_unresolved_fee_pending_count = 0
+unresolved_fee_state = 0
+fill_accounting_active_issue_count = 0
+live_ready = 1
+blocking_incident_class = NONE
 ```
 
-Runtime evidence from the incident:
+Yet `fee-diagnostics` prints something equivalent to:
 
 ```text
-Actual Bithumb mobile-app fee rate: 0.04% = 0.0004 = ~4 bps
-
-DB-observed examples:
-flatten SELL fee_bps = 3.999784
-latest BUY fee_bps   = 3.999902
-previous SELL        = 3.998178
-previous BUY         = 3.999148
-
-Resolved setting during incident:
-LIVE_FEE_RATE_ESTIMATE = 0.0025
-LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW = 10000.0
+fee_pending_count=13
+diagnostic_only_vs_startup_blocking=startup_blocking_due_to_active_fee_pending
+startup_impact=active_fee_pending_blocks_resume
+operator_action=resolve_fee_pending_before_resume
 ```
 
-The likely direct trigger was:
+This is wrong if the 13 rows are historical/repaired/stale observations and canonical accounting says there are no active unresolved fee issues.
+
+## Current likely bug
+
+Verify this from the repo, especially:
 
 ```text
-configured expected live fee rate = 0.0025
-actual Bithumb paid fee rate      = 0.0004
-→ expected_fee_rate_mismatch
-→ old behavior: order_level_candidate / fee_pending
-→ accounting/recovery cascade
+src/bithumb_bot/reporting.py
+build_fee_rate_drift_diagnostics()
 ```
 
-But do **not** reduce the fix to `LIVE_FEE_RATE_ESTIMATE=0.0004`. That is required EC2 operational hygiene, not the repository-level fix. The repository-level fix is that coherent exchange `paid_fee` must outrank configured estimates for settlement accounting, and accounting-root-cause incidents must not default to flatten.
-
-## Current repo state to verify
-
-Verify all of this directly from the current repo before changing anything.
-
-### 1. Fee authority appears substantially improved
-
-`FeeEvaluation` should include explicit semantic fields:
-
-```python
-fee_authority
-accounting_decision
-accounting_eligibility
-diagnostic_flags
-```
-
-Expected invariant:
+The suspected current behavior is:
 
 ```text
-exchange order-level paid_fee
-+ single fill
-+ executed_volume/executed_funds/identifiers match
-→ fee_authority="exchange_order_paid_fee_single_fill"
-→ accounting_decision="finalize"
-→ accounting_status="accounting_complete"
-
-LIVE_FEE_RATE_ESTIMATE mismatch
-→ diagnostic_flags contains "expected_fee_rate_mismatch"
-→ not fee_pending by itself
+SELECT recent rows from broker_fill_observations
+count rows where accounting_status == "fee_pending"
+if fee_pending_count > 0:
+    startup_impact = active_fee_pending_blocks_resume
+    diagnostic_only_vs_startup_blocking = startup_blocking_due_to_active_fee_pending
+    operator_action = resolve_fee_pending_before_resume
 ```
 
-Verify through:
+That is the wrong authority boundary.
+
+`broker_fill_observations.accounting_status='fee_pending'` is an observation-layer/historical signal. It may include stale, duplicated, repaired, or previously pending observations. It must not be the startup-blocker authority.
+
+Startup/restart blocker authority should come from canonical accounting/replay/readiness state, such as:
 
 ```text
-src/bithumb_bot/fee_observation.py
-src/bithumb_bot/broker/bithumb_order_queries.py
-src/bithumb_bot/broker/live_submission_execution.py
-src/bithumb_bot/broker/myorder_runtime.py
-src/bithumb_bot/execution.py
-tests/test_fee_observation.py
-tests/test_myorder_runtime_ingestion.py
-tests/test_bithumb_private_api.py
-tests/test_live_broker.py
+compute_accounting_replay(conn)
+unresolved_fee_state
+broker_fill_latest_unresolved_fee_pending_count
+fill_accounting_active_issue_count
+fill_accounting_repaired_incident_count
+fee_pending_accounting_repair_count
 ```
 
-### 2. `repair_plan.py` appears to introduce the right policy model
+or the same canonical source used by `audit-ledger` / runtime readiness.
 
-Verify `src/bithumb_bot/repair_plan.py`, especially:
+## Working hypotheses
 
-```python
-build_recovery_policy_from_report(report)
-build_repair_plan_preview_from_report(report)
-```
+Keep these as hypotheses until verified in code and tests.
 
-Expected policy fields:
+### Hypothesis A — Direct bug: fee-diagnostics aggregation misclassifies historical observations as active blockers
 
-```text
-primary_incident_class
-recommended_mode
-accounting_root_cause_unresolved
-accounting_evidence_reliable
-actual_executable_exposure
-additional_orders_allowed
-flatten_primary_recommendation
-flatten_not_primary
-recommended_action
-recommended_command
-incident_reasons
-```
-
-Expected accounting-root-cause policy:
-
-```text
-If accounting_root_cause_unresolved:
-  recommended_mode="forensic_accounting"
-  primary_incident_class="ACCOUNTING_ROOT_CAUSE"
-  additional_orders_allowed=False
-  flatten_primary_recommendation=False
-  recommended_action="collect_broker_fill_evidence_and_build_repair_plan"
-  recommended_command includes "repair-plan"
-```
-
-Expected market-risk policy:
-
-```text
-If actual_executable_exposure and accounting_evidence_reliable and closeout_allowed:
-  recommended_mode="market_risk"
-  primary_incident_class="MARKET_RISK_EXPOSURE"
-  additional_orders_allowed=True
-  flatten_primary_recommendation=True
-  recommended_action="review_executable_exposure_and_consider_flatten"
-  recommended_command includes "flatten-position"
-```
-
-Do not assume this is fully wired into CLI, `recovery-report`, `restart-checklist`, or `health` just because the model exists. Verify operator surfaces.
-
-### 3. `repair-plan` CLI appears to exist but needs hard verification
-
-Verify:
-
-```bash
-uv run bithumb-bot repair-plan --help
-MODE=live uv run bithumb-bot repair-plan
-```
-
-The command must be read-only by default and clearly say it is a non-mutating preview.
-
-Required operator output:
-
-```text
-[REPAIR-PLAN]
-  plan_id=...
-  mode=live
-  primary_incident_class=...
-  recommended_mode=...
-  accounting_root_cause_unresolved=...
-  accounting_evidence_reliable=...
-  actual_executable_exposure=...
-  additional_orders_allowed=...
-  flatten_primary_recommendation=...
-  flatten_not_primary=...
-  recommended_action=...
-  recommended_command=...
-  non_mutating_preview=1
-
-[POSITION-PROJECTION]
-  source_of_truth=fills+trades+fee_adjustments+external_adjustments+repair_events
-  projection_kind=open_position_lots
-  canonical_portfolio_qty=...
-  broker_qty=...
-  open_position_lots_projected_qty=...
-  broker_portfolio_converged=...
-  projection_converged=...
-  rebuildable=1
-  safe_to_rebuild=...
-  reason=...
-
-candidate_repairs:
-  - name=...
-    needed=...
-    active_issue=...
-    safe_to_apply=...
-    preconditions=...
-    touched_tables=...
-    expected_after=...
-    idempotency_key=...
-    rollback_or_backup=...
-    why_safe=...
-    recommended_command=...
-```
-
-If the payload exists internally but the CLI output is incomplete, hidden, or hard to read, improve the formatting.
-
-### 4. `repair-plan` should aggregate existing repair candidates
-
-Verify that `build_repair_plan_preview_from_report()` aggregates, where applicable:
-
-```text
-fee-pending-accounting-repair
-fee-gap-accounting-repair
-manual-flat-accounting-repair
-external-position-accounting-repair
-rebuild-position-authority
-```
-
-Each candidate should expose:
-
-```text
-name
-needed
-active_issue
-safe_to_apply
-preconditions
-touched_tables
-expected_after
-idempotency_key
-rollback_or_backup
-why_safe
-recommended_command
-```
-
-The goal is to stop the operator from guessing between multiple separate repair commands.
-
-### 5. Projection semantics must be end-to-end
-
-Verify that `open_position_lots` is treated as a rebuildable projection, not canonical settlement truth.
-
-Expected model:
-
-```text
-canonical truth:
-  fills
-  trades
-  fee finalization / adjustment events
-  external adjustments
-  repair events
-
-projection:
-  open_position_lots
-```
-
-Expected projection-drift behavior:
-
-```text
-broker_portfolio_converged=1
-canonical_portfolio_qty == broker_qty
-open_position_lots_projected_qty != canonical_portfolio_qty
-→ projection_drift incident
-→ candidate_repairs includes rebuild-position-authority
-→ flatten_primary_recommendation=0
-```
-
-## Working hypotheses to verify or falsify
-
-Keep these as hypotheses until repo evidence proves them.
-
-### Hypothesis A — Fee authority problem is mostly fixed
-
-Coherent exchange `paid_fee` is now settlement authority and configured fee-rate mismatch is only diagnostic.
-
-Verification:
-
-```bash
-uv run pytest tests/test_fee_observation.py
-uv run pytest tests/test_myorder_runtime_ingestion.py -k "paid_fee or expected_fee_rate"
-uv run pytest tests/test_bithumb_private_api.py -k "fee or paid_fee or expected_fee_rate or single_fill"
-uv run pytest tests/test_live_broker.py -k "fee or paid_fee or expected_fee_rate or accounting"
-```
-
-Falsification condition:
-
-```text
-Any REST/private/live path still converts:
-  coherent exchange paid_fee + estimate mismatch
-into:
-  order_level_candidate / fee_pending / principal_applied_fee_pending
-```
-
-### Hypothesis B — Recovery has started separating accounting-root-cause from market-risk
-
-`repair_plan.py` appears to make this distinction, but it may not yet be fully wired into CLI, `recovery-report`, `restart-checklist`, or `health`.
-
-Verification target for accounting-root-cause state:
-
-```text
-accounting_root_cause_unresolved=1
-accounting_evidence_reliable=0
-maybe actual_executable_exposure=1
-→ primary_incident_class=ACCOUNTING_ROOT_CAUSE
-→ recommended_mode=forensic_accounting
-→ additional_orders_allowed=0
-→ flatten_primary_recommendation=0
-→ recommended_action=collect_broker_fill_evidence_and_build_repair_plan
-→ recommended_command includes repair-plan
-```
-
-Verification target for market-risk state:
-
-```text
-actual_executable_exposure=1
-accounting_evidence_reliable=1
-closeout_allowed=1
-no unresolved fee/accounting blockers
-→ primary_incident_class=MARKET_RISK_EXPOSURE
-→ recommended_mode=market_risk
-→ additional_orders_allowed=1
-→ flatten_primary_recommendation=1
-→ recommended_command includes flatten-position
-```
-
-Falsification condition:
-
-```text
-recovery-report / restart-checklist still recommends flatten as primary action when accounting_root_cause_unresolved=1.
-```
-
-If not fully wired, wire it.
-
-### Hypothesis C — Repair-plan preview exists internally but needs CLI/operator-surface hardening
-
-The current repo appears to have `cmd_repair_plan` wiring, but the operator-facing output must be verified.
-
-Verification target:
-
-```bash
-uv run bithumb-bot repair-plan --help
-MODE=live uv run bithumb-bot repair-plan
-```
-
-Falsification condition:
-
-```text
-The command and tests already exist and produce readable non-mutating output with:
-  plan_id
-  policy summary
-  projection summary
-  candidate repairs
-  why_safe
-  non_mutating_preview=1
-```
-
-If missing or weak, add it.
-
-### Hypothesis D — Projection semantics are present but need end-to-end tests
-
-The repair-plan payload may declare `open_position_lots` as projection, but recovery must not treat projection drift as market-risk exposure.
+`build_fee_rate_drift_diagnostics()` currently treats `broker_fill_observations.accounting_status='fee_pending'` count as active startup-blocking fee pending.
 
 Verification target:
 
 ```text
-broker_portfolio_converged=1
-canonical_portfolio_qty == broker_qty
-open_position_lots_projected_qty != canonical_portfolio_qty
-→ projection_drift incident
-→ rebuild-position-authority candidate
-→ flatten_primary_recommendation=0
+Given:
+  broker_fill_observations accounting_status='fee_pending' rows > 0
+  compute_accounting_replay unresolved_fee_state = False
+  broker_fill_latest_unresolved_fee_pending_count = 0
+  fill_accounting_active_issue_count = 0
+  fill_accounting_repaired_incident_count > 0
+
+Expected after patch:
+  historical_fee_pending_observation_count > 0
+  recent_fee_pending_observation_count > 0
+  active_unresolved_fee_pending_count = 0
+  diagnostic_only_vs_startup_blocking = diagnostic_only
+  startup_impact = diagnostic_only_without_active_fee_pending
+  operator_action = review_fee_diagnostics
 ```
 
 Falsification condition:
 
 ```text
-Existing tests already prove projection drift routes to repair-plan/rebuild-position-authority and not flatten.
+If canonical accounting replay reports active unresolved fee state, then fee-diagnostics may correctly block startup.
 ```
 
-If missing, add tests.
+### Hypothesis B — Higher-level root cause: diagnostic evidence and startup authority are not separated
+
+The structural issue is not one bad string. The structural issue is that an observation-layer count is being used as an authority-layer blocker.
+
+Required model:
+
+```text
+Observation layer:
+  broker_fill_observations
+  historical fee_pending observations
+  recent fee warnings
+  expected_fee_rate_mismatch counts
+
+Canonical accounting authority:
+  compute_accounting_replay()
+  unresolved_fee_state
+  broker_fill_latest_unresolved_fee_pending_count
+  fill_accounting_active_issue_count
+
+Operator guidance:
+  startup_impact
+  diagnostic_only_vs_startup_blocking
+  operator_action
+  recommended_command
+```
+
+Do not let the observation layer directly decide startup blocking.
+
+### Hypothesis C — FEE-MODEL-VALIDATION also has a naming/source authority bug
+
+`fee-diagnostics` also prints something like:
+
+```text
+[FEE-MODEL-VALIDATION]
+estimated_fee_rate=0.002500
+estimated_minus_actual_bps=22.369 bps
+fee_authority_source=chance_doc
+```
+
+But the same run also prints:
+
+```text
+[FEE-RATE-DRIFT]
+configured_fee_rate=0.000400
+configured_fee_bps=4.000
+observed_fee_bps_median=4.000 bps
+fee_rate_deviation_pct=0.01%
+```
+
+If `estimated_fee_rate=0.002500` is from `chance_doc`, do not present it as the live configured fee estimate. It should be renamed or disambiguated.
+
+Expected direction:
+
+```text
+configured_fee_rate=0.000400
+configured_fee_bps=4.000
+exchange_chance_doc_fee_rate=0.002500
+exchange_chance_doc_fee_bps=25.000
+observed_fee_bps_median=4.000
+fee_model_validation_source=chance_doc
+settlement_authority=exchange_paid_fee_when_coherent
+operator_note=chance_doc_fee_rate_is_diagnostic_not_settlement_authority
+```
+
+Falsification condition:
+
+```text
+If estimated_fee_rate=0.002500 is actually used as live planning/settlement configuration, report that as a larger bug. But do not assume that without verifying.
+```
+
+### Hypothesis D — Fee authority, settlement accounting, and repair-plan recovery policy are not the direct causes of this current bug
+
+Do not modify settlement accounting, fee authority, repair-plan recovery policy, or live order behavior unless verification shows they are directly involved.
+
+Current EC2 evidence indicates:
+
+```text
+audit-ledger live_ready=1
+blocking_incident_class=NONE
+repair-plan accounting_root_cause_unresolved=false
+repair-plan accounting_evidence_reliable=true
+repair-plan flatten_primary_recommendation=false
+repair-plan recommended_action=resume_now
+```
+
+Therefore this task should be a reporting/diagnostic consistency patch, not a trading/accounting patch.
 
 ## Required design changes
 
-### 1. Finish wiring repair-plan policy into operator surfaces
+### 1. Split historical observation counts from active blocker counts
 
-If `repair_plan.py` exists but is not fully surfaced, finish:
+In `build_fee_rate_drift_diagnostics()`, stop using `broker_fill_observations.accounting_status='fee_pending'` as the active startup-blocker authority.
 
-```bash
-bithumb-bot repair-plan
-```
-
-Also surface the same policy summary in:
+Add or expose fields equivalent to:
 
 ```text
-recovery-report
-restart-checklist
-health, if appropriate
+historical_fee_pending_observation_count
+recent_fee_pending_observation_count
+active_unresolved_fee_pending_count
+repaired_fee_pending_incident_count
+fee_pending_accounting_repair_count
+unresolved_fee_state
+fill_accounting_active_issue_count
+broker_fill_latest_unresolved_fee_pending_count
 ```
 
-Minimum required surface:
+Recommended semantics:
 
 ```text
-primary_incident_class=ACCOUNTING_ROOT_CAUSE
-recommended_mode=forensic_accounting
-accounting_root_cause_unresolved=1
-accounting_evidence_reliable=0
-additional_orders_allowed=0
-flatten_primary_recommendation=0
-recommended_action=collect_broker_fill_evidence_and_build_repair_plan
-recommended_command=uv run python bot.py repair-plan
+historical_fee_pending_observation_count:
+  count of historical/recent observation rows with accounting_status='fee_pending'
+
+recent_fee_pending_observation_count:
+  count within the current observation window
+
+active_unresolved_fee_pending_count:
+  canonical active unresolved fee issue count derived from accounting replay / audit-ledger authority
+
+repaired_fee_pending_incident_count:
+  count of repaired fee-pending incidents from canonical accounting replay
+
+fee_pending_accounting_repair_count:
+  count from fee_pending_accounting_repairs
 ```
 
-Do not leave the policy trapped inside `repair_plan.py` only.
+### 2. Use canonical replay/readiness authority for startup impact
 
-### 2. Suppress flatten as primary recommendation during accounting-root-cause incidents
+Use `compute_accounting_replay(conn)` or the same canonical source used by `audit-ledger`.
 
-Enforce this invariant:
+Suggested logic:
 
 ```text
-accounting_root_cause_unresolved
-→ flatten_primary_recommendation=0
-→ additional_orders_allowed=0
-→ recommended_action=collect_broker_fill_evidence_and_build_repair_plan
+active_unresolved_fee_pending_count =
+  max(
+    broker_fill_latest_unresolved_fee_pending_count,
+    fill_accounting_active_issue_count,
+    1 if unresolved_fee_state else 0
+  )
 ```
 
-Do **not** remove flatten entirely. Flatten is allowed only under market-risk mode:
+Then:
 
 ```text
-actual_executable_exposure=1
-accounting_evidence_reliable=1
-closeout_allowed=1
-no unresolved fee/accounting blockers
-→ flatten_primary_recommendation=1
+if active_unresolved_fee_pending_count > 0:
+    startup_impact = active_fee_pending_blocks_resume
+    diagnostic_only_vs_startup_blocking = startup_blocking_due_to_active_fee_pending
+    operator_action = resolve_fee_pending_before_resume
+    recommended_command = uv run python bot.py recovery-report
+
+elif mismatch_count > 0 or historical_fee_pending_observation_count > 0:
+    startup_impact = diagnostic_only_without_active_fee_pending
+    diagnostic_only_vs_startup_blocking = diagnostic_only
+    operator_action = review_fee_diagnostics
+    recommended_command = uv run python bot.py fee-diagnostics
+
+else:
+    startup_impact = no_recent_fee_rate_drift_detected
+    diagnostic_only_vs_startup_blocking = none
+    operator_action = none
+    recommended_command = none
 ```
 
-Search and patch where needed:
+For the EC2 case described above, the expected output is:
 
 ```text
-src/bithumb_bot/engine.py
-src/bithumb_bot/app.py
-src/bithumb_bot/recovery.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/reporting.py
-src/bithumb_bot/repair_plan.py
-```
+configured_fee_rate=0.000400
+configured_fee_bps=4.000
+observed_fee_bps_median=4.000 bps
+fee_rate_deviation_pct=0.01%
 
-Search terms:
-
-```text
-flatten
-flatten-position
-manual-flat
-recommended_command
-recommended_action
-next_required_action
-resume_guidance
-restart_checklist
-recovery_report
-repair-plan
-```
-
-### 3. Make repair-plan candidate output useful enough for operators
-
-Each candidate repair must include:
-
-```text
-needed
-active_issue
-safe_to_apply
-preconditions
-touched_tables
-expected_after
-idempotency_key
-rollback_or_backup
-why_safe
-recommended_command
-```
-
-Candidate repairs should include, where applicable:
-
-```text
-fee-pending-accounting-repair
-fee-gap-accounting-repair
-manual-flat-accounting-repair
-external-position-accounting-repair
-rebuild-position-authority
-```
-
-Do not implement `repair-apply --plan-id` unless the current repo infrastructure makes that small and safe. The immediate goal is a robust non-mutating preview.
-
-### 4. Make `open_position_lots` projection semantics explicit end-to-end
-
-Projection drift should route to repair-plan / rebuild-position-authority, not flatten.
-
-Required invariant:
-
-```text
-broker_portfolio_converged=1
-canonical portfolio converged=1
-open_position_lots projection diverged=1
-→ primary_incident_class=ACCOUNTING_ROOT_CAUSE or PROJECTION_DRIFT
-→ flatten_primary_recommendation=0
-→ candidate_repairs includes rebuild-position-authority
-```
-
-### 5. Keep fee-rate drift visible on restart/recovery surfaces
-
-`fee-diagnostics` is not enough. Operators commonly run:
-
-```bash
-bithumb-bot health
-bithumb-bot recovery-report
-bithumb-bot restart-checklist
-```
-
-If fee-rate drift is present, expose at least a compact summary or pointer:
-
-```text
-fee_rate_drift=diagnostic_only
-configured_fee_bps=25.000
-observed_fee_bps_median=4.000
+expected_fee_rate_warning_count=6
+historical_fee_pending_observation_count=13
+recent_fee_pending_observation_count=13
+active_unresolved_fee_pending_count=0
+fee_pending_accounting_repair_count=8
+repaired_fee_pending_incident_count=8
+diagnostic_only_vs_startup_blocking=diagnostic_only
 startup_impact=diagnostic_only_without_active_fee_pending
-action=review_fee_diagnostics
+operator_action=review_fee_diagnostics
+recommended_command=uv run python bot.py fee-diagnostics
 ```
 
-Do not make diagnostic-only drift startup-blocking unless there is active fee pending/accounting issue.
+### 3. Preserve backward compatibility carefully
+
+Do not abruptly remove `fee_pending_count` if existing tests or scripts depend on it.
+
+Preferred compatibility behavior:
+
+```text
+fee_pending_count=13
+fee_pending_count_semantics=historical_observation_count_deprecated
+historical_fee_pending_observation_count=13
+active_unresolved_fee_pending_count=0
+```
+
+In human-readable output, prefer showing `active_unresolved_fee_pending_count` before or near `fee_pending_count` so operators do not confuse the old field with active blockers.
+
+### 4. Disambiguate FEE-MODEL-VALIDATION fee-rate source
+
+Find where `FeeDiagnosticSummary.estimated_fee_rate`, `estimated_minus_actual_bps`, `fee_authority_source`, and `[FEE-MODEL-VALIDATION]` output are produced.
+
+If the `0.002500` value is from `chance_doc`, rename or add explicit fields:
+
+```text
+configured_fee_rate
+configured_fee_bps
+exchange_chance_doc_fee_rate
+exchange_chance_doc_fee_bps
+observed_fee_bps_median
+fee_model_validation_source=chance_doc
+settlement_authority=exchange_paid_fee_when_coherent
+operator_note=chance_doc_fee_rate_is_diagnostic_not_settlement_authority
+```
+
+Do not display chance-doc fee as if it were the live configured fee estimate.
+
+If keeping `estimated_fee_rate` for compatibility, add source/semantics fields:
+
+```text
+estimated_fee_rate=0.002500
+estimated_fee_rate_source=chance_doc
+estimated_fee_rate_semantics=exchange_chance_doc_diagnostic_not_configured_live_fee
+configured_fee_rate=0.000400
+```
+
+### 5. Keep other systems unchanged unless directly proven necessary
+
+Do not change:
+
+```text
+settlement accounting
+fee authority
+exchange paid_fee validation
+repair-plan recovery policy
+flatten/market-risk policy
+manual repair commands
+database rows
+live order submission behavior
+```
+
+This is a diagnostic/reporting authority patch.
 
 ## Required tests
 
-Add or strengthen focused tests. Prefer tests that lock policy behavior, not implementation trivia.
+Add focused tests that lock the reporting authority boundary.
 
-### Existing fee-authority regression tests
+### Test 1 — historical fee_pending observations do not imply active startup blocker
 
-Verify these still pass:
+Add or update a test near existing fee diagnostics/reporting tests.
 
-```bash
-uv run pytest tests/test_fee_observation.py
-uv run pytest tests/test_myorder_runtime_ingestion.py -k "paid_fee or expected_fee_rate"
-uv run pytest tests/test_bithumb_private_api.py -k "fee or paid_fee or expected_fee_rate or single_fill"
-uv run pytest tests/test_live_broker.py -k "fee or paid_fee or expected_fee_rate or accounting"
-```
-
-They must prove:
+Fixture:
 
 ```text
-coherent exchange paid_fee + configured_fee_rate mismatch
-→ fee_authority=exchange_order_paid_fee_single_fill
-→ accounting_decision=finalize
-→ accounting_status=accounting_complete
-→ diagnostic_flags contains expected_fee_rate_mismatch
-→ not fee_pending
+broker_fill_observations:
+  13 rows with accounting_status='fee_pending'
+
+fee_pending_accounting_repairs:
+  8 rows
+
+canonical accounting replay:
+  unresolved_fee_state=False
+  broker_fill_latest_unresolved_fee_pending_count=0
+  fill_accounting_active_issue_count=0
+  fill_accounting_repaired_incident_count=8
 ```
 
-### Recovery policy tests
-
-Add or verify tests such as:
+Expected:
 
 ```text
-test_recovery_policy_suppresses_flatten_when_accounting_root_cause_unresolved
-test_recovery_policy_allows_flatten_only_for_market_risk_with_reliable_accounting
-test_recovery_report_surfaces_forensic_accounting_mode
-test_restart_checklist_surfaces_forensic_accounting_mode
+historical_fee_pending_observation_count=13
+recent_fee_pending_observation_count=13
+active_unresolved_fee_pending_count=0
+repaired_fee_pending_incident_count=8
+fee_pending_accounting_repair_count=8
+diagnostic_only_vs_startup_blocking=diagnostic_only
+startup_impact=diagnostic_only_without_active_fee_pending
+operator_action=review_fee_diagnostics
+recommended_command includes fee-diagnostics
 ```
 
-Required assertions for accounting-root-cause case:
+Also assert that it does **not** output:
 
 ```text
-accounting_root_cause_unresolved=1
-→ primary_incident_class=ACCOUNTING_ROOT_CAUSE
-→ recommended_mode=forensic_accounting
-→ additional_orders_allowed=0
-→ flatten_primary_recommendation=0
-→ recommended_action=collect_broker_fill_evidence_and_build_repair_plan
-→ recommended_command includes repair-plan
+startup_blocking_due_to_active_fee_pending
+active_fee_pending_blocks_resume
+resolve_fee_pending_before_resume
 ```
 
-Required assertions for positive market-risk case:
+for this fixture.
+
+### Test 2 — actual active unresolved fee remains startup-blocking
+
+Fixture:
 
 ```text
-actual_executable_exposure=1
-accounting_evidence_reliable=1
-closeout_allowed=1
-no unresolved fee/accounting blockers
-→ primary_incident_class=MARKET_RISK_EXPOSURE
-→ recommended_mode=market_risk
-→ flatten_primary_recommendation=1
+canonical accounting replay:
+  unresolved_fee_state=True
+  or broker_fill_latest_unresolved_fee_pending_count > 0
+  or fill_accounting_active_issue_count > 0
 ```
 
-### Repair-plan CLI/operator tests
-
-Add or verify tests such as:
+Expected:
 
 ```text
-test_repair_plan_cli_prints_non_mutating_preview
-test_repair_plan_cli_lists_candidate_repairs
-test_repair_plan_cli_includes_plan_id_and_policy_summary
-test_repair_plan_marks_additional_orders_disallowed_for_accounting_root_cause
-test_repair_plan_includes_preconditions_touched_tables_expected_after_and_why_safe
+active_unresolved_fee_pending_count > 0
+diagnostic_only_vs_startup_blocking=startup_blocking_due_to_active_fee_pending
+startup_impact=active_fee_pending_blocks_resume
+operator_action=resolve_fee_pending_before_resume
+recommended_command includes recovery-report
 ```
 
-Required output fields:
+This preserves fail-closed behavior for genuinely active unresolved fee issues.
+
+### Test 3 — fee diagnostics, health, repair-plan, and audit-ledger agree on active readiness
+
+Given:
 
 ```text
-[REPAIR-PLAN]
-plan_id=
-mode=
-primary_incident_class=
-recommended_mode=
-accounting_root_cause_unresolved=
-accounting_evidence_reliable=
-additional_orders_allowed=
-flatten_primary_recommendation=
-recommended_action=
-recommended_command=
-non_mutating_preview=1
-
-[POSITION-PROJECTION]
-source_of_truth=
-projection_kind=open_position_lots
-canonical_portfolio_qty=
-broker_qty=
-open_position_lots_projected_qty=
-projection_converged=
-rebuildable=
-safe_to_rebuild=
-
-candidate_repairs:
-name=
-needed=
-active_issue=
-safe_to_apply=
-preconditions=
-touched_tables=
-expected_after=
-idempotency_key=
-rollback_or_backup=
-why_safe=
-recommended_command=
+active_unresolved_fee_pending_count=0
+historical_fee_pending_observation_count>0
+repair-plan accounting_root_cause_unresolved=false
+audit-ledger live_ready=1
 ```
 
-### Projection semantics tests
-
-Add or verify tests such as:
+Expected:
 
 ```text
-test_projection_drift_routes_to_repair_plan_not_flatten
-test_position_authority_rebuild_treats_open_position_lots_as_projection
-test_repair_plan_includes_position_projection_drift_candidate
+fee-diagnostics reports diagnostic_only
+health does not surface fee_rate_drift as startup-blocking
+repair-plan remains resume_now
+audit-ledger remains live_ready=1
 ```
 
-Required assertions:
+This test prevents future drift between reporting surfaces.
+
+### Test 4 — FEE-MODEL-VALIDATION source is unambiguous
+
+Given:
 
 ```text
-broker_portfolio_converged=1
-canonical_portfolio_qty == broker_qty
-open_position_lots_projected_qty != canonical_portfolio_qty
-→ projection_converged=0
-→ candidate_repairs includes rebuild-position-authority
-→ flatten_primary_recommendation=0
+configured_fee_rate=0.0004
+chance_doc fee rate=0.0025
+observed paid fee median=4bps
 ```
 
-### Observability tests
-
-Add or verify tests for operator surfaces:
+Expected output or data contains:
 
 ```text
-test_health_surfaces_fee_rate_drift_summary
-test_recovery_report_surfaces_fee_rate_drift_summary
-test_restart_checklist_surfaces_fee_rate_drift_summary
+configured_fee_rate=0.000400
+exchange_chance_doc_fee_rate=0.002500
+settlement_authority=exchange_paid_fee_when_coherent
+operator_note=chance_doc_fee_rate_is_diagnostic_not_settlement_authority
 ```
 
-Required output fields or pointer:
+And does not present `0.002500` as the configured live fee estimate without source/semantics.
 
-```text
-fee_rate_drift=
-configured_fee_bps=
-observed_fee_bps_median=
-startup_impact=
-action=review_fee_diagnostics
-```
+## Verification commands
 
-## Required verification commands
-
-Run targeted tests first, then relevant broader subsets.
+Run targeted reporting tests first, then relevant operator tests.
 
 At minimum attempt:
 
 ```bash
+uv run pytest tests/test_fee_diagnostics_report.py
+uv run pytest tests/test_operator_commands.py -k "fee_diagnostics or health or repair_plan or audit_ledger or fee_rate_drift"
 uv run pytest tests/test_fee_observation.py
 uv run pytest tests/test_myorder_runtime_ingestion.py -k "paid_fee or expected_fee_rate"
-uv run pytest tests/test_bithumb_private_api.py -k "fee or paid_fee or expected_fee_rate or single_fill"
-uv run pytest tests/test_live_broker.py -k "fee or paid_fee or expected_fee_rate or accounting"
-uv run pytest tests/test_operator_commands.py -k "repair_plan or recovery or restart or diagnostics or flatten or projection"
-uv run pytest tests/test_accounting_projection.py -k "projection or lot or repair or fee"
 ```
 
-If a command fails or is too broad/slow, report:
+If relevant test files differ, search and run the closest existing reporting/operator tests.
+
+If any command fails, report:
 
 ```text
 exact command
 failing test names
 failure summary
-whether it is related or unrelated
-whether you added a narrower replacement test
+whether the failure is related or unrelated
+whether a narrower replacement test was added
 ```
 
-## EC2 operational follow-up to preserve in final report
+## EC2 validation after patch
 
-Even though repository-level safety must not depend on it, the EC2 live env should still be corrected:
-
-```bash
-LIVE_FEE_RATE_ESTIMATE=0.0004
-```
-
-Before live restart, the operator should verify:
-
-```bash
-cd ~/apps/bithumb-bot
-git rev-parse HEAD
-sudo systemctl cat bithumb-bot
-
-set -a
-source /home/ec2-user/bithumb-runtime/env/live.verify.env
-set +a
-export MODE=live
-export ENV_ROOT=/home/ec2-user/bithumb-runtime/env
-
-uv run python - <<'PY'
-from bithumb_bot.config import settings
-print("LIVE_FEE_RATE_ESTIMATE", settings.LIVE_FEE_RATE_ESTIMATE)
-PY
-
-MODE=live uv run bithumb-bot audit
-MODE=live uv run bithumb-bot audit-ledger
-MODE=live uv run bithumb-bot fee-diagnostics
-MODE=live uv run bithumb-bot health
-MODE=live uv run bithumb-bot recovery-report
-MODE=live uv run bithumb-bot restart-checklist
-MODE=live uv run bithumb-bot repair-plan
-```
-
-After the first real fill:
-
-```bash
-MODE=live uv run bithumb-bot health
-MODE=live uv run bithumb-bot audit-ledger
-MODE=live uv run bithumb-bot recovery-report
-MODE=live uv run bithumb-bot repair-plan
-```
-
-Expected post-fill outcome:
+After patching, the EC2 validation should show:
 
 ```text
-expected_fee_rate_warning may appear
-fee_pending should not increase solely due to estimate mismatch
-principal_applied_fee_pending should not increase solely due to estimate mismatch
-no broker/local mismatch
-broker_portfolio_converged=1
-lot_projection_converged=1
-blockers=none
+broker_fill_observations.accounting_status='fee_pending' rows may still be 13
+fee_pending_accounting_repair_count may still be 8
+fill_accounting_repaired_incident_count may still be 8
 
-if accounting_root_cause_unresolved appears:
-  flatten_primary_recommendation=0
-  recommended_mode=forensic_accounting
-  additional_orders_allowed=0
+active_unresolved_fee_pending_count=0
+unresolved_fee_state=0
+fill_accounting_active_issue_count=0
+broker_fill_latest_unresolved_fee_pending_count=0
+
+diagnostic_only_vs_startup_blocking=diagnostic_only
+startup_impact=diagnostic_only_without_active_fee_pending
+operator_action=review_fee_diagnostics
+
+live_ready=1
+blocking_incident_class=NONE
+repair-plan recommended_action=resume_now
+```
+
+Recommended EC2 commands to include in the final report:
+
+```bash
+MODE=live uv run bithumb-bot fee-diagnostics
+MODE=live uv run bithumb-bot health
+MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot repair-plan --json
 ```
 
 ## Scope boundaries
@@ -781,29 +531,27 @@ if accounting_root_cause_unresolved appears:
 Do:
 
 ```text
-- Verify the current fee-authority patch through REST/private/live paths.
-- Verify and finish the repair-plan policy wiring.
-- Add or harden repair-plan CLI/operator output if missing.
-- Wire repair-plan policy into recovery-report and restart-checklist if missing.
-- Suppress flatten as primary recommendation when accounting evidence is unreliable.
-- Preserve market-risk flatten when accounting evidence is reliable.
-- Make open_position_lots projection semantics explicit in policy and tests.
-- Improve health/recovery/restart observability for fee drift and forensic accounting mode.
-- Preserve unsafe fee evidence fail-closed behavior.
-- Keep changes deterministic and idempotent.
+- Fix fee-diagnostics aggregation authority.
+- Split historical/recent fee-pending observations from active unresolved fee blockers.
+- Use canonical accounting replay / audit-ledger-equivalent fields for startup-blocking decisions.
+- Preserve historical observation counts as diagnostics.
+- Preserve genuine active unresolved fee blockers as startup-blocking.
+- Disambiguate chance_doc fee model output from configured live fee estimate.
+- Add reporting/operator tests.
+- Keep output operator-readable.
 ```
 
 Do not:
 
 ```text
-- Treat LIVE_FEE_RATE_ESTIMATE=0.0004 as the whole fix.
-- Hide expected_fee_rate_mismatch.
-- Let configured estimates act as authoritative live settlement data.
-- Relax genuinely unsafe fee evidence.
-- Add manual DB UPDATE workarounds.
-- Make flatten the primary response to accounting drift.
-- Rewrite the entire accounting engine unless a small safe abstraction already exists.
-- Build a full repair-apply engine unless the repo infrastructure already supports it cleanly.
+- Change settlement accounting.
+- Change exchange paid_fee authority.
+- Change live order submission.
+- Change repair-plan recovery policy.
+- Change flatten policy.
+- Add manual DB updates.
+- Delete historical broker_fill_observations rows.
+- Hide expected_fee_rate_mismatch or historical fee_pending observations.
 ```
 
 ## Final report format
@@ -813,59 +561,50 @@ When finished, produce a report with exactly these sections:
 ```text
 1. Summary
    - What changed.
-   - Which previous fee-authority improvements were verified.
-   - What recovery/repair/projection gaps were fixed.
+   - Why this is a diagnostic/reporting authority fix, not a settlement accounting fix.
 
 2. Hypothesis results
-   - Hypothesis A: fee authority mostly fixed — confirmed / falsified / partially confirmed.
-   - Hypothesis B: recovery separates accounting-root-cause vs market-risk — confirmed / falsified / partially confirmed.
-   - Hypothesis C: repair-plan preview is operator-usable — confirmed / falsified / partially confirmed.
-   - Hypothesis D: open_position_lots projection semantics are enforced end-to-end — confirmed / falsified / partially confirmed.
+   - Hypothesis A: fee-diagnostics aggregation bug — confirmed / falsified / partially confirmed.
+   - Hypothesis B: diagnostic evidence vs startup authority not separated — confirmed / falsified / partially confirmed.
+   - Hypothesis C: FEE-MODEL-VALIDATION source naming ambiguity — confirmed / falsified / partially confirmed.
+   - Hypothesis D: fee authority and repair-plan are not direct causes — confirmed / falsified / partially confirmed.
 
 3. Design assessment
-   - Whether exchange paid_fee outranks configured fee estimates for settlement accounting.
-   - Whether expected fee-rate mismatch is preserved as diagnostics.
-   - Whether unsafe fee evidence still fails closed.
-   - Whether recovery now avoids flatten as default for accounting-root-cause incidents.
-   - Whether market-risk flatten is still allowed under reliable accounting evidence.
-   - Whether repair-plan gives operators a non-mutating plan.
-   - Whether open_position_lots is treated as projection rather than canonical truth.
+   - How historical observations are represented.
+   - How active unresolved blockers are represented.
+   - What authority decides startup impact.
+   - How fee model sources are named.
    - Remaining architectural risks.
 
 4. Code changes
    - Files changed.
    - Key behavior changes.
-   - Why this prevents a problem class rather than suppressing a symptom.
+   - Compatibility notes for fee_pending_count.
+   - Why this prevents the problem class instead of suppressing one message.
 
 5. Tests
    - Tests added/updated.
-   - Fee-authority regression tests.
-   - Recovery policy tests.
-   - Repair-plan CLI/operator tests.
-   - Projection semantics tests.
-   - Observability tests.
+   - Historical fee-pending without active blocker case.
+   - Active unresolved fee blocker case.
+   - Cross-surface consistency case.
+   - FEE-MODEL-VALIDATION source naming case.
 
 6. Verification
    - Commands run.
    - Pass/fail results.
-   - Any unrelated failures and why they are considered unrelated.
+   - Any unrelated failures and why they are unrelated.
 
-7. Operational follow-up
-   - EC2 env change still required, if any.
-   - Commands the operator should run before live restart.
-   - Commands the operator should run after the first fill.
-   - Follow-up issues recommended.
+7. EC2 operational follow-up
+   - Commands to run on EC2 after deploy.
+   - Expected fee-diagnostics output.
+   - Expected health/audit-ledger/repair-plan output.
 ```
 
-The goal is not to add another isolated repair command. The goal is to make the current recovery system able to say, consistently and visibly:
+Keep the core principle visible in code and output:
 
 ```text
-This is an accounting-root-cause incident.
-Do not flatten as the first response.
-Do not create new orders.
-Here is the evidence.
-Here is the non-mutating repair plan.
-Here is why the plan is safe.
-Here is how to verify it before live restart.
+Observed historically
+≠ active unresolved
+≠ startup blocker
 ```
 

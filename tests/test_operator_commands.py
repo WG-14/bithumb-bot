@@ -50,6 +50,7 @@ from bithumb_bot.engine import (
     evaluate_startup_safety_gate,
 )
 from bithumb_bot.execution import apply_fill_and_trade, record_order_if_missing
+from bithumb_bot.fee_pending_repair import apply_fee_pending_accounting_repair
 from bithumb_bot.oms import add_fill, set_exchange_order_id, set_status
 from bithumb_bot.position_authority_repair import (
     apply_position_authority_rebuild,
@@ -7612,6 +7613,91 @@ def test_health_recovery_report_and_restart_checklist_expose_fee_rate_drift(tmp_
     assert "fee_rate_drift_summary=diagnostic_only configured_fee_bps=25.000 observed_fee_bps_median=4.000" in checklist_out
     assert "action=review_fee_diagnostics" in checklist_out
     assert "recommended_command=uv run python bot.py fee-diagnostics" in checklist_out
+
+
+def test_fee_pending_history_is_diagnostic_only_across_operator_surfaces(tmp_path, monkeypatch, capsys):
+    _set_tmp_db(tmp_path, monkeypatch)
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    runtime_state.enable_trading()
+    monkeypatch.setattr("bithumb_bot.app.write_json_atomic", lambda *_args, **_kwargs: None)
+
+    conn = ensure_db()
+    try:
+        record_order_if_missing(
+            conn,
+            client_order_id="historical-fee-pending",
+            side="BUY",
+            qty_req=0.001,
+            price=100_000_000.0,
+            ts_ms=1_777_104_360_400,
+            status="NEW",
+        )
+        conn.execute(
+            """
+            INSERT INTO broker_fill_observations(
+                event_ts, client_order_id, exchange_order_id, fill_id, fill_ts, side,
+                price, qty, fee, fee_status, fee_source, fee_confidence, accounting_status, source,
+                fee_provenance, fee_validation_reason, fee_validation_checks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1_777_104_360_500,
+                "historical-fee-pending",
+                "ex-historical-fee-pending",
+                "historical-fill-1",
+                1_777_104_360_490,
+                "BUY",
+                100_000_000.0,
+                0.001,
+                26.86,
+                "order_level_candidate",
+                "order_level_paid_fee",
+                "ambiguous",
+                "fee_pending",
+                "operator_surface_fixture",
+                "order_level_paid_fee_candidate",
+                "pending_fee_validation",
+                json.dumps({"single_fill": True}, sort_keys=True),
+            ),
+        )
+        apply_fee_pending_accounting_repair(
+            conn,
+            client_order_id="historical-fee-pending",
+            fill_id="historical-fill-1",
+            fee=26.86,
+            fee_provenance="operator_checked_bithumb_trade_history",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    cmd_health()
+    health_out = capsys.readouterr().out
+    assert "active_unresolved_fee_pending_count=0" in health_out
+    assert "historical_fee_pending_observation_count=1" in health_out
+    assert "repaired_fee_pending_incident_count=1" in health_out
+    assert "fee_pending_accounting_repair_count=1" in health_out
+    assert "diagnostic_only_vs_startup_blocking=diagnostic_only" in health_out
+    assert "startup_impact=diagnostic_only_without_active_fee_pending" in health_out
+    assert "operator_action=review_fee_diagnostics" in health_out
+    assert "recommended_command=uv run python bot.py fee-diagnostics" in health_out
+
+    cmd_repair_plan(as_json=True)
+    repair_plan = json.loads(capsys.readouterr().out)
+    assert repair_plan["accounting_root_cause_unresolved"] is False
+    assert repair_plan["recommended_action"] == "resume_now"
+
+    app_main(["audit-ledger"])
+    audit_out = capsys.readouterr().out
+    assert "broker_fill_fee_pending_count=1" in audit_out
+    assert "broker_fill_latest_unresolved_fee_pending_count=0" in audit_out
+    assert "unresolved_fee_state=0" in audit_out
+    assert "fill_accounting_active_issue_count=0" in audit_out
+    assert "fill_accounting_repaired_incident_count=1" in audit_out
+    assert "fee_pending_accounting_repair_count=1" in audit_out
+    assert "live_ready=1" in audit_out
 
 
 def test_recovery_report_and_restart_checklist_use_forensic_accounting_mode_for_active_accounting_root_cause(
