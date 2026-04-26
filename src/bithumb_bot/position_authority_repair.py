@@ -30,7 +30,7 @@ from .position_authority_state import (
     build_lot_projection_convergence,
     build_position_authority_assessment,
 )
-from .runtime_readiness import compute_runtime_readiness_snapshot
+from .runtime_readiness import build_broker_position_evidence, compute_runtime_readiness_snapshot
 
 
 _EPS = 1e-12
@@ -77,8 +77,9 @@ def _build_full_projection_rebuild_gate_report(
     authority_assessment: dict[str, Any],
     portfolio_qty: float,
 ) -> dict[str, Any]:
-    broker_qty = float(snapshot.position_state.normalized_exposure.raw_holdings.broker_qty)
-    broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
+    broker_evidence = build_broker_position_evidence(snapshot.reconcile_metadata, pair=settings.PAIR)
+    broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
     broker_portfolio_converged = bool(
         broker_qty_known and abs(normalize_asset_qty(broker_qty) - normalize_asset_qty(portfolio_qty)) <= _EPS
     )
@@ -132,6 +133,15 @@ def _build_full_projection_rebuild_gate_report(
     return {
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
+        "broker_qty_evidence_source": broker_evidence.get("broker_qty_evidence_source"),
+        "broker_qty_evidence_observed_ts_ms": broker_evidence.get("broker_qty_evidence_observed_ts_ms"),
+        "balance_source": broker_evidence.get("balance_source"),
+        "balance_source_stale": broker_evidence.get("balance_source_stale"),
+        "balance_snapshot_available_for_health": broker_evidence.get("balance_snapshot_available_for_health"),
+        "balance_snapshot_available_for_position_rebuild": broker_evidence.get(
+            "balance_snapshot_available_for_position_rebuild"
+        ),
+        "missing_evidence_fields": list(broker_evidence.get("missing_evidence_fields") or []),
         "broker_portfolio_converged": broker_portfolio_converged,
         "remote_open_order_count": remote_open_order_count,
         "unresolved_open_order_count": unresolved_open_order_count,
@@ -229,8 +239,9 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         reasons.append(f"open_or_unresolved_orders={snapshot.open_order_count}")
     if snapshot.recovery_required_count > 0:
         reasons.append(f"recovery_required_orders={snapshot.recovery_required_count}")
-    broker_qty = float(snapshot.position_state.normalized_exposure.raw_holdings.broker_qty)
-    broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
+    broker_evidence = build_broker_position_evidence(snapshot.reconcile_metadata, pair=settings.PAIR)
+    broker_qty = float(broker_evidence.get("broker_qty") or 0.0)
+    broker_qty_known = bool(broker_evidence.get("broker_qty_known"))
     remote_open_order_count = int(snapshot.reconcile_metadata.get("remote_open_order_found", 0) or 0)
     if repair_mode == "full_projection_rebuild":
         full_projection_gate_report = _build_full_projection_rebuild_gate_report(
@@ -378,6 +389,15 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "needs_full_projection_rebuild": bool(authority_assessment.get("needs_full_projection_rebuild")),
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
+        "broker_qty_evidence_source": broker_evidence.get("broker_qty_evidence_source"),
+        "broker_qty_evidence_observed_ts_ms": broker_evidence.get("broker_qty_evidence_observed_ts_ms"),
+        "balance_source": broker_evidence.get("balance_source"),
+        "balance_source_stale": broker_evidence.get("balance_source_stale"),
+        "balance_snapshot_available_for_health": broker_evidence.get("balance_snapshot_available_for_health"),
+        "balance_snapshot_available_for_position_rebuild": broker_evidence.get(
+            "balance_snapshot_available_for_position_rebuild"
+        ),
+        "missing_evidence_fields": list(broker_evidence.get("missing_evidence_fields") or []),
         "remote_open_order_count": remote_open_order_count,
         "broker_portfolio_converged": (
             None if full_projection_gate_report is None else bool(full_projection_gate_report["broker_portfolio_converged"])

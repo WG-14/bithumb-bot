@@ -213,7 +213,7 @@ def build_fee_rate_drift_diagnostics(
 
     try:
         accounting_replay = compute_accounting_replay(conn)
-    except sqlite3.Error:
+    except (sqlite3.Error, RuntimeError):
         accounting_replay = {}
     try:
         repair_row = conn.execute("SELECT COUNT(*) AS repair_count FROM fee_pending_accounting_repairs").fetchone()

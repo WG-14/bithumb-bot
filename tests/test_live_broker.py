@@ -743,6 +743,77 @@ class _ValidatedOrderLevelPaidFeeBroker(_FakeBroker):
         ]
 
 
+class _ValidatedAllocatedOrderLevelPaidFeeBroker(_FakeBroker):
+    def get_order(self, *, client_order_id: str, exchange_order_id: str | None = None) -> BrokerOrder:
+        return BrokerOrder(
+            client_order_id,
+            exchange_order_id or "C0101000002950999701",
+            "BUY",
+            "FILLED",
+            115995000.0,
+            0.00059999,
+            0.00059999,
+            1777186500000,
+            1777186501000,
+        )
+
+    def get_fills(
+        self,
+        *,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        parse_mode: str = "strict",
+    ) -> list[BrokerFill]:
+        if not client_order_id:
+            return []
+        return [
+            BrokerFill(
+                client_order_id=client_order_id,
+                fill_id="C0101000000983890060",
+                fill_ts=1777186500100,
+                price=115_994_000.0,
+                qty=0.00036902,
+                fee=17.12,
+                exchange_order_id=exchange_order_id or "C0101000002950999701",
+                fee_status="validated_order_level_paid_fee_allocated",
+                fee_source="order_level_paid_fee",
+                fee_confidence="validated",
+                fee_provenance="order_level_paid_fee_validated_allocated",
+                fee_validation_reason="order_level_paid_fee_validated_allocated",
+                fee_validation_checks={
+                    "complete_fill_set": True,
+                    "executed_funds_match": True,
+                    "allocated_fee_sum_match": True,
+                    "identifiers_match": True,
+                    "expected_fee_rate_match": True,
+                },
+                parse_warnings=("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee"),
+            ),
+            BrokerFill(
+                client_order_id=client_order_id,
+                fill_id="C0101000000983890061",
+                fill_ts=1777186500200,
+                price=115_995_000.0,
+                qty=0.00023097,
+                fee=10.71,
+                exchange_order_id=exchange_order_id or "C0101000002950999701",
+                fee_status="validated_order_level_paid_fee_allocated",
+                fee_source="order_level_paid_fee",
+                fee_confidence="validated",
+                fee_provenance="order_level_paid_fee_validated_allocated",
+                fee_validation_reason="order_level_paid_fee_validated_allocated",
+                fee_validation_checks={
+                    "complete_fill_set": True,
+                    "executed_funds_match": True,
+                    "allocated_fee_sum_match": True,
+                    "identifiers_match": True,
+                    "expected_fee_rate_match": True,
+                },
+                parse_warnings=("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee"),
+            ),
+        ]
+
+
 class _ValidatedOrderLevelPaidFeeMismatchBroker(_FakeBroker):
     def get_fills(
         self,
@@ -4179,6 +4250,52 @@ def test_reconcile_preserves_order_level_fee_candidate_without_accounting_apply(
     assert metadata["fee_pending_fill_count"] == 1
     assert metadata["fee_pending_latest_fee_status"] == "order_level_candidate"
     assert metadata["fee_pending_operator_next_action"].startswith("pause additional orders")
+
+
+def test_reconcile_multi_fill_allocated_paid_fee_completes_accounting_without_fee_pending(tmp_path):
+    object.__setattr__(settings, "DB_PATH", str(tmp_path / "multi_fill_allocated_paid_fee.sqlite"))
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "START_CASH_KRW", 1_000_000.0)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    conn = ensure_db(str(tmp_path / "multi_fill_allocated_paid_fee.sqlite"))
+    conn.execute(
+        """
+        INSERT INTO orders(client_order_id, exchange_order_id, status, side, price, qty_req, qty_filled, created_ts, updated_ts, last_error)
+        VALUES ('live_1777186500000_buy_aee54bab','C0101000002950999701','NEW','BUY',NULL,0.00059999,0,1000,1000,NULL)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    reconcile_with_broker(_ValidatedAllocatedOrderLevelPaidFeeBroker())
+
+    conn = ensure_db(str(tmp_path / "multi_fill_allocated_paid_fee.sqlite"))
+    fills = conn.execute(
+        """
+        SELECT fill_id, fee, fee_accounting_status, observed_fee_status
+        FROM fills
+        WHERE client_order_id='live_1777186500000_buy_aee54bab'
+        ORDER BY fill_ts ASC
+        """
+    ).fetchall()
+    observations = conn.execute(
+        """
+        SELECT fee_status, accounting_status, fee_validation_reason
+        FROM broker_fill_observations
+        WHERE client_order_id='live_1777186500000_buy_aee54bab'
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    conn.close()
+    report = _load_recovery_report()
+
+    assert [row["fee"] for row in fills] == pytest.approx([17.12, 10.71])
+    assert {row["fee_accounting_status"] for row in fills} == {"fee_finalized"}
+    assert {row["observed_fee_status"] for row in fills} == {"complete"}
+    assert observations == []
+    assert report["fill_accounting_incident_projection"]["active_fee_pending_count"] == 0
+    assert report["runtime_readiness"]["fill_accounting_incident_summary"]["principal_applied_fee_pending_count"] == 0
 
 
 def test_fee_pending_accounting_repair_finalizes_observed_fill_and_rebuilds_lot_authority(tmp_path):

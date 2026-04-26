@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from .config import settings
 from .execution import order_fill_tolerance
 
 
 ACCOUNTING_COMPLETE_FEE_STATUSES = frozenset(
-    {"complete", "operator_confirmed", "validated_order_level_paid_fee"}
+    {
+        "complete",
+        "operator_confirmed",
+        "validated_order_level_paid_fee",
+        "validated_order_level_paid_fee_allocated",
+    }
 )
 _FEE_RATE_ABS_TOLERANCE_KRW = 0.05
 _FUNDS_MATCH_ABS_TOLERANCE_KRW = 0.05
+_ORDER_FEE_ROUNDING_INCREMENT = Decimal("0.01")
+_MAX_REASONABLE_FEE_RATE_MULTIPLIER = 10.0
+_MAX_REASONABLE_FEE_RATE_ABSOLUTE = 0.05
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,23 @@ class FeeEvaluation:
     diagnostic_flags: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MultiFillTradeEvidence:
+    fill_id: str
+    qty: float | None
+    price: float | None
+    funds: float | None
+
+
+@dataclass(frozen=True)
+class MultiFillOrderLevelPaidFeeAllocation:
+    evaluations_by_fill_id: dict[str, FeeEvaluation]
+    allocated_fees_by_fill_id: dict[str, float]
+    checks: dict[str, bool]
+    reason: str
+    diagnostic_flags: tuple[str, ...]
+
+
 def _to_float(value: object) -> float | None:
     if value in (None, ""):
         return None
@@ -38,6 +64,18 @@ def _to_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _to_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    if not parsed.is_finite():
         return None
     return parsed
 
@@ -61,6 +99,19 @@ def _expected_fee_match(*, notional: float | None, fee: float | None, fee_rate: 
     expected_fee = max(0.0, float(notional)) * max(0.0, float(fee_rate))
     tolerance = max(_FEE_RATE_ABS_TOLERANCE_KRW, expected_fee * 0.02)
     return abs(float(fee) - expected_fee) <= tolerance
+
+
+def _suspicious_fee_rate(*, notional: float | None, fee: float | None, fee_rate: float | None) -> bool:
+    if fee is None or notional is None or fee_rate is None or notional <= 0.0:
+        return False
+    observed_rate = max(0.0, float(fee)) / max(float(notional), 1e-12)
+    configured_rate = max(0.0, float(fee_rate))
+    if configured_rate <= 0.0:
+        return observed_rate > _MAX_REASONABLE_FEE_RATE_ABSOLUTE
+    return observed_rate > max(
+        _MAX_REASONABLE_FEE_RATE_ABSOLUTE,
+        configured_rate * _MAX_REASONABLE_FEE_RATE_MULTIPLIER,
+    )
 
 
 def classify_fee_evaluation(
@@ -168,6 +219,17 @@ def classify_fee_evaluation(
                 else "order_level_paid_fee_validated_single_fill"
             )
             fee_authority = "exchange_order_paid_fee_single_fill"
+            if check_map.get("expected_fee_rate_warning"):
+                diagnostic_flags = ("expected_fee_rate_mismatch",)
+        elif status == "validated_order_level_paid_fee_allocated":
+            resolved_source = resolved_source if resolved_source != "unknown" else "order_level_paid_fee"
+            resolved_confidence = resolved_confidence if resolved_confidence != "unknown" else "validated"
+            resolved_provenance = (
+                resolved_provenance
+                if resolved_provenance != "unknown"
+                else "order_level_paid_fee_validated_allocated"
+            )
+            fee_authority = "exchange_order_paid_fee_allocated"
             if check_map.get("expected_fee_rate_warning"):
                 diagnostic_flags = ("expected_fee_rate_mismatch",)
         return FeeEvaluation(
@@ -354,6 +416,191 @@ def validate_single_fill_order_level_paid_fee(
         material_notional_threshold=threshold,
         price=price_value,
         qty=qty_value,
+    )
+
+
+def validate_multi_fill_order_level_paid_fee_allocation(
+    *,
+    paid_fee: object,
+    trades: list[MultiFillTradeEvidence],
+    order_executed_volume: float | None,
+    order_executed_funds: float | None,
+    client_order_id: str | None,
+    exchange_order_id: str | None,
+    configured_fee_rate: float | None = None,
+    material_notional_threshold: float | None = None,
+) -> MultiFillOrderLevelPaidFeeAllocation:
+    fee_value = _to_float(paid_fee)
+    fee_decimal = _to_decimal(paid_fee)
+    threshold = max(
+        0.0,
+        float(
+            settings.LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW
+            if material_notional_threshold is None
+            else material_notional_threshold
+        ),
+    )
+    configured_rate = _to_float(settings.LIVE_FEE_RATE_ESTIMATE if configured_fee_rate is None else configured_fee_rate)
+    checks = {
+        "single_fill": False,
+        "paid_fee_present": fee_value is not None and fee_value >= 0.0,
+        "executed_volume_match": False,
+        "executed_funds_match": False,
+        "expected_fee_rate_match": False,
+        "expected_fee_rate_warning": False,
+        "identifiers_match": bool(str(client_order_id or "").strip() and str(exchange_order_id or "").strip()),
+        "complete_fill_set": False,
+        "duplicate_fill": False,
+        "allocated_fee_sum_match": False,
+        "suspicious_fee_rate": False,
+        "material_notional_suspicious": False,
+    }
+    diagnostic_flags: tuple[str, ...] = ()
+
+    if fee_value is None or fee_decimal is None:
+        return MultiFillOrderLevelPaidFeeAllocation(
+            evaluations_by_fill_id={},
+            allocated_fees_by_fill_id={},
+            checks=checks,
+            reason="order_paid_fee_missing",
+            diagnostic_flags=diagnostic_flags,
+        )
+    if fee_value < 0.0:
+        return MultiFillOrderLevelPaidFeeAllocation(
+            evaluations_by_fill_id={},
+            allocated_fees_by_fill_id={},
+            checks=checks,
+            reason="negative_paid_fee",
+            diagnostic_flags=diagnostic_flags,
+        )
+
+    normalized_trades: list[tuple[MultiFillTradeEvidence, float, float]] = []
+    seen_fill_ids: set[str] = set()
+    total_trade_qty = 0.0
+    total_trade_funds = 0.0
+    material_notional = False
+    for trade in trades:
+        fill_id = str(trade.fill_id or "").strip()
+        if not fill_id:
+            return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "identifier_mismatch", diagnostic_flags)
+        if fill_id in seen_fill_ids:
+            checks["duplicate_fill"] = True
+            return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "duplicate_fill", diagnostic_flags)
+        seen_fill_ids.add(fill_id)
+        qty_value = _to_float(trade.qty)
+        price_value = _to_float(trade.price)
+        funds_value = _to_float(trade.funds)
+        if funds_value is None and qty_value is not None and price_value is not None:
+            funds_value = qty_value * price_value
+        if qty_value is None or qty_value <= 0.0 or funds_value is None or funds_value <= 0.0:
+            return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "incomplete_fill_set", diagnostic_flags)
+        total_trade_qty += qty_value
+        total_trade_funds += funds_value
+        material_notional = material_notional or funds_value >= threshold
+        normalized_trades.append((trade, qty_value, funds_value))
+    checks["complete_fill_set"] = bool(normalized_trades)
+    checks["material_notional_suspicious"] = material_notional
+    if not normalized_trades:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "incomplete_fill_set", diagnostic_flags)
+    if material_notional and fee_value <= 1e-12:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "zero_paid_fee_material_notional", diagnostic_flags)
+
+    checks["executed_volume_match"] = _qty_match(total_trade_qty, _to_float(order_executed_volume))
+    checks["executed_funds_match"] = _funds_match(total_trade_funds, _to_float(order_executed_funds))
+    if not checks["identifiers_match"]:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "identifier_mismatch", diagnostic_flags)
+    if not checks["executed_funds_match"] or not checks["executed_volume_match"]:
+        return MultiFillOrderLevelPaidFeeAllocation(
+            {},
+            {},
+            checks,
+            ("executed_funds_mismatch" if not checks["executed_funds_match"] else "incomplete_fill_set"),
+            diagnostic_flags,
+        )
+
+    paid_fee_quantized = fee_decimal.quantize(_ORDER_FEE_ROUNDING_INCREMENT, rounding=ROUND_HALF_UP)
+    if paid_fee_quantized != fee_decimal:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "allocated_fee_sum_mismatch", diagnostic_flags)
+
+    total_funds_decimal = sum(
+        _to_decimal(funds_value) or Decimal("0") for _, _, funds_value in normalized_trades
+    )
+    if total_funds_decimal <= Decimal("0"):
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "incomplete_fill_set", diagnostic_flags)
+
+    sorted_trades = sorted(
+        normalized_trades,
+        key=lambda item: (-item[2], str(item[0].fill_id), float(item[0].qty or 0.0), float(item[0].price or 0.0)),
+    )
+    allocated_decimals: dict[str, Decimal] = {}
+    remaining_fee = paid_fee_quantized
+    for index, (trade, _, funds_value) in enumerate(sorted_trades):
+        funds_decimal = _to_decimal(funds_value) or Decimal("0")
+        fill_id = str(trade.fill_id)
+        if index == len(sorted_trades) - 1:
+            allocation = remaining_fee
+        else:
+            proportional = (paid_fee_quantized * funds_decimal / total_funds_decimal).quantize(
+                _ORDER_FEE_ROUNDING_INCREMENT,
+                rounding=ROUND_HALF_UP,
+            )
+            allocation = proportional
+            remaining_fee -= allocation
+        if allocation < Decimal("0"):
+            return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "allocated_fee_sum_mismatch", diagnostic_flags)
+        allocated_decimals[fill_id] = allocation
+
+    allocated_sum = sum(allocated_decimals.values(), Decimal("0"))
+    checks["allocated_fee_sum_match"] = allocated_sum == paid_fee_quantized
+    if not checks["allocated_fee_sum_match"]:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "allocated_fee_sum_mismatch", diagnostic_flags)
+
+    expected_fee_match = _expected_fee_match(
+        notional=total_trade_funds,
+        fee=float(paid_fee_quantized),
+        fee_rate=configured_rate,
+    )
+    checks["expected_fee_rate_match"] = expected_fee_match
+    checks["expected_fee_rate_warning"] = not expected_fee_match
+    checks["suspicious_fee_rate"] = _suspicious_fee_rate(
+        notional=total_trade_funds,
+        fee=float(paid_fee_quantized),
+        fee_rate=configured_rate,
+    )
+    if checks["suspicious_fee_rate"]:
+        return MultiFillOrderLevelPaidFeeAllocation({}, {}, checks, "suspicious_fee_rate", diagnostic_flags)
+    if checks["expected_fee_rate_warning"]:
+        diagnostic_flags = ("expected_fee_rate_mismatch",)
+
+    evaluations: dict[str, FeeEvaluation] = {}
+    allocated_fees: dict[str, float] = {}
+    provenance = "order_level_paid_fee_validated_allocated"
+    reason = "order_level_paid_fee_validated_allocated"
+    if checks["expected_fee_rate_warning"]:
+        provenance = "order_level_paid_fee_validated_allocated_fee_rate_warning"
+        reason = "order_level_paid_fee_validated_allocated_expected_fee_rate_mismatch"
+    for trade, qty_value, _funds_value in normalized_trades:
+        fill_id = str(trade.fill_id)
+        allocation = float(allocated_decimals[fill_id])
+        allocated_fees[fill_id] = allocation
+        evaluations[fill_id] = classify_fee_evaluation(
+            fee=allocation,
+            fee_status="validated_order_level_paid_fee_allocated",
+            fee_source="order_level_paid_fee",
+            fee_confidence="validated",
+            provenance=provenance,
+            reason=reason,
+            checks=dict(checks),
+            material_notional_threshold=threshold,
+            price=_to_float(trade.price),
+            qty=qty_value,
+        )
+    return MultiFillOrderLevelPaidFeeAllocation(
+        evaluations_by_fill_id=evaluations,
+        allocated_fees_by_fill_id=allocated_fees,
+        checks=checks,
+        reason=reason,
+        diagnostic_flags=diagnostic_flags,
     )
 
 

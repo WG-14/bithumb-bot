@@ -238,6 +238,16 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "incident_reasons": list(policy["incident_reasons"]),
         "canonical_portfolio_qty": _float(report.get("portfolio_qty")),
         "broker_qty": _float(report.get("broker_qty")),
+        "broker_qty_known": _truthy(report.get("broker_qty_known")),
+        "broker_qty_evidence_source": report.get("broker_qty_evidence_source"),
+        "broker_qty_evidence_observed_ts_ms": report.get("broker_qty_evidence_observed_ts_ms"),
+        "balance_source": report.get("balance_source"),
+        "balance_source_stale": report.get("balance_source_stale"),
+        "balance_snapshot_available_for_health": _truthy(report.get("balance_snapshot_available_for_health")),
+        "balance_snapshot_available_for_position_rebuild": _truthy(
+            report.get("balance_snapshot_available_for_position_rebuild")
+        ),
+        "missing_evidence_fields": list(report.get("missing_evidence_fields") or []),
         "open_position_lots_projected_qty": _float(
             ((report.get("runtime_readiness") or {}).get("projection_convergence") or {}).get("projected_total_qty")
         ),

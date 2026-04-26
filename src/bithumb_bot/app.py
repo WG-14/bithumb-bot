@@ -2916,6 +2916,7 @@ def _load_recovery_report(
         else recommended_next_action
     )
     lot_projection = runtime_readiness_snapshot.get("projection_convergence") or {}
+    broker_position_evidence = dict(runtime_readiness_snapshot.get("broker_position_evidence") or {})
     broker_qty = float(position_authority_rebuild_preview.get("broker_qty") or 0.0)
     broker_qty_known = bool(position_authority_rebuild_preview.get("broker_qty_known"))
     portfolio_qty = float(lot_projection.get("portfolio_qty") or 0.0)
@@ -3096,6 +3097,17 @@ def _load_recovery_report(
         "broker_portfolio_converged": broker_portfolio_converged,
         "broker_qty_known": broker_qty_known,
         "broker_qty": broker_qty,
+        "broker_qty_evidence_source": broker_position_evidence.get("broker_qty_evidence_source"),
+        "broker_qty_evidence_observed_ts_ms": broker_position_evidence.get("broker_qty_evidence_observed_ts_ms"),
+        "balance_source": broker_position_evidence.get("balance_source"),
+        "balance_source_stale": broker_position_evidence.get("balance_source_stale"),
+        "balance_snapshot_available_for_health": broker_position_evidence.get(
+            "balance_snapshot_available_for_health"
+        ),
+        "balance_snapshot_available_for_position_rebuild": broker_position_evidence.get(
+            "balance_snapshot_available_for_position_rebuild"
+        ),
+        "missing_evidence_fields": list(broker_position_evidence.get("missing_evidence_fields") or []),
         "portfolio_qty": portfolio_qty,
         "lot_projection_converged": lot_projection_converged,
         "live_ready": bool(runtime_readiness_snapshot.get("resume_ready")),
@@ -3660,9 +3672,20 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
         "  "
         f"canonical_portfolio_qty={float(plan.get('canonical_portfolio_qty') or 0.0):.12f} "
         f"broker_qty={float(plan.get('broker_qty') or 0.0):.12f} "
+        f"broker_qty_known={1 if bool(plan.get('broker_qty_known')) else 0} "
         f"open_position_lots_projected_qty={float(plan.get('open_position_lots_projected_qty') or 0.0):.12f} "
         f"broker_portfolio_converged={1 if bool(plan.get('broker_portfolio_converged')) else 0} "
         f"projection_converged={1 if bool(plan.get('projection_converged')) else 0}"
+    )
+    print(
+        "  "
+        f"broker_qty_evidence_source={plan.get('broker_qty_evidence_source') or '-'} "
+        f"broker_qty_evidence_observed_ts_ms={int(plan.get('broker_qty_evidence_observed_ts_ms') or 0)} "
+        f"balance_snapshot_available_for_health={1 if bool(plan.get('balance_snapshot_available_for_health')) else 0} "
+        "balance_snapshot_available_for_position_rebuild="
+        f"{1 if bool(plan.get('balance_snapshot_available_for_position_rebuild')) else 0} "
+        "missing_evidence_fields="
+        f"{'|'.join(str(item) for item in (plan.get('missing_evidence_fields') or [])) or 'none'}"
     )
     print(
         "  "
@@ -4190,6 +4213,16 @@ def cmd_rebuild_position_authority(
             f"broker_qty_known={1 if bool(preview.get('broker_qty_known')) else 0} "
             f"broker_qty={float(preview.get('broker_qty') or 0.0):.12f} "
             f"remote_open_order_count={int(preview.get('remote_open_order_count') or 0)}"
+        )
+        print(
+            "  "
+            f"broker_qty_evidence_source={preview.get('broker_qty_evidence_source') or '-'} "
+            f"broker_qty_evidence_observed_ts_ms={int(preview.get('broker_qty_evidence_observed_ts_ms') or 0)} "
+            f"balance_snapshot_available_for_health={1 if bool(preview.get('balance_snapshot_available_for_health')) else 0} "
+            "balance_snapshot_available_for_position_rebuild="
+            f"{1 if bool(preview.get('balance_snapshot_available_for_position_rebuild')) else 0} "
+            "missing_evidence_fields="
+            f"{'|'.join(str(item) for item in (preview.get('missing_evidence_fields') or [])) or 'none'}"
         )
         if preview.get("portfolio_anchor_missing_evidence") or preview.get("manual_projection_missing_evidence"):
             print(

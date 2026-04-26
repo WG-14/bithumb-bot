@@ -771,6 +771,14 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
         "mode": "live",
         "portfolio_qty": 0.25,
         "broker_qty": 0.25,
+        "broker_qty_known": True,
+        "broker_qty_evidence_source": "accounts_v1_rest_snapshot",
+        "broker_qty_evidence_observed_ts_ms": 1_700_000_000_200,
+        "balance_source": "accounts_v1_rest_snapshot",
+        "balance_source_stale": False,
+        "balance_snapshot_available_for_health": True,
+        "balance_snapshot_available_for_position_rebuild": True,
+        "missing_evidence_fields": [],
         "broker_portfolio_converged": True,
         "lot_projection_converged": False,
         "accounting_projection_ok": True,
@@ -808,6 +816,10 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
     assert plan["projection_converged"] is False
     assert plan["canonical_portfolio_qty"] == pytest.approx(0.25)
     assert plan["broker_qty"] == pytest.approx(0.25)
+    assert plan["broker_qty_known"] is True
+    assert plan["broker_qty_evidence_source"] == "accounts_v1_rest_snapshot"
+    assert plan["balance_snapshot_available_for_position_rebuild"] is True
+    assert plan["missing_evidence_fields"] == []
     assert plan["open_position_lots_projected_qty"] == pytest.approx(0.1)
     assert plan["actual_executable_exposure"] is True
     assert plan["flatten_not_primary"] is True
@@ -817,3 +829,51 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
         candidate["name"] == "rebuild-position-authority" and candidate["needed"] and candidate["safe_to_apply"]
         for candidate in plan["candidate_repairs"]
     )
+
+
+def test_repair_plan_exposes_missing_broker_evidence_fields() -> None:
+    report = {
+        "mode": "live",
+        "portfolio_qty": 0.00079982,
+        "broker_qty": 0.0,
+        "broker_qty_known": False,
+        "broker_qty_evidence_source": "accounts_v1_rest_snapshot",
+        "broker_qty_evidence_observed_ts_ms": 0,
+        "balance_source": "accounts_v1_rest_snapshot",
+        "balance_source_stale": False,
+        "balance_snapshot_available_for_health": True,
+        "balance_snapshot_available_for_position_rebuild": False,
+        "missing_evidence_fields": ["balance_observed_ts_ms", "base_currency", "broker_asset_qty"],
+        "broker_portfolio_converged": False,
+        "lot_projection_converged": False,
+        "accounting_projection_ok": True,
+        "runtime_readiness": {
+            "normalized_exposure": {"has_executable_exposure": True},
+            "closeout_allowed": False,
+            "projection_convergence": {
+                "projected_total_qty": 0.00298794,
+                "reason": "projection_non_converged",
+            },
+        },
+        "fill_accounting_incident_projection": {"active_issue_count": 0},
+        "fee_gap_accounting_repair_preview": {"needs_repair": False, "active_issue": False, "resume_blocking": False},
+        "manual_flat_accounting_repair_preview": {"needs_repair": False},
+        "external_position_accounting_repair_preview": {"needs_repair": False},
+        "position_authority_rebuild_preview": {
+            "needs_rebuild": True,
+            "safe_to_apply": False,
+            "eligibility_reason": "broker_position_qty_evidence_missing",
+            "repair_mode": "full_projection_rebuild",
+            "recommended_command": "uv run python bot.py rebuild-position-authority --full-projection-rebuild",
+        },
+    }
+
+    plan = build_repair_plan_preview_from_report(report)
+
+    assert plan["balance_snapshot_available_for_health"] is True
+    assert plan["balance_snapshot_available_for_position_rebuild"] is False
+    assert plan["missing_evidence_fields"] == [
+        "balance_observed_ts_ms",
+        "base_currency",
+        "broker_asset_qty",
+    ]

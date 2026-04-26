@@ -16,6 +16,7 @@ from .dust import build_dust_display_context, build_position_state_model
 from .external_position_repair import build_external_position_accounting_repair_preview
 from .fee_gap_policy import classify_fee_gap_incident_verdict, matching_fee_gap_repair_present
 from .lifecycle import summarize_position_lots, summarize_reserved_exit_qty
+from .markets import normalize_market_id
 from .position_authority_state import build_lot_projection_convergence, build_position_authority_assessment
 from .recovery_policy import (
     build_tradeability_operator_fields,
@@ -63,6 +64,7 @@ class RuntimeReadinessSnapshot:
     tradeability_operator_fields: dict[str, object]
     structured_blockers: tuple[dict[str, object], ...]
     authority_truth_model: dict[str, object]
+    broker_position_evidence: dict[str, object]
     inspect_only_mode: bool
 
     def as_dict(self) -> dict[str, object]:
@@ -102,6 +104,7 @@ class RuntimeReadinessSnapshot:
             "projection_converged": bool(self.projection_convergence.get("converged")),
             "projection_non_convergence_reason": str(self.projection_convergence.get("reason") or "none"),
             "authority_truth_model": dict(self.authority_truth_model),
+            "broker_position_evidence": dict(self.broker_position_evidence),
             "structured_blockers": [dict(item) for item in self.structured_blockers],
             "inspect_only_mode": bool(self.inspect_only_mode),
             "canonical_state": self.canonical_state,
@@ -215,6 +218,105 @@ def _row_int(row: Any, key: str, default: int = 0) -> int:
         return default
 
 
+def _to_float_or_zero(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _split_pair_currencies(pair: str) -> tuple[str | None, str | None]:
+    try:
+        market = normalize_market_id(str(pair or ""))
+    except Exception:
+        token = str(pair or "").strip().upper().replace("_", "-")
+        if "-" not in token:
+            return None, None
+        market = token
+    quote_currency, base_currency = market.split("-", 1)
+    return base_currency, quote_currency
+
+
+def build_broker_position_evidence(
+    metadata: dict[str, object] | None,
+    *,
+    pair: str | None = None,
+) -> dict[str, object]:
+    metadata = dict(metadata or {})
+    base_currency_expected, quote_currency_expected = _split_pair_currencies(str(pair or settings.PAIR))
+    source = str(metadata.get("balance_source") or metadata.get("broker_qty_evidence_source") or "-")
+    observed_ts_ms = _metadata_int(metadata, "balance_observed_ts_ms")
+    asset_ts_ms = _metadata_int(metadata, "balance_asset_ts_ms")
+    asset_available = _to_float_or_zero(metadata.get("broker_asset_available"))
+    asset_locked = _to_float_or_zero(metadata.get("broker_asset_locked"))
+    cash_available = _to_float_or_zero(metadata.get("broker_cash_available"))
+    cash_locked = _to_float_or_zero(metadata.get("broker_cash_locked"))
+    broker_qty = _to_float_or_zero(metadata.get("broker_asset_qty"))
+    if abs(broker_qty) <= 1e-12:
+        broker_qty = _to_float_or_zero(metadata.get("dust_broker_qty"))
+    base_currency = str(
+        metadata.get("balance_source_base_currency")
+        or metadata.get("base_currency")
+        or ""
+    ).strip().upper()
+    quote_currency = str(
+        metadata.get("balance_source_quote_currency")
+        or metadata.get("quote_currency")
+        or ""
+    ).strip().upper()
+    stale = bool(metadata.get("balance_source_stale")) if "balance_source_stale" in metadata else False
+    missing_evidence_fields: list[str] = []
+    if observed_ts_ms <= 0:
+        missing_evidence_fields.append("balance_observed_ts_ms")
+    if not base_currency:
+        missing_evidence_fields.append("base_currency")
+    if not quote_currency:
+        missing_evidence_fields.append("quote_currency")
+    if "broker_asset_qty" not in metadata:
+        missing_evidence_fields.append("broker_asset_qty")
+    if "broker_asset_available" not in metadata:
+        missing_evidence_fields.append("broker_asset_available")
+    if "broker_asset_locked" not in metadata:
+        missing_evidence_fields.append("broker_asset_locked")
+    currency_match = bool(
+        base_currency
+        and quote_currency
+        and base_currency_expected
+        and quote_currency_expected
+        and base_currency == base_currency_expected
+        and quote_currency == quote_currency_expected
+    )
+    if base_currency and base_currency_expected and base_currency != base_currency_expected:
+        missing_evidence_fields.append("base_currency_mismatch")
+    if quote_currency and quote_currency_expected and quote_currency != quote_currency_expected:
+        missing_evidence_fields.append("quote_currency_mismatch")
+    available_for_health = bool(source != "-" or observed_ts_ms > 0 or abs(broker_qty) > 1e-12)
+    broker_qty_known = bool(
+        observed_ts_ms > 0
+        and not stale
+        and currency_match
+        and "broker_asset_qty" in metadata
+    )
+    return {
+        "broker_qty_known": broker_qty_known,
+        "broker_qty": broker_qty,
+        "broker_qty_evidence_source": source,
+        "broker_qty_evidence_observed_ts_ms": observed_ts_ms,
+        "balance_source": source,
+        "balance_source_stale": stale,
+        "balance_snapshot_available_for_health": available_for_health,
+        "balance_snapshot_available_for_position_rebuild": broker_qty_known,
+        "missing_evidence_fields": missing_evidence_fields,
+        "base_currency": base_currency or None,
+        "quote_currency": quote_currency or None,
+        "asset_available": asset_available,
+        "asset_locked": asset_locked,
+        "cash_available": cash_available,
+        "cash_locked": cash_locked,
+        "asset_ts_ms": asset_ts_ms,
+    }
+
+
 def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
     """Build the canonical recovery/readiness interpretation for one DB snapshot.
 
@@ -310,6 +412,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
         material_zero_fee_fill_latest_ts = _metadata_int(metadata, "material_zero_fee_fill_latest_ts")
         authority_assessment = build_position_authority_assessment(conn, pair=settings.PAIR)
         projection_convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
+        broker_position_evidence = build_broker_position_evidence(metadata, pair=settings.PAIR)
         authority_truth_model = _build_authority_truth_model(
             projection_convergence=projection_convergence,
             authority_assessment=authority_assessment,
@@ -717,6 +820,7 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             tradeability_operator_fields=tradeability_operator_fields,
             structured_blockers=tuple(structured_blockers),
             authority_truth_model=authority_truth_model,
+            broker_position_evidence=broker_position_evidence,
             inspect_only_mode=any(bool(item.get("inspect_only")) for item in structured_blockers),
         )
     finally:

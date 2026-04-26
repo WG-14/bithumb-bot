@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from ..config import settings
-from ..fee_observation import classify_fee_evaluation, validate_single_fill_order_level_paid_fee
+from ..fee_observation import (
+    MultiFillTradeEvidence,
+    classify_fee_evaluation,
+    validate_multi_fill_order_level_paid_fee_allocation,
+    validate_single_fill_order_level_paid_fee,
+)
 from .base import BrokerFill, BrokerIdentifierMismatchError, BrokerOrder, BrokerRejectError, BrokerSchemaError, BrokerTemporaryError
 from .order_list_v1 import build_order_list_params, build_recovery_order_list_params, parse_v1_order_list_row
 from .order_lookup_v1 import (
@@ -91,6 +96,43 @@ def _build_order_level_paid_fee_evaluation(
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id,
         fill_id=str(trade.get("uuid") or trade.get("id") or ""),
+    )
+
+
+def _build_multi_fill_order_level_paid_fee_allocations(
+    broker,
+    *,
+    row: dict[str, object],
+    trades: list[object],
+    client_order_id: str,
+    exchange_order_id: str,
+):
+    trade_evidence: list[MultiFillTradeEvidence] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            return None
+        qty = broker._strict_optional_number(trade, "volume", context="/v1/order.trades")
+        price = broker._resolve_fill_price(trade, normalized_row=row)
+        if qty is None or qty <= 0 or price is None:
+            return None
+        funds = broker._to_float(trade.get("funds"), default=None)
+        if funds is None:
+            funds = float(qty) * float(price)
+        trade_evidence.append(
+            MultiFillTradeEvidence(
+                fill_id=str(trade.get("uuid") or trade.get("id") or ""),
+                qty=float(qty),
+                price=float(price),
+                funds=float(funds),
+            )
+        )
+    return validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee=row.get("paid_fee"),
+        trades=trade_evidence,
+        order_executed_volume=broker._to_float(row.get("executed_volume"), default=None),
+        order_executed_funds=broker._to_float(row.get("executed_funds"), default=None),
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
     )
 
 
@@ -313,6 +355,15 @@ def get_fills(
         require_v1_known_state(row.get("state"), context="/v1/order")
         normalized = broker._normalize_v1_order_row_lenient_for_fills(row)
         trades = normalized["trades"] if isinstance(normalized["trades"], list) else []
+        multi_fill_order_level_allocation = None
+        if trades and len(trades) > 1 and "paid_fee" in row:
+            multi_fill_order_level_allocation = _build_multi_fill_order_level_paid_fee_allocations(
+                broker,
+                row=row,
+                trades=trades,
+                client_order_id=(requested.client_order_id or row.get("client_order_id") or ""),
+                exchange_order_id=str(row.get("uuid") or ""),
+            )
         if trades:
             for index, trade in enumerate(trades):
                 if not isinstance(trade, dict):
@@ -342,7 +393,20 @@ def get_fills(
                     candidate_fee, candidate_warning = _order_level_fee_candidate(broker, row, trades=trades)
                     if candidate_warning:
                         warnings.append(candidate_warning)
-                    if candidate_fee is not None:
+                    allocated_evaluation = None
+                    if multi_fill_order_level_allocation is not None:
+                        allocated_evaluation = multi_fill_order_level_allocation.evaluations_by_fill_id.get(
+                            str(trade.get("uuid") or trade.get("id") or "")
+                        )
+                    if allocated_evaluation is not None:
+                        fee = allocated_evaluation.fee
+                        fee_status = allocated_evaluation.fee_status
+                        fee_source = allocated_evaluation.fee_source
+                        fee_confidence = allocated_evaluation.fee_confidence
+                        fee_provenance = allocated_evaluation.provenance
+                        fee_validation_reason = allocated_evaluation.reason
+                        fee_validation_checks = allocated_evaluation.checks
+                    elif candidate_fee is not None:
                         evaluation = _build_order_level_paid_fee_evaluation(
                             broker,
                             row=row,

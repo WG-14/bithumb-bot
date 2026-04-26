@@ -2414,6 +2414,18 @@ def reconcile_with_broker(broker: Broker) -> None:
         bal = balance_snapshot.balance
         metadata["balance_source"] = str(balance_snapshot.source_id or "-")
         metadata["balance_observed_ts_ms"] = int(balance_snapshot.observed_ts_ms)
+        metadata["balance_asset_ts_ms"] = int(balance_snapshot.asset_ts_ms)
+        metadata["balance_source_stale"] = False
+        pair_text = str(settings.PAIR or "").strip().upper().replace("_", "-")
+        if "-" in pair_text:
+            quote_currency, base_currency = pair_text.split("-", 1)
+            metadata["balance_source_quote_currency"] = quote_currency
+            metadata["balance_source_base_currency"] = base_currency
+        metadata["broker_cash_available"] = float(bal.cash_available)
+        metadata["broker_cash_locked"] = float(bal.cash_locked)
+        metadata["broker_asset_available"] = float(bal.asset_available)
+        metadata["broker_asset_locked"] = float(bal.asset_locked)
+        metadata["broker_asset_qty"] = float(bal.asset_available) + float(bal.asset_locked)
         local_cash_available, local_cash_locked, local_asset_available, local_asset_locked = get_portfolio_breakdown(conn)
         has_open_orders = bool(local_open) or bool(remote_open)
 

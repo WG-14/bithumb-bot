@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from bithumb_bot.config import settings
-from bithumb_bot.fee_observation import validate_single_fill_order_level_paid_fee
+from bithumb_bot.fee_observation import (
+    MultiFillTradeEvidence,
+    validate_multi_fill_order_level_paid_fee_allocation,
+    validate_single_fill_order_level_paid_fee,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -245,3 +249,129 @@ def test_validate_single_fill_order_level_paid_fee_keeps_unsafe_cases_pending(
     assert evaluation.accounting_decision == "pending_fee_validation"
     assert evaluation.fee_status == "order_level_candidate"
     assert evaluation.reason == expected_reason
+
+
+def test_validate_multi_fill_order_level_paid_fee_allocation_accepts_incident_shape() -> None:
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    allocation = validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee="27.83",
+        order_executed_volume=0.00059999,
+        order_executed_funds=69_595.47103,
+        client_order_id="live_1777186500000_buy_aee54bab",
+        exchange_order_id="C0101000002950999701",
+        trades=[
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890060",
+                price=115_994_000.0,
+                qty=0.00036902,
+                funds=42_804.10588,
+            ),
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890061",
+                price=115_995_000.0,
+                qty=0.00023097,
+                funds=26_791.36515,
+            ),
+        ],
+    )
+
+    assert allocation.reason == "order_level_paid_fee_validated_allocated"
+    assert allocation.allocated_fees_by_fill_id["C0101000000983890060"] == pytest.approx(17.12)
+    assert allocation.allocated_fees_by_fill_id["C0101000000983890061"] == pytest.approx(10.71)
+    assert sum(allocation.allocated_fees_by_fill_id.values()) == pytest.approx(27.83)
+    first = allocation.evaluations_by_fill_id["C0101000000983890060"]
+    second = allocation.evaluations_by_fill_id["C0101000000983890061"]
+    assert first.accounting_status == "accounting_complete"
+    assert first.fee_authority == "exchange_order_paid_fee_allocated"
+    assert first.accounting_decision == "finalize"
+    assert second.accounting_status == "accounting_complete"
+    assert allocation.checks["allocated_fee_sum_match"] is True
+    assert allocation.checks["executed_funds_match"] is True
+    assert allocation.checks["expected_fee_rate_match"] is True
+
+
+def test_validate_multi_fill_order_level_paid_fee_allocation_fails_closed_on_incomplete_fill_set() -> None:
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    allocation = validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee="27.83",
+        order_executed_volume=0.00059999,
+        order_executed_funds=69_595.47103,
+        client_order_id="live_1777186500000_buy_aee54bab",
+        exchange_order_id="C0101000002950999701",
+        trades=[
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890060",
+                price=115_994_000.0,
+                qty=0.00036902,
+                funds=42_804.10588,
+            )
+        ],
+    )
+
+    assert allocation.evaluations_by_fill_id == {}
+    assert allocation.reason == "executed_funds_mismatch"
+    assert allocation.checks["executed_funds_match"] is False
+
+
+def test_validate_multi_fill_order_level_paid_fee_allocation_fails_closed_on_rounding_mismatch() -> None:
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    allocation = validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee="27.831",
+        order_executed_volume=0.00059999,
+        order_executed_funds=69_595.47103,
+        client_order_id="live_1777186500000_buy_aee54bab",
+        exchange_order_id="C0101000002950999701",
+        trades=[
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890060",
+                price=115_994_000.0,
+                qty=0.00036902,
+                funds=42_804.10588,
+            ),
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890061",
+                price=115_995_000.0,
+                qty=0.00023097,
+                funds=26_791.36515,
+            ),
+        ],
+    )
+
+    assert allocation.evaluations_by_fill_id == {}
+    assert allocation.reason == "allocated_fee_sum_mismatch"
+
+
+def test_validate_multi_fill_order_level_paid_fee_allocation_blocks_wild_fee_rate() -> None:
+    object.__setattr__(settings, "LIVE_FEE_RATE_ESTIMATE", 0.0004)
+    object.__setattr__(settings, "LIVE_FILL_FEE_ALERT_MIN_NOTIONAL_KRW", 10_000.0)
+
+    allocation = validate_multi_fill_order_level_paid_fee_allocation(
+        paid_fee="4000.00",
+        order_executed_volume=0.00059999,
+        order_executed_funds=69_595.47103,
+        client_order_id="live_1777186500000_buy_aee54bab",
+        exchange_order_id="C0101000002950999701",
+        trades=[
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890060",
+                price=115_994_000.0,
+                qty=0.00036902,
+                funds=42_804.10588,
+            ),
+            MultiFillTradeEvidence(
+                fill_id="C0101000000983890061",
+                price=115_995_000.0,
+                qty=0.00023097,
+                funds=26_791.36515,
+            ),
+        ],
+    )
+
+    assert allocation.evaluations_by_fill_id == {}
+    assert allocation.reason == "suspicious_fee_rate"

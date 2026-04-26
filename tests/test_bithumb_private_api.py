@@ -4404,19 +4404,55 @@ def test_get_fills_order_level_fee_candidate_is_ambiguous_for_multiple_trade_row
     }
     monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
 
-    with pytest.raises(BrokerRejectError, match="missing fee field"):
-        broker.get_fills(client_order_id="cid-multi-order-fee", exchange_order_id="ex-multi-order-fee")
-
     fills = broker.get_fills(
         client_order_id="cid-multi-order-fee",
         exchange_order_id="ex-multi-order-fee",
+    )
+
+    assert len(fills) == 2
+    assert sorted(fill.fee for fill in fills) == pytest.approx([26.86, 26.86])
+    assert {fill.fee_status for fill in fills} == {"validated_order_level_paid_fee_allocated"}
+    assert all(
+        fill.parse_warnings == ("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee")
+        for fill in fills
+    )
+
+
+def test_get_fills_multi_fill_paid_fee_fails_closed_when_order_funds_do_not_match(monkeypatch):
+    _configure_live()
+    broker = BithumbBroker()
+    payload = {
+        "uuid": "ex-multi-order-fee-mismatch",
+        "client_order_id": "cid-multi-order-fee-mismatch",
+        "state": "done",
+        "side": "bid",
+        "price": "5372000",
+        "volume": "0.02",
+        "remaining_volume": "0",
+        "executed_volume": "0.02",
+        "executed_funds": "99999.99",
+        "paid_fee": "53.72",
+        "created_at": "2026-04-21T00:24:00+09:00",
+        "updated_at": "2026-04-21T00:24:01+09:00",
+        "trades": [
+            {"uuid": "trade-a", "price": "5372000", "volume": "0.01", "created_at": "2026-04-21T00:24:01+09:00"},
+            {"uuid": "trade-b", "price": "5372000", "volume": "0.01", "created_at": "2026-04-21T00:24:02+09:00"},
+        ],
+    }
+    monkeypatch.setattr(broker, "_get_private", lambda endpoint, params, retry_safe=False: payload)
+
+    with pytest.raises(BrokerRejectError, match="missing fee field"):
+        broker.get_fills(client_order_id="cid-multi-order-fee-mismatch", exchange_order_id="ex-multi-order-fee-mismatch")
+
+    fills = broker.get_fills(
+        client_order_id="cid-multi-order-fee-mismatch",
+        exchange_order_id="ex-multi-order-fee-mismatch",
         parse_mode="salvage",
     )
 
     assert len(fills) == 2
     assert {fill.fee for fill in fills} == {None}
     assert {fill.fee_status for fill in fills} == {"missing"}
-    assert all(fill.parse_warnings == ("missing_fee_field", "order_level_fee_candidate_ambiguous:paid_fee") for fill in fills)
 
 
 def test_get_fills_fee_rate_mismatch_accepts_validated_order_level_paid_fee_with_warning(monkeypatch):
