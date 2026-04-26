@@ -103,7 +103,13 @@ def _build_full_projection_rebuild_gate_report(
     accounting_projection_ok = bool(abs(normalize_asset_qty(replay_qty) - normalize_asset_qty(portfolio_qty)) <= _EPS)
     unresolved_fee_pending = bool(int(snapshot.fee_pending_count) > 0)
     reasons: list[str] = []
-    if not broker_qty_known:
+    if not bool(broker_evidence.get("balance_snapshot_available_for_position_rebuild")):
+        blockers = list(broker_evidence.get("position_rebuild_blockers") or [])
+        if broker_qty_known and blockers:
+            reasons.extend(blockers)
+        else:
+            reasons.append("broker_position_qty_evidence_missing")
+    elif not broker_qty_known:
         reasons.append("broker_position_qty_evidence_missing")
     elif not broker_portfolio_converged:
         reasons.append(
@@ -133,6 +139,7 @@ def _build_full_projection_rebuild_gate_report(
     return {
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
+        "broker_qty_value_source": broker_evidence.get("broker_qty_value_source"),
         "broker_qty_evidence_source": broker_evidence.get("broker_qty_evidence_source"),
         "broker_qty_evidence_observed_ts_ms": broker_evidence.get("broker_qty_evidence_observed_ts_ms"),
         "balance_source": broker_evidence.get("balance_source"),
@@ -142,6 +149,13 @@ def _build_full_projection_rebuild_gate_report(
             "balance_snapshot_available_for_position_rebuild"
         ),
         "missing_evidence_fields": list(broker_evidence.get("missing_evidence_fields") or []),
+        "position_rebuild_blockers": list(broker_evidence.get("position_rebuild_blockers") or []),
+        "base_currency": broker_evidence.get("base_currency"),
+        "quote_currency": broker_evidence.get("quote_currency"),
+        "asset_available": broker_evidence.get("asset_available"),
+        "asset_locked": broker_evidence.get("asset_locked"),
+        "cash_available": broker_evidence.get("cash_available"),
+        "cash_locked": broker_evidence.get("cash_locked"),
         "broker_portfolio_converged": broker_portfolio_converged,
         "remote_open_order_count": remote_open_order_count,
         "unresolved_open_order_count": unresolved_open_order_count,
@@ -389,6 +403,7 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "needs_full_projection_rebuild": bool(authority_assessment.get("needs_full_projection_rebuild")),
         "broker_qty": broker_qty,
         "broker_qty_known": broker_qty_known,
+        "broker_qty_value_source": broker_evidence.get("broker_qty_value_source"),
         "broker_qty_evidence_source": broker_evidence.get("broker_qty_evidence_source"),
         "broker_qty_evidence_observed_ts_ms": broker_evidence.get("broker_qty_evidence_observed_ts_ms"),
         "balance_source": broker_evidence.get("balance_source"),
@@ -398,6 +413,13 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             "balance_snapshot_available_for_position_rebuild"
         ),
         "missing_evidence_fields": list(broker_evidence.get("missing_evidence_fields") or []),
+        "position_rebuild_blockers": list(broker_evidence.get("position_rebuild_blockers") or []),
+        "base_currency": broker_evidence.get("base_currency"),
+        "quote_currency": broker_evidence.get("quote_currency"),
+        "asset_available": broker_evidence.get("asset_available"),
+        "asset_locked": broker_evidence.get("asset_locked"),
+        "cash_available": broker_evidence.get("cash_available"),
+        "cash_locked": broker_evidence.get("cash_locked"),
         "remote_open_order_count": remote_open_order_count,
         "broker_portfolio_converged": (
             None if full_projection_gate_report is None else bool(full_projection_gate_report["broker_portfolio_converged"])

@@ -239,6 +239,7 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "canonical_portfolio_qty": _float(report.get("portfolio_qty")),
         "broker_qty": _float(report.get("broker_qty")),
         "broker_qty_known": _truthy(report.get("broker_qty_known")),
+        "broker_qty_value_source": report.get("broker_qty_value_source"),
         "broker_qty_evidence_source": report.get("broker_qty_evidence_source"),
         "broker_qty_evidence_observed_ts_ms": report.get("broker_qty_evidence_observed_ts_ms"),
         "balance_source": report.get("balance_source"),
@@ -248,6 +249,13 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
             report.get("balance_snapshot_available_for_position_rebuild")
         ),
         "missing_evidence_fields": list(report.get("missing_evidence_fields") or []),
+        "position_rebuild_blockers": list(report.get("position_rebuild_blockers") or []),
+        "base_currency": report.get("base_currency"),
+        "quote_currency": report.get("quote_currency"),
+        "asset_available": report.get("asset_available"),
+        "asset_locked": report.get("asset_locked"),
+        "cash_available": report.get("cash_available"),
+        "cash_locked": report.get("cash_locked"),
         "open_position_lots_projected_qty": _float(
             ((report.get("runtime_readiness") or {}).get("projection_convergence") or {}).get("projected_total_qty")
         ),

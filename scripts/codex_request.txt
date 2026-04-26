@@ -1,4 +1,4 @@
-Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The current EC2 evidence and prior repo inspection suggest this is no longer a single “fee bug.” It appears to be a two-part evidence-granularity failure: Bithumb provides order-level `paid_fee` for multi-fill orders while the bot requires per-fill fees, and the bot’s position-authority rebuild gate cannot consume the same broker account evidence that other health surfaces can see. 
+Use the attached EC2 incident-analysis context as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. 
 
 You are working in the GitHub repository:
 
@@ -6,463 +6,293 @@ You are working in the GitHub repository:
 WG-14/bithumb-bot
 ```
 
-## Mission
+The immediate goal is **not** to bypass safety gates, manually rewrite `open_position_lots`, hide blockers, or make `rebuild-position-authority` permissive. The goal is to make the bot’s evidence model robust enough that normal live trading, accounting replay, projection repair, and operator diagnostics all consume the same verified broker/accounting evidence.
 
-Do not add another isolated manual repair command. Do not patch symptoms by hiding blockers. Do not loosen safety gates broadly.
-
-Your task is to make the live trading system more robust, reproducible, and operational by fixing the evidence model that connects:
+The core principle for this task is:
 
 ```text
-exchange evidence
-→ canonical accounting
-→ projection repair
-→ operator recovery policy
+A value being visible
+≠ canonical evidence
+≠ safe repair-gate authority
+≠ permission to mutate projection state
 ```
 
-The core principle to preserve:
+## Current EC2 incident state
+
+The latest EC2 state shows:
 
 ```text
-Observed evidence
-≠ canonical accounting authority
-≠ projection
-≠ repair gate authority
+accounting replay: OK
+fee/principal pending: none
+active fee issue: none
+portfolio_qty: 0.00079982 BTC
+broker_qty value: visible as 0.00079982 BTC
+open_position_lots projected_total_qty: 0.00298794 BTC
+live_ready: 0
+blocking_incident_class: HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+rebuild-position-authority safe_to_apply: 0
 ```
 
-The current failure loop is:
+The important failing output is:
 
 ```text
-1. Bithumb multi-fill order provides no per-fill fee, but provides order-level paid_fee.
-2. Bot treats multi-fill order-level paid_fee as ambiguous.
-3. Each fill is stored with fee=None / fee_pending.
-4. Principal is not applied.
-5. Operator manually repairs fees.
-6. fills/trades/portfolio converge.
-7. open_position_lots projection remains drifted.
-8. rebuild-position-authority refuses to apply because broker_qty evidence is missing.
-9. live_ready remains 0.
-10. Operator is trapped in repeated manual recovery after every fill.
+broker_qty_known=0
+broker_qty=0.000799820000
+broker_qty_evidence_source=accounts_v1_rest_snapshot
+broker_qty_evidence_observed_ts_ms=1777191428883
+balance_snapshot_available_for_health=1
+balance_snapshot_available_for_position_rebuild=0
+missing_evidence_fields=base_currency|quote_currency|broker_asset_qty|broker_asset_available|broker_asset_locked
 ```
 
-The next patch must break this loop structurally.
+This means the account snapshot itself is **not** missing. `accounts_v1_rest_snapshot` exists, has an observed timestamp, and exposes a broker quantity value. The remaining failure is that `rebuild-position-authority` does not receive a complete formal broker position evidence object. It sees a broker quantity value, but not the formal fields required to trust that value for projection rebuild safety.
 
-## Current EC2 incident evidence to preserve as fixtures
+Do **not** solve this by forcing `broker_qty_known=true`. Fix evidence propagation.
 
-The latest problematic live BUY order:
+## Primary files and code paths to inspect first
+
+Inspect these files and related tests:
 
 ```text
-client_order_id=live_1777186500000_buy_aee54bab
-exchange_order_id=C0101000002950999701
-side=BUY
-```
-
-Bithumb/mobile-app observed balances after manual fee repair:
-
-```text
-cash=306,916 KRW
-BTC=0.00079982
-```
-
-Local `portfolio` table after manual fee repair:
-
-```text
-cash_krw=306916.10493
-asset_qty=0.00079982
-asset_available=0.00079982
-asset_locked=0.0
-```
-
-The two fills:
-
-```text
-fill_id=C0101000000983890060
-price=115994000
-qty=0.00036902
-funds=42804.10588
-mobile_app_fee=17.12 KRW
-
-fill_id=C0101000000983890061
-price=115995000
-qty=0.00023097
-funds=26791.36515
-mobile_app_fee=10.71 KRW
-```
-
-Order-level fee evidence:
-
-```text
-order_level_paid_fee=27.83
-17.12 + 10.71 = 27.83
-```
-
-The raw payload shape reportedly contained:
-
-```json
-{
-  "order_fee_fields": {
-    "paid_fee": "27.83"
-  },
-  "trade": {
-    "uuid": "C0101000000983890060",
-    "price": "115994000",
-    "volume": "0.00036902",
-    "funds": "42804.10588"
-  }
-}
-```
-
-and similarly for the second fill. The trade-level fee field was absent.
-
-Current known blocker after manual fee repair:
-
-```text
-fee/principal manual repair: completed
-active fee pending: none
-portfolio and mobile app: converged
-live restart: still blocked
-blocker: open_position_lots projection drift
-open_position_lots projected_total_qty=0.00298794
-portfolio_qty=0.00079982
-rebuild-position-authority safe_to_apply=false
-reason=broker_position_qty_evidence_missing
-```
-
-`health` reportedly sees:
-
-```text
-balance_source=accounts_v1_rest_snapshot
-balance_source_stale=False
-portfolio_not_flat=asset_available=0.000799820000,asset_locked=0.000000000000
-```
-
-but formal evidence fields are missing:
-
-```text
-balance_source_last_success_ts_ms=None
-balance_source_last_observed_ts_ms=None
-balance_source_last_asset_ts_ms=None
-balance_source_quote_currency=None
-balance_source_base_currency=None
-balance_source_preflight_outcome=not_checked
-external_position_accounting_repair_reason=balance_snapshot_evidence_missing
-```
-
-This means one surface can see account information, while `repair-plan` / `rebuild-position-authority` cannot treat it as broker position evidence.
-
-## Files and code paths to inspect first
-
-Start by inspecting these areas:
-
-```text
+src/bithumb_bot/runtime_readiness.py
+src/bithumb_bot/position_authority_repair.py
+src/bithumb_bot/repair_plan.py
+src/bithumb_bot/reporting.py
 src/bithumb_bot/fee_observation.py
 src/bithumb_bot/broker/bithumb_order_queries.py
 src/bithumb_bot/broker/live_submission_execution.py
 src/bithumb_bot/broker/myorder_runtime.py
 src/bithumb_bot/execution.py
-src/bithumb_bot/position_authority_repair.py
-src/bithumb_bot/runtime_readiness.py
-src/bithumb_bot/repair_plan.py
-src/bithumb_bot/reporting.py
+
+tests/test_operator_commands.py
+tests/test_accounting_projection.py
 tests/test_fee_observation.py
 tests/test_bithumb_private_api.py
 tests/test_live_broker.py
-tests/test_operator_commands.py
-tests/test_accounting_projection.py
 ```
 
-Pay special attention to current behavior around:
+Pay special attention to:
 
 ```text
-validate_single_fill_order_level_paid_fee
+build_broker_position_evidence()
+compute_runtime_readiness_snapshot()
+build_position_authority_rebuild_preview()
+_build_full_projection_rebuild_gate_report()
+build_repair_plan_preview_from_report()
+validate_single_fill_order_level_paid_fee()
 multi_fill_order_level_fee_ambiguous
-validated_order_level_paid_fee
 exchange_order_paid_fee_single_fill
 broker_position_qty_evidence_missing
+missing_evidence_fields
 balance_observed_ts_ms
-compute_runtime_readiness_snapshot
-build_position_authority_rebuild_preview
-build_repair_plan_preview_from_report
+broker_asset_qty
+broker_asset_available
+broker_asset_locked
+base_currency
+quote_currency
 ```
 
-## Working hypotheses to verify or falsify
+## Working hypotheses
 
-Keep these as hypotheses until verified from code and tests.
+Keep these as hypotheses until verified or falsified in code and tests.
 
-### Hypothesis A — repeated manual fee repair is caused by missing multi-fill order-level paid_fee allocation
+### Hypothesis A — current rebuild failure is caused by incomplete broker evidence metadata
 
-Current expected repo behavior appears to be:
+The EC2 state suggests that `last_reconcile_metadata` contains enough weak/fallback evidence to display a broker quantity, such as:
 
 ```text
-trade-level fee present
-→ exchange_trade_level_fee
-→ accounting_complete
-
-single-fill + order-level paid_fee present
-→ exchange_order_paid_fee_single_fill
-→ accounting_complete
-
-multi-fill + order-level paid_fee present
-→ multi_fill_order_level_fee_ambiguous
-→ order_level_candidate
-→ fee_pending
+balance_source=accounts_v1_rest_snapshot
+balance_observed_ts_ms=1777191428883
+dust_broker_qty=0.00079982
+dust_local_qty=0.00079982
 ```
 
-If this is true, it explains the repeated manual recovery.
+but lacks formal position evidence fields:
+
+```text
+base_currency
+quote_currency
+broker_asset_qty
+broker_asset_available
+broker_asset_locked
+```
+
+As a result, `build_broker_position_evidence()` can display:
+
+```text
+broker_qty=0.00079982
+```
+
+using fallback data, but still correctly returns:
+
+```text
+broker_qty_known=false
+balance_snapshot_available_for_position_rebuild=false
+missing_evidence_fields=base_currency|quote_currency|broker_asset_qty|broker_asset_available|broker_asset_locked
+```
+
+which causes `rebuild-position-authority --full-projection-rebuild` to refuse apply.
 
 Verification target:
 
 ```text
-Find where order-level paid_fee is validated.
-Confirm that single-fill paid_fee can finalize.
-Confirm that multi-fill paid_fee is intentionally treated as ambiguous.
-Confirm that this path leads to fee_pending / principal unapplied.
+Find where accounts_v1_rest_snapshot is read.
+Find where last_reconcile_metadata is constructed.
+Confirm whether asset_available=0.00079982, asset_locked=0, BTC/KRW market attribution, and observed timestamp are available.
+Confirm whether these values are written into metadata/evidence as:
+  broker_asset_qty
+  broker_asset_available
+  broker_asset_locked
+  base_currency
+  quote_currency
+  broker_cash_available
+  broker_cash_locked
+  balance_observed_ts_ms
 ```
 
 Falsification condition:
 
 ```text
-If Bithumb actually provides per-fill fee and the parser drops it, then parser correction takes priority over allocation.
-If multi-fill paid_fee allocation already exists and is failing for another reason, diagnose that reason directly.
+If the account snapshot is stale, currency-ambiguous, missing, not attributable to KRW-BTC/BTC, or has locked asset/open orders that should block rebuild, then rebuild refusal is correct. Report that directly and do not force the gate open.
 ```
 
-### Hypothesis B — live restart is blocked because broker account evidence is not propagated into position-authority repair gates
+### Hypothesis B — repeated manual fee recovery is a separate P0 issue caused by missing multi-fill order-level paid_fee allocation
 
-Current expected repo behavior appears to be:
-
-```python
-broker_qty = snapshot.position_state.normalized_exposure.raw_holdings.broker_qty
-broker_qty_known = bool(int(snapshot.reconcile_metadata.get("balance_observed_ts_ms", 0) or 0) > 0)
-```
-
-If `balance_observed_ts_ms` is missing, full projection rebuild refuses to apply with:
+The current rebuild problem is not the only problem. The repeated manual recovery loop after live fills likely comes from this evidence shape:
 
 ```text
-broker_position_qty_evidence_missing
+Bithumb multi-fill order:
+  no per-trade fee field
+  order-level paid_fee exists
 ```
 
-But EC2 health output indicates `accounts_v1_rest_snapshot` sees the broker account and knows `asset_available=0.00079982`.
-
-Verification target:
+The bot appears to support single-fill order-level `paid_fee` finalization but treats multi-fill order-level `paid_fee` as ambiguous, leading to:
 
 ```text
-Find why health/reconcile can show accounts_v1_rest_snapshot and asset_available,
-but build_position_authority_rebuild_preview / repair-plan gets broker_qty=0.0 and broker_qty_known=false.
-```
-
-Falsification condition:
-
-```text
-If the account snapshot is actually stale, currency-ambiguous, missing, or not attributable to KRW-BTC/BTC, then rebuild refusal is correct.
-```
-
-### Hypothesis C — the higher-level design gap is inconsistent evidence granularity
-
-This is the structural diagnosis:
-
-```text
-fee granularity mismatch:
-  exchange gives order-level paid_fee
-  bot requires per-fill fee
-  → fee_pending repeated
-
-broker evidence propagation mismatch:
-  health sees accounts_v1_rest_snapshot
-  rebuild-position-authority lacks broker_qty evidence
-  → projection rebuild impossible
+fee=None
+fee_status=missing/order_level_candidate
+accounting_status=fee_pending
+principal unapplied
+manual operator fee repair required
 ```
 
 Verification target:
 
 ```text
-Check whether evidence objects are typed, persisted, and reused consistently across health, audit-ledger, repair-plan, rebuild-position-authority, and recovery-report.
+Confirm that single-fill + order-level paid_fee finalizes.
+Confirm that multi-fill + order-level paid_fee currently becomes multi_fill_order_level_fee_ambiguous / fee_pending.
+Confirm whether Bithumb raw payload has per-fill fee fields that parser drops, or only order-level paid_fee.
 ```
 
 Falsification condition:
 
 ```text
-If there is already a single canonical evidence object used by all these surfaces, identify why it is not populated in the EC2 case.
+If Bithumb does provide per-fill fees and the parser drops them, fix the parser before implementing allocation.
+If multi-fill allocation already exists, identify the actual failing gate.
+```
+
+### Hypothesis C — higher-level root cause is evidence granularity mismatch across bot layers
+
+The broader issue is not a single missing field. It is that the bot’s layers do not consistently share typed, provenance-rich evidence.
+
+The relevant layers are:
+
+```text
+exchange observation:
+  order / trade / paid_fee / accounts snapshot
+
+canonical accounting:
+  fills / trades / fee finalization / repair events
+
+projection:
+  open_position_lots / trade_lifecycles
+
+repair gate:
+  rebuild-position-authority / repair-plan / recovery-report
+
+operator surface:
+  health / audit-ledger / fee-diagnostics
+```
+
+The current system can show a value in one surface while refusing it in another because the value is not carried as first-class evidence.
+
+Verification target:
+
+```text
+Check whether accounts snapshots and order fee observations are represented as typed evidence with source, timestamp, market/currency attribution, and completeness.
+Check whether health, audit-ledger, repair-plan, recovery-report, and rebuild-position-authority consume the same evidence model.
+```
+
+Falsification condition:
+
+```text
+If a single canonical evidence object already exists, identify why it is not populated for the EC2 case.
 ```
 
 ## Required design changes
 
-### 1. Add a safe multi-fill order-level paid_fee allocation authority
+### 1. Promote broker account snapshot data to first-class position evidence
 
-Do not loosen fee validation blindly. Add a specific safe path for this evidence shape:
+Do not merely set `broker_qty_known=True`.
 
-```text
-per-fill fee missing
-order-level paid_fee present
-all fills for the order known
-fill IDs stable
-sum(fill funds) matches order executed_funds within tolerance
-sum(allocated fees) equals order paid_fee after KRW rounding
-allocated fees are coherent with configured/observed fee bounds
-side/market/order identifiers match
-no duplicate fill application
-```
-
-Expected successful outcome:
+When `accounts_v1_rest_snapshot` is available and valid, construct formal evidence equivalent to:
 
 ```text
-fee_status=validated_order_level_paid_fee_allocated
-fee_authority=exchange_order_paid_fee_allocated
-fee_source=order_level_paid_fee
-fee_confidence=validated
-accounting_decision=finalize
-accounting_status=accounting_complete
-```
-
-Expected failure behavior:
-
-```text
-fee_status=order_level_candidate
-fee_authority=configured_estimate_or_missing_fee or equivalent pending authority
-accounting_decision=pending_fee_validation
-accounting_status=fee_pending
-reason must explain exact failed gate:
-  incomplete_fill_set
-  executed_funds_mismatch
-  order_paid_fee_missing
-  allocated_fee_sum_mismatch
-  identifier_mismatch
-  duplicate_fill
-  suspicious_fee_rate
-```
-
-Do not use configured fee estimate as settlement authority. Configured fee rate may be used as a diagnostic/coherence bound only.
-
-Allocation rule should be deterministic and auditable. Prefer notional/funds proportional allocation with KRW rounding, assigning rounding residue deterministically, for example to the largest-funds fill or last deterministic sort key. The sum of allocated fees must equal the order-level `paid_fee`.
-
-Use the incident fixture:
-
-```text
-order_paid_fee=27.83
-fill A funds=42804.10588 qty=0.00036902 expected_allocated_fee=17.12
-fill B funds=26791.36515 qty=0.00023097 expected_allocated_fee=10.71
-```
-
-This should no longer produce `fee_pending`.
-
-### 2. Preserve fail-closed behavior for incomplete or incoherent multi-fill evidence
-
-This is critical. Do not make all order-level paid_fee evidence automatically authoritative.
-
-Must still fail closed when:
-
-```text
-not all fills are known
-sum(fill funds) does not match order executed_funds
-order-level paid_fee is missing, negative, zero for material notional, or unparseable
-allocated fee sum cannot equal paid_fee after rounding
-identifiers do not match
-duplicate fills are present
-fee rate is wildly outside configured/observed bounds
-order is not terminal
-```
-
-### 3. Propagate broker account snapshot evidence into position-authority rebuild gates
-
-Find the canonical place where `accounts_v1_rest_snapshot` is created or consumed.
-
-The position rebuild gate should be able to consume a formal evidence object equivalent to:
-
-```text
-balance_observed_ts_ms
 source=accounts_v1_rest_snapshot
+observed_ts_ms=<present>
+base_currency=BTC
+quote_currency=KRW
+broker_asset_available=0.00079982
+broker_asset_locked=0
+broker_asset_qty=0.00079982
+broker_cash_available=306916.10493
+broker_cash_locked=0
+stale=false
+```
+
+Then `build_broker_position_evidence()` should be able to return:
+
+```text
+broker_qty_known=true
+broker_qty=0.00079982
+broker_qty_evidence_source=accounts_v1_rest_snapshot
+broker_qty_evidence_observed_ts_ms=<present>
+balance_snapshot_available_for_health=true
+balance_snapshot_available_for_position_rebuild=true
+missing_evidence_fields=[]
 base_currency=BTC
 quote_currency=KRW
 asset_available=0.00079982
 asset_locked=0
-cash_available=306916.10493
-cash_locked=0
-broker_qty=asset_available + asset_locked, or explicit policy-defined broker position qty
-broker_qty_known=true
-stale=false
 ```
 
-Then this scenario should be safe:
+Keep fail-closed behavior when:
 
 ```text
-portfolio.asset_qty=0.00079982
-accounting_replay.qty=0.00079982
-broker_qty=0.00079982
-broker_qty_known=true
-broker_portfolio_converged=true
-open_orders=0
-unresolved_fee_state=0
-open_position_lots_projected_qty=0.00298794
-```
-
-Expected:
-
-```text
-rebuild-position-authority preview:
-  needs_rebuild=true
-  safe_to_apply=true
-  repair_mode=full_projection_rebuild
-  broker_qty_known=true
-  broker_qty=0.00079982
-  broker_portfolio_converged=true
-```
-
-Still refuse rebuild when:
-
-```text
-broker snapshot missing
-broker snapshot stale
+snapshot stale
 base/quote currency missing or mismatched
-asset_locked > 0, unless explicitly allowed by policy
+broker_asset_qty missing
+broker_asset_available missing
+broker_asset_locked missing
+asset_locked > 0 unless explicitly allowed by policy
 open orders present
 unresolved fee pending
 portfolio/replay mismatch
 broker/portfolio mismatch
 ```
 
-### 4. Improve operator visibility for missing evidence
+### 2. Keep `open_position_lots` as projection, not canonical truth
 
-If rebuild is blocked, `repair-plan`, `recovery-report`, and/or `health` must show whether account evidence is missing entirely or merely not propagated to the repair gate.
+Do not make `open_position_lots` authoritative.
 
-Required fields or equivalent:
-
-```text
-broker_qty_known
-broker_qty
-broker_qty_evidence_source
-broker_qty_evidence_observed_ts_ms
-balance_source
-balance_source_stale
-balance_snapshot_available_for_health
-balance_snapshot_available_for_position_rebuild
-missing_evidence_fields
-```
-
-For the current failure, the desired explanation should be closer to:
-
-```text
-balance_source=accounts_v1_rest_snapshot
-balance_source_stale=False
-balance_snapshot_available_for_health=True
-balance_snapshot_available_for_position_rebuild=False
-missing_evidence_fields=balance_observed_ts_ms,base_currency,broker_asset_qty
-```
-
-not merely:
-
-```text
-broker_position_qty_evidence_missing
-```
-
-### 5. Keep open_position_lots as projection, not canonical truth
-
-Do not make `open_position_lots` a source of truth.
-
-The intended model:
+The intended model is:
 
 ```text
 canonical truth:
-  exchange order/trade observations
+  exchange observations
   fills
   trades
-  fee finalization / allocation events
+  fee finalization/allocation events
   fee repair events
   external adjustments
   broker account snapshots
@@ -472,13 +302,282 @@ projection:
   trade_lifecycles
 ```
 
-Projection drift should be repairable only when canonical accounting and broker evidence agree.
+The safe full projection rebuild condition should be:
+
+```text
+canonical replay qty == portfolio qty == broker qty
+fresh broker evidence present
+open orders = 0
+unresolved fee pending = 0
+projection drift exists
+→ rebuild projection safely
+```
+
+For the EC2 case, after evidence propagation is fixed, expected preview should become:
+
+```text
+needs_rebuild=1
+safe_to_apply=1
+repair_mode=full_projection_rebuild
+broker_qty_known=1
+broker_qty=0.000799820000
+broker_portfolio_converged=1
+accounting_projection_ok=1
+unresolved_fee_pending=0
+remote_open_order_count=0
+recommended_command=uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes
+```
+
+### 3. Preserve the current refusal when only fallback quantity exists
+
+The current EC2 failure shape must remain blocked until formal fields are present.
+
+Fixture:
+
+```text
+metadata:
+  balance_source=accounts_v1_rest_snapshot
+  balance_observed_ts_ms=1777191428883
+  dust_broker_qty=0.00079982
+  dust_local_qty=0.00079982
+
+missing:
+  base_currency
+  quote_currency
+  broker_asset_qty
+  broker_asset_available
+  broker_asset_locked
+```
+
+Expected:
+
+```text
+broker_qty=0.00079982
+broker_qty_known=false
+balance_snapshot_available_for_health=true
+balance_snapshot_available_for_position_rebuild=false
+safe_to_apply=false
+missing_evidence_fields includes:
+  base_currency
+  quote_currency
+  broker_asset_qty
+  broker_asset_available
+  broker_asset_locked
+```
+
+This test is important. It prevents a dangerous regression where fallback dust metadata is treated as formal broker position evidence.
+
+### 4. Add safe multi-fill order-level paid_fee allocation
+
+This is still P0 because otherwise the next live multi-fill order can recreate fee_pending and manual recovery.
+
+Implement a safe deterministic authority path:
+
+```text
+per-fill fee present
+→ trade-level fee authority
+→ finalize
+
+single-fill + order-level paid_fee present
+→ exchange_order_paid_fee_single_fill
+→ finalize
+
+multi-fill + order-level paid_fee present + complete coherent fill set
+→ exchange_order_paid_fee_allocated
+→ finalize
+
+incomplete or incoherent evidence
+→ fee_pending
+```
+
+Do not use configured fee estimate as settlement authority. Configured fee may be used only as a diagnostic/coherence bound.
+
+Required safe allocation gates:
+
+```text
+order-level paid_fee present and parseable
+order terminal/filled
+all fills known
+fill IDs stable
+side/market/order identifiers match
+sum(fill funds) matches order executed_funds within tolerance
+sum(allocated fees) equals order paid_fee after KRW rounding
+allocated fee rate is coherent with configured/observed fee bounds
+no duplicate fill application
+```
+
+Allocation should be deterministic and auditable. Prefer proportional allocation by `funds`/notional, rounded to KRW fee precision, with rounding residue assigned deterministically, for example to the largest-funds fill or stable sorted last fill. The sum of allocated fees must exactly equal order-level `paid_fee`.
+
+Incident fixture:
+
+```text
+order_paid_fee=27.83
+order_executed_funds=69595.47103
+
+fill C0101000000983890060:
+  price=115994000
+  qty=0.00036902
+  funds=42804.10588
+  expected_allocated_fee=17.12
+
+fill C0101000000983890061:
+  price=115995000
+  qty=0.00023097
+  funds=26791.36515
+  expected_allocated_fee=10.71
+```
+
+Expected:
+
+```text
+fee_status=validated_order_level_paid_fee_allocated
+fee_authority=exchange_order_paid_fee_allocated
+fee_source=order_level_paid_fee
+fee_confidence=validated
+accounting_decision=finalize
+accounting_status=accounting_complete
+no fee_pending
+no unapplied_principal
+```
+
+### 5. Preserve fail-closed behavior for bad fee evidence
+
+Continue to produce `fee_pending` when:
+
+```text
+order-level paid_fee missing
+paid_fee unparseable
+paid_fee negative
+paid_fee zero for material notional unless explicitly valid
+not all fills known
+sum(fill funds) mismatches order executed_funds
+allocated fee sum cannot equal paid_fee after rounding
+identifier mismatch
+duplicate fill
+order not terminal
+fee rate wildly implausible
+```
+
+Diagnostic warnings are allowed for minor configured-rate mismatch if exchange evidence is coherent, but settlement authority must come from exchange evidence, not configured estimate.
+
+### 6. Improve operator visibility
+
+When rebuild is blocked, operator output should explain whether account evidence is missing entirely or present but incomplete.
+
+Required fields or equivalents in `health`, `repair-plan`, `recovery-report`, or rebuild preview:
+
+```text
+broker_qty
+broker_qty_known
+broker_qty_value_source
+broker_qty_evidence_source
+broker_qty_evidence_observed_ts_ms
+balance_snapshot_available_for_health
+balance_snapshot_available_for_position_rebuild
+missing_evidence_fields
+base_currency
+quote_currency
+asset_available
+asset_locked
+cash_available
+cash_locked
+```
+
+For the current failure, the explanation should be explicit:
+
+```text
+broker_qty value is from fallback dust_broker_qty
+formal broker_asset_qty is missing
+health can display account quantity
+position rebuild cannot use it as formal evidence
+missing_evidence_fields=base_currency|quote_currency|broker_asset_qty|broker_asset_available|broker_asset_locked
+```
 
 ## Required tests
 
-Add focused regression tests. Prefer real incident fixtures over abstract mocks.
+Add incident-shaped regression tests. Prefer real EC2 values.
 
-### Test 1 — multi-fill order-level paid_fee allocation succeeds
+### Test 1 — formal broker evidence enables full projection rebuild
+
+Fixture:
+
+```text
+portfolio_qty=0.00079982
+accounting_replay_qty=0.00079982
+accounts_v1_rest_snapshot:
+  observed_ts_ms present
+  source=accounts_v1_rest_snapshot
+  base_currency=BTC
+  quote_currency=KRW
+  asset_available=0.00079982
+  asset_locked=0
+  cash_available=306916.10493
+  cash_locked=0
+open_orders=0
+unresolved_fee_pending=0
+open_position_lots_projected_qty=0.00298794
+```
+
+Expected:
+
+```text
+broker_qty_known=true
+broker_qty=0.00079982
+broker_portfolio_converged=true
+accounting_projection_ok=true
+safe_to_apply=true
+candidate repair rebuild-position-authority safe_to_apply=true
+```
+
+### Test 2 — fallback broker quantity without formal fields remains blocked
+
+Fixture:
+
+```text
+metadata:
+  balance_source=accounts_v1_rest_snapshot
+  balance_observed_ts_ms=1777191428883
+  dust_broker_qty=0.00079982
+  dust_local_qty=0.00079982
+
+missing:
+  base_currency
+  quote_currency
+  broker_asset_qty
+  broker_asset_available
+  broker_asset_locked
+```
+
+Expected:
+
+```text
+broker_qty=0.00079982
+broker_qty_known=false
+balance_snapshot_available_for_health=true
+balance_snapshot_available_for_position_rebuild=false
+safe_to_apply=false
+missing_evidence_fields includes base_currency, quote_currency, broker_asset_qty, broker_asset_available, broker_asset_locked
+```
+
+### Test 3 — stale or currency-mismatched broker snapshot remains blocked
+
+Fixture variants:
+
+```text
+stale=true
+base_currency mismatch
+quote_currency mismatch
+asset_locked > 0
+```
+
+Expected:
+
+```text
+broker_qty_known=false or safe_to_apply=false
+reason includes stale or currency mismatch or locked asset/open exposure policy
+```
+
+### Test 4 — multi-fill order-level paid_fee allocation succeeds
 
 Fixture:
 
@@ -486,40 +585,33 @@ Fixture:
 order_paid_fee=27.83
 order_executed_funds=69595.47103
 fills:
-  fill_id=C0101000000983890060
-  funds=42804.10588
-  qty=0.00036902
-  price=115994000
-
-  fill_id=C0101000000983890061
-  funds=26791.36515
-  qty=0.00023097
-  price=115995000
+  C0101000000983890060 funds=42804.10588 qty=0.00036902 price=115994000
+  C0101000000983890061 funds=26791.36515 qty=0.00023097 price=115995000
 no per-fill fee fields
 ```
 
 Expected:
 
 ```text
-allocated_fee for first fill=17.12
-allocated_fee for second fill=10.71
+allocated fees:
+  C0101000000983890060 → 17.12
+  C0101000000983890061 → 10.71
 sum allocated=27.83
 fee_authority=exchange_order_paid_fee_allocated
 accounting_decision=finalize
 accounting_status=accounting_complete
-diagnostic flags may include expected_fee_rate_mismatch if appropriate, but must not block accounting
 no fee_pending
 no unapplied_principal
 ```
 
-### Test 2 — incomplete fill set fails closed
+### Test 5 — incomplete multi-fill set fails closed
 
 Fixture:
 
 ```text
 order_paid_fee=27.83
 order_executed_funds=69595.47103
-only one of the two fills is present
+only one fill present
 ```
 
 Expected:
@@ -530,12 +622,12 @@ accounting_status=fee_pending
 reason=incomplete_fill_set or executed_funds_mismatch
 ```
 
-### Test 3 — allocated fee sum mismatch fails closed
+### Test 6 — allocated fee sum mismatch fails closed
 
 Fixture:
 
 ```text
-order_paid_fee does not equal deterministic rounded allocation sum
+order_paid_fee cannot be reconciled with deterministic rounded per-fill allocation
 ```
 
 Expected:
@@ -546,90 +638,9 @@ fee_pending
 reason=allocated_fee_sum_mismatch
 ```
 
-### Test 4 — suspicious fee rate fails closed or diagnostic-warns according to existing policy
+### Test 7 — no regression of single-fill order-level paid_fee
 
-Use repo’s existing fee-rate tolerance policy. If existing policy treats configured fee mismatch as diagnostic only when exchange evidence is coherent, preserve that. But if allocation implies a wildly implausible fee, block it.
-
-Expected:
-
-```text
-reasonable allocation:
-  finalize, diagnostic warning allowed
-
-wildly implausible allocation:
-  fee_pending
-```
-
-### Test 5 — broker snapshot evidence enables projection rebuild
-
-Fixture:
-
-```text
-portfolio_qty=0.00079982
-replay_qty=0.00079982
-accounts_v1_rest_snapshot:
-  asset_available=0.00079982
-  asset_locked=0
-  source=accounts_v1_rest_snapshot
-  stale=false
-  observed_ts_ms present
-open_orders=0
-unresolved_fee_state=0
-open_position_lots_projected_qty=0.00298794
-```
-
-Expected:
-
-```text
-broker_qty_known=true
-broker_qty=0.00079982
-broker_portfolio_converged=true
-safe_to_rebuild=true
-candidate repair rebuild-position-authority safe_to_apply=true
-```
-
-### Test 6 — missing broker snapshot keeps projection rebuild blocked
-
-Fixture:
-
-```text
-portfolio/replay match
-projection drift exists
-no broker snapshot timestamp or no base asset evidence
-```
-
-Expected:
-
-```text
-safe_to_rebuild=false
-reason includes broker_position_qty_evidence_missing
-```
-
-### Test 7 — cross-surface consistency
-
-Given the same readiness/evidence fixture, these surfaces must agree on broker evidence and projection safety:
-
-```text
-health
-recovery-report
-repair-plan
-rebuild-position-authority preview
-```
-
-Expected agreement:
-
-```text
-broker_qty_known
-broker_qty
-broker_portfolio_converged
-projection_converged
-safe_to_rebuild
-missing_evidence_fields
-```
-
-### Test 8 — no regression of single-fill paid_fee behavior
-
-Existing single-fill order-level paid_fee validation must continue to work.
+Existing single-fill order-level `paid_fee` behavior must still work.
 
 Expected:
 
@@ -638,69 +649,99 @@ fee_authority=exchange_order_paid_fee_single_fill
 accounting_status=accounting_complete
 ```
 
-### Test 9 — no regression of genuine missing-fee behavior
+### Test 8 — no regression of genuine missing fee
 
-If neither trade-level fee nor order-level paid_fee is present, material fills must still become fee_pending.
+If neither trade-level fee nor order-level `paid_fee` is present:
+
+```text
+material fill → fee_pending
+```
+
+### Test 9 — cross-surface consistency
+
+Given the same evidence fixture, these surfaces must agree:
+
+```text
+health
+audit-ledger
+recovery-report
+repair-plan
+rebuild-position-authority preview
+```
+
+Expected agreement on:
+
+```text
+broker_qty
+broker_qty_known
+projection_converged
+broker_portfolio_converged
+safe_to_rebuild
+missing_evidence_fields
+live_ready
+blocking_incident_class
+```
 
 ## Verification commands
 
-Run targeted tests first, then broader relevant subsets.
-
-At minimum attempt:
+Run targeted tests first:
 
 ```bash
+uv run pytest tests/test_operator_commands.py -k "rebuild_position_authority or repair_plan or recovery or broker_qty or projection"
+uv run pytest tests/test_accounting_projection.py -k "projection or rebuild or broker"
 uv run pytest tests/test_fee_observation.py
 uv run pytest tests/test_bithumb_private_api.py -k "paid_fee or multi_fill or fee"
 uv run pytest tests/test_live_broker.py -k "paid_fee or multi_fill or accounting"
-uv run pytest tests/test_operator_commands.py -k "rebuild_position_authority or repair_plan or recovery or broker_qty or projection"
-uv run pytest tests/test_accounting_projection.py -k "projection or rebuild or broker"
 ```
 
-If test names differ, search and run the closest existing suites. If a command fails, report:
+If test names differ, search and run the closest matching suites. Report all commands exactly.
+
+If any command fails, include:
 
 ```text
 exact command
 failing tests
-failure reason
-related or unrelated
-what narrower test was added or run
+failure summary
+whether related or unrelated
+whether a narrower replacement test was added or run
 ```
 
 ## EC2 validation after patch
 
-After deploying the patch to EC2, do not immediately enable unattended live trading.
+Do not enable unattended live trading immediately.
 
-Run:
+After deploying, run:
 
 ```bash
-MODE=live uv run bithumb-bot health
+MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
 MODE=live uv run bithumb-bot audit-ledger
+MODE=live uv run bithumb-bot health
 MODE=live uv run bithumb-bot recovery-report
 MODE=live uv run bithumb-bot repair-plan --json
-MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild
 ```
 
-Expected after the broker evidence propagation patch:
+Expected before rebuild apply:
 
 ```text
-active fee pending=0
+fee/principal pending=0
 unresolved_fee_state=0
 portfolio_qty=0.00079982
-broker_qty_known=true
+broker_qty_known=1
 broker_qty=0.00079982
-broker_portfolio_converged=true
+broker_portfolio_converged=1
 open_position_lots_projected_qty=0.00298794
-projection_converged=false
-rebuild-position-authority safe_to_apply=true
+projection_converged=0
+rebuild-position-authority safe_to_apply=1
+recommended_command includes --full-projection-rebuild --apply --yes
 ```
 
-Only then should the operator consider:
+Only then may the operator run:
 
 ```bash
 MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes
 ```
 
-After apply:
+After apply, run:
 
 ```bash
 MODE=live uv run bithumb-bot audit-ledger
@@ -712,20 +753,20 @@ MODE=live uv run bithumb-bot repair-plan --json
 Expected:
 
 ```text
-projection_converged=true
-broker_portfolio_converged=true
+projection_converged=1
+broker_portfolio_converged=1
 live_ready=1
 blocking_incident_class=NONE
-accounting_root_cause_unresolved=false
-flatten_primary_recommendation=false
+accounting_root_cause_unresolved=0
+flatten_primary_recommendation=0
 ```
 
-For the next live fill after the fee-allocation patch:
+For the next live fill after the paid-fee allocation patch, expected:
 
 ```text
 multi-fill with order-level paid_fee only
 → no fee_pending
-→ no principal_unapplied
+→ no unapplied_principal
 → audit-ledger OK
 → broker/portfolio converged
 ```
@@ -735,27 +776,72 @@ multi-fill with order-level paid_fee only
 Do:
 
 ```text
+- Fix broker account evidence propagation into position-authority rebuild gates.
+- Keep `broker_qty_known=false` when only fallback/dust quantity exists.
 - Add safe deterministic multi-fill order-level paid_fee allocation.
 - Preserve single-fill order-level paid_fee behavior.
-- Preserve fail-closed behavior for incomplete/incoherent evidence.
-- Propagate broker account snapshot evidence into position-authority rebuild gates.
-- Improve repair-plan/recovery/health output for missing broker evidence.
-- Add incident-fixture regression tests.
+- Preserve fail-closed behavior for incomplete/incoherent fee or broker evidence.
+- Improve operator visibility for missing formal evidence fields.
 - Keep open_position_lots as projection.
+- Add incident-fixture regression tests.
 ```
 
 Do not:
 
 ```text
+- Force broker_qty_known=true without formal evidence.
+- Treat dust_broker_qty fallback as sufficient rebuild authority.
+- Force projection rebuild while evidence is incomplete.
 - Use configured fee estimate as settlement authority.
 - Silence fee_pending by default.
 - Automatically trust partial fill sets.
-- Force projection rebuild without broker evidence.
 - Treat open_position_lots as canonical truth.
 - Change flatten policy.
 - Add manual DB update workarounds.
 - Delete historical lots without audited repair event.
-- Resume live trading in tests or code paths.
+- Resume live trading from code or tests.
+```
+
+## Long-term design recommendations to include in the final report
+
+Discuss, but do not necessarily fully implement unless small and natural:
+
+```text
+1. broker_account_snapshots table or equivalent persisted first-class evidence:
+   snapshot_id
+   observed_ts_ms
+   source
+   market
+   base_currency
+   quote_currency
+   cash_available
+   cash_locked
+   asset_available
+   asset_locked
+   asset_qty
+   stale
+   request_id/provenance
+
+2. event-sourced accounting families:
+   exchange_order_observed
+   exchange_trade_observed
+   order_level_fee_observed
+   fee_allocated_to_fill
+   fee_finalized
+   operator_fee_repair_applied
+   broker_account_snapshot_observed
+   portfolio_projection_published
+   lot_projection_rebuilt
+
+3. repair-plan as evidence graph:
+   evidence available
+   evidence missing
+   source
+   observed timestamp
+   tables touched
+   before/after projection
+   why safe
+   why blocked
 ```
 
 ## Final report format
@@ -765,16 +851,17 @@ When finished, produce a report with exactly these sections:
 ```text
 1. Summary
    - What changed.
-   - Why this fixes the repeated manual-recovery loop structurally.
+   - Why this fixes evidence propagation instead of bypassing safety gates.
+   - Why this reduces repeated manual recovery after live fills.
 
 2. Hypothesis results
-   - Hypothesis A: repeated manual fee repair caused by missing multi-fill order-level paid_fee allocation — confirmed / falsified / partially confirmed.
-   - Hypothesis B: live restart blocked by broker position evidence propagation gap — confirmed / falsified / partially confirmed.
+   - Hypothesis A: rebuild failure caused by incomplete broker evidence metadata — confirmed / falsified / partially confirmed.
+   - Hypothesis B: repeated manual fee recovery caused by missing multi-fill order-level paid_fee allocation — confirmed / falsified / partially confirmed.
    - Hypothesis C: higher-level evidence granularity mismatch — confirmed / falsified / partially confirmed.
 
 3. Design assessment
-   - Fee authority hierarchy after the patch.
    - Broker account evidence model after the patch.
+   - Fee authority hierarchy after the patch.
    - How open_position_lots remains projection only.
    - What still fails closed.
 
@@ -786,11 +873,12 @@ When finished, produce a report with exactly these sections:
 
 5. Tests
    - Tests added/updated.
+   - Broker evidence / projection rebuild tests.
+   - Fallback quantity blocked test.
    - Multi-fill paid_fee allocation tests.
    - Fail-closed tests.
-   - Broker evidence / projection rebuild tests.
    - Cross-surface consistency tests.
-   - Regression tests for single-fill paid_fee and missing-fee cases.
+   - Regression tests for single-fill paid_fee and genuine missing-fee cases.
 
 6. Verification
    - Commands run.
@@ -804,5 +892,5 @@ When finished, produce a report with exactly these sections:
    - Expected output after the next live fill.
 ```
 
-The goal is not to make the bot ignore safety gates. The goal is to make the bot understand the evidence Bithumb actually provides, carry that evidence into canonical accounting and projection repair, and stop requiring manual recovery after every normal fill.
+The goal is not to make the bot less strict. The goal is to make it strict about the right evidence: typed, timestamped, currency-attributed broker account snapshots and auditable exchange fee evidence.
 

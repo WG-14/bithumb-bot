@@ -24,6 +24,8 @@ from .recovery_policy import (
     classify_canonical_tradeability_state,
 )
 
+_POSITION_REBUILD_LOCKED_ASSET_EPSILON = 1e-12
+
 
 @dataclass(frozen=True)
 class RuntimeReadinessSnapshot:
@@ -252,8 +254,11 @@ def build_broker_position_evidence(
     cash_available = _to_float_or_zero(metadata.get("broker_cash_available"))
     cash_locked = _to_float_or_zero(metadata.get("broker_cash_locked"))
     broker_qty = _to_float_or_zero(metadata.get("broker_asset_qty"))
-    if abs(broker_qty) <= 1e-12:
+    broker_qty_value_source = "broker_asset_qty" if "broker_asset_qty" in metadata else "missing"
+    if abs(broker_qty) <= 1e-12 and broker_qty_value_source == "missing":
         broker_qty = _to_float_or_zero(metadata.get("dust_broker_qty"))
+        if abs(broker_qty) > 1e-12:
+            broker_qty_value_source = "dust_broker_qty_fallback"
     base_currency = str(
         metadata.get("balance_source_base_currency")
         or metadata.get("base_currency")
@@ -278,6 +283,9 @@ def build_broker_position_evidence(
         missing_evidence_fields.append("broker_asset_available")
     if "broker_asset_locked" not in metadata:
         missing_evidence_fields.append("broker_asset_locked")
+    formal_position_fields_present = all(
+        key in metadata for key in ("broker_asset_qty", "broker_asset_available", "broker_asset_locked")
+    )
     currency_match = bool(
         base_currency
         and quote_currency
@@ -291,22 +299,36 @@ def build_broker_position_evidence(
     if quote_currency and quote_currency_expected and quote_currency != quote_currency_expected:
         missing_evidence_fields.append("quote_currency_mismatch")
     available_for_health = bool(source != "-" or observed_ts_ms > 0 or abs(broker_qty) > 1e-12)
-    broker_qty_known = bool(
+    formal_position_evidence_available = bool(
         observed_ts_ms > 0
         and not stale
         and currency_match
-        and "broker_asset_qty" in metadata
+        and formal_position_fields_present
+    )
+    position_rebuild_blockers: list[str] = []
+    if stale:
+        position_rebuild_blockers.append("balance_snapshot_stale")
+    if base_currency and base_currency_expected and base_currency != base_currency_expected:
+        position_rebuild_blockers.append("base_currency_mismatch")
+    if quote_currency and quote_currency_expected and quote_currency != quote_currency_expected:
+        position_rebuild_blockers.append("quote_currency_mismatch")
+    if formal_position_evidence_available and abs(asset_locked) > _POSITION_REBUILD_LOCKED_ASSET_EPSILON:
+        position_rebuild_blockers.append("broker_asset_locked_nonzero")
+    balance_snapshot_available_for_position_rebuild = bool(
+        formal_position_evidence_available and not position_rebuild_blockers
     )
     return {
-        "broker_qty_known": broker_qty_known,
+        "broker_qty_known": formal_position_evidence_available,
         "broker_qty": broker_qty,
+        "broker_qty_value_source": broker_qty_value_source,
         "broker_qty_evidence_source": source,
         "broker_qty_evidence_observed_ts_ms": observed_ts_ms,
         "balance_source": source,
         "balance_source_stale": stale,
         "balance_snapshot_available_for_health": available_for_health,
-        "balance_snapshot_available_for_position_rebuild": broker_qty_known,
+        "balance_snapshot_available_for_position_rebuild": balance_snapshot_available_for_position_rebuild,
         "missing_evidence_fields": missing_evidence_fields,
+        "position_rebuild_blockers": position_rebuild_blockers,
         "base_currency": base_currency or None,
         "quote_currency": quote_currency or None,
         "asset_available": asset_available,

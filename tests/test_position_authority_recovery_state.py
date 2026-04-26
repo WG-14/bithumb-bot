@@ -2642,6 +2642,85 @@ def test_recorded_projection_repair_without_publication_full_rebuild_refuses_rem
     assert "remote_open_orders=1" in preview["eligibility_reason"]
 
 
+def test_full_projection_rebuild_keeps_fallback_broker_qty_non_authoritative(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "balance_source": "accounts_v1_rest_snapshot",
+                "balance_observed_ts_ms": 1_777_191_428_883,
+                "remote_open_order_found": 0,
+                "unresolved_open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+                "dust_broker_qty": 0.00079982,
+                "dust_local_qty": 0.00079982,
+                "dust_delta_qty": 0.0,
+            },
+            now_epoch_sec=1.0,
+        )
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["broker_qty"] == pytest.approx(0.00079982)
+    assert preview["broker_qty_known"] is False
+    assert preview["broker_qty_value_source"] == "dust_broker_qty_fallback"
+    assert preview["balance_snapshot_available_for_health"] is True
+    assert preview["balance_snapshot_available_for_position_rebuild"] is False
+    assert preview["safe_to_apply"] is False
+    assert "base_currency" in preview["missing_evidence_fields"]
+    assert "quote_currency" in preview["missing_evidence_fields"]
+    assert "broker_asset_qty" in preview["missing_evidence_fields"]
+    assert "broker_asset_available" in preview["missing_evidence_fields"]
+    assert "broker_asset_locked" in preview["missing_evidence_fields"]
+    assert "broker_position_qty_evidence_missing" in preview["eligibility_reason"]
+
+
+def test_full_projection_rebuild_refuses_locked_broker_asset_even_with_formal_snapshot(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        runtime_state.record_reconcile_result(
+            success=True,
+            reason_code="RECONCILE_OK",
+            metadata={
+                "balance_observed_ts_ms": 1_776_745_500_000,
+                "balance_asset_ts_ms": 1_776_745_500_000,
+                "balance_source": "accounts_v1_rest_snapshot",
+                "balance_source_stale": False,
+                "balance_source_quote_currency": "KRW",
+                "balance_source_base_currency": "BTC",
+                "broker_asset_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "broker_asset_available": LIVE_INCIDENT_PORTFOLIO_QTY - 0.0001,
+                "broker_asset_locked": 0.0001,
+                "broker_cash_available": OBSERVED_LIVE_CASH_KRW,
+                "broker_cash_locked": 0.0,
+                "remote_open_order_found": 0,
+                "unresolved_open_order_count": 0,
+                "submit_unknown_count": 0,
+                "recovery_required_count": 0,
+                "dust_broker_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "dust_local_qty": LIVE_INCIDENT_PORTFOLIO_QTY,
+                "dust_delta_qty": 0.0,
+            },
+            now_epoch_sec=1.0,
+        )
+        preview = build_position_authority_rebuild_preview(conn, full_projection_rebuild=True)
+    finally:
+        conn.close()
+
+    assert preview["broker_qty_known"] is True
+    assert preview["balance_snapshot_available_for_position_rebuild"] is False
+    assert preview["position_rebuild_blockers"] == ["broker_asset_locked_nonzero"]
+    assert preview["asset_locked"] == pytest.approx(0.0001)
+    assert preview["safe_to_apply"] is False
+    assert "broker_asset_locked_nonzero" in preview["eligibility_reason"]
+
+
 def test_recorded_projection_repair_without_publication_full_rebuild_refuses_accounting_mismatch(
     recovery_db,
 ):

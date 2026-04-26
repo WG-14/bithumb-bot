@@ -3097,6 +3097,7 @@ def _load_recovery_report(
         "broker_portfolio_converged": broker_portfolio_converged,
         "broker_qty_known": broker_qty_known,
         "broker_qty": broker_qty,
+        "broker_qty_value_source": broker_position_evidence.get("broker_qty_value_source"),
         "broker_qty_evidence_source": broker_position_evidence.get("broker_qty_evidence_source"),
         "broker_qty_evidence_observed_ts_ms": broker_position_evidence.get("broker_qty_evidence_observed_ts_ms"),
         "balance_source": broker_position_evidence.get("balance_source"),
@@ -3108,6 +3109,13 @@ def _load_recovery_report(
             "balance_snapshot_available_for_position_rebuild"
         ),
         "missing_evidence_fields": list(broker_position_evidence.get("missing_evidence_fields") or []),
+        "position_rebuild_blockers": list(broker_position_evidence.get("position_rebuild_blockers") or []),
+        "base_currency": broker_position_evidence.get("base_currency"),
+        "quote_currency": broker_position_evidence.get("quote_currency"),
+        "asset_available": broker_position_evidence.get("asset_available"),
+        "asset_locked": broker_position_evidence.get("asset_locked"),
+        "cash_available": broker_position_evidence.get("cash_available"),
+        "cash_locked": broker_position_evidence.get("cash_locked"),
         "portfolio_qty": portfolio_qty,
         "lot_projection_converged": lot_projection_converged,
         "live_ready": bool(runtime_readiness_snapshot.get("resume_ready")),
@@ -3680,12 +3688,24 @@ def cmd_repair_plan(*, as_json: bool = False) -> None:
     print(
         "  "
         f"broker_qty_evidence_source={plan.get('broker_qty_evidence_source') or '-'} "
+        f"broker_qty_value_source={plan.get('broker_qty_value_source') or '-'} "
         f"broker_qty_evidence_observed_ts_ms={int(plan.get('broker_qty_evidence_observed_ts_ms') or 0)} "
         f"balance_snapshot_available_for_health={1 if bool(plan.get('balance_snapshot_available_for_health')) else 0} "
         "balance_snapshot_available_for_position_rebuild="
         f"{1 if bool(plan.get('balance_snapshot_available_for_position_rebuild')) else 0} "
         "missing_evidence_fields="
         f"{'|'.join(str(item) for item in (plan.get('missing_evidence_fields') or [])) or 'none'}"
+    )
+    print(
+        "  "
+        f"base_currency={plan.get('base_currency') or '-'} "
+        f"quote_currency={plan.get('quote_currency') or '-'} "
+        f"asset_available={float(plan.get('asset_available') or 0.0):.12f} "
+        f"asset_locked={float(plan.get('asset_locked') or 0.0):.12f} "
+        f"cash_available={float(plan.get('cash_available') or 0.0):.2f} "
+        f"cash_locked={float(plan.get('cash_locked') or 0.0):.2f} "
+        "position_rebuild_blockers="
+        f"{'|'.join(str(item) for item in (plan.get('position_rebuild_blockers') or [])) or 'none'}"
     )
     print(
         "  "
@@ -4217,12 +4237,24 @@ def cmd_rebuild_position_authority(
         print(
             "  "
             f"broker_qty_evidence_source={preview.get('broker_qty_evidence_source') or '-'} "
+            f"broker_qty_value_source={preview.get('broker_qty_value_source') or '-'} "
             f"broker_qty_evidence_observed_ts_ms={int(preview.get('broker_qty_evidence_observed_ts_ms') or 0)} "
             f"balance_snapshot_available_for_health={1 if bool(preview.get('balance_snapshot_available_for_health')) else 0} "
             "balance_snapshot_available_for_position_rebuild="
             f"{1 if bool(preview.get('balance_snapshot_available_for_position_rebuild')) else 0} "
             "missing_evidence_fields="
             f"{'|'.join(str(item) for item in (preview.get('missing_evidence_fields') or [])) or 'none'}"
+        )
+        print(
+            "  "
+            f"base_currency={preview.get('base_currency') or '-'} "
+            f"quote_currency={preview.get('quote_currency') or '-'} "
+            f"asset_available={float(preview.get('asset_available') or 0.0):.12f} "
+            f"asset_locked={float(preview.get('asset_locked') or 0.0):.12f} "
+            f"cash_available={float(preview.get('cash_available') or 0.0):.2f} "
+            f"cash_locked={float(preview.get('cash_locked') or 0.0):.2f} "
+            "position_rebuild_blockers="
+            f"{'|'.join(str(item) for item in (preview.get('position_rebuild_blockers') or [])) or 'none'}"
         )
         if preview.get("portfolio_anchor_missing_evidence") or preview.get("manual_projection_missing_evidence"):
             print(
