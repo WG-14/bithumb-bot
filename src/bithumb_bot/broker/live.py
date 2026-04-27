@@ -2169,7 +2169,9 @@ def _determine_live_execution_position_state(
             "accounting_projection_ok": bool(readiness_payload.get("projection_converged")),
             "projection_converged": bool(readiness_payload.get("projection_converged")),
             "open_order_count": int(readiness_payload.get("open_order_count") or 0),
+            "unresolved_open_order_count": int(readiness_payload.get("unresolved_open_order_count") or 0),
             "recovery_required_count": int(readiness_payload.get("recovery_required_count") or 0),
+            "submit_unknown_count": int(readiness_payload.get("submit_unknown_count") or 0),
             "broker_position_evidence": dict(readiness_payload.get("broker_position_evidence") or {}),
             "residual_inventory": dict(readiness_payload.get("residual_inventory") or {}),
         }

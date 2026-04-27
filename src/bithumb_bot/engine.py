@@ -67,6 +67,7 @@ from .oms import collect_risky_order_state
 from .flatten import flatten_btc_position
 from .execution_service import (
     SignalExecutionRequest,
+    build_execution_decision_summary,
     build_signal_execution_service,
     live_execute_signal,
     paper_execute,
@@ -3025,6 +3026,45 @@ def run_loop(short_n: int, long_n: int) -> None:
                 strategy_name = str(context.pop("strategy", settings.STRATEGY_NAME))
                 signal = str(context.pop("signal", "HOLD"))
                 reason = str(context.pop("reason", ""))
+                readiness_payload: dict[str, object] = {}
+                try:
+                    readiness_payload = compute_runtime_readiness_snapshot(conn).as_dict()
+                    execution_decision = build_execution_decision_summary(
+                        decision_context=context,
+                        readiness_payload=readiness_payload,
+                        raw_signal=str(context.get("raw_signal") or context.get("base_signal") or signal),
+                        final_signal=signal,
+                        final_reason=reason,
+                    ).as_dict()
+                    context["execution_decision"] = execution_decision
+                    context["final_action"] = execution_decision["final_action"]
+                    context["submit_expected"] = execution_decision["submit_expected"]
+                    context["pre_submit_proof_status"] = execution_decision["pre_submit_proof_status"]
+                    context["execution_block_reason"] = execution_decision["block_reason"]
+                    for key in (
+                        "residual_inventory_mode",
+                        "residual_inventory_state",
+                        "residual_inventory_policy_allows_run",
+                        "residual_inventory_policy_allows_buy",
+                        "residual_inventory_policy_allows_sell",
+                        "residual_inventory_qty",
+                        "residual_inventory_notional_krw",
+                        "residual_inventory_exchange_sellable",
+                        "total_effective_exposure_qty",
+                        "total_effective_exposure_notional_krw",
+                        "residual_sell_candidate",
+                        "unresolved_open_order_count",
+                        "submit_unknown_count",
+                    ):
+                        if key in readiness_payload:
+                            context[key] = readiness_payload[key]
+                except Exception as exc:
+                    context["execution_decision"] = {
+                        "final_action": "BLOCK_RECOVERY",
+                        "submit_expected": False,
+                        "pre_submit_proof_status": "failed",
+                        "block_reason": f"execution_decision_unavailable:{type(exc).__name__}",
+                    }
                 exit_ctx = context.get("exit")
                 if isinstance(exit_ctx, dict):
                     raw_rule = exit_ctx.get("rule")
@@ -3049,6 +3089,11 @@ def run_loop(short_n: int, long_n: int) -> None:
                     raw_qty_open=f"{float(context.get('raw_qty_open', 0.0) or 0.0):.8f}",
                     normalized_exposure_active=1 if bool(context.get("normalized_exposure_active")) else 0,
                     normalized_exposure_qty=f"{float(context.get('normalized_exposure_qty', 0.0) or 0.0):.8f}",
+                    final_action=str(context.get("final_action") or "-"),
+                    submit_expected=1 if bool(context.get("submit_expected")) else 0,
+                    pre_submit_proof_status=str(context.get("pre_submit_proof_status") or "-"),
+                    execution_block_reason=str(context.get("execution_block_reason") or "-"),
+                    residual_inventory_state=str(context.get("residual_inventory_state") or "-"),
                     reason=reason,
                 )
                 try:

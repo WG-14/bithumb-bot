@@ -67,7 +67,7 @@ Current sections and payload groups:
 - `[STRATEGY-SUMMARY]`: per-strategy order/fill counts, notionals, fee totals, and the current `pnl_proxy_deprecated` compatibility field.
 - `[RECENT-STRATEGY-ORDER-FILL-FLOW]`: recent order-event flow with submission reason, sell-boundary diagnostics, and operator-facing notes.
 - `[RECENT-SELL-SUPPRESSIONS]`: recent SELL suppression outcomes including suppression category/detail, lot count, qty boundary inputs, dust/operator action, and summary text.
-- `[RECENT-STRATEGY-DECISION-FLOW]`: recent strategy decisions with raw/base/final signals, entry gating, normalized exposure diagnostics, sell-boundary fields, and final reason text.
+- `[RECENT-STRATEGY-DECISION-FLOW]`: recent strategy decisions with raw/base/final signals, explicit `final_action`, `submit_expected`, pre-submit proof status, entry gating, normalized exposure diagnostics, sell-boundary fields, and final reason text.
 - `[RECENT-TRADES-OPERATIONS]`: recent trade ledger operations and rolling fee total.
 - `[FEE-DIAGNOSTICS-SNAPSHOT]`: compact fee/fill and round-trip diagnostics included alongside the ops snapshot.
 

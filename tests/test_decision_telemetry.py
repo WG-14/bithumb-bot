@@ -1044,3 +1044,52 @@ def test_record_strategy_decision_keeps_cost_edge_block_reason(tmp_path, monkeyp
     assert ctx["decision_type"] == "BLOCKED_ENTRY"
     assert ctx["blocked_filters"] == ["cost_edge"]
     assert ctx["entry_reason"] == "filtered entry: cost_edge"
+
+
+def test_record_strategy_decision_preserves_residual_execution_action(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "decision-residual-action.sqlite")
+    monkeypatch.setenv("DB_PATH", db_path)
+    object.__setattr__(settings, "DB_PATH", db_path)
+
+    conn = ensure_db()
+    try:
+        record_strategy_decision(
+            conn,
+            decision_ts=10,
+            strategy_name="sma_with_filter",
+            signal="HOLD",
+            reason="dust_only_remainder",
+            candle_ts=10,
+            market_price=115_679_000.0,
+            context={
+                "raw_signal": "SELL",
+                "final_signal": "HOLD",
+                "execution_decision": {
+                    "final_action": "CLOSE_RESIDUAL_CANDIDATE",
+                    "submit_expected": False,
+                    "pre_submit_proof_status": "passed_telemetry_only",
+                    "block_reason": "residual_live_submit_disabled",
+                    "residual_sell_candidate": {
+                        "source": "residual_inventory",
+                        "qty": 0.0004998,
+                        "notional": 57_816.0,
+                    },
+                },
+            },
+        )
+        conn.commit()
+        row = conn.execute("SELECT context_json FROM strategy_decisions ORDER BY id DESC LIMIT 1").fetchone()
+        recent = fetch_recent_decision_flow(conn, limit=1)
+    finally:
+        conn.close()
+
+    assert row is not None
+    ctx = json.loads(str(row["context_json"]))
+    assert ctx["final_action"] == "CLOSE_RESIDUAL_CANDIDATE"
+    assert ctx["submit_expected"] is False
+    assert ctx["pre_submit_proof_status"] == "passed_telemetry_only"
+    assert ctx["execution_block_reason"] == "residual_live_submit_disabled"
+    assert ctx["decision_summary"]["final_action"] == "CLOSE_RESIDUAL_CANDIDATE"
+    assert recent[0].final_action == "CLOSE_RESIDUAL_CANDIDATE"
+    assert recent[0].submit_expected is False
+    assert recent[0].pre_submit_proof_status == "passed_telemetry_only"

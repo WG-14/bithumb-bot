@@ -312,6 +312,10 @@ class DecisionTelemetrySummary:
     decision_type: str
     raw_signal: str
     final_signal: str
+    final_action: str
+    submit_expected: bool
+    pre_submit_proof_status: str
+    execution_block_reason: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -808,6 +812,10 @@ class RecentDecisionFlowSummary:
     base_signal: str
     raw_signal: str
     final_signal: str
+    final_action: str
+    submit_expected: bool
+    pre_submit_proof_status: str
+    execution_block_reason: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -1493,6 +1501,19 @@ def fetch_recent_decision_flow(
             COALESCE(json_extract(context_json, '$.base_signal'), json_extract(context_json, '$.raw_signal'), signal) AS base_signal,
             COALESCE(json_extract(context_json, '$.raw_signal'), json_extract(context_json, '$.base_signal'), signal) AS raw_signal,
             COALESCE(json_extract(context_json, '$.final_signal'), signal) AS final_signal,
+            COALESCE(json_extract(context_json, '$.final_action'), json_extract(context_json, '$.decision_summary.final_action'), 'STRATEGY_HOLD') AS final_action,
+            COALESCE(
+                CAST(json_extract(context_json, '$.submit_expected') AS INTEGER),
+                CAST(json_extract(context_json, '$.decision_summary.submit_expected') AS INTEGER),
+                0
+            ) AS submit_expected,
+            COALESCE(json_extract(context_json, '$.pre_submit_proof_status'), json_extract(context_json, '$.decision_summary.pre_submit_proof_status'), 'not_required') AS pre_submit_proof_status,
+            COALESCE(
+                NULLIF(json_extract(context_json, '$.execution_block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.decision_summary.execution_block_reason'), ''),
+                NULLIF(json_extract(context_json, '$.execution_decision.block_reason'), ''),
+                'none'
+            ) AS execution_block_reason,
             COALESCE(
                 CAST(json_extract(context_json, '$.entry_blocked') AS INTEGER),
                 CASE
@@ -1771,6 +1792,10 @@ def fetch_recent_decision_flow(
                 base_signal=str(row["base_signal"]),
                 raw_signal=str(row["raw_signal"]),
                 final_signal=str(row["final_signal"]),
+                final_action=str(row["final_action"]),
+                submit_expected=bool(row["submit_expected"]),
+                pre_submit_proof_status=str(row["pre_submit_proof_status"]),
+                execution_block_reason=str(row["execution_block_reason"]),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(row["raw_signal"]),
                     final_signal=str(row["final_signal"]),
@@ -1880,6 +1905,27 @@ def fetch_decision_telemetry_summary(
         decision_type = str(context.get("decision_type") or row["signal"])
         raw_signal = str(context.get("raw_signal") or context.get("base_signal") or row["signal"])
         final_signal = str(context.get("final_signal") or row["signal"])
+        final_action = str(
+            context.get("final_action")
+            or context.get("decision_summary", {}).get("final_action")
+            or "STRATEGY_HOLD"
+        )
+        submit_expected = bool(
+            context.get("submit_expected")
+            if "submit_expected" in context
+            else context.get("decision_summary", {}).get("submit_expected", False)
+        )
+        pre_submit_proof_status = str(
+            context.get("pre_submit_proof_status")
+            or context.get("decision_summary", {}).get("pre_submit_proof_status")
+            or "not_required"
+        )
+        execution_block_reason = str(
+            context.get("execution_block_reason")
+            or context.get("decision_summary", {}).get("execution_block_reason")
+            or context.get("execution_decision", {}).get("block_reason")
+            or "none"
+        )
         entry_blocked = bool(
             context.get("entry_blocked")
             if "entry_blocked" in context
@@ -1917,6 +1963,10 @@ def fetch_decision_telemetry_summary(
             decision_type,
             raw_signal,
             final_signal,
+            final_action,
+            submit_expected,
+            pre_submit_proof_status,
+            execution_block_reason,
             entry_blocked,
             exposure.entry_allowed,
             strategy_name,
@@ -1945,42 +1995,46 @@ def fetch_decision_telemetry_summary(
         grouped[key] = grouped.get(key, 0) + 1
 
     summaries = [
-        DecisionTelemetrySummary(
-            base_signal=str(key[0]),
-            decision_type=str(key[1]),
-            raw_signal=str(key[2]),
-            final_signal=str(key[3]),
-            buy_flow_state=_derive_buy_flow_state(
+            DecisionTelemetrySummary(
+                base_signal=str(key[0]),
+                decision_type=str(key[1]),
                 raw_signal=str(key[2]),
                 final_signal=str(key[3]),
-                entry_blocked=bool(key[4]),
-            ),
-            entry_blocked=bool(key[4]),
-            entry_allowed=bool(key[5]),
-            block_reason=str(key[9]),
-            dust_classification=str(key[10]),
-            effective_flat=bool(key[11]),
-            raw_qty_open=float(key[12]),
-            raw_total_asset_qty=float(key[13]),
-            position_qty=float(key[14]),
-            submit_payload_qty=float(key[15]),
-            normalized_exposure_active=bool(key[16]),
-            normalized_exposure_qty=float(key[17]),
-            open_exposure_qty=float(key[18]),
-            dust_tracking_qty=float(key[19]),
-            sell_open_exposure_qty=float(key[20]),
-            sell_dust_tracking_qty=float(key[21]),
-            sell_qty_basis_qty=float(key[22]),
-            sell_qty_boundary_kind=str(key[23]),
-            sell_submit_lot_count=int(key[26]),
-            sell_normalized_exposure_qty=float(key[27]),
-            sell_failure_category=str(key[24]),
-            sell_failure_detail=str(key[25]),
-            strategy_name=str(key[6]),
-            pair=str(key[7]),
-            interval=str(key[8]),
-            count=count,
-        )
+                final_action=str(key[4]),
+                submit_expected=bool(key[5]),
+                pre_submit_proof_status=str(key[6]),
+                execution_block_reason=str(key[7]),
+                buy_flow_state=_derive_buy_flow_state(
+                    raw_signal=str(key[2]),
+                    final_signal=str(key[3]),
+                    entry_blocked=bool(key[8]),
+                ),
+                entry_blocked=bool(key[8]),
+                entry_allowed=bool(key[9]),
+                block_reason=str(key[13]),
+                dust_classification=str(key[14]),
+                effective_flat=bool(key[15]),
+                raw_qty_open=float(key[16]),
+                raw_total_asset_qty=float(key[17]),
+                position_qty=float(key[18]),
+                submit_payload_qty=float(key[19]),
+                normalized_exposure_active=bool(key[20]),
+                normalized_exposure_qty=float(key[21]),
+                open_exposure_qty=float(key[22]),
+                dust_tracking_qty=float(key[23]),
+                sell_open_exposure_qty=float(key[24]),
+                sell_dust_tracking_qty=float(key[25]),
+                sell_qty_basis_qty=float(key[26]),
+                sell_qty_boundary_kind=str(key[27]),
+                sell_submit_lot_count=int(key[30]),
+                sell_normalized_exposure_qty=float(key[31]),
+                sell_failure_category=str(key[28]),
+                sell_failure_detail=str(key[29]),
+                strategy_name=str(key[10]),
+                pair=str(key[11]),
+                interval=str(key[12]),
+                count=count,
+            )
         for key, count in grouped.items()
     ]
     summaries.sort(
@@ -4297,6 +4351,8 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 "  "
                 f"{kst_str(int(row.decision_ts))} decision_id={row.decision_id} strategy={row.strategy_name} "
                 f"base={row.base_signal} raw={row.raw_signal} final={row.final_signal} "
+                f"final_action={row.final_action} submit_expected={1 if row.submit_expected else 0} "
+                f"pre_submit_proof={row.pre_submit_proof_status} execution_block_reason={row.execution_block_reason} "
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "

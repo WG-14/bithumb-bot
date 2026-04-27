@@ -23,6 +23,7 @@ from bithumb_bot.engine import (
     evaluate_startup_safety_gate,
     get_health_status,
 )
+from bithumb_bot.execution_service import build_execution_decision_summary
 from bithumb_bot.execution import apply_fill_and_trade, apply_fill_principal_with_pending_fee, record_order_if_missing
 from bithumb_bot.external_position_repair import (
     apply_external_position_accounting_repair,
@@ -2646,6 +2647,47 @@ def test_broker_matched_residual_only_holdings_track_mode_resume_as_tracked_inve
     assert payload["residual_sell_candidate_allowed"] is True
     assert payload["residual_sell_candidate"]["source"] == "residual_inventory"
     assert payload["total_effective_exposure_qty"] == pytest.approx(RESIDUAL_INCIDENT_PORTFOLIO_QTY)
+    assert payload["unresolved_open_order_count"] == 0
+    assert payload["submit_unknown_count"] == 0
+
+    sell_decision = build_execution_decision_summary(
+        decision_context={
+            "raw_signal": "SELL",
+            "final_signal": "HOLD",
+            "has_dust_only_remainder": True,
+            "exit_allowed": False,
+            "exit_block_reason": "dust_only_remainder",
+            "sellable_executable_lot_count": 0,
+            "sellable_executable_qty": 0.0,
+        },
+        readiness_payload=payload,
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert sell_decision.final_action == "CLOSE_RESIDUAL_CANDIDATE"
+    assert sell_decision.submit_expected is False
+    assert sell_decision.pre_submit_proof_status == "passed_telemetry_only"
+    assert sell_decision.residual_sell_candidate is not None
+    assert sell_decision.strategy_sell_candidate is None
+
+    buy_decision = build_execution_decision_summary(
+        decision_context={
+            "raw_signal": "BUY",
+            "final_signal": "HOLD",
+            "entry_block_reason": "dust_only_remainder",
+        },
+        readiness_payload=payload,
+        raw_signal="BUY",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert buy_decision.current_effective_exposure_krw == pytest.approx(
+        payload["total_effective_exposure_notional_krw"]
+    )
+    assert buy_decision.tracked_residual_exposure_krw == pytest.approx(
+        payload["residual_inventory_notional_krw"]
+    )
 
 
 def test_broker_matched_residual_only_holdings_track_mode_still_fails_closed_when_broker_evidence_stale(

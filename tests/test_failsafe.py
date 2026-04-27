@@ -12,7 +12,11 @@ from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
-from bithumb_bot.execution_service import build_residual_sell_candidate, build_residual_sell_presubmit_proof
+from bithumb_bot.execution_service import (
+    build_execution_decision_summary,
+    build_residual_sell_candidate,
+    build_residual_sell_presubmit_proof,
+)
 from bithumb_bot.marketdata import _get_with_retry
 from bithumb_bot.public_api_orderbook import BestQuote
 
@@ -821,6 +825,27 @@ def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_author
     assert context["sellable_executable_lot_count"] == 0
     assert proof.passed is True
 
+    decision = build_execution_decision_summary(
+        decision_context={
+            **context,
+            "raw_signal": "SELL",
+            "final_signal": "HOLD",
+            "has_dust_only_remainder": True,
+            "exit_block_reason": "dust_only_remainder",
+        },
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+
+    assert decision.final_action == "CLOSE_RESIDUAL_CANDIDATE"
+    assert decision.submit_expected is False
+    assert decision.pre_submit_proof_status == "passed_telemetry_only"
+    assert decision.block_reason == "residual_live_submit_disabled"
+    assert decision.strategy_sell_candidate is None
+    assert decision.residual_sell_candidate is not None
+    assert decision.residual_sell_candidate["qty"] == pytest.approx(0.0004998)
+
 
 def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() -> None:
     context = {
@@ -852,6 +877,65 @@ def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() ->
     assert candidate is None
     assert proof.passed is False
     assert "missing_residual_sell_candidate" in proof.reasons
+
+    decision = build_execution_decision_summary(
+        decision_context={
+            **context,
+            "raw_signal": "SELL",
+            "final_signal": "HOLD",
+            "has_dust_only_remainder": True,
+            "exit_block_reason": "dust_only_remainder",
+        },
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+
+    assert decision.final_action == "HOLD_TRACKED_DUST"
+    assert decision.submit_expected is False
+    assert decision.residual_sell_candidate is None
+    assert decision.block_reason == "below_min_qty_or_min_notional"
+
+
+def test_residual_sell_proof_fails_closed_for_submit_unknown() -> None:
+    context = {
+        "signal": "SELL",
+        "residual_inventory_mode": "track",
+        "residual_inventory_state": "RESIDUAL_INVENTORY_TRACKED",
+        "residual_inventory_policy_allows_sell": True,
+        "residual_inventory": {
+            "residual_qty": 0.0004998,
+            "residual_notional_krw": 57_816.0,
+            "residual_classes": ["SELLABLE_RESIDUAL"],
+            "exchange_sellable": True,
+        },
+        "projection_converged": True,
+        "accounting_projection_ok": True,
+        "open_order_count": 0,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 1,
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": 0.0004998,
+            "balance_source_stale": False,
+        },
+    }
+
+    proof = build_residual_sell_presubmit_proof(context)
+    decision = build_execution_decision_summary(
+        decision_context={**context, "raw_signal": "SELL", "final_signal": "HOLD"},
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+
+    assert proof.passed is False
+    assert "submit_unknown_count_nonzero" in proof.reasons
+    assert decision.final_action == "BLOCK_UNRESOLVED_RESIDUAL"
+    assert decision.submit_expected is False
+    assert decision.pre_submit_proof_status == "failed"
+    assert decision.block_reason == "submit_unknown_count_nonzero"
 
 
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):

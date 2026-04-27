@@ -126,12 +126,16 @@ Interpretation:
 sudo systemctl restart bithumb-bot.service
 sudo systemctl status bithumb-bot.service
 sudo journalctl -u bithumb-bot.service -n 100 --no-pager
+sudo journalctl -u bithumb-bot.service -f
 
 uv run bithumb-bot health
 uv run bithumb-bot recovery-report
 ```
 
 - Confirm the service is `active (running)`.
+- For the rendered `bithumb-bot.service`, `StandardOutput=journal` and `StandardError=journal`.
+  Treat `journalctl -u bithumb-bot.service -f` as the canonical live log stream unless the unit is explicitly changed to redirect stdout/stderr to a managed runtime log file.
+  File logs remain useful supporting evidence, but a quiet file log does not prove the systemd process is stopped.
 - Confirm `last_candle_age_sec`, `error_count`, and `trading_enabled` are healthy.
 - Confirm `recovery-report` still shows no unresolved or recovery-required order state.
 
@@ -183,15 +187,17 @@ uv run bithumb-bot resume
 
 ## Recovery Checklist
 
-1. Check `journalctl` for the last error cause.
+1. Check `journalctl -u bithumb-bot.service` for the last live-loop decision or error cause.
 2. Run `uv run bithumb-bot recovery-report`.
 3. Confirm `unresolved_count` and `recovery_required_count` are both zero.
 4. Confirm `[P2] resume_eligibility` shows `resume_allowed=1`, `can_resume=true`, and no active blockers.
 5. Review `[P3] dust_residual` and `[P3.1] lot_exposure`.
-6. Do not treat a clear unresolved count alone as sufficient if `dust_state=blocking_dust`, `dust_resume_allowed=0`, `sellable_executable_qty=0`, or `exit_block_reason` still indicates a lot/dust boundary blocker.
-7. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
-8. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
-9. Resume only after the state is understood.
+6. Review recent strategy decision flow for `raw_signal`, `final_signal`, `final_action`, `submit_expected`, `pre_submit_proof`, and `execution_block_reason`.
+7. Do not treat a clear unresolved count alone as sufficient if `dust_state=blocking_dust`, `dust_resume_allowed=0`, `sellable_executable_qty=0`, or `exit_block_reason` still indicates a lot/dust boundary blocker.
+   If `residual_inventory_state=RESIDUAL_INVENTORY_TRACKED` and `final_action=CLOSE_RESIDUAL_CANDIDATE`, treat it as residual-inventory telemetry unless an explicit residual-submit policy is enabled; do not manually flatten only because the strategy final signal is `HOLD`.
+8. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
+9. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
+10. Resume only after the state is understood.
 
 ### Position Authority Projection Drift
 

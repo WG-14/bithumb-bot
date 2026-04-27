@@ -1129,6 +1129,21 @@ def normalize_strategy_decision_context(
         payload=payload,
     )
     position_state_source = submit_lot_source
+    execution_decision = (
+        dict(payload.get("execution_decision"))
+        if isinstance(payload.get("execution_decision"), dict)
+        else {}
+    )
+    final_action = _as_text(execution_decision.get("final_action", payload.get("final_action")), default="")
+    submit_expected = _as_bool(execution_decision.get("submit_expected", payload.get("submit_expected")))
+    pre_submit_proof_status = _as_text(
+        execution_decision.get("pre_submit_proof_status", payload.get("pre_submit_proof_status")),
+        default="not_required",
+    )
+    execution_block_reason = _as_text(
+        execution_decision.get("block_reason", payload.get("execution_block_reason")),
+        default="none",
+    )
 
     decision_summary = {
         "raw_signal": raw_signal,
@@ -1174,6 +1189,10 @@ def normalize_strategy_decision_context(
         "sell_dust_tracking_qty": float(sell_dust_tracking_qty),
         "sell_failure_category": sell_failure_category,
         "sell_failure_detail": sell_failure_detail,
+        "final_action": final_action or "STRATEGY_HOLD",
+        "submit_expected": bool(submit_expected),
+        "pre_submit_proof_status": pre_submit_proof_status,
+        "execution_block_reason": execution_block_reason,
     }
 
     payload["decision_context_version"] = _CANONICAL_CONTEXT_VERSION
@@ -1228,6 +1247,17 @@ def normalize_strategy_decision_context(
     payload["sell_dust_tracking_qty"] = float(sell_dust_tracking_qty)
     payload["sell_failure_category"] = sell_failure_category
     payload["sell_failure_detail"] = sell_failure_detail
+    if final_action:
+        payload["final_action"] = final_action
+    payload["submit_expected"] = bool(submit_expected)
+    payload["pre_submit_proof_status"] = pre_submit_proof_status
+    payload["execution_block_reason"] = execution_block_reason
+    if execution_decision:
+        execution_decision["final_action"] = final_action or str(execution_decision.get("final_action") or "STRATEGY_HOLD")
+        execution_decision["submit_expected"] = bool(submit_expected)
+        execution_decision["pre_submit_proof_status"] = pre_submit_proof_status
+        execution_decision["block_reason"] = execution_block_reason
+        payload["execution_decision"] = execution_decision
     payload["decision_summary"] = decision_summary
     if authority_anomalies:
         payload["authority_anomalies"] = authority_anomalies

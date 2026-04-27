@@ -54,7 +54,9 @@ class RuntimeReadinessSnapshot:
     material_zero_fee_fill_count: int
     fee_gap_incident: Any
     open_order_count: int
+    unresolved_open_order_count: int
     recovery_required_count: int
+    submit_unknown_count: int
     position_authority_assessment: dict[str, object]
     projection_convergence: dict[str, object]
     canonical_state: str
@@ -119,7 +121,9 @@ class RuntimeReadinessSnapshot:
             "material_zero_fee_fill_count": int(self.material_zero_fee_fill_count),
             "fee_gap_incident": self.fee_gap_incident.as_dict(),
             "open_order_count": int(self.open_order_count),
+            "unresolved_open_order_count": int(self.unresolved_open_order_count),
             "recovery_required_count": int(self.recovery_required_count),
+            "submit_unknown_count": int(self.submit_unknown_count),
             "position_authority_assessment": dict(self.position_authority_assessment),
             "position_authority_alignment_state": str(
                 self.position_authority_assessment.get("alignment_state") or "unknown"
@@ -572,6 +576,10 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             """
             SELECT
                 COUNT(*) AS open_order_count,
+                COALESCE(SUM(CASE WHEN status IN ('PENDING_SUBMIT', 'NEW', 'PARTIAL', 'ACCOUNTING_PENDING', 'CANCEL_REQUESTED') THEN 1 ELSE 0 END), 0)
+                    AS unresolved_open_order_count,
+                COALESCE(SUM(CASE WHEN status='SUBMIT_UNKNOWN' THEN 1 ELSE 0 END), 0)
+                    AS submit_unknown_count,
                 COALESCE(SUM(CASE WHEN status='ACCOUNTING_PENDING' THEN 1 ELSE 0 END), 0)
                     AS accounting_pending_count,
                 COALESCE(SUM(CASE WHEN status='RECOVERY_REQUIRED' THEN 1 ELSE 0 END), 0)
@@ -583,6 +591,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             """
         ).fetchone()
         open_order_count = _row_int(open_row, "open_order_count")
+        unresolved_open_order_count = _row_int(open_row, "unresolved_open_order_count")
+        submit_unknown_count = _row_int(open_row, "submit_unknown_count")
         accounting_pending_count = _row_int(open_row, "accounting_pending_count")
         recovery_required_count = _row_int(open_row, "recovery_required_count")
 
@@ -1166,7 +1176,9 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             material_zero_fee_fill_count=material_zero_fee_fill_count,
             fee_gap_incident=fee_gap_incident,
             open_order_count=open_order_count,
+            unresolved_open_order_count=unresolved_open_order_count,
             recovery_required_count=recovery_required_count,
+            submit_unknown_count=submit_unknown_count,
             position_authority_assessment=authority_assessment,
             projection_convergence=projection_convergence,
             canonical_state=canonical_recovery.canonical_state,
