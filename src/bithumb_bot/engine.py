@@ -3041,6 +3041,8 @@ def run_loop(short_n: int, long_n: int) -> None:
                     context["submit_expected"] = execution_decision["submit_expected"]
                     context["pre_submit_proof_status"] = execution_decision["pre_submit_proof_status"]
                     context["execution_block_reason"] = execution_decision["block_reason"]
+                    context["residual_live_sell_mode"] = execution_decision.get("residual_live_sell_mode")
+                    context["residual_buy_sizing_mode"] = execution_decision.get("residual_buy_sizing_mode")
                     for key in (
                         "residual_inventory_mode",
                         "residual_inventory_state",

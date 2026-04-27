@@ -7,12 +7,14 @@ import httpx
 import pytest
 
 from bithumb_bot import runtime_state
-from bithumb_bot.broker.base import BrokerBalance, BrokerRejectError
+from bithumb_bot.broker.base import BrokerBalance, BrokerOrder, BrokerRejectError
 from bithumb_bot.broker.balance_source import _default_flat_start_safety_check
 from bithumb_bot.config import settings
 from bithumb_bot.db_core import ensure_db
 from bithumb_bot.engine import get_health_status, run_loop
 from bithumb_bot.execution_service import (
+    LiveSignalExecutionService,
+    SignalExecutionRequest,
     build_execution_decision_summary,
     build_residual_sell_candidate,
     build_residual_sell_presubmit_proof,
@@ -35,6 +37,8 @@ def _isolated_db(tmp_path):
         "KILL_SWITCH_LIQUIDATE": settings.KILL_SWITCH_LIQUIDATE,
         "BITHUMB_API_KEY": settings.BITHUMB_API_KEY,
         "BITHUMB_API_SECRET": settings.BITHUMB_API_SECRET,
+        "RESIDUAL_LIVE_SELL_MODE": settings.RESIDUAL_LIVE_SELL_MODE,
+        "RESIDUAL_BUY_SIZING_MODE": settings.RESIDUAL_BUY_SIZING_MODE,
     }
     old_env_db_path = os.environ.get("DB_PATH")
 
@@ -806,11 +810,19 @@ def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_author
         "projection_converged": True,
         "accounting_projection_ok": True,
         "open_order_count": 0,
+        "unresolved_open_order_count": 0,
         "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "locked_qty": 0.0,
+        "active_fee_accounting_blocker": False,
+        "min_qty": 0.0001,
+        "min_notional_krw": 5000.0,
+        "idempotency_scope": "live_client_order_id_generator",
         "broker_position_evidence": {
             "broker_qty_known": True,
             "broker_qty": 0.0004998,
             "balance_source_stale": False,
+            "asset_locked": 0.0,
         },
     }
 
@@ -840,11 +852,14 @@ def test_residual_sell_candidate_is_modeled_separately_from_strategy_sell_author
 
     assert decision.final_action == "CLOSE_RESIDUAL_CANDIDATE"
     assert decision.submit_expected is False
-    assert decision.pre_submit_proof_status == "passed_telemetry_only"
-    assert decision.block_reason == "residual_live_submit_disabled"
+    assert decision.pre_submit_proof_status == "passed"
+    assert decision.block_reason == "residual_live_sell_mode_telemetry"
     assert decision.strategy_sell_candidate is None
     assert decision.residual_sell_candidate is not None
     assert decision.residual_sell_candidate["qty"] == pytest.approx(0.0004998)
+    assert decision.residual_submit_plan is not None
+    assert decision.residual_submit_plan["side"] == "SELL"
+    assert decision.residual_submit_plan["source"] == "residual_inventory"
 
 
 def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() -> None:
@@ -863,11 +878,19 @@ def test_residual_sell_candidate_is_absent_for_unsellable_tracked_tiny_dust() ->
         "projection_converged": True,
         "accounting_projection_ok": True,
         "open_order_count": 0,
+        "unresolved_open_order_count": 0,
         "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "locked_qty": 0.0,
+        "active_fee_accounting_blocker": False,
+        "min_qty": 0.0001,
+        "min_notional_krw": 5000.0,
+        "idempotency_scope": "live_client_order_id_generator",
         "broker_position_evidence": {
             "broker_qty_known": True,
             "broker_qty": 0.00009998,
             "balance_source_stale": False,
+            "asset_locked": 0.0,
         },
     }
 
@@ -915,10 +938,16 @@ def test_residual_sell_proof_fails_closed_for_submit_unknown() -> None:
         "unresolved_open_order_count": 0,
         "recovery_required_count": 0,
         "submit_unknown_count": 1,
+        "locked_qty": 0.0,
+        "active_fee_accounting_blocker": False,
+        "min_qty": 0.0001,
+        "min_notional_krw": 5000.0,
+        "idempotency_scope": "live_client_order_id_generator",
         "broker_position_evidence": {
             "broker_qty_known": True,
             "broker_qty": 0.0004998,
             "balance_source_stale": False,
+            "asset_locked": 0.0,
         },
     }
 
@@ -936,6 +965,206 @@ def test_residual_sell_proof_fails_closed_for_submit_unknown() -> None:
     assert decision.submit_expected is False
     assert decision.pre_submit_proof_status == "failed"
     assert decision.block_reason == "submit_unknown_count_nonzero"
+
+
+class _ResidualFakeBroker:
+    def __init__(self) -> None:
+        self.orders: list[dict[str, object]] = []
+
+    def place_order(self, *, client_order_id: str, side: str, qty: float, price: float | None = None, **_kwargs):
+        self.orders.append({"client_order_id": client_order_id, "side": side, "qty": qty, "price": price})
+        return BrokerOrder(
+            client_order_id=client_order_id,
+            exchange_order_id="ex-residual-1",
+            side=side,
+            status="open",
+            price=price,
+            qty_req=qty,
+            qty_filled=0.0,
+            created_ts=123,
+            updated_ts=123,
+            raw={},
+        )
+
+
+def _ec2_residual_context() -> dict[str, object]:
+    return {
+        "raw_signal": "SELL",
+        "final_signal": "HOLD",
+        "sellable_executable_lot_count": 0,
+        "sellable_executable_qty": 0.0,
+        "has_dust_only_remainder": True,
+        "exit_block_reason": "dust_only_remainder",
+        "residual_inventory_mode": "track",
+        "residual_inventory_state": "RESIDUAL_INVENTORY_TRACKED",
+        "residual_inventory_policy_allows_run": True,
+        "residual_inventory_policy_allows_buy": True,
+        "residual_inventory_policy_allows_sell": True,
+        "residual_inventory": {
+            "residual_qty": 0.0004998,
+            "residual_notional_krw": 57_816.0,
+            "residual_classes": ["SELLABLE_RESIDUAL"],
+            "exchange_sellable": True,
+        },
+        "projection_converged": True,
+        "projection_convergence": {"converged": True, "portfolio_qty": 0.0004998, "projected_total_qty": 0.0004998},
+        "accounting_projection_ok": True,
+        "open_order_count": 0,
+        "unresolved_open_order_count": 0,
+        "recovery_required_count": 0,
+        "submit_unknown_count": 0,
+        "locked_qty": 0.0,
+        "active_fee_accounting_blocker": False,
+        "min_qty": 0.0001,
+        "min_notional_krw": 5000.0,
+        "idempotency_scope": "live_client_order_id_generator",
+        "broker_position_evidence": {
+            "broker_qty_known": True,
+            "broker_qty": 0.0004998,
+            "balance_source_stale": False,
+            "asset_locked": 0.0,
+        },
+        "total_effective_exposure_notional_krw": 57_816.0,
+        "residual_inventory_notional_krw": 57_816.0,
+    }
+
+
+def test_residual_sell_policy_dry_run_builds_plan_without_broker_submit() -> None:
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "dry_run")
+    decision = build_execution_decision_summary(
+        decision_context=_ec2_residual_context(),
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert decision.pre_submit_proof_status == "passed"
+    assert decision.submit_expected is False
+    assert decision.block_reason == "residual_live_sell_mode_dry_run"
+    assert decision.residual_submit_plan is not None
+    assert decision.residual_submit_plan["qty"] == pytest.approx(0.0004998)
+
+    broker = _ResidualFakeBroker()
+    service = LiveSignalExecutionService(broker=broker, executor=lambda *_a, **_k: None, harmless_dust_recorder=lambda **_k: False)
+    service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_679_000.0,
+            decision_context={"execution_decision": decision.as_dict()},
+        )
+    )
+    assert broker.orders == []
+
+
+def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_authority() -> None:
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    object.__setattr__(settings, "MODE", "live")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    decision = build_execution_decision_summary(
+        decision_context=_ec2_residual_context(),
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert decision.submit_expected is True
+    assert decision.strategy_sell_candidate is None
+    assert decision.residual_submit_plan is not None
+    assert decision.residual_submit_plan["authority"] == "residual_inventory_policy"
+
+    broker = _ResidualFakeBroker()
+    service = LiveSignalExecutionService(broker=broker, executor=lambda *_a, **_k: None, harmless_dust_recorder=lambda **_k: False)
+    trade = service.execute(
+        SignalExecutionRequest(
+            signal="SELL",
+            ts=123,
+            market_price=115_679_000.0,
+            decision_context={"execution_decision": decision.as_dict()},
+        )
+    )
+    assert trade is not None
+    assert broker.orders[0]["side"] == "SELL"
+    assert broker.orders[0]["qty"] == pytest.approx(0.0004998)
+    assert trade["source"] == "residual_inventory"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ({"broker_position_evidence": {"broker_qty_known": True, "broker_qty": 0.0004998, "balance_source_stale": True, "asset_locked": 0.0}}, "broker_evidence_stale"),
+        ({"broker_position_evidence": {"broker_qty_known": False, "broker_qty": 0.0004998, "balance_source_stale": False, "asset_locked": 0.0}}, "broker_qty_unknown"),
+        ({"broker_position_evidence": {"broker_qty_known": True, "broker_qty": 0.0001, "balance_source_stale": False, "asset_locked": 0.0}}, "broker_qty_below_candidate_qty"),
+        ({"locked_qty": 0.0001}, "locked_qty_nonzero"),
+        ({"open_order_count": 1}, "open_order_count_nonzero"),
+        ({"unresolved_open_order_count": 1}, "unresolved_open_order_count_nonzero"),
+        ({"recovery_required_count": 1}, "recovery_required_count_nonzero"),
+        ({"submit_unknown_count": 1}, "submit_unknown_count_nonzero"),
+        ({"accounting_projection_ok": False}, "accounting_projection_not_ok"),
+        ({"min_qty": 0.001}, "qty_below_min_qty"),
+        ({"min_notional_krw": 100_000.0}, "notional_below_min_notional"),
+        ({"active_fee_accounting_blocker": True}, "active_fee_accounting_blocker"),
+        ({"residual_sell_candidate": {"qty": 0.0004998, "notional": 57_816.0, "source": "residual_inventory", "classes": ["SELLABLE_RESIDUAL"], "exchange_sellable": True, "allowed_by_policy": False, "requires_final_pre_submit_proof": True}}, "candidate_policy_blocked"),
+    ],
+)
+def test_residual_sell_proof_failure_reasons_are_explicit(mutation: dict[str, object], reason: str) -> None:
+    context = _ec2_residual_context()
+    context.update(mutation)
+    proof = build_residual_sell_presubmit_proof(context)
+    decision = build_execution_decision_summary(
+        decision_context=context,
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    assert proof.passed is False
+    assert reason in proof.reasons
+    assert decision.final_action == "BLOCK_UNRESOLVED_RESIDUAL"
+    assert decision.submit_expected is False
+    assert decision.pre_submit_proof_status == "failed"
+    assert decision.block_reason == reason
+
+
+def test_residual_buy_sizing_modes_telemetry_and_delta() -> None:
+    context = _ec2_residual_context() | {
+        "raw_signal": "BUY",
+        "final_signal": "BUY",
+        "market_price": 115_679_000.0,
+        "total_effective_exposure_notional_krw": 57_816.0,
+        "residual_inventory_notional_krw": 57_816.0,
+    }
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100_000.0)
+    object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry")
+    telemetry = build_execution_decision_summary(decision_context=context, raw_signal="BUY", final_signal="BUY")
+    assert telemetry.buy_delta_krw == pytest.approx(42_184.0)
+    assert telemetry.submit_expected is True
+    assert telemetry.buy_submit_plan is not None
+    assert telemetry.buy_submit_plan["notional_krw"] == pytest.approx(100_000.0)
+    assert telemetry.block_reason == "residual_buy_sizing_mode_telemetry"
+
+    object.__setattr__(settings, "RESIDUAL_BUY_SIZING_MODE", "delta")
+    delta = build_execution_decision_summary(decision_context=context, raw_signal="BUY", final_signal="BUY")
+    assert delta.buy_submit_plan is not None
+    assert delta.buy_submit_plan["notional_krw"] == pytest.approx(42_184.0)
+    assert delta.submit_expected is True
+    assert delta.block_reason == "none"
+
+    covered = build_execution_decision_summary(
+        decision_context=context | {"total_effective_exposure_notional_krw": 120_000.0},
+        raw_signal="BUY",
+        final_signal="BUY",
+    )
+    assert covered.final_action == "HOLD_TARGET_ALREADY_COVERED"
+    assert covered.submit_expected is False
+    assert covered.block_reason == "tracked_residual_exposure_covers_target"
+
+    below_min = build_execution_decision_summary(
+        decision_context=context | {"total_effective_exposure_notional_krw": 96_000.0},
+        raw_signal="BUY",
+        final_signal="BUY",
+    )
+    assert below_min.final_action == "BLOCK_ORDER_RULE"
+    assert below_min.submit_expected is False
+    assert below_min.block_reason == "buy_delta_below_min_notional"
 
 
 def test_run_loop_kill_switch_halts_with_risk_open_reason_and_cancel_attempt(monkeypatch):

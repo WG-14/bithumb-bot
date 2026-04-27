@@ -2667,7 +2667,9 @@ def test_broker_matched_residual_only_holdings_track_mode_resume_as_tracked_inve
     )
     assert sell_decision.final_action == "CLOSE_RESIDUAL_CANDIDATE"
     assert sell_decision.submit_expected is False
-    assert sell_decision.pre_submit_proof_status == "passed_telemetry_only"
+    assert sell_decision.pre_submit_proof_status == "passed"
+    assert sell_decision.block_reason == "residual_live_sell_mode_telemetry"
+    assert sell_decision.residual_submit_plan is not None
     assert sell_decision.residual_sell_candidate is not None
     assert sell_decision.strategy_sell_candidate is None
 

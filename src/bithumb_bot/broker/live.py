@@ -2341,11 +2341,13 @@ def _determine_live_execution_intent(
             residual_inventory_qty=(
                 float(decision_observability.get("residual_inventory_qty") or 0.0)
                 if bool(decision_observability.get("residual_inventory_policy_allows_buy"))
+                and str(getattr(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry") or "telemetry").strip().lower() == "delta"
                 else 0.0
             ),
             residual_inventory_notional_krw=(
                 float(decision_observability.get("residual_inventory_notional_krw") or 0.0)
                 if bool(decision_observability.get("residual_inventory_policy_allows_buy"))
+                and str(getattr(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry") or "telemetry").strip().lower() == "delta"
                 else 0.0
             ),
         )

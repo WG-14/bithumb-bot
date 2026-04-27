@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 from typing import Callable, Protocol
 
 from . import runtime_state
 from .config import settings
 from .db_core import ensure_db
 from .decision_context import resolve_canonical_position_exposure_snapshot
+from .oms import build_client_order_id
 
 if False:  # pragma: no cover
     from .broker.base import Broker
@@ -42,6 +44,40 @@ class ResidualSellPreSubmitProof:
 
 
 @dataclass(frozen=True)
+class ExecutionSubmitPlan:
+    side: str
+    source: str
+    authority: str
+    final_action: str
+    qty: float | None
+    notional_krw: float | None
+    target_exposure_krw: float | None
+    current_effective_exposure_krw: float | None
+    delta_krw: float | None
+    submit_expected: bool
+    pre_submit_proof_status: str
+    block_reason: str
+    idempotency_key: str | None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "side": self.side,
+            "source": self.source,
+            "authority": self.authority,
+            "final_action": self.final_action,
+            "qty": self.qty,
+            "notional_krw": self.notional_krw,
+            "target_exposure_krw": self.target_exposure_krw,
+            "current_effective_exposure_krw": self.current_effective_exposure_krw,
+            "delta_krw": self.delta_krw,
+            "submit_expected": bool(self.submit_expected),
+            "pre_submit_proof_status": self.pre_submit_proof_status,
+            "block_reason": self.block_reason,
+            "idempotency_key": self.idempotency_key,
+        }
+
+
+@dataclass(frozen=True)
 class ExecutionDecisionSummary:
     raw_signal: str
     final_signal: str
@@ -55,6 +91,10 @@ class ExecutionDecisionSummary:
     current_effective_exposure_krw: float | None
     tracked_residual_exposure_krw: float | None
     buy_delta_krw: float | None
+    residual_live_sell_mode: str
+    residual_buy_sizing_mode: str
+    residual_submit_plan: dict[str, object] | None
+    buy_submit_plan: dict[str, object] | None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -74,6 +114,12 @@ class ExecutionDecisionSummary:
             "current_effective_exposure_krw": self.current_effective_exposure_krw,
             "tracked_residual_exposure_krw": self.tracked_residual_exposure_krw,
             "buy_delta_krw": self.buy_delta_krw,
+            "residual_live_sell_mode": self.residual_live_sell_mode,
+            "residual_buy_sizing_mode": self.residual_buy_sizing_mode,
+            "residual_submit_plan": (
+                None if self.residual_submit_plan is None else dict(self.residual_submit_plan)
+            ),
+            "buy_submit_plan": None if self.buy_submit_plan is None else dict(self.buy_submit_plan),
         }
 
 
@@ -127,6 +173,16 @@ def live_execute_signal(
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
     )
+
+
+def _residual_live_sell_mode() -> str:
+    mode = str(getattr(settings, "RESIDUAL_LIVE_SELL_MODE", "telemetry") or "telemetry").strip().lower()
+    return mode if mode in {"telemetry", "dry_run", "enabled"} else "telemetry"
+
+
+def _residual_buy_sizing_mode() -> str:
+    mode = str(getattr(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry") or "telemetry").strip().lower()
+    return mode if mode in {"off", "telemetry", "delta"} else "telemetry"
 
 
 def record_harmless_dust_exit_suppression(**kwargs) -> bool:
@@ -187,12 +243,24 @@ def build_residual_sell_presubmit_proof(decision_context: dict[str, object] | No
     candidate = build_residual_sell_candidate(decision_context)
     if candidate is None:
         reasons.append("missing_residual_sell_candidate")
+    else:
+        if not bool(candidate.allowed_by_policy):
+            reasons.append("candidate_policy_blocked")
+        if not bool(candidate.requires_final_pre_submit_proof):
+            reasons.append("candidate_final_pre_submit_proof_not_required")
     if not bool(decision_context.get("residual_inventory_policy_allows_sell")):
         reasons.append("residual_sell_policy_blocked")
     if not bool(decision_context.get("projection_converged")):
         reasons.append("projection_not_converged")
+    projection = _dict_value(decision_context.get("projection_convergence"))
+    if projection and not bool(projection.get("converged")):
+        reasons.append("projection_not_converged")
     if not bool(decision_context.get("accounting_projection_ok")):
-        reasons.append("accounting_projection_not_ok")
+        reasons.append(
+            "missing_accounting_projection_ok"
+            if "accounting_projection_ok" not in decision_context
+            else "accounting_projection_not_ok"
+        )
     if int(decision_context.get("open_order_count") or 0) > 0:
         reasons.append("open_order_count_nonzero")
     if int(decision_context.get("unresolved_open_order_count") or 0) > 0:
@@ -202,13 +270,40 @@ def build_residual_sell_presubmit_proof(decision_context: dict[str, object] | No
     if int(decision_context.get("submit_unknown_count") or 0) > 0:
         reasons.append("submit_unknown_count_nonzero")
     broker_evidence = _dict_value(decision_context.get("broker_position_evidence"))
+    locked_qty = (
+        decision_context.get("locked_qty")
+        if "locked_qty" in decision_context
+        else decision_context.get("residual_proof_locked_qty", broker_evidence.get("asset_locked"))
+    )
+    if locked_qty is None:
+        reasons.append("missing_locked_qty")
+    elif float(locked_qty or 0.0) > 1e-12:
+        reasons.append("locked_qty_nonzero")
+    if bool(decision_context.get("active_fee_accounting_blocker")):
+        reasons.append("active_fee_accounting_blocker")
     if not bool(broker_evidence.get("broker_qty_known")):
         reasons.append("broker_qty_unknown")
     if bool(broker_evidence.get("balance_source_stale")):
         reasons.append("broker_evidence_stale")
     if candidate is not None and float(broker_evidence.get("broker_qty") or 0.0) + 1e-12 < float(candidate.qty):
         reasons.append("broker_qty_below_candidate_qty")
-    return ResidualSellPreSubmitProof(passed=not reasons, reasons=tuple(reasons))
+    min_qty = decision_context.get("min_qty", decision_context.get("residual_proof_min_qty"))
+    min_notional = decision_context.get(
+        "min_notional_krw", decision_context.get("residual_proof_min_notional_krw")
+    )
+    if min_qty is None:
+        reasons.append("missing_min_qty")
+    elif candidate is not None and float(candidate.qty) + 1e-12 < float(min_qty):
+        reasons.append("qty_below_min_qty")
+    if min_notional is None:
+        reasons.append("missing_min_notional")
+    elif candidate is not None and (
+        candidate.notional is None or float(candidate.notional) + 1e-9 < float(min_notional)
+    ):
+        reasons.append("notional_below_min_notional")
+    if not str(decision_context.get("idempotency_scope") or "").strip():
+        reasons.append("missing_idempotency_scope")
+    return ResidualSellPreSubmitProof(passed=not reasons, reasons=tuple(dict.fromkeys(reasons)))
 
 
 def _first_block_reason(*values: object, default: str = "none") -> str:
@@ -280,10 +375,17 @@ def build_execution_decision_summary(
             "total_effective_exposure_qty",
             "total_effective_exposure_notional_krw",
             "residual_inventory_notional_krw",
+            "residual_proof_min_qty",
+            "residual_proof_min_notional_krw",
+            "residual_proof_locked_qty",
+            "active_fee_accounting_blocker",
+            "accounting_projection_ok",
+            "idempotency_scope",
         ):
             if key in readiness_payload:
                 payload[key] = readiness_payload[key]
-        payload["accounting_projection_ok"] = bool(readiness_payload.get("projection_converged"))
+        if "accounting_projection_ok" not in payload:
+            payload["accounting_projection_ok"] = bool(readiness_payload.get("projection_converged"))
 
     raw = str(raw_signal or payload.get("raw_signal") or payload.get("base_signal") or payload.get("signal") or "HOLD").upper()
     final = str(final_signal or payload.get("final_signal") or payload.get("signal") or "HOLD").upper()
@@ -322,17 +424,40 @@ def build_execution_decision_summary(
     if raw == "SELL" and residual_candidate is not None:
         proof = build_residual_sell_presubmit_proof(payload)
 
+    residual_live_sell_mode = _residual_live_sell_mode()
+    residual_buy_sizing_mode = _residual_buy_sizing_mode()
+    residual_submit_plan: dict[str, object] | None = None
+    buy_submit_plan: dict[str, object] | None = None
+
     if raw == "BUY":
         if not bool(payload.get("residual_inventory_policy_allows_run", True)):
             action = "BLOCK_RECOVERY"
             submit_expected = False
             proof_status = "not_required"
             block_reason = _first_block_reason(payload.get("residual_inventory_state"), final_reason, default="recovery_blocked")
+        elif (
+            residual_buy_sizing_mode == "delta"
+            and buy_delta_krw is not None
+            and buy_delta_krw <= 0.0
+        ):
+            action = "HOLD_TARGET_ALREADY_COVERED"
+            submit_expected = False
+            proof_status = "not_required"
+            block_reason = "tracked_residual_exposure_covers_target"
+        elif (
+            residual_buy_sizing_mode == "delta"
+            and buy_delta_krw is not None
+            and 0.0 < buy_delta_krw < float(payload.get("min_notional_krw", payload.get("residual_proof_min_notional_krw", 0.0)) or 0.0)
+        ):
+            action = "BLOCK_ORDER_RULE"
+            submit_expected = False
+            proof_status = "not_required"
+            block_reason = "buy_delta_below_min_notional"
         elif final == "BUY":
             action = "ENTER_STRATEGY_POSITION"
             submit_expected = True
             proof_status = "not_required"
-            block_reason = "none"
+            block_reason = "none" if residual_buy_sizing_mode != "telemetry" else "residual_buy_sizing_mode_telemetry"
         elif buy_delta_krw is not None and buy_delta_krw <= 0.0:
             action = "HOLD_TARGET_ALREADY_COVERED"
             submit_expected = False
@@ -343,6 +468,31 @@ def build_execution_decision_summary(
             submit_expected = False
             proof_status = "not_required"
             block_reason = _first_block_reason(final_reason, payload.get("entry_block_reason"), payload.get("block_reason"))
+        if buy_delta_krw is not None:
+            delta_for_plan = (
+                buy_delta_krw
+                if residual_buy_sizing_mode == "delta"
+                else target_exposure_krw
+            )
+            buy_submit_plan = ExecutionSubmitPlan(
+                side="BUY",
+                source="strategy_position",
+                authority=(
+                    "residual_inventory_delta"
+                    if residual_buy_sizing_mode == "delta"
+                    else "configured_strategy_order_size"
+                ),
+                final_action=action,
+                qty=(None if delta_for_plan is None else float(delta_for_plan) / float(payload.get("market_price") or 1.0)),
+                notional_krw=delta_for_plan,
+                target_exposure_krw=target_exposure_krw,
+                current_effective_exposure_krw=current_effective_exposure_krw,
+                delta_krw=buy_delta_krw,
+                submit_expected=submit_expected,
+                pre_submit_proof_status=proof_status,
+                block_reason=block_reason,
+                idempotency_key=None,
+            ).as_dict()
     elif raw == "SELL":
         if strategy_candidate is not None and final == "SELL":
             action = "EXIT_STRATEGY_POSITION"
@@ -351,12 +501,44 @@ def build_execution_decision_summary(
             block_reason = "none"
         elif residual_candidate is not None:
             action = "CLOSE_RESIDUAL_CANDIDATE" if proof is not None and proof.passed else "BLOCK_UNRESOLVED_RESIDUAL"
-            # Telemetry-only in this patch: residual closeout has a candidate
-            # and proof, but live submission remains disabled until explicitly
-            # enabled by a separate policy change.
-            submit_expected = False
-            proof_status = "passed_telemetry_only" if proof is not None and proof.passed else "failed"
-            block_reason = "residual_live_submit_disabled" if proof is not None and proof.passed else _residual_block_reason(decision_context=payload, proof=proof)
+            proof_status = "passed" if proof is not None and proof.passed else "failed"
+            if proof is not None and proof.passed:
+                submit_expected = bool(
+                    residual_live_sell_mode == "enabled"
+                    and bool(getattr(settings, "LIVE_REAL_ORDER_ARMED", False))
+                    and not bool(getattr(settings, "LIVE_DRY_RUN", True))
+                )
+                block_reason = (
+                    "none"
+                    if submit_expected
+                    else (
+                        "residual_live_sell_mode_telemetry"
+                        if residual_live_sell_mode == "telemetry"
+                        else (
+                            "residual_live_sell_mode_dry_run"
+                            if residual_live_sell_mode == "dry_run"
+                            else "residual_live_sell_not_armed"
+                        )
+                    )
+                )
+            else:
+                submit_expected = False
+                block_reason = _residual_block_reason(decision_context=payload, proof=proof)
+            residual_submit_plan = ExecutionSubmitPlan(
+                side="SELL",
+                source="residual_inventory",
+                authority="residual_inventory_policy",
+                final_action=action,
+                qty=float(residual_candidate.qty),
+                notional_krw=residual_candidate.notional,
+                target_exposure_krw=None,
+                current_effective_exposure_krw=None,
+                delta_krw=None,
+                submit_expected=submit_expected,
+                pre_submit_proof_status=proof_status,
+                block_reason=block_reason,
+                idempotency_key=str(payload.get("idempotency_scope") or "live_client_order_id_generator"),
+            ).as_dict()
         elif str(payload.get("residual_inventory_state") or "") == "RESIDUAL_INVENTORY_UNRESOLVED":
             action = "BLOCK_UNRESOLVED_RESIDUAL"
             submit_expected = False
@@ -396,6 +578,10 @@ def build_execution_decision_summary(
         current_effective_exposure_krw=current_effective_exposure_krw,
         tracked_residual_exposure_krw=tracked_residual_exposure_krw,
         buy_delta_krw=buy_delta_krw,
+        residual_live_sell_mode=residual_live_sell_mode,
+        residual_buy_sizing_mode=residual_buy_sizing_mode,
+        residual_submit_plan=residual_submit_plan,
+        buy_submit_plan=buy_submit_plan,
     )
 
 
@@ -457,6 +643,55 @@ class LiveSignalExecutionService:
     harmless_dust_recorder: Callable[..., bool]
 
     def execute(self, request: SignalExecutionRequest) -> dict | None:
+        execution_decision = (
+            dict(request.decision_context.get("execution_decision"))
+            if isinstance(request.decision_context, dict)
+            and isinstance(request.decision_context.get("execution_decision"), dict)
+            else {}
+        )
+        residual_plan = (
+            dict(execution_decision.get("residual_submit_plan"))
+            if isinstance(execution_decision.get("residual_submit_plan"), dict)
+            else {}
+        )
+        if (
+            request.signal == "SELL"
+            and residual_plan
+            and str(residual_plan.get("source")) == "residual_inventory"
+        ):
+            if str(residual_plan.get("block_reason") or "none") != "none":
+                return None
+            if not bool(residual_plan.get("submit_expected")):
+                return None
+            if _residual_live_sell_mode() != "enabled":
+                return None
+            if bool(settings.LIVE_DRY_RUN) or not bool(settings.LIVE_REAL_ORDER_ARMED):
+                return None
+            client_order_id = build_client_order_id(
+                mode=str(settings.MODE or "live"),
+                side="SELL",
+                intent_ts=int(request.ts),
+                nonce=uuid.uuid4().hex,
+            )
+            order = self.broker.place_order(
+                client_order_id=client_order_id,
+                side="SELL",
+                qty=float(residual_plan.get("qty") or 0.0),
+                price=None,
+                submit_plan=None,
+            )
+            return {
+                "client_order_id": order.client_order_id,
+                "exchange_order_id": order.exchange_order_id,
+                "side": order.side,
+                "qty": float(order.qty_req),
+                "submit_qty": float(order.qty_req),
+                "filled_qty": float(order.qty_filled),
+                "candle_ts": request.ts,
+                "signal_ts": request.ts,
+                "source": "residual_inventory",
+                "authority": "residual_inventory_policy",
+            }
         harmless_dust_preview = None
         if request.signal == "SELL":
             harmless_dust_preview = _canonical_harmless_dust_sell_preview(request.decision_context)

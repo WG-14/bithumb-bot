@@ -1067,8 +1067,8 @@ def test_record_strategy_decision_preserves_residual_execution_action(tmp_path, 
                 "execution_decision": {
                     "final_action": "CLOSE_RESIDUAL_CANDIDATE",
                     "submit_expected": False,
-                    "pre_submit_proof_status": "passed_telemetry_only",
-                    "block_reason": "residual_live_submit_disabled",
+                    "pre_submit_proof_status": "passed",
+                    "block_reason": "residual_live_sell_mode_telemetry",
                     "residual_sell_candidate": {
                         "source": "residual_inventory",
                         "qty": 0.0004998,
@@ -1087,9 +1087,9 @@ def test_record_strategy_decision_preserves_residual_execution_action(tmp_path, 
     ctx = json.loads(str(row["context_json"]))
     assert ctx["final_action"] == "CLOSE_RESIDUAL_CANDIDATE"
     assert ctx["submit_expected"] is False
-    assert ctx["pre_submit_proof_status"] == "passed_telemetry_only"
-    assert ctx["execution_block_reason"] == "residual_live_submit_disabled"
+    assert ctx["pre_submit_proof_status"] == "passed"
+    assert ctx["execution_block_reason"] == "residual_live_sell_mode_telemetry"
     assert ctx["decision_summary"]["final_action"] == "CLOSE_RESIDUAL_CANDIDATE"
     assert recent[0].final_action == "CLOSE_RESIDUAL_CANDIDATE"
     assert recent[0].submit_expected is False
-    assert recent[0].pre_submit_proof_status == "passed_telemetry_only"
+    assert recent[0].pre_submit_proof_status == "passed"

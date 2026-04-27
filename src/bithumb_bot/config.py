@@ -483,6 +483,8 @@ class Settings:
     START_CASH_KRW: float = float(os.getenv("START_CASH_KRW", "1000000"))
     BUY_FRACTION: float = float(os.getenv("BUY_FRACTION", "0.99"))
     RESIDUAL_INVENTORY_MODE: str = os.getenv("RESIDUAL_INVENTORY_MODE", "block").strip().lower() or "block"
+    RESIDUAL_LIVE_SELL_MODE: str = os.getenv("RESIDUAL_LIVE_SELL_MODE", "telemetry").strip().lower() or "telemetry"
+    RESIDUAL_BUY_SIZING_MODE: str = os.getenv("RESIDUAL_BUY_SIZING_MODE", "telemetry").strip().lower() or "telemetry"
     # 怨듯넻 湲곕낯 ?섏닔猷뚯쑉. ?댁쁺?먯꽌??LIVE/PAPER ?섏닔猷뚯쑉??媛곴컖 紐낆떆?쒕떎.
     FEE_RATE: float = float(os.getenv("FEE_RATE", "0.0004"))
     # live pretrade ?붽퀬/?꾧툑 寃利??꾩슜 蹂댁닔??異붿젙 ?섏닔猷뚯쑉.
@@ -839,6 +841,10 @@ def validate_live_mode_preflight(cfg: Settings) -> None:
 
     if cfg.MAX_ORDER_KRW <= 0 or not math.isfinite(float(cfg.MAX_ORDER_KRW)):
         issues.append("MAX_ORDER_KRW must be > 0")
+    if str(cfg.RESIDUAL_LIVE_SELL_MODE) not in {"telemetry", "dry_run", "enabled"}:
+        issues.append("RESIDUAL_LIVE_SELL_MODE must be one of: telemetry, dry_run, enabled")
+    if str(cfg.RESIDUAL_BUY_SIZING_MODE) not in {"off", "telemetry", "delta"}:
+        issues.append("RESIDUAL_BUY_SIZING_MODE must be one of: off, telemetry, delta")
     if cfg.MAX_DAILY_LOSS_KRW <= 0 or not math.isfinite(float(cfg.MAX_DAILY_LOSS_KRW)):
         issues.append("MAX_DAILY_LOSS_KRW must be > 0")
     if cfg.MAX_DAILY_ORDER_COUNT <= 0:

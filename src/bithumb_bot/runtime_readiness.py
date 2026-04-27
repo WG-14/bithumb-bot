@@ -81,6 +81,12 @@ class RuntimeReadinessSnapshot:
     total_effective_exposure_qty: float
     total_effective_exposure_notional_krw: float | None
     residual_sell_candidate: dict[str, object] | None
+    residual_proof_min_qty: float | None
+    residual_proof_min_notional_krw: float | None
+    residual_proof_locked_qty: float
+    active_fee_accounting_blocker: bool
+    accounting_projection_ok: bool
+    idempotency_scope: str
     structured_blockers: tuple[dict[str, object], ...]
     authority_truth_model: dict[str, object]
     broker_position_evidence: dict[str, object]
@@ -190,6 +196,12 @@ class RuntimeReadinessSnapshot:
             "residual_sell_candidate_allowed": bool(
                 self.residual_sell_candidate and self.residual_inventory_policy_allows_sell
             ),
+            "residual_proof_min_qty": self.residual_proof_min_qty,
+            "residual_proof_min_notional_krw": self.residual_proof_min_notional_krw,
+            "residual_proof_locked_qty": float(self.residual_proof_locked_qty),
+            "active_fee_accounting_blocker": bool(self.active_fee_accounting_blocker),
+            "accounting_projection_ok": bool(self.accounting_projection_ok),
+            "idempotency_scope": self.idempotency_scope,
             **self.tradeability_operator_fields,
         }
 
@@ -440,6 +452,15 @@ def _to_float_or_zero(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _split_pair_currencies(pair: str) -> tuple[str | None, str | None]:
@@ -1203,6 +1224,18 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             total_effective_exposure_qty=total_effective_exposure_qty,
             total_effective_exposure_notional_krw=total_effective_exposure_notional_krw,
             residual_sell_candidate=residual_sell_candidate,
+            residual_proof_min_qty=(None if lot_definition is None else _optional_float(lot_definition.min_qty)),
+            residual_proof_min_notional_krw=(
+                None if lot_definition is None else _optional_float(lot_definition.min_notional_krw)
+            ),
+            residual_proof_locked_qty=float(broker_position_evidence.get("asset_locked") or 0.0),
+            active_fee_accounting_blocker=bool(
+                fee_validation_blocked_count > 0
+                or unapplied_principal_pending_count > 0
+                or fee_gap_policy.closeout_blocking
+            ),
+            accounting_projection_ok=bool(projection_convergence.get("converged")),
+            idempotency_scope="live_client_order_id_generator",
             structured_blockers=tuple(structured_blockers),
             authority_truth_model=authority_truth_model,
             broker_position_evidence=broker_position_evidence,

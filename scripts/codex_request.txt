@@ -1,18 +1,29 @@
 You are working in the GitHub repo `WG-14/bithumb-bot`.
 
-Treat this as a repository-grounded engineering task, not as a generic trading-bot discussion. Inspect the current code, docs, tests, and operational scripts before changing anything. The objective is not to suppress one symptom from the EC2 incident, but to evolve the repo into a more robust, reproducible, and operable automated trading experiment system.
+This is a repository-grounded follow-up patch task. Do not treat this as a generic trading-bot discussion. Inspect the current `main` branch directly before changing anything.
 
-## Context from the EC2 incident
+Current reference point:
 
-Do not assume the current diagnosis is final. Treat it as a set of hypotheses to verify or falsify in the repo.
+```text
+Base before previous patch: 0b81a216de40aadf7db6d850407f7f07d8fa2c10
+Current main after previous patch: e7002cef5399c4a812692b1b5f840ed3c7a85d59
+```
 
-Observed EC2 state:
+The previous patch was a good first step, but it is not complete. It made sellable residual inventory more observable through `final_action`, `submit_expected`, `pre_submit_proof_status`, and `residual_sell_candidate`, but it still appears to be telemetry/proof-candidate work rather than a complete residual-aware execution policy.
+
+Your task is to complete the next coherent step: move from residual-aware telemetry toward residual-aware execution policy, while preserving fail-closed defaults and the lot-native SELL authority contract.
+
+## Core problem
+
+The current system can detect a sellable residual BTC balance and explain why it is not being used, but it still does not fully turn that residual-aware decision into safe, reproducible, policy-gated execution behavior.
+
+The EC2-shaped state that motivated this work:
 
 ```text
 broker_qty = 0.00049980 BTC
-local/portfolio qty = 0.00049980 BTC
+local/portfolio_qty = 0.00049980 BTC
 broker/local match = true
-locked qty = 0
+locked_qty = 0
 open_order_count = 0
 unresolved_open_order_count = 0
 recovery_required_count = 0
@@ -20,389 +31,426 @@ submit_unknown_count = 0
 
 min_qty = 0.00010000 BTC
 min_notional_krw = 5,000 KRW
-residual notional ≈ 57,816 KRW
+residual_notional_krw ≈ 57,816 KRW
 
 RESIDUAL_INVENTORY_MODE=track
 canonical_state=DUST_ONLY_TRACKED
 run_loop_allowed=1
 closeout_allowed=1
-new_entry_allowed=0
-entry_block_reason=dust_only_remainder
-exit_allowed=0
-exit_block_reason=dust_only_remainder
-sellable_executable_qty=0
+
+strategy sellable_executable_lot_count = 0
+strategy sellable_executable_qty = 0
+
+previous behavior:
+  BUY and SELL could both collapse to HOLD/no-submit under dust_only_remainder
+
+previous patch behavior:
+  residual_sell_candidate and final_action telemetry may exist,
+  but residual close remains telemetry-only,
+  and BUY delta sizing may still not affect actual submit sizing.
 ```
 
-Operationally, the bot appeared “stuck” because BUY and SELL signals could both be converted to HOLD/no-submit under `dust_only_remainder`, even though the observed residual BTC appears exchange-sellable by min quantity and min notional. Also, an early stale-lock explanation was plausible from `/proc/<pid>` and lock-file observations, but systemd journal later showed the prior process was actually running until a user stop and that the bigger issue was residual-policy no-submit behavior. Do not overfit to stale lock as the primary root cause.
+The current repo must not leave the operator in a state where sellable residual BTC is visible but still functionally unusable except by manual flattening.
 
-## Core problem statement
+## Non-negotiable safety constraint
 
-The suspected structural problem is:
+Do not weaken the lot-native strategy SELL authority.
 
-```text
-The bot has become good at detecting and safely blocking risky states, but residual inventory is not yet consistently modeled as first-class exposure/inventory through the live run loop, strategy decision, sizing, execution policy, submit path, telemetry, and tests.
+Do not make `dust_tracking_qty`, aggregate residual quantity, or residual lots pretend to be canonical strategy executable lots.
 
-As a result, a sellable residual BTC balance can be treated as dust-only/non-executable for strategy authority, blocking both entry and exit. This creates an operational deadlock even if the behavior is technically consistent with some existing conservative policy.
-```
-
-Do not “fix” this by simply merging `dust_tracking` into `open_exposure` or by making all residual balances canonical strategy SELL inventory. Preserve the lot-native safety contract: strategy SELL authority must remain based on the proper executable strategy lots. Residual inventory needs its own explicit authority, policy, candidate, and pre-submit proof.
-
-## Required investigation
-
-Start by inspecting these areas and any related code you find:
-
-```bash
-grep -RIn \
-  "RESIDUAL_INVENTORY_MODE\|RESIDUAL_INVENTORY_TRACKED\|DUST_ONLY_TRACKED\|dust_only_remainder\|sellable_executable_qty\|tracked_dust_qty\|exit_allowed\|new_entry_allowed\|closeout_allowed" \
-  src app tests docs scripts \
-  --exclude-dir=.venv --exclude-dir=.git
-
-grep -RIn \
-  "residual_sell_candidate\|ResidualSellCandidate\|build_residual_sell_candidate\|build_residual_sell_presubmit_proof\|residual_inventory_policy_allows_sell\|final_action\|submit_expected\|execution_intent" \
-  src app tests docs scripts \
-  --exclude-dir=.venv --exclude-dir=.git
-
-grep -RIn \
-  "raw_signal\|final_signal\|entry_block_reason\|strategy decision\|sma_with_filter\|ORDER_SKIP\|no actionable position" \
-  src app tests docs scripts \
-  --exclude-dir=.venv --exclude-dir=.git
-
-grep -RIn \
-  "BUY_FRACTION\|MAX_ORDER_KRW\|target_exposure\|current_exposure\|buy_sizing_residual_adjusted\|build_buy_execution_sizing\|build_sell_execution_sizing" \
-  src app tests docs scripts \
-  --exclude-dir=.venv --exclude-dir=.git
-
-grep -RIn \
-  "systemd\|journalctl\|StandardOutput\|StandardError\|bithumb-bot.service\|lock\|stale" \
-  src app tests docs scripts deploy systemd .github \
-  --exclude-dir=.venv --exclude-dir=.git
-```
-
-Also inspect any existing docs such as `scripts/codex_request.txt`, `lot_native_contract.md`, runtime readiness, repair plan, execution service, operator commands, and tests around position authority/recovery/dust/failsafe/restart regression.
-
-## Hypotheses to verify or falsify
-
-Keep these as hypotheses. Do not treat them as facts until the code and tests support them.
-
-### H1: stale lock was an operational symptom, not the primary root cause
-
-Hypothesis:
-
-```text
-The bot was perceived as stopped partly because file logs and systemd journal were not treated as one canonical live log source. The process may have been running and making HOLD/no-submit decisions while older file logs made it look stale. Stale lock handling may still need hardening, but it should not be over-classified as the root cause unless evidence supports that.
-```
-
-Verify in repo:
-
-* Inspect systemd service definition, deployment docs, runbooks, lock implementation, stale lock detection, and log routing.
-* Check whether systemd mode writes only to journal while file logs are still documented as canonical.
-* Check whether lock cleanup on graceful stop and stale-owner detection are tested.
-
-Implement only if needed:
-
-* Improve runbook/docs to make canonical live log source explicit.
-* Add or improve stale-lock regression tests if lock cleanup or stale-owner behavior is under-tested.
-* Do not make stale lock the central fix for the residual deadlock.
-
-### H2: residual inventory is detected/readiness-tracked but not consistently connected to live execution policy
-
-Hypothesis:
-
-```text
-RESIDUAL_INVENTORY_MODE=track and RESIDUAL_INVENTORY_TRACKED may exist in readiness/reporting, but the live run loop and strategy decision path still convert BUY/SELL into HOLD under dust_only_remainder instead of producing explicit residual-aware execution actions.
-```
-
-Verify:
-
-* Find where `raw_signal` becomes `final_signal`.
-* Find whether `ResidualSellCandidate` or equivalent is actually created in the decision context when `raw_signal=SELL` and residual inventory is exchange-sellable.
-* Find whether residual-aware BUY sizing is applied when `raw_signal=BUY`.
-* Find whether telemetry/DB decision rows preserve this distinction.
-
-Expected direction:
-
-* `raw_signal=SELL` with no strategy lots but with exchange-sellable, explainable, broker/local/projection-converged residual should not silently collapse to generic HOLD.
-* It should produce an explicit residual-aware action/candidate, even if final live submit remains gated by pre-submit proof.
-
-### H3: `dust_tracking` semantics are too strong in execution policy
-
-Hypothesis:
-
-```text
-A row/state used for accounting/operator evidence, such as dust_tracking, may be treated as permanently non-executable in execution policy. This is safe but can be operationally wrong when aggregate residual inventory is exchange-sellable and reconciled.
-```
-
-Verify:
-
-* Inspect DB lot state semantics, open-position lot calculations, dust/residual classification, and position authority tests.
-* Confirm the existing lot-native contract: do not mix `dust_tracking` into canonical strategy `open_exposure`.
-* Determine whether there is an explicit separate residual inventory authority for sellable residuals.
-
-Expected direction:
-
-* Preserve strategy lot-native SELL authority.
-* Add or complete separate `residual_sell_candidate` / residual authority path instead of changing strategy lot authority.
-* Rename or split reason codes so exchange-sellable residual is not reported as generic `dust_only_remainder`.
-
-### H4: BUY/SELL are still treated too much like order commands instead of target exposure transitions
-
-Hypothesis:
-
-```text
-The current engine may interpret BUY as “open a new position” and SELL as “close canonical strategy lots”. This makes the system fragile to partial fills, fees, step rounding, and residual inventory.
-```
-
-Verify:
-
-* Inspect sizing logic.
-* Look for target exposure, current effective exposure, residual-adjusted delta sizing.
-* Check whether residual inventory contributes to current exposure under track mode.
-
-Expected direction:
-
-* Move toward this model, or prepare an incremental step toward it:
-
-```text
-StrategySignal -> TargetExposure
-TargetExposure + CurrentEffectiveExposure -> ExecutionDelta
-ExecutionDelta + OrderRules + RiskPolicy -> SubmitPlan
-SubmitPlan + PreSubmitProof -> BrokerOrder
-```
-
-Incremental acceptable outcome:
-
-* Under `RESIDUAL_INVENTORY_MODE=track`, BUY sizing should account for tracked residual exposure and not blindly block or blindly overbuy.
-* SELL should target zero exposure and consider both strategy sell candidates and residual sell candidates through separate authorities.
-
-### H5: readiness, position truth, residual inventory, execution policy, and order submission are not cleanly separated
-
-Hypothesis:
-
-```text
-Runtime readiness/reporting, residual classification, strategy signal handling, execution decision, and broker submit proof are too intertwined. This causes final_signal=HOLD to hide materially different cases: strategic HOLD, blocked recovery, unsellable dust, sellable residual pending policy, and actual submit failure.
-```
-
-Verify:
-
-* Inspect whether the code has explicit concepts equivalent to:
-
-  * `RecoveryReadiness`
-  * `PositionTruth`
-  * `ResidualInventory`
-  * `StrategySignal`
-  * `ExecutionPolicy`
-  * `OrderSubmissionPolicy`
-* Check whether final logs/DB rows carry `final_action`, `submit_expected`, `block_reason`, and proof status.
-
-Expected direction:
-
-* Add or complete an explicit execution decision model.
-* Do not let `final_signal=HOLD` be the only representation of no-submit outcomes.
-
-### H6: observability is insufficient for live operations
-
-Hypothesis:
-
-```text
-The bot may be operating correctly while the operator sees stale file logs, or it may be no-submitting without clear state/action/reason telemetry. This creates false diagnoses and unsafe manual interventions.
-```
-
-Verify:
-
-* Inspect systemd docs/service files/logging.
-* Inspect decision telemetry and operator commands such as `health`, `ops-report`, `recovery-report`.
-* Confirm whether “bot is running but no-submitting due to residual policy” is directly visible.
-
-Expected direction:
-
-* Improve operator-facing logs/reports so live state is explainable.
-* Ensure each loop records structured decision/action/proof/block reason fields.
-
-## Design requirements
-
-Prioritize design changes that prevent the whole problem family over one-off symptom patches.
-
-### Requirement 1: Do not weaken the lot-native safety contract
-
-Do not make `dust_tracking` or aggregate residual quantity canonical strategy SELL inventory.
-
-Keep separate:
+Keep these separate:
 
 ```text
 strategy_sell_candidate:
-  source = canonical executable strategy lots
   authority = lot-native strategy position
+  source = sellable_executable_lot_count / sellable_executable_qty
+  used for normal strategy exits
 
 residual_sell_candidate:
-  source = residual inventory model
   authority = residual inventory policy
-  requires final pre-submit proof
+  source = residual inventory model
+  used only through explicit residual policy + final pre-submit proof
 ```
 
-### Requirement 2: Introduce or complete explicit execution actions
+If you need to modify `decision_context.py`, preserve the canonical lot-native SELL boundary. It is acceptable for canonical strategy SELL to remain blocked with `dust_only_remainder` when no strategy lots exist. What must change is that exchange-sellable residual inventory gets a separate, explicit execution path and operator-facing reason/action, not a silent generic HOLD.
 
-Do not collapse all no-submit outcomes into `final_signal=HOLD`.
+## Required first step: inspect current implementation
 
-Add or complete fields/concepts equivalent to:
+Before modifying code, inspect the actual current state of `main`:
 
-```text
-raw_signal
-position_truth_state
-residual_inventory_state
-strategy_sell_candidate
-residual_sell_candidate
-target_exposure_krw
-current_effective_exposure_krw
-final_action
-submit_expected
-pre_submit_proof_status
-block_reason
+```bash
+git rev-parse HEAD
+git status --short
+
+grep -RIn \
+  "RESIDUAL_INVENTORY_MODE\|RESIDUAL_LIVE_SELL_MODE\|RESIDUAL_BUY_SIZING_MODE\|RESIDUAL_INVENTORY_TRACKED\|DUST_ONLY_TRACKED\|dust_only_remainder\|sellable_executable_qty\|final_action\|submit_expected\|pre_submit_proof" \
+  src tests docs scripts \
+  --exclude-dir=.venv --exclude-dir=.git
+
+grep -RIn \
+  "ResidualSellCandidate\|build_residual_sell_candidate\|build_residual_sell_presubmit_proof\|residual_live_submit_disabled\|passed_telemetry_only\|residual_sell_candidate" \
+  src tests \
+  --exclude-dir=.venv --exclude-dir=.git
+
+grep -RIn \
+  "buy_delta_krw\|target_exposure_krw\|current_effective_exposure_krw\|tracked_residual_exposure_krw\|MAX_ORDER_KRW\|submit_plan\|live_execute_signal" \
+  src tests \
+  --exclude-dir=.venv --exclude-dir=.git
 ```
 
-At minimum, distinguish:
+Verify whether the previous patch is indeed telemetry-only for residual close, and whether BUY delta sizing is only recorded as summary/telemetry or actually wired into order sizing.
+
+Keep the following as hypotheses until verified or falsified.
+
+## Hypotheses
+
+### H1: residual close is still telemetry-only
+
+Hypothesis:
 
 ```text
-STRATEGY_HOLD
-ENTER_STRATEGY_POSITION
-EXIT_STRATEGY_POSITION
-CLOSE_RESIDUAL_CANDIDATE
-HOLD_TRACKED_DUST
-BLOCK_RECOVERY
-BLOCK_UNRESOLVED_RESIDUAL
-BLOCK_ORDER_RULE
+The current code can build a residual sell candidate and pre-submit proof, but even when proof passes it sets:
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  pre_submit_proof_status=passed_telemetry_only
+  submit_expected=false
+  block_reason=residual_live_submit_disabled
+
+Therefore sellable residual BTC is visible but cannot be automatically closed by policy.
 ```
 
-Use the repo’s existing naming style if different.
+Verify by inspecting `execution_service.py` and tests.
 
-### Requirement 3: Split residual taxonomy
-
-Do not use a single dust-only state for all residual inventory.
-
-Represent at least these distinctions, using repo-appropriate names:
+Falsify if:
 
 ```text
-UNSELLABLE_DUST:
-  qty < min_qty OR notional < min_notional
-  no sell candidate
+There is already a policy-gated residual submit path that can generate and execute a residual SELL submit plan when explicitly enabled.
+```
 
-SELLABLE_RESIDUAL:
+If H1 is confirmed, implement an explicit residual live sell policy mode.
+
+### H2: BUY residual-aware delta is not wired into actual order sizing
+
+Hypothesis:
+
+```text
+build_execution_decision_summary() computes target_exposure_krw, current_effective_exposure_krw, tracked_residual_exposure_krw, and buy_delta_krw, but live/paper execution still sends only the original BUY signal to the old executor, so actual BUY order sizing can still ignore tracked residual exposure.
+```
+
+Verify by tracing the actual BUY path from strategy signal to live/paper order submit.
+
+Falsify if:
+
+```text
+The actual submit payload already uses residual-aware buy_delta_krw or an equivalent target-exposure delta.
+```
+
+If H2 is confirmed, wire residual-aware BUY delta into an explicit submit plan or into the executor path without breaking existing safety gates.
+
+### H3: residual pre-submit proof is incomplete
+
+Hypothesis:
+
+```text
+build_residual_sell_presubmit_proof() checks some convergence/order conditions but does not yet directly verify all required live-submit invariants:
+  candidate.allowed_by_policy
+  candidate.requires_final_pre_submit_proof
   qty >= min_qty
   notional >= min_notional
-  broker/local/projection converged
-  no unresolved open orders
-  no active submit_unknown/recovery blockers
-  fresh broker evidence
-  residual policy allows tracking
-  residual sell candidate can be built
-
-TRACKED_RESIDUAL_EXPOSURE:
-  residual contributes to current effective exposure under track mode
-
-UNRESOLVED_RESIDUAL:
-  broker/local/projection mismatch, stale evidence, open order, fee/accounting blocker, or submit_unknown
-  fail closed
+  locked_qty == 0
+  active fee/accounting blocker == false
+  accounting_projection_ok from real accounting projection, not merely projection_converged alias
+  client order id / idempotency uniqueness
 ```
 
-### Requirement 4: Residual-aware BUY sizing
+Verify by inspecting `runtime_readiness.py`, `execution_service.py`, broker submit code, and tests.
 
-Under `RESIDUAL_INVENTORY_MODE=track`, tracked residual inventory should count toward current effective exposure.
+Falsify only if each condition is already directly proven and tested.
 
-Expected behavior:
+If H3 is confirmed, strengthen proof data and tests.
+
+### H4: `dust_only_remainder` remains too visible as the operator-facing explanation for sellable residual
+
+Hypothesis:
 
 ```text
-BUY signal:
-  target_exposure_krw = configured strategy position notional
-  current_effective_exposure_krw includes tracked residual notional
-  buy_delta_krw = target_exposure_krw - current_effective_exposure_krw
-
-If buy_delta is below min_notional or <= 0:
-  no BUY submit
-  final_action should explain insufficient delta / residual already covers target exposure
-
-If buy_delta is valid:
-  submit only the delta, subject to existing risk/order-rule gates
+Canonical strategy SELL authority may correctly produce exit_block_reason=dust_only_remainder when no strategy lots exist, but operator-facing reports may still expose that as the dominant explanation even when:
+  residual_inventory_state=RESIDUAL_INVENTORY_TRACKED
+  residual_exchange_sellable=true
+  residual_sell_candidate exists
 ```
 
-If the repo already has a partial implementation, complete it and add tests. If this is too large for one patch, implement the telemetry and classification first, then isolate the sizing change behind a clearly named policy flag. Do not leave the deadlock silent.
+Do not remove the canonical lot-native reason if it is needed. Instead, make the final execution layer clearly distinguish:
 
-### Requirement 5: Residual-aware SELL policy
+```text
+canonical_exit_block_reason=dust_only_remainder
+execution_final_action=CLOSE_RESIDUAL_CANDIDATE
+execution_block_reason=residual_live_submit_disabled | proof_failed_reason | residual_live_sell_mode_telemetry
+```
 
-Under `RESIDUAL_INVENTORY_MODE=track`, when a SELL signal occurs and canonical strategy lots are absent but exchange-sellable residual inventory exists:
+### H5: EC2-shaped run-loop regression coverage is still incomplete
+
+Hypothesis:
+
+```text
+The tests cover pieces of decision telemetry and dust suppression, but may not yet test the full path:
+  EC2-shaped residual fixture
+  -> strategy signal
+  -> decision summary
+  -> submit plan / no-submit plan
+  -> operator telemetry/report output
+```
+
+If confirmed, add targeted regression tests.
+
+## Required design changes
+
+### 1. Add explicit residual live sell policy mode
+
+Introduce a config setting with conservative default:
+
+```text
+RESIDUAL_LIVE_SELL_MODE=telemetry
+```
+
+Supported values:
+
+```text
+telemetry:
+  Build residual sell candidate and pre-submit proof.
+  Never submit a live residual SELL.
+  final_action may be CLOSE_RESIDUAL_CANDIDATE.
+  submit_expected=false.
+  block_reason should explicitly say residual live sell mode is telemetry-only.
+
+dry_run:
+  Build a residual submit plan and all proof artifacts.
+  Do not send a live broker order.
+  Telemetry must show that a real order would have been submitted if enabled.
+
+enabled:
+  If and only if:
+    residual candidate exists
+    residual policy allows sell
+    final pre-submit proof passes
+    live execution is armed
+    LIVE_DRY_RUN=false
+    existing risk/order/recovery gates pass
+  then residual SELL may be submitted through the separate residual submit path.
+```
+
+Default must remain `telemetry`.
+
+Do not rely on a code comment like “telemetry-only in this patch.” This must be a first-class config/policy visible in logs/tests/operator reports.
+
+### 2. Add explicit residual submit plan
+
+Add or complete an object equivalent to:
+
+```python
+@dataclass(frozen=True)
+class ExecutionSubmitPlan:
+    side: str                       # BUY or SELL
+    source: str                     # strategy_position | residual_inventory
+    final_action: str
+    qty: float | None
+    notional_krw: float | None
+    target_exposure_krw: float | None
+    current_effective_exposure_krw: float | None
+    delta_krw: float | None
+    submit_expected: bool
+    pre_submit_proof_status: str
+    block_reason: str
+    idempotency_key: str | None
+```
+
+Use repo naming/style if there is already a similar type.
+
+For residual SELL:
+
+```text
+source=residual_inventory
+side=SELL
+qty=residual_sell_candidate.qty
+notional_krw=residual_sell_candidate.notional
+authority=residual_inventory_policy
+```
+
+For strategy SELL:
+
+```text
+source=strategy_position
+side=SELL
+qty=strategy sellable executable qty
+authority=lot_native_strategy_position
+```
+
+Do not mutate strategy lot authority to make residual SELL work.
+
+### 3. Wire residual SELL plan into execution path
+
+When:
 
 ```text
 raw_signal=SELL
-strategy_sell_candidate=absent
-residual_sell_candidate=present
-final_action=CLOSE_RESIDUAL_CANDIDATE or equivalent
-submit_expected=true only if final pre-submit proof passes
+strategy_sell_candidate is absent
+residual_sell_candidate is present
+pre_submit_proof passes
+RESIDUAL_LIVE_SELL_MODE=enabled
 ```
 
-Final live submit must remain guarded by hard pre-submit proof.
+Then produce a residual SELL submit plan and call the broker submit path using the residual qty from the residual candidate.
 
-Required proof checks:
+When mode is `telemetry` or `dry_run`, do not submit, but still build the same plan and report exactly why it did not submit.
+
+Expected telemetry examples:
 
 ```text
-fresh broker snapshot
-broker_qty >= residual sell qty
-broker_qty == portfolio_qty == projected_total_qty within configured tolerance
-projection_converged=true
-accounting_projection_ok=true
-open_order_count=0
-unresolved_open_order_count=0
-recovery_required_count=0
-submit_unknown_count=0
-active fee/accounting blocker=false
-exchange_sellable=true
-qty >= min_qty
-notional >= min_notional
-idempotency key / client order id uniqueness is preserved
+RESIDUAL_LIVE_SELL_MODE=telemetry:
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  submit_expected=false
+  pre_submit_proof_status=passed
+  execution_block_reason=residual_live_sell_mode_telemetry
+  residual_sell_candidate.qty=0.00049980
+
+RESIDUAL_LIVE_SELL_MODE=dry_run:
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  submit_expected=false
+  pre_submit_proof_status=passed
+  execution_block_reason=residual_live_sell_mode_dry_run
+  residual_submit_plan.side=SELL
+  residual_submit_plan.qty=0.00049980
+
+RESIDUAL_LIVE_SELL_MODE=enabled:
+  final_action=CLOSE_RESIDUAL_CANDIDATE
+  submit_expected=true
+  pre_submit_proof_status=passed
+  residual_submit_plan.side=SELL
+  residual_submit_plan.qty=0.00049980
 ```
 
 If proof fails:
 
 ```text
-final_action=BLOCK_UNRESOLVED_RESIDUAL or equivalent
+final_action=BLOCK_UNRESOLVED_RESIDUAL
 submit_expected=false
-block_reason must identify the failed proof condition
+pre_submit_proof_status=failed
+execution_block_reason=<first failed proof reason>
 ```
 
-### Requirement 6: Observability and operator commands
+### 4. Wire residual-aware BUY delta into actual order sizing
 
-Update logs, DB decision rows, and operator commands where appropriate so the EC2-shaped state is unambiguous.
-
-For a SELL signal in the incident fixture, the operator should see something like:
+Introduce a config setting with conservative default:
 
 ```text
-raw_signal=SELL
-position_truth_state=CONVERGED
-residual_inventory_state=SELLABLE_RESIDUAL
-strategy_sell_candidate=absent
-residual_sell_candidate=present qty=0.00049980 notional_krw=...
-final_action=CLOSE_RESIDUAL_CANDIDATE
+RESIDUAL_BUY_SIZING_MODE=telemetry
+```
+
+Supported values:
+
+```text
+off:
+  Existing BUY sizing behavior.
+  May still record residual exposure telemetry.
+
+telemetry:
+  Compute target/current/delta and record it.
+  Do not alter actual BUY submit sizing.
+
+delta:
+  Actual BUY order sizing uses residual-aware delta.
+```
+
+If the repo already has an equivalent flag, reuse it.
+
+Under `RESIDUAL_INVENTORY_MODE=track` and `RESIDUAL_BUY_SIZING_MODE=delta`, BUY should behave as target-exposure delta sizing:
+
+```text
+target_exposure_krw = configured strategy position notional
+current_effective_exposure_krw = strategy open exposure + tracked residual exposure
+buy_delta_krw = target_exposure_krw - current_effective_exposure_krw
+```
+
+Expected behavior:
+
+```text
+if buy_delta_krw <= 0:
+  do not submit BUY
+  final_action=HOLD_TARGET_ALREADY_COVERED
+  block_reason=tracked_residual_exposure_covers_target
+
+if 0 < buy_delta_krw < min_notional_krw:
+  do not submit BUY
+  final_action=BLOCK_ORDER_RULE or equivalent
+  block_reason=buy_delta_below_min_notional
+
+if buy_delta_krw >= min_notional_krw:
+  submit only delta amount, subject to all existing live/risk/order gates
+```
+
+Do not overbuy the full configured order size when tracked residual exposure already exists.
+
+If full live BUY delta wiring is too invasive, implement the submit-plan layer and keep actual live behavior behind `RESIDUAL_BUY_SIZING_MODE=telemetry`, but add the `delta` path and tests with fake executor/broker so the next step is not blocked.
+
+### 5. Strengthen residual pre-submit proof
+
+Extend readiness payload and/or decision context so proof can directly check:
+
+```text
+candidate exists
+candidate.allowed_by_policy == true
+candidate.requires_final_pre_submit_proof == true
+residual sell policy allows sell
+broker qty known
+broker evidence fresh
+broker_qty >= candidate.qty
+broker/local/portfolio/projection converged within tolerance
+accounting_projection_ok == true from actual accounting replay/projection, not aliased from projection_converged
+open_order_count == 0
+unresolved_open_order_count == 0
+recovery_required_count == 0
+submit_unknown_count == 0
+locked_qty == 0
+active_fee_accounting_blocker == false
+candidate.qty >= min_qty
+candidate.notional >= min_notional_krw
+idempotency/client_order_id uniqueness is preserved or generated through the existing safe path
+```
+
+If some data is not currently available, add it to `RuntimeReadinessSnapshot.as_dict()` or the equivalent readiness/decision payload. Do not silently treat missing required proof fields as passing.
+
+Missing proof data should fail closed with an explicit reason, for example:
+
+```text
+missing_min_qty
+missing_min_notional
+missing_locked_qty
+missing_accounting_projection_ok
+missing_idempotency_scope
+```
+
+### 6. Improve operator-facing reason separation
+
+Preserve canonical lot-native `exit_block_reason=dust_only_remainder` where appropriate, but do not let it be the only operator-facing explanation when residual-aware execution data exists.
+
+Reports/logs should show both layers:
+
+```text
+canonical_exit_block_reason=dust_only_remainder
+residual_inventory_state=RESIDUAL_INVENTORY_TRACKED
+residual_exchange_sellable=1
+final_action=CLOSE_RESIDUAL_CANDIDATE | BLOCK_UNRESOLVED_RESIDUAL
 submit_expected=true|false
-pre_submit_proof=passed|failed
-block_reason=...
+pre_submit_proof_status=passed|failed
+execution_block_reason=<policy/proof reason>
 ```
 
-For a BUY signal:
+Update `ops-report`, `decision-telemetry`, `health`, or whichever operator commands currently display recent strategy decisions so the EC2-shaped state is not reduced to generic HOLD/dust-only language.
 
-```text
-raw_signal=BUY
-tracked_residual_exposure_krw=...
-target_exposure_krw=...
-buy_delta_krw=...
-final_action=ENTER_STRATEGY_POSITION | HOLD_TARGET_ALREADY_COVERED | BLOCK_ORDER_RULE
-```
+## Required tests
 
-Also update runbooks/docs so systemd journal vs file log behavior is explicit. If the service is systemd-managed, `journalctl -u bithumb-bot.service -f` must be documented as the canonical live log unless the service explicitly redirects stdout/stderr to a runtime log file.
+Add regression tests before or alongside code changes. Do not rely on manual EC2 verification.
 
-## Test requirements
-
-Add regression tests before or with code changes. Do not rely only on manual EC2 checks.
-
-### Required EC2-shaped regression fixture
-
-Create a fixture equivalent to:
+Use or create an EC2-shaped fixture:
 
 ```text
 broker_qty=0.00049980
@@ -416,6 +464,7 @@ open_order_count=0
 unresolved_open_order_count=0
 recovery_required_count=0
 submit_unknown_count=0
+active_fee_accounting_blocker=false
 min_qty=0.00010000
 min_notional_krw=5000
 latest_price_krw≈115_679_000
@@ -424,99 +473,280 @@ strategy executable lot count=0
 strategy sellable_executable_qty=0
 residual_inventory.material_residual=true
 residual_inventory.exchange_sellable=true
+RESIDUAL_INVENTORY_MODE=track
 ```
 
-Expected under `RESIDUAL_INVENTORY_MODE=track`:
+### Test 1: SELL + sellable residual + telemetry mode
+
+Given EC2-shaped residual and `raw_signal=SELL`:
 
 ```text
-run_loop_allowed=true
-residual inventory is tracked
-residual contributes to current effective exposure
-BUY signal does not blindly overbuy and does not silently deadlock
-SELL signal creates residual_sell_candidate
-strategy sellable_executable_lot_count remains 0
-final_action is not generic HOLD/dust_only_remainder
-telemetry includes final_action, submit_expected, proof/block reason
+RESIDUAL_LIVE_SELL_MODE=telemetry
+
+Expect:
+  strategy_sell_candidate is None
+  residual_sell_candidate is present
+  residual_sell_candidate.qty == 0.00049980
+  final_action == CLOSE_RESIDUAL_CANDIDATE
+  pre_submit_proof_status == passed or passed_telemetry_only if current naming is retained
+  submit_expected == false
+  block_reason/execution_block_reason == residual_live_sell_mode_telemetry or equivalent
+  live broker executor is not called
+  canonical strategy sellable lot count remains 0
 ```
 
-Expected under `RESIDUAL_INVENTORY_MODE=block`:
+### Test 2: SELL + sellable residual + dry_run mode
 
 ```text
-fail closed or block run/new orders according to existing safety policy
-operator output explains residual inventory is blocking
-read-only residual closeout/repair plan remains diagnostic unless policy explicitly allows action
+RESIDUAL_LIVE_SELL_MODE=dry_run
+
+Expect:
+  residual submit plan is built
+  side=SELL
+  source=residual_inventory
+  qty=0.00049980
+  proof passes
+  submit_expected=false
+  broker order is not sent
+  telemetry explains dry_run mode
 ```
 
-Expected under true dust:
+### Test 3: SELL + sellable residual + enabled mode
+
+Use a fake broker/executor. Do not hit live network.
+
+```text
+RESIDUAL_LIVE_SELL_MODE=enabled
+
+Expect:
+  residual submit plan is built
+  proof passes
+  submit_expected=true
+  fake broker/executor receives a SELL for residual qty
+  source/authority remains residual_inventory
+  strategy sellable_executable_lot_count remains 0
+  canonical strategy lot authority is not weakened
+```
+
+### Test 4: SELL + residual proof failure
+
+Parametrize failure cases:
+
+```text
+broker evidence stale
+broker_qty unknown
+broker_qty below candidate qty
+locked_qty > 0
+open_order_count > 0
+unresolved_open_order_count > 0
+recovery_required_count > 0
+submit_unknown_count > 0
+accounting_projection_ok=false
+qty < min_qty
+notional < min_notional
+active_fee_accounting_blocker=true
+candidate.allowed_by_policy=false
+```
+
+Expect:
+
+```text
+final_action=BLOCK_UNRESOLVED_RESIDUAL or equivalent
+submit_expected=false
+pre_submit_proof_status=failed
+block_reason identifies the failed condition
+broker/executor not called
+```
+
+### Test 5: BUY + sellable residual + telemetry mode
+
+```text
+RESIDUAL_BUY_SIZING_MODE=telemetry
+
+Expect:
+  target_exposure_krw is computed
+  current_effective_exposure_krw includes tracked residual
+  tracked_residual_exposure_krw is populated
+  buy_delta_krw is computed
+  actual existing BUY path remains unchanged if telemetry mode is intended
+  telemetry clearly says sizing mode is telemetry
+```
+
+### Test 6: BUY + sellable residual + delta mode
+
+```text
+RESIDUAL_BUY_SIZING_MODE=delta
+
+Case A:
+  current_effective_exposure_krw < target_exposure_krw
+  buy_delta_krw >= min_notional
+
+Expect:
+  actual submit plan uses buy_delta, not full configured order size
+  no full-size overbuy
+
+Case B:
+  current_effective_exposure_krw >= target_exposure_krw
+
+Expect:
+  no BUY submit
+  final_action=HOLD_TARGET_ALREADY_COVERED
+  block_reason=tracked_residual_exposure_covers_target
+
+Case C:
+  0 < buy_delta_krw < min_notional
+
+Expect:
+  no BUY submit
+  final_action=BLOCK_ORDER_RULE or equivalent
+  block_reason=buy_delta_below_min_notional
+```
+
+### Test 7: true dust remains non-sellable
+
+Given:
 
 ```text
 qty < min_qty OR notional < min_notional
-state=UNSELLABLE_DUST or repo equivalent
-SELL signal does not create residual_sell_candidate
+```
+
+Expect:
+
+```text
+residual_sell_candidate absent
 final_action=HOLD_TRACKED_DUST or equivalent
 submit_expected=false
 block_reason=below_min_qty or below_min_notional
 ```
 
-Expected under unresolved residual:
+### Test 8: operator/reporting regression
+
+For EC2-shaped residual, assert that recent decision/report output contains:
 
 ```text
-broker/local mismatch OR stale broker evidence OR open order OR recovery_required OR submit_unknown
-state=UNRESOLVED_RESIDUAL or equivalent
-no submit
-final_action=BLOCK_UNRESOLVED_RESIDUAL or equivalent
-block_reason identifies failed condition
+raw_signal
+final_signal
+final_action
+submit_expected
+pre_submit_proof_status
+execution_block_reason
+residual_sell_candidate
+target_exposure_krw / current_effective_exposure_krw / buy_delta_krw when BUY
+canonical_exit_block_reason when relevant
 ```
 
-### Required test files
+and does not reduce the case to only:
 
-Prefer adding to existing relevant tests if they already exist. Otherwise create focused tests.
+```text
+final_signal=HOLD reason=dust_only_remainder
+```
 
-Run and report at least:
+## Test commands to run
+
+Run focused tests and any new tests you add.
+
+At minimum, run:
 
 ```bash
-uv run pytest tests/test_position_authority_recovery_state.py
-uv run pytest tests/test_operator_commands.py
-uv run pytest tests/test_dust.py
-uv run pytest tests/test_failsafe.py
-uv run pytest tests/test_recovery_restart_regression.py
+uv run pytest -q tests/test_position_authority_recovery_state.py
+uv run pytest -q tests/test_failsafe.py
+uv run pytest -q tests/test_decision_telemetry.py
+uv run pytest -q tests/test_operator_commands.py
 ```
 
-Also run any new tests you add, and any existing tests directly covering `runtime_readiness`, `repair_plan`, `execution_service`, sizing, or operator reports.
+Also run tests directly covering the files you modify:
 
-If some of these files do not exist or are not relevant after repo inspection, state that explicitly and run the closest equivalent tests. Do not pretend a test was run if it was not.
+```bash
+uv run pytest -q tests -k "residual or dust or telemetry or execution or sizing or failsafe"
+```
 
-## Out of scope / guardrails
+If the repo has a fast regression marker, run:
 
-Do not:
+```bash
+uv run pytest -q -m fast_regression
+```
 
-* Manually flatten the EC2 account as the “fix”.
-* Add a one-off special case for exactly `0.00049980 BTC`.
-* Treat stale lock as the root cause unless verified.
-* Make residual/dust lots canonical strategy sellable lots.
-* Bypass recovery gates, broker/local convergence checks, order-rule checks, or idempotency.
-* Convert all residuals into automatic live sells without proof and policy.
-* Hide blocked cases behind generic `HOLD`.
+If any command is unavailable or too broad, state that explicitly in the final report and run the closest relevant focused tests. Do not claim tests passed if they were not run.
 
-Allowed:
+## Scope
 
-* Add explicit residual inventory taxonomy.
-* Add explicit execution decision/final_action model.
-* Add residual-aware BUY sizing.
-* Add residual sell candidate path with hard pre-submit proof.
-* Add or improve telemetry/operator reports.
-* Improve systemd/logging docs and stale-lock tests.
-* Gate live residual submit behind existing or new conservative config if needed, as long as the decision telemetry is explicit and the deadlock is not silent.
+In scope:
 
-## Implementation strategy
+```text
+- explicit residual live sell policy mode
+- explicit residual buy sizing mode
+- residual submit plan object or equivalent
+- residual SELL path separated from strategy SELL path
+- residual-aware BUY delta path
+- strengthened residual pre-submit proof
+- EC2-shaped regression tests
+- operator telemetry/reporting updates
+- docs/runbook updates for new modes and safe EC2 verification
+```
 
-1. Inspect current repo structure and summarize the actual code path.
-2. Verify or falsify H1-H6 from code/tests/docs.
-3. Implement the smallest coherent design change that addresses the problem family, not just one symptom.
-4. Add EC2-shaped regression tests.
-5. Add/update operator telemetry and docs.
-6. Run focused tests and report results.
-7. If live residual submit is too risky for this PR, still implement classification, candidates, proof, final_action telemetry, and a clearly documented disabled-by-default submit gate. Do not leave SELLABLE_RESIDUAL indistinguishable from unsellable dust.
+Out of scope unless required by tests:
+
+```text
+- manually flattening the live account
+- one-off special casing 0.00049980 BTC
+- weakening lot-native strategy SELL authority
+- merging dust_tracking into canonical strategy open_exposure
+- bypassing recovery gates or broker/local/projection convergence
+- enabling residual live submit by default
+- removing fail-closed behavior for unresolved residuals
+```
+
+## Implementation guidance
+
+Prefer a staged but complete design:
+
+```text
+Stage 1:
+  make policy modes explicit
+  make submit plans explicit
+  make proof complete
+  keep defaults telemetry/fail-closed
+
+Stage 2:
+  wire fake-broker tested enabled residual SELL path
+  wire fake-broker tested BUY delta path
+  keep live defaults conservative
+
+Stage 3:
+  improve operator reports/docs
+```
+
+Do not stop after adding more telemetry if the repo still has no tested submit-plan path for residual SELL and no tested submit-plan path for residual-aware BUY delta.
+
+If live residual SELL is considered too risky to enable by default, that is fine. The `enabled` path still needs to exist and be tested with a fake broker/executor behind a fail-closed config gate.
+
+## Safe EC2 verification docs
+
+Update docs/runbook with commands like:
+
+```bash
+MODE=live uv run bithumb-bot health | egrep \
+  'canonical_state|residual_inventory|new_entry_allowed|exit_allowed|sellable_executable|run_loop|can_resume'
+
+MODE=live uv run bithumb-bot decision-telemetry --limit 20 | egrep \
+  'raw_signal|final_signal|final_action|submit_expected|pre_submit|residual|buy_delta|execution_block'
+
+MODE=live uv run bithumb-bot ops-report --limit 50 | egrep \
+  'final_action|submit_expected|pre_submit|residual|dust_only|buy_delta|execution_block'
+
+sudo journalctl -u bithumb-bot.service -n 100 --no-pager | egrep \
+  'strategy decision|final_action|submit_expected|pre_submit|residual|dust_only|BUY|SELL'
+```
+
+Document expected output for:
+
+```text
+RESIDUAL_LIVE_SELL_MODE=telemetry
+RESIDUAL_LIVE_SELL_MODE=dry_run
+RESIDUAL_LIVE_SELL_MODE=enabled
+RESIDUAL_BUY_SIZING_MODE=telemetry
+RESIDUAL_BUY_SIZING_MODE=delta
+```
 
 ## Final report format
 
@@ -526,63 +756,71 @@ When finished, report in this exact structure:
 ## Summary
 
 - What changed
-- Why this is a structural fix rather than a symptom patch
+- Why this is a structural execution-policy patch rather than another telemetry-only patch
 
 ## Hypothesis Review
 
-### H1: stale lock / observability
+### H1: residual close was telemetry-only
 - Verdict: confirmed / partially confirmed / falsified / inconclusive
 - Evidence:
 - Changes made:
 
-### H2: residual execution path incomplete
+### H2: BUY delta was not wired into actual sizing
 - Verdict:
 - Evidence:
 - Changes made:
 
-### H3: dust_tracking semantics too strong
+### H3: residual pre-submit proof was incomplete
 - Verdict:
 - Evidence:
 - Changes made:
 
-### H4: target exposure / residual-aware sizing
+### H4: dust_only_remainder remained too dominant as operator-facing reason
 - Verdict:
 - Evidence:
 - Changes made:
 
-### H5: readiness vs execution policy separation
-- Verdict:
-- Evidence:
-- Changes made:
-
-### H6: live observability
+### H5: EC2-shaped run-loop regression coverage was incomplete
 - Verdict:
 - Evidence:
 - Changes made:
 
 ## Design Decisions
 
-- How strategy SELL authority is preserved
-- How residual sell authority is separated
-- How BUY sizing accounts for tracked residual exposure
+- How lot-native strategy SELL authority is preserved
+- How residual SELL authority is separated
+- How residual live sell modes work
+- How residual-aware BUY sizing modes work
 - What remains fail-closed and why
 
 ## Tests
 
-Include exact commands run and pass/fail results.
+List exact commands run and results.
 
 ## Operational Impact
 
-- What `health`, `ops-report`, `recovery-report`, logs, or DB decision rows now show for the EC2-shaped case
-- Whether live residual submit is enabled, gated, or telemetry-only
-- How to verify safely on EC2 without manually flattening
+- What `health`, `decision-telemetry`, `ops-report`, and journal logs now show for the EC2-shaped residual case
+- Default behavior after deployment
+- How to safely verify on EC2 without manual flattening
+- Whether live residual submit is telemetry-only, dry-run, or enabled by config
 
-## Follow-ups
+## Remaining Follow-ups
 
 - Any remaining target-exposure engine work
 - Any remaining service/logging/runbook work
 - Any risk or migration note
 ```
 
-The final code should make the EC2-shaped state explainable and reproducible. The operator should no longer face a state where a sellable residual BTC balance silently blocks both BUY and SELL under `dust_only_remainder` with no explicit residual-aware action, proof, or block reason.
+The final result should make this true:
+
+```text
+A sellable residual BTC balance no longer silently deadlocks the system under dust_only_remainder.
+
+By default, the system may remain fail-closed or telemetry-only, but:
+  - the residual SELL candidate has a tested policy-gated submit path,
+  - residual-aware BUY delta has a tested sizing path,
+  - proof failures are explicit,
+  - operator telemetry shows state/action/reason/proof,
+  - lot-native strategy SELL authority remains intact.
+```
 

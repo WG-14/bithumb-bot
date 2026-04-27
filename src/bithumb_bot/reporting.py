@@ -316,6 +316,12 @@ class DecisionTelemetrySummary:
     submit_expected: bool
     pre_submit_proof_status: str
     execution_block_reason: str
+    target_exposure_krw: float | None
+    current_effective_exposure_krw: float | None
+    tracked_residual_exposure_krw: float | None
+    buy_delta_krw: float | None
+    residual_live_sell_mode: str
+    residual_buy_sizing_mode: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -816,6 +822,12 @@ class RecentDecisionFlowSummary:
     submit_expected: bool
     pre_submit_proof_status: str
     execution_block_reason: str
+    target_exposure_krw: float | None
+    current_effective_exposure_krw: float | None
+    tracked_residual_exposure_krw: float | None
+    buy_delta_krw: float | None
+    residual_live_sell_mode: str
+    residual_buy_sizing_mode: str
     buy_flow_state: str
     entry_blocked: bool
     entry_allowed: bool
@@ -1514,6 +1526,12 @@ def fetch_recent_decision_flow(
                 NULLIF(json_extract(context_json, '$.execution_decision.block_reason'), ''),
                 'none'
             ) AS execution_block_reason,
+            json_extract(context_json, '$.execution_decision.target_exposure_krw') AS target_exposure_krw,
+            json_extract(context_json, '$.execution_decision.current_effective_exposure_krw') AS current_effective_exposure_krw,
+            json_extract(context_json, '$.execution_decision.tracked_residual_exposure_krw') AS tracked_residual_exposure_krw,
+            json_extract(context_json, '$.execution_decision.buy_delta_krw') AS buy_delta_krw,
+            COALESCE(json_extract(context_json, '$.residual_live_sell_mode'), json_extract(context_json, '$.execution_decision.residual_live_sell_mode'), '-') AS residual_live_sell_mode,
+            COALESCE(json_extract(context_json, '$.residual_buy_sizing_mode'), json_extract(context_json, '$.execution_decision.residual_buy_sizing_mode'), '-') AS residual_buy_sizing_mode,
             COALESCE(
                 CAST(json_extract(context_json, '$.entry_blocked') AS INTEGER),
                 CASE
@@ -1796,6 +1814,22 @@ def fetch_recent_decision_flow(
                 submit_expected=bool(row["submit_expected"]),
                 pre_submit_proof_status=str(row["pre_submit_proof_status"]),
                 execution_block_reason=str(row["execution_block_reason"]),
+                target_exposure_krw=(
+                    None if row["target_exposure_krw"] is None else float(row["target_exposure_krw"])
+                ),
+                current_effective_exposure_krw=(
+                    None
+                    if row["current_effective_exposure_krw"] is None
+                    else float(row["current_effective_exposure_krw"])
+                ),
+                tracked_residual_exposure_krw=(
+                    None
+                    if row["tracked_residual_exposure_krw"] is None
+                    else float(row["tracked_residual_exposure_krw"])
+                ),
+                buy_delta_krw=(None if row["buy_delta_krw"] is None else float(row["buy_delta_krw"])),
+                residual_live_sell_mode=str(row["residual_live_sell_mode"]),
+                residual_buy_sizing_mode=str(row["residual_buy_sizing_mode"]),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(row["raw_signal"]),
                     final_signal=str(row["final_signal"]),
@@ -1957,6 +1991,23 @@ def fetch_decision_telemetry_summary(
                 else _derived_sell_failure(exposure.sell_qty_boundary_kind) or "none"
             )
         )
+        execution_decision = (
+            context.get("execution_decision") if isinstance(context.get("execution_decision"), dict) else {}
+        )
+        target_exposure_krw = execution_decision.get("target_exposure_krw")
+        current_effective_exposure_krw = execution_decision.get("current_effective_exposure_krw")
+        tracked_residual_exposure_krw = execution_decision.get("tracked_residual_exposure_krw")
+        buy_delta_krw = execution_decision.get("buy_delta_krw")
+        residual_live_sell_mode = str(
+            context.get("residual_live_sell_mode")
+            or execution_decision.get("residual_live_sell_mode")
+            or "-"
+        )
+        residual_buy_sizing_mode = str(
+            context.get("residual_buy_sizing_mode")
+            or execution_decision.get("residual_buy_sizing_mode")
+            or "-"
+        )
 
         key = (
             base_signal,
@@ -1991,6 +2042,12 @@ def fetch_decision_telemetry_summary(
             sell_failure_detail,
             exposure.sell_submit_lot_count,
             exposure.sell_normalized_exposure_qty,
+            target_exposure_krw,
+            current_effective_exposure_krw,
+            tracked_residual_exposure_krw,
+            buy_delta_krw,
+            residual_live_sell_mode,
+            residual_buy_sizing_mode,
         )
         grouped[key] = grouped.get(key, 0) + 1
 
@@ -2004,6 +2061,12 @@ def fetch_decision_telemetry_summary(
                 submit_expected=bool(key[5]),
                 pre_submit_proof_status=str(key[6]),
                 execution_block_reason=str(key[7]),
+                target_exposure_krw=(None if key[32] is None else float(key[32])),
+                current_effective_exposure_krw=(None if key[33] is None else float(key[33])),
+                tracked_residual_exposure_krw=(None if key[34] is None else float(key[34])),
+                buy_delta_krw=(None if key[35] is None else float(key[35])),
+                residual_live_sell_mode=str(key[36]),
+                residual_buy_sizing_mode=str(key[37]),
                 buy_flow_state=_derive_buy_flow_state(
                     raw_signal=str(key[2]),
                     final_signal=str(key[3]),
@@ -4353,6 +4416,11 @@ def cmd_ops_report(*, limit: int = 20) -> None:
                 f"base={row.base_signal} raw={row.raw_signal} final={row.final_signal} "
                 f"final_action={row.final_action} submit_expected={1 if row.submit_expected else 0} "
                 f"pre_submit_proof={row.pre_submit_proof_status} execution_block_reason={row.execution_block_reason} "
+                f"residual_live_sell_mode={row.residual_live_sell_mode} "
+                f"residual_buy_sizing_mode={row.residual_buy_sizing_mode} "
+                f"target_exposure_krw={_fmt_float(float(row.target_exposure_krw or 0.0), 0)} "
+                f"current_effective_exposure_krw={_fmt_float(float(row.current_effective_exposure_krw or 0.0), 0)} "
+                f"buy_delta_krw={_fmt_float(float(row.buy_delta_krw or 0.0), 0)} "
                 f"flow={row.buy_flow_state} entry_blocked={1 if row.entry_blocked else 0} "
                 f"entry_allowed={1 if row.entry_allowed else 0} effective_flat={1 if row.effective_flat else 0} "
                 f"normalized_exposure_active={1 if row.normalized_exposure_active else 0} "
@@ -4536,6 +4604,9 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
     print(
         "  base_signal,decision_type,raw_signal,final_signal,buy_flow_state,entry_blocked,"
         "entry_allowed,block_reason,dust_classification,effective_flat,raw_qty_open,"
+        "final_action,submit_expected,pre_submit_proof_status,execution_block_reason,"
+        "residual_live_sell_mode,residual_buy_sizing_mode,target_exposure_krw,"
+        "current_effective_exposure_krw,tracked_residual_exposure_krw,buy_delta_krw,"
         "raw_total_asset_qty,observed_position_qty,observed_submit_payload_qty,normalized_exposure_active,"
         "normalized_exposure_qty,open_exposure_qty,dust_tracking_qty,sell_open_exposure_qty,sell_dust_tracking_qty,"
         "observed_sell_qty_basis_qty,sell_qty_boundary_kind,sell_submit_lot_count,"
@@ -4548,6 +4619,10 @@ def cmd_decision_telemetry(*, limit: int = 200) -> None:
             f"{row.base_signal},{row.decision_type},{row.raw_signal},{row.final_signal},{row.buy_flow_state},"
             f"{1 if row.entry_blocked else 0},{1 if row.entry_allowed else 0},{row.block_reason},"
             f"{row.dust_classification},{1 if row.effective_flat else 0},{row.raw_qty_open:.8f},"
+            f"{row.final_action},{1 if row.submit_expected else 0},{row.pre_submit_proof_status},"
+            f"{row.execution_block_reason},{row.residual_live_sell_mode},{row.residual_buy_sizing_mode},"
+            f"{float(row.target_exposure_krw or 0.0):.2f},{float(row.current_effective_exposure_krw or 0.0):.2f},"
+            f"{float(row.tracked_residual_exposure_krw or 0.0):.2f},{float(row.buy_delta_krw or 0.0):.2f},"
             f"{row.raw_total_asset_qty:.8f},{row.position_qty:.8f},"
             f"{row.submit_payload_qty:.8f},{1 if row.normalized_exposure_active else 0},"
             f"{row.normalized_exposure_qty:.8f},{row.open_exposure_qty:.8f},"

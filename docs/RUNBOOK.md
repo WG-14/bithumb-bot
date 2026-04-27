@@ -194,7 +194,36 @@ uv run bithumb-bot resume
 5. Review `[P3] dust_residual` and `[P3.1] lot_exposure`.
 6. Review recent strategy decision flow for `raw_signal`, `final_signal`, `final_action`, `submit_expected`, `pre_submit_proof`, and `execution_block_reason`.
 7. Do not treat a clear unresolved count alone as sufficient if `dust_state=blocking_dust`, `dust_resume_allowed=0`, `sellable_executable_qty=0`, or `exit_block_reason` still indicates a lot/dust boundary blocker.
-   If `residual_inventory_state=RESIDUAL_INVENTORY_TRACKED` and `final_action=CLOSE_RESIDUAL_CANDIDATE`, treat it as residual-inventory telemetry unless an explicit residual-submit policy is enabled; do not manually flatten only because the strategy final signal is `HOLD`.
+   If `residual_inventory_state=RESIDUAL_INVENTORY_TRACKED` and `final_action=CLOSE_RESIDUAL_CANDIDATE`, check `RESIDUAL_LIVE_SELL_MODE`, `submit_expected`, `pre_submit_proof`, and `execution_block_reason` before taking action.
+
+### Residual Inventory Policy Verification
+
+Use these commands on EC2 after deployment:
+
+```bash
+MODE=live uv run bithumb-bot health | egrep \
+  'canonical_state|residual_inventory|new_entry_allowed|exit_allowed|sellable_executable|run_loop|can_resume'
+
+MODE=live uv run bithumb-bot decision-telemetry --limit 20 | egrep \
+  'raw_signal|final_signal|final_action|submit_expected|pre_submit|residual|buy_delta|execution_block'
+
+MODE=live uv run bithumb-bot ops-report --limit 50 | egrep \
+  'final_action|submit_expected|pre_submit|residual|dust_only|buy_delta|execution_block'
+
+sudo journalctl -u bithumb-bot.service -n 100 --no-pager | egrep \
+  'strategy decision|final_action|submit_expected|pre_submit|residual|dust_only|BUY|SELL'
+```
+
+Expected residual SELL mode behavior:
+
+- `RESIDUAL_LIVE_SELL_MODE=telemetry`: `final_action=CLOSE_RESIDUAL_CANDIDATE`, `pre_submit_proof=passed`, `submit_expected=0`, `execution_block_reason=residual_live_sell_mode_telemetry`.
+- `RESIDUAL_LIVE_SELL_MODE=dry_run`: residual submit plan is built, `submit_expected=0`, `execution_block_reason=residual_live_sell_mode_dry_run`.
+- `RESIDUAL_LIVE_SELL_MODE=enabled`: residual submit is allowed only when proof passes, `LIVE_REAL_ORDER_ARMED=true`, and `LIVE_DRY_RUN=false`; otherwise it remains fail-closed with an explicit block reason.
+
+Expected BUY sizing behavior:
+
+- `RESIDUAL_BUY_SIZING_MODE=telemetry`: target/current/delta are reported, but the existing BUY sizing remains unchanged.
+- `RESIDUAL_BUY_SIZING_MODE=delta`: BUY sizing uses `target_exposure_krw - current_effective_exposure_krw`; if tracked residual already covers target, no BUY submits.
 8. Run `uv run bithumb-bot reconcile` if state needs to be refreshed.
 9. Re-run `health` and confirm `trading_enabled` is healthy, `can_resume=true`, and the current dust indicators do not contradict resume.
 10. Resume only after the state is understood.
