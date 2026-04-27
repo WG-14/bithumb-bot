@@ -63,6 +63,57 @@ def test_buy_execution_sizing_finalizes_order_qty_from_entry_budget(sizing_rule_
     assert plan.decision_reason_code == "none"
 
 
+def test_residual_buy_delta_changes_actual_sizing_budget(sizing_rule_overrides) -> None:
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    plan = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=100000.0,
+        market_price=115_679_000.0,
+        existing_exposure_qty=0.0,
+        residual_inventory_qty=0.0004998,
+        residual_inventory_notional_krw=57_816.0,
+    )
+
+    assert plan.allowed is True
+    assert plan.gross_budget_krw == pytest.approx(100000.0)
+    assert plan.exposure_offset_krw == pytest.approx(57816.0)
+    assert plan.budget_krw == pytest.approx(42184.0)
+    assert plan.qty_source == "residual_inventory_delta"
+    assert plan.requested_qty == pytest.approx(42184.0 / 115_679_000.0)
+    assert plan.buy_sizing_residual_adjusted is True
+
+
+def test_residual_buy_delta_blocks_when_residual_covers_or_delta_below_min(
+    sizing_rule_overrides,
+) -> None:
+    object.__setattr__(settings, "BUY_FRACTION", 1.0)
+    object.__setattr__(settings, "MAX_ORDER_KRW", 100000.0)
+    covered = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=100000.0,
+        market_price=115_679_000.0,
+        residual_inventory_qty=0.001,
+        residual_inventory_notional_krw=120000.0,
+    )
+    assert covered.allowed is False
+    assert covered.block_reason == BUY_BLOCK_REASON_NON_POSITIVE_ENTRY_BUDGET
+    assert covered.budget_krw == pytest.approx(0.0)
+    assert covered.qty_source == "residual_inventory_delta"
+
+    below_min = build_buy_execution_sizing(
+        pair="BTC_KRW",
+        cash_krw=100000.0,
+        market_price=20_000_000.0,
+        residual_inventory_qty=0.00083,
+        residual_inventory_notional_krw=96000.0,
+    )
+    assert below_min.allowed is False
+    assert below_min.block_reason == BUY_BLOCK_REASON_ENTRY_MIN_NOTIONAL_MISS
+    assert below_min.budget_krw == pytest.approx(4000.0)
+    assert below_min.qty_source == "residual_inventory_delta"
+
+
 def test_documented_buy_quantity_layers_keep_submitted_qty_and_internal_lots_distinct(
     sizing_rule_overrides,
 ) -> None:

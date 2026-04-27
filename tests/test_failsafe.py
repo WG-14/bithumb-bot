@@ -1042,6 +1042,11 @@ def test_residual_sell_policy_dry_run_builds_plan_without_broker_submit() -> Non
     assert decision.block_reason == "residual_live_sell_mode_dry_run"
     assert decision.residual_submit_plan is not None
     assert decision.residual_submit_plan["qty"] == pytest.approx(0.0004998)
+    assert decision.residual_submit_plan["would_submit_pipeline"] == "standard"
+    assert decision.residual_submit_plan["would_source"] == "residual_inventory"
+    assert decision.residual_submit_plan["would_authority"] == "residual_inventory_policy"
+    assert decision.residual_submit_plan["would_submit_side"] == "SELL"
+    assert decision.residual_submit_plan["would_submit_qty"] == pytest.approx(0.0004998)
 
     broker = _ResidualFakeBroker()
     service = LiveSignalExecutionService(broker=broker, executor=lambda *_a, **_k: None, harmless_dust_recorder=lambda **_k: False)
@@ -1054,6 +1059,32 @@ def test_residual_sell_policy_dry_run_builds_plan_without_broker_submit() -> Non
         )
     )
     assert broker.orders == []
+
+
+def test_residual_sell_intent_key_is_stable_for_same_decision() -> None:
+    object.__setattr__(settings, "RESIDUAL_LIVE_SELL_MODE", "enabled")
+    object.__setattr__(settings, "LIVE_DRY_RUN", False)
+    object.__setattr__(settings, "LIVE_REAL_ORDER_ARMED", True)
+    context = _ec2_residual_context() | {"candle_ts": 1_700_000_000_000}
+
+    first = build_execution_decision_summary(
+        decision_context=context,
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+    second = build_execution_decision_summary(
+        decision_context=context,
+        raw_signal="SELL",
+        final_signal="HOLD",
+        final_reason="dust_only_remainder",
+    )
+
+    assert first.residual_submit_plan is not None
+    assert second.residual_submit_plan is not None
+    assert first.residual_submit_plan["idempotency_key"] == second.residual_submit_plan["idempotency_key"]
+    assert first.residual_submit_plan["intent_type"] == "residual_close"
+    assert first.residual_submit_plan["strategy_context"] == "residual_inventory_policy"
 
 
 def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_authority() -> None:
@@ -1073,7 +1104,17 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
     assert decision.residual_submit_plan["authority"] == "residual_inventory_policy"
 
     broker = _ResidualFakeBroker()
-    service = LiveSignalExecutionService(broker=broker, executor=lambda *_a, **_k: None, harmless_dust_recorder=lambda **_k: False)
+    executor_calls: list[dict[str, object]] = []
+
+    def _standard_pipeline_executor(*_args, **kwargs):
+        executor_calls.append(dict(kwargs))
+        return {"source": "residual_inventory", "authority": "residual_inventory_policy"}
+
+    service = LiveSignalExecutionService(
+        broker=broker,
+        executor=_standard_pipeline_executor,
+        harmless_dust_recorder=lambda **_k: False,
+    )
     trade = service.execute(
         SignalExecutionRequest(
             signal="SELL",
@@ -1083,9 +1124,32 @@ def test_residual_sell_policy_enabled_submits_residual_qty_without_strategy_lot_
         )
     )
     assert trade is not None
-    assert broker.orders[0]["side"] == "SELL"
-    assert broker.orders[0]["qty"] == pytest.approx(0.0004998)
+    assert broker.orders == []
+    assert len(executor_calls) == 1
+    assert executor_calls[0]["execution_submit_plan"]["side"] == "SELL"
+    assert executor_calls[0]["execution_submit_plan"]["source"] == "residual_inventory"
+    assert executor_calls[0]["execution_submit_plan"]["authority"] == "residual_inventory_policy"
+    assert executor_calls[0]["execution_submit_plan"]["qty"] == pytest.approx(0.0004998)
     assert trade["source"] == "residual_inventory"
+
+
+def test_residual_sell_proof_missing_accounting_projection_fails_closed() -> None:
+    context = _ec2_residual_context()
+    context.pop("accounting_projection_ok")
+    context["projection_converged"] = True
+    proof = build_residual_sell_presubmit_proof(context)
+    assert proof.passed is False
+    assert "missing_accounting_projection_ok" in proof.reasons
+
+
+def test_residual_sell_proof_accounting_projection_false_fails_closed() -> None:
+    context = _ec2_residual_context() | {
+        "projection_converged": True,
+        "accounting_projection_ok": False,
+    }
+    proof = build_residual_sell_presubmit_proof(context)
+    assert proof.passed is False
+    assert "accounting_projection_not_ok" in proof.reasons
 
 
 @pytest.mark.parametrize(

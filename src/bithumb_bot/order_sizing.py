@@ -301,7 +301,11 @@ def build_buy_execution_sizing(
             internal_lot_size=0.0,
             intended_lot_count=0,
             executable_lot_count=0,
-            qty_source="entry.intent_budget_krw",
+            qty_source=(
+                "residual_inventory_delta"
+                if residual_adjusted
+                else "entry.intent_budget_krw"
+            ),
             effective_min_trade_qty=0.0,
             min_qty=0.0,
             qty_step=0.0,
@@ -332,7 +336,11 @@ def build_buy_execution_sizing(
             internal_lot_size=0.0,
             intended_lot_count=0,
             executable_lot_count=0,
-            qty_source="entry.intent_budget_krw",
+            qty_source=(
+                "residual_inventory_delta"
+                if residual_adjusted
+                else "entry.intent_budget_krw"
+            ),
             effective_min_trade_qty=0.0,
             min_qty=0.0,
             qty_step=0.0,
@@ -367,7 +375,11 @@ def build_buy_execution_sizing(
                 internal_lot_size=0.0,
                 intended_lot_count=0,
                 executable_lot_count=0,
-                qty_source="entry.intent_budget_krw",
+                qty_source=(
+                    "residual_inventory_delta"
+                    if residual_adjusted
+                    else "entry.intent_budget_krw"
+                ),
                 effective_min_trade_qty=0.0,
                 min_qty=float(rules.min_qty),
                 qty_step=float(rules.qty_step),
@@ -458,7 +470,11 @@ def build_buy_execution_sizing(
         internal_lot_size=float(lot_rules.lot_size),
         intended_lot_count=int(intended_lot_count),
         executable_lot_count=int(executable_lot_count if allowed else 0),
-        qty_source="entry.intent_budget_exchange_constraints",
+        qty_source=(
+            "residual_inventory_delta"
+            if residual_adjusted
+            else "entry.intent_budget_exchange_constraints"
+        ),
         effective_min_trade_qty=float(effective_min_trade_qty),
         min_qty=float(lot_rules.min_qty),
         qty_step=float(lot_rules.qty_step),

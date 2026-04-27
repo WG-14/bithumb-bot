@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, replace
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 from enum import Enum
+from types import SimpleNamespace
 
 from ..config import settings
 from ..db_core import ensure_db, get_portfolio, init_portfolio
@@ -205,6 +206,9 @@ class _LiveExecutionIntent:
     exit_sizing: object | None
     canonical_sell: _CanonicalSellExecutionView | None
     diagnostic_sell_qty: _SellDiagnosticQtyView | None
+    intent_type: str | None = None
+    strategy_context: str | None = None
+    use_qty_intent_key: bool = False
 
 
 @dataclass(frozen=True)
@@ -2010,6 +2014,10 @@ def _order_intent_strategy_context() -> str:
 def _order_intent_type(*, side: str) -> str:
     return "market_entry" if side == "BUY" else "market_exit"
 
+
+def _residual_order_intent_strategy_context() -> str:
+    return "residual_inventory_policy"
+
 def _decision_truth_sources_payload(decision_observability: dict[str, object]) -> dict[str, str]:
     return {
         "entry_allowed": str(decision_observability.get("entry_allowed_truth_source") or "-"),
@@ -2166,7 +2174,7 @@ def _determine_live_execution_position_state(
                 readiness_payload.get("residual_inventory_policy_allows_buy")
             ),
             "residual_sell_candidate": readiness_payload.get("residual_sell_candidate"),
-            "accounting_projection_ok": bool(readiness_payload.get("projection_converged")),
+            "accounting_projection_ok": readiness_payload.get("accounting_projection_ok"),
             "projection_converged": bool(readiness_payload.get("projection_converged")),
             "open_order_count": int(readiness_payload.get("open_order_count") or 0),
             "unresolved_open_order_count": int(readiness_payload.get("unresolved_open_order_count") or 0),
@@ -2264,10 +2272,57 @@ def _determine_live_execution_intent(
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
+    execution_submit_plan: dict[str, object] | None = None,
 ) -> _LiveExecutionIntent | None:
     conn = position_state.conn
     decision_observability = position_state.decision_observability
     normalized_exposure = position_state.normalized_exposure
+
+    if (
+        signal == "SELL"
+        and isinstance(execution_submit_plan, dict)
+        and str(execution_submit_plan.get("source") or "") == "residual_inventory"
+        and str(execution_submit_plan.get("authority") or "") == "residual_inventory_policy"
+    ):
+        residual_qty = float(execution_submit_plan.get("qty") or 0.0)
+        if residual_qty <= POSITION_EPSILON:
+            return None
+        residual_sizing = SimpleNamespace(
+            allowed=True,
+            block_reason="none",
+            decision_reason_code=str(
+                execution_submit_plan.get("final_action") or "CLOSE_RESIDUAL_CANDIDATE"
+            ),
+            budget_krw=0.0,
+            requested_qty=float(residual_qty),
+            exchange_constrained_qty=float(residual_qty),
+            lifecycle_executable_qty=float(residual_qty),
+            executable_qty=float(residual_qty),
+            rejected_qty_remainder=0.0,
+            unused_budget_krw=0.0,
+            internal_lot_size=0.0,
+            intended_lot_count=0,
+            executable_lot_count=0,
+            qty_source="residual_inventory_policy",
+            effective_min_trade_qty=float(position_state.effective_rules.min_qty),
+            min_qty=float(position_state.effective_rules.min_qty),
+            qty_step=float(position_state.effective_rules.qty_step),
+            min_notional_krw=float(position_state.effective_rules.min_notional_krw),
+            non_executable_reason="executable",
+        )
+        return _LiveExecutionIntent(
+            side="SELL",
+            order_qty=float(residual_qty),
+            submit_qty_source="residual_inventory_policy",
+            harmless_dust_checked=True,
+            entry_sizing=None,
+            exit_sizing=residual_sizing,
+            canonical_sell=None,
+            diagnostic_sell_qty=None,
+            intent_type="residual_close",
+            strategy_context=_residual_order_intent_strategy_context(),
+            use_qty_intent_key=True,
+        )
 
     if signal == "BUY" and normalized_exposure.effective_flat:
         if not math.isfinite(float(market_price)) or float(market_price) <= 0:
@@ -2955,6 +3010,7 @@ def _prepare_live_execution_submission(
     decision_id: int | None,
     decision_reason: str | None,
     exit_rule_name: str | None,
+    execution_submit_plan: dict[str, object] | None = None,
 ) -> _LiveExecutionSubmissionReady | None:
     intent = _determine_live_execution_intent(
         broker=broker,
@@ -2966,6 +3022,7 @@ def _prepare_live_execution_submission(
         decision_id=decision_id,
         decision_reason=decision_reason,
         exit_rule_name=exit_rule_name,
+        execution_submit_plan=execution_submit_plan,
     )
     if intent is None:
         return None
@@ -3001,6 +3058,7 @@ def live_execute_signal(
     decision_id: int | None = None,
     decision_reason: str | None = None,
     exit_rule_name: str | None = None,
+    execution_submit_plan: dict[str, object] | None = None,
 ) -> dict | None:
     conn = None
     try:
@@ -3047,6 +3105,7 @@ def live_execute_signal(
             decision_id=decision_id,
             decision_reason=decision_reason,
             exit_rule_name=exit_rule_name,
+            execution_submit_plan=execution_submit_plan,
         )
         if submission_ready is None:
             return None

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import uuid
 from typing import Callable, Protocol
 
 from . import runtime_state
 from .config import settings
 from .db_core import ensure_db
 from .decision_context import resolve_canonical_position_exposure_snapshot
-from .oms import build_client_order_id
+from .oms import build_order_intent_key
 
 if False:  # pragma: no cover
     from .broker.base import Broker
@@ -183,6 +182,17 @@ def _residual_live_sell_mode() -> str:
 def _residual_buy_sizing_mode() -> str:
     mode = str(getattr(settings, "RESIDUAL_BUY_SIZING_MODE", "telemetry") or "telemetry").strip().lower()
     return mode if mode in {"off", "telemetry", "delta"} else "telemetry"
+
+
+def _residual_intent_ts(payload: dict[str, object]) -> int:
+    for key in ("ts", "candle_ts", "signal_ts", "decision_ts"):
+        try:
+            value = payload.get(key)
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 def record_harmless_dust_exit_suppression(**kwargs) -> bool:
@@ -384,8 +394,6 @@ def build_execution_decision_summary(
         ):
             if key in readiness_payload:
                 payload[key] = readiness_payload[key]
-        if "accounting_projection_ok" not in payload:
-            payload["accounting_projection_ok"] = bool(readiness_payload.get("projection_converged"))
 
     raw = str(raw_signal or payload.get("raw_signal") or payload.get("base_signal") or payload.get("signal") or "HOLD").upper()
     final = str(final_signal or payload.get("final_signal") or payload.get("signal") or "HOLD").upper()
@@ -524,6 +532,14 @@ def build_execution_decision_summary(
             else:
                 submit_expected = False
                 block_reason = _residual_block_reason(decision_context=payload, proof=proof)
+            residual_intent_key = build_order_intent_key(
+                symbol=str(settings.PAIR),
+                side="SELL",
+                strategy_context="residual_inventory_policy",
+                intent_ts=_residual_intent_ts(payload),
+                intent_type="residual_close",
+                qty=float(residual_candidate.qty),
+            )
             residual_submit_plan = ExecutionSubmitPlan(
                 side="SELL",
                 source="residual_inventory",
@@ -537,8 +553,22 @@ def build_execution_decision_summary(
                 submit_expected=submit_expected,
                 pre_submit_proof_status=proof_status,
                 block_reason=block_reason,
-                idempotency_key=str(payload.get("idempotency_scope") or "live_client_order_id_generator"),
+                idempotency_key=residual_intent_key,
             ).as_dict()
+            residual_submit_plan.update(
+                {
+                    "intent_type": "residual_close",
+                    "strategy_context": "residual_inventory_policy",
+                    "would_submit_pipeline": "standard",
+                    "would_intent_key": residual_intent_key,
+                    "would_client_order_id_shape": "live_<ts>_sell_<submit_attempt_id>",
+                    "would_order_type": "market",
+                    "would_source": "residual_inventory",
+                    "would_authority": "residual_inventory_policy",
+                    "would_submit_side": "SELL",
+                    "would_submit_qty": float(residual_candidate.qty),
+                }
+            )
         elif str(payload.get("residual_inventory_state") or "") == "RESIDUAL_INVENTORY_UNRESOLVED":
             action = "BLOCK_UNRESOLVED_RESIDUAL"
             submit_expected = False
@@ -667,31 +697,31 @@ class LiveSignalExecutionService:
                 return None
             if bool(settings.LIVE_DRY_RUN) or not bool(settings.LIVE_REAL_ORDER_ARMED):
                 return None
-            client_order_id = build_client_order_id(
-                mode=str(settings.MODE or "live"),
-                side="SELL",
-                intent_ts=int(request.ts),
-                nonce=uuid.uuid4().hex,
-            )
-            order = self.broker.place_order(
-                client_order_id=client_order_id,
-                side="SELL",
-                qty=float(residual_plan.get("qty") or 0.0),
-                price=None,
-                submit_plan=None,
-            )
-            return {
-                "client_order_id": order.client_order_id,
-                "exchange_order_id": order.exchange_order_id,
-                "side": order.side,
-                "qty": float(order.qty_req),
-                "submit_qty": float(order.qty_req),
-                "filled_qty": float(order.qty_filled),
-                "candle_ts": request.ts,
-                "signal_ts": request.ts,
-                "source": "residual_inventory",
-                "authority": "residual_inventory_policy",
-            }
+            try:
+                return self.executor(
+                    self.broker,
+                    request.signal,
+                    request.ts,
+                    request.market_price,
+                    strategy_name=request.strategy_name,
+                    decision_id=request.decision_id,
+                    decision_reason=request.decision_reason,
+                    exit_rule_name=request.exit_rule_name,
+                    execution_submit_plan=residual_plan,
+                )
+            except TypeError as exc:
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                return self.executor(
+                    self.broker,
+                    request.signal,
+                    request.ts,
+                    request.market_price,
+                    strategy_name=request.strategy_name,
+                    decision_id=request.decision_id,
+                    decision_reason=request.decision_reason,
+                    exit_rule_name=request.exit_rule_name,
+                )
         harmless_dust_preview = None
         if request.signal == "SELL":
             harmless_dust_preview = _canonical_harmless_dust_sell_preview(request.decision_context)

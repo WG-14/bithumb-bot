@@ -479,9 +479,12 @@ def execute_live_submission_and_application(
     decision_observability = position_state.decision_observability
     submit_attempt_id = live_module._submit_attempt_id()
     client_order_id = live_module._client_order_id(ts=ts, side=feasibility.side, submit_attempt_id=submit_attempt_id)
-    strategy_context = live_module._order_intent_strategy_context()
-    intent_type = live_module._order_intent_type(side=feasibility.side)
+    strategy_context = str(getattr(intent, "strategy_context", None) or live_module._order_intent_strategy_context())
+    intent_type = str(getattr(intent, "intent_type", None) or live_module._order_intent_type(side=feasibility.side))
     lot_sizing = feasibility.entry_sizing if feasibility.side == "BUY" else feasibility.exit_sizing
+    use_qty_intent_key = bool(getattr(intent, "use_qty_intent_key", False))
+    intended_lot_count_for_intent = None if use_qty_intent_key else int(lot_sizing.intended_lot_count)
+    executable_lot_count_for_intent = None if use_qty_intent_key else int(lot_sizing.executable_lot_count)
     intent_key = build_order_intent_key(
         symbol=settings.PAIR,
         side=feasibility.side,
@@ -489,8 +492,8 @@ def execute_live_submission_and_application(
         intent_ts=int(ts),
         intent_type=intent_type,
         qty=feasibility.normalized_qty,
-        intended_lot_count=int(lot_sizing.intended_lot_count),
-        executable_lot_count=int(lot_sizing.executable_lot_count),
+        intended_lot_count=intended_lot_count_for_intent,
+        executable_lot_count=executable_lot_count_for_intent,
     )
 
     reference_price: float | None = None
@@ -671,8 +674,8 @@ def execute_live_submission_and_application(
         intent_type=intent_type,
         intent_ts=int(ts),
         qty=feasibility.normalized_qty,
-        intended_lot_count=int(lot_sizing.intended_lot_count),
-        executable_lot_count=int(lot_sizing.executable_lot_count),
+        intended_lot_count=intended_lot_count_for_intent,
+        executable_lot_count=executable_lot_count_for_intent,
         order_status="PENDING_SUBMIT",
     )
     if not claimed:
