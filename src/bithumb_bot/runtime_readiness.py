@@ -454,6 +454,8 @@ def compute_runtime_readiness_snapshot(conn=None) -> RuntimeReadinessSnapshot:
             lot_snapshot=lot_snapshot,
             portfolio_asset_qty=portfolio_asset_qty,
             reserved_exit_qty=reserved_exit_qty,
+            projection_converged=bool(projection_convergence.get("converged")),
+            projection_non_convergence_reason=str(projection_convergence.get("reason") or "projection_non_converged"),
         )
         repair_summary = get_fee_gap_accounting_repair_summary(conn)
         already_repaired_fee_gap = matching_fee_gap_repair_present(

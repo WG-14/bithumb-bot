@@ -4388,6 +4388,12 @@ def cmd_rebuild_position_authority(
             )
             print(
                 "  "
+                f"pre_gate_passed={1 if bool(preview.get('pre_gate_passed')) else 0} "
+                f"final_safe_to_apply={1 if bool(preview.get('final_safe_to_apply')) else 0} "
+                f"operator_next_action={preview.get('operator_next_action') or preview['next_required_action']}"
+            )
+            print(
+                "  "
                 f"repair_kind={preview.get('repair_kind') or 'full_projection_rebuild'} "
                 f"truth_source={preview.get('truth_source') or 'unknown'} "
                 f"pre_projected_total_qty={float(preview.get('pre_projected_total_qty') or 0.0):.12f} "
@@ -4427,7 +4433,8 @@ def cmd_rebuild_position_authority(
                 f"rollback_path={preview.get('rollback_path') or 'none'}"
             )
         print(f"  next_required_action={preview['next_required_action']}")
-        print(f"  recommended_command={preview['recommended_command']}")
+        print(f"  preview_command={preview.get('preview_command') or 'none'}")
+        print(f"  recommended_command={preview.get('recommended_command') or 'none'}")
 
         if not apply:
             print("[REBUILD-POSITION-AUTHORITY] dry-run: no changes applied")

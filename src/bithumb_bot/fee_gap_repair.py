@@ -160,6 +160,10 @@ def build_fee_gap_accounting_repair_preview(conn) -> dict[str, Any]:
         lot_snapshot=lot_snapshot,
         portfolio_asset_qty=portfolio_asset_qty,
         reserved_exit_qty=reserved_exit_qty,
+        projection_converged=bool(readiness.projection_convergence.get("converged")),
+        projection_non_convergence_reason=str(
+            readiness.projection_convergence.get("reason") or "projection_non_converged"
+        ),
     )
     if already_repaired and not needs_repair:
         eligibility_reason = "matching fee-gap accounting repair already recorded"

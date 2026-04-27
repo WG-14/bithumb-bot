@@ -801,9 +801,11 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
         "position_authority_rebuild_preview": {
             "needs_rebuild": True,
             "safe_to_apply": True,
+            "pre_gate_passed": True,
+            "final_safe_to_apply": True,
             "eligibility_reason": "projection drift requires rebuild",
             "repair_mode": "full_projection_rebuild",
-            "recommended_command": "uv run python bot.py rebuild-position-authority --full-projection-rebuild",
+            "recommended_command": "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes",
         },
     }
 
@@ -832,6 +834,14 @@ def test_projection_drift_routes_to_repair_plan_not_flatten() -> None:
     assert any(
         candidate["name"] == "rebuild-position-authority" and candidate["needed"] and candidate["safe_to_apply"]
         for candidate in plan["candidate_repairs"]
+    )
+    rebuild_candidate = next(
+        candidate for candidate in plan["candidate_repairs"] if candidate["name"] == "rebuild-position-authority"
+    )
+    assert rebuild_candidate["pre_gate_passed"] is True
+    assert rebuild_candidate["final_safe_to_apply"] is True
+    assert rebuild_candidate["recommended_command"] == (
+        "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes"
     )
 
 
@@ -866,9 +876,11 @@ def test_repair_plan_exposes_missing_broker_evidence_fields() -> None:
         "position_authority_rebuild_preview": {
             "needs_rebuild": True,
             "safe_to_apply": False,
+            "pre_gate_passed": False,
+            "final_safe_to_apply": False,
             "eligibility_reason": "broker_position_qty_evidence_missing",
             "repair_mode": "full_projection_rebuild",
-            "recommended_command": "uv run python bot.py rebuild-position-authority --full-projection-rebuild",
+            "recommended_command": None,
         },
     }
 
@@ -881,3 +893,9 @@ def test_repair_plan_exposes_missing_broker_evidence_fields() -> None:
         "base_currency",
         "broker_asset_qty",
     ]
+    rebuild_candidate = next(
+        candidate for candidate in plan["candidate_repairs"] if candidate["name"] == "rebuild-position-authority"
+    )
+    assert rebuild_candidate["pre_gate_passed"] is False
+    assert rebuild_candidate["final_safe_to_apply"] is False
+    assert rebuild_candidate["recommended_command"] == ""

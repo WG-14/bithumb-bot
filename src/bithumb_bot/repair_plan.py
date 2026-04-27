@@ -199,6 +199,7 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
             "needed": bool(position_preview.get("needs_rebuild") or not report.get("lot_projection_converged", True)),
             "active_issue": bool(policy.get("accounting_root_cause_unresolved")),
             "safe_to_apply": bool(position_preview.get("safe_to_apply")),
+            "pre_gate_passed": bool(position_preview.get("pre_gate_passed")),
             "final_safe_to_apply": bool(position_preview.get("final_safe_to_apply")),
             "preconditions": str(position_preview.get("eligibility_reason") or "review position-authority rebuild preview"),
             "touched_tables": [
@@ -220,15 +221,20 @@ def _candidate_repairs_from_report(report: dict[str, Any], policy: dict[str, Any
             "projection_converged_before": position_preview.get("projection_converged_before"),
             "projection_converged_after_replay": position_preview.get("projection_converged_after_replay"),
             "projection_converged_after_publish": position_preview.get("projection_converged_after_publish"),
+            "replay_projection_converged": position_preview.get("replay_projection_converged"),
+            "post_publish_projection_converged": position_preview.get("post_publish_projection_converged"),
             "source_mode_of_new_rows": list(position_preview.get("source_mode_of_new_rows") or []),
             "target_lot_provenance_kind": position_preview.get("target_lot_provenance_kind"),
             "fill_qty_invariant_applies": position_preview.get("target_lot_fill_qty_invariant_applies"),
             "semantic_contract_check_applicable": position_preview.get("semantic_contract_check_applicable"),
             "semantic_contract_check_skipped_reason": position_preview.get("semantic_contract_check_skipped_reason"),
             "rollback_path": position_preview.get("rollback_path"),
-            "why_safe": "treats open_position_lots as rebuildable projection and requires broker, portfolio, and replay gates before mutation",
+            "operator_next_action": position_preview.get("operator_next_action"),
+            "preview_command": position_preview.get("preview_command"),
+            "why_safe": position_preview.get("why_safe"),
+            "why_unsafe": list(position_preview.get("why_unsafe") or []),
             "recommended_command": str(
-                position_preview.get("recommended_command") or "uv run python bot.py rebuild-position-authority"
+                position_preview.get("recommended_command") or ""
             ),
         },
     ]
@@ -287,6 +293,7 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "projection_kind": "open_position_lots",
         "rebuildable": True,
         "safe_to_rebuild": bool((report.get("position_authority_rebuild_preview") or {}).get("safe_to_apply")),
+        "pre_gate_passed": bool((report.get("position_authority_rebuild_preview") or {}).get("pre_gate_passed")),
         "final_safe_to_rebuild": bool((report.get("position_authority_rebuild_preview") or {}).get("final_safe_to_apply")),
         "reason": projection_reason,
         "non_mutating_preview": True,
@@ -298,12 +305,18 @@ def build_repair_plan_preview_from_report(report: dict[str, Any]) -> dict[str, A
         "projection_converged_before": position_preview.get("projection_converged_before"),
         "projection_converged_after_replay": position_preview.get("projection_converged_after_replay"),
         "projection_converged_after_publish": position_preview.get("projection_converged_after_publish"),
+        "replay_projection_converged": position_preview.get("replay_projection_converged"),
+        "post_publish_projection_converged": position_preview.get("post_publish_projection_converged"),
         "source_mode_of_new_rows": list(position_preview.get("source_mode_of_new_rows") or []),
         "target_lot_provenance_kind": position_preview.get("target_lot_provenance_kind"),
         "fill_qty_invariant_applies": position_preview.get("target_lot_fill_qty_invariant_applies"),
         "semantic_contract_check_applicable": position_preview.get("semantic_contract_check_applicable"),
         "semantic_contract_check_skipped_reason": position_preview.get("semantic_contract_check_skipped_reason"),
         "rollback_path": position_preview.get("rollback_path"),
+        "operator_next_action": position_preview.get("operator_next_action"),
+        "preview_command": position_preview.get("preview_command"),
+        "why_safe": position_preview.get("why_safe"),
+        "why_unsafe": list(position_preview.get("why_unsafe") or []),
         "candidate_repairs": _candidate_repairs_from_report(report, policy),
     }
     plan_basis = {

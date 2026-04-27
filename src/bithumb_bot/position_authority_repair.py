@@ -207,6 +207,7 @@ def _build_full_projection_rebuild_post_state_preview(
 ) -> dict[str, Any]:
     portfolio_qty = float(preview.get("portfolio_qty") or 0.0)
     broker_qty = float(preview.get("broker_qty") or 0.0)
+    pre_gate_passed = bool(not gate_report.get("reasons"))
     pre_convergence = build_lot_projection_convergence(conn, pair=settings.PAIR)
     savepoint = "position_authority_full_projection_rebuild_preview"
     conn.execute(f"SAVEPOINT {savepoint}")
@@ -292,6 +293,7 @@ def _build_full_projection_rebuild_post_state_preview(
         return {
             "repair_kind": "full_projection_rebuild",
             "truth_source": "broker_portfolio_anchor",
+            "pre_gate_passed": pre_gate_passed,
             "pre_projected_total_qty": float(pre_convergence.get("projected_total_qty") or 0.0),
             "replay_projected_total_qty": float(replay_convergence.get("projected_total_qty") or 0.0),
             "post_replace_projected_total_qty": float(post_replace_convergence.get("projected_total_qty") or 0.0),
@@ -302,6 +304,8 @@ def _build_full_projection_rebuild_post_state_preview(
             "projection_converged_after_replay": bool(replay_convergence.get("converged")),
             "projection_converged_after_replace": bool(post_replace_convergence.get("converged")),
             "projection_converged_after_publish": bool(post_publish_convergence.get("converged")),
+            "replay_projection_converged": bool(replay_convergence.get("converged")),
+            "post_publish_projection_converged": bool(post_publish_convergence.get("converged")),
             "source_mode_of_new_rows": source_modes_of_new_rows,
             "target_lot_provenance_kind": str(post_publish_assessment.get("target_lot_provenance_kind") or "unknown"),
             "fill_qty_invariant_applies": bool(
@@ -322,7 +326,13 @@ def _build_full_projection_rebuild_post_state_preview(
             "post_publish_projection_convergence": post_publish_convergence,
             "portfolio_anchor_projection": anchor_summary,
             "final_gate_failures": final_gate_failures,
-            "final_safe_to_apply": bool(not gate_report.get("reasons") and not final_gate_failures),
+            "why_safe": (
+                "broker, portfolio, and rebuilt projection converge after portfolio-anchor publication"
+                if pre_gate_passed and not final_gate_failures
+                else None
+            ),
+            "why_unsafe": list(final_gate_failures),
+            "final_safe_to_apply": bool(pre_gate_passed and not final_gate_failures),
             "rollback_path": "preview savepoint rollback; no DB changes committed",
         }
     finally:
@@ -483,12 +493,28 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         if full_projection_post_state_preview is not None
         else safe_to_apply
     )
+    if repair_mode == "full_projection_rebuild":
+        safe_to_apply = final_safe_to_apply
     next_required_action = (
         "review_rebuild_replay"
         if repair_mode == "full_projection_rebuild"
         and full_projection_post_state_preview is not None
         and not final_safe_to_apply
         else ("apply_rebuild_position_authority" if safe_to_apply else snapshot.operator_next_action)
+    )
+    preview_command = (
+        "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+        if repair_mode == "full_projection_rebuild"
+        else "uv run python bot.py rebuild-position-authority"
+    )
+    recommended_command = (
+        "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes"
+        if repair_mode == "full_projection_rebuild" and final_safe_to_apply
+        else (
+            "uv run python bot.py rebuild-position-authority --apply --yes"
+            if repair_mode != "full_projection_rebuild" and safe_to_apply
+            else None
+        )
     )
     return {
         "needs_rebuild": snapshot.recovery_stage in {
@@ -500,6 +526,11 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         },
         "safe_to_apply": safe_to_apply,
         "final_safe_to_apply": final_safe_to_apply,
+        "pre_gate_passed": (
+            bool(full_projection_post_state_preview.get("pre_gate_passed"))
+            if full_projection_post_state_preview is not None
+            else bool(not reasons)
+        ),
         "action_state": effective_action_state,
         "eligibility_reason": (
             "partial-close residual authority normalization applicable"
@@ -521,19 +552,9 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
         "recovery_stage": snapshot.recovery_stage,
         "repair_mode": repair_mode,
         "next_required_action": next_required_action,
-        "recommended_command": (
-            (
-                "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes"
-                if repair_mode == "full_projection_rebuild"
-                else "uv run python bot.py rebuild-position-authority --apply --yes"
-            )
-            if safe_to_apply
-            else (
-                "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
-                if repair_mode == "full_projection_rebuild"
-                else snapshot.recommended_command
-            )
-        ),
+        "operator_next_action": next_required_action,
+        "preview_command": preview_command,
+        "recommended_command": recommended_command,
         "position_authority_assessment": authority_assessment,
         "portfolio_qty": portfolio_qty,
         "accounted_buy_qty": buy_qty,
@@ -704,6 +725,16 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             if full_projection_post_state_preview is None
             else bool(full_projection_post_state_preview.get("projection_converged_after_publish"))
         ),
+        "replay_projection_converged": (
+            None
+            if full_projection_post_state_preview is None
+            else bool(full_projection_post_state_preview.get("replay_projection_converged"))
+        ),
+        "post_publish_projection_converged": (
+            None
+            if full_projection_post_state_preview is None
+            else bool(full_projection_post_state_preview.get("post_publish_projection_converged"))
+        ),
         "source_mode_of_new_rows": (
             []
             if full_projection_post_state_preview is None
@@ -713,6 +744,16 @@ def build_position_authority_rebuild_preview(conn, *, full_projection_rebuild: b
             None
             if full_projection_post_state_preview is None
             else str(full_projection_post_state_preview.get("rollback_path") or "")
+        ),
+        "why_safe": (
+            None
+            if full_projection_post_state_preview is None
+            else full_projection_post_state_preview.get("why_safe")
+        ),
+        "why_unsafe": (
+            []
+            if full_projection_post_state_preview is None
+            else list(full_projection_post_state_preview.get("why_unsafe") or [])
         ),
         "full_projection_rebuild_post_state_preview": full_projection_post_state_preview,
     }

@@ -191,6 +191,22 @@ def classify_canonical_tradeability_state(
     entry_block_reason = str(getattr(normalized, "entry_block_reason", "none") or "none")
     exit_block_reason = str(getattr(normalized, "exit_block_reason", "none") or "none")
 
+    if str(recovery_state.canonical_state) == "PROJECTION_INVALID":
+        return CanonicalTradeabilityState(
+            canonical_state="PROJECTION_INVALID",
+            residual_class="AUTHORITY_PROJECTION_NON_CONVERGED",
+            run_loop_allowed=False,
+            position_management_allowed=False,
+            new_entry_allowed=False,
+            closeout_allowed=False,
+            execution_flat=bool(recovery_state.execution_flat),
+            accounting_flat=bool(recovery_state.accounting_flat),
+            effective_flat=effective_flat,
+            operator_action_required=True,
+            why_not="run_loop_blocked;projection_invalid",
+            operator_next_action="review_position_authority_evidence",
+        )
+
     if has_executable or terminal_state in {"open_exposure", "reserved_exit_pending"}:
         residual_class = "EXECUTABLE_OPEN_EXPOSURE"
     elif has_dust_only and entry_allowed and dust_operability_state == "boundary_near_tracked_residue_entry_allowed":
@@ -269,6 +285,8 @@ def classify_canonical_recovery_state(
     lot_snapshot: Any,
     portfolio_asset_qty: float,
     reserved_exit_qty: float,
+    projection_converged: bool = True,
+    projection_non_convergence_reason: str = "none",
 ) -> CanonicalRecoveryState:
     """Classify recovery posture from shared lot-native authority.
 
@@ -308,6 +326,20 @@ def classify_canonical_recovery_state(
             residue_kind="authority_missing",
             operator_next_action="rebuild_position_authority",
             policy_reason="position residue exists without lot-native executable authority",
+        )
+
+    if not bool(projection_converged) and has_position_residue:
+        return CanonicalRecoveryState(
+            canonical_state="PROJECTION_INVALID",
+            execution_flat=False,
+            accounting_flat=False,
+            closeout_blocking_residue=True,
+            residue_kind="projection_invalid",
+            operator_next_action="review_position_authority_evidence",
+            policy_reason=(
+                "materialized lot projection diverges from canonical portfolio evidence: "
+                f"{projection_non_convergence_reason or 'projection_non_converged'}"
+            ),
         )
 
     if has_executable or open_lot_count > 0:

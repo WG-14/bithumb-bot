@@ -1,4 +1,4 @@
-Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The current EC2 failure is no longer primarily about fee accounting, stale halt clearing, broker balance visibility, or position-management resume. The remaining failure is in the **position authority projection/rebuild semantics**: `open_position_lots` is being treated sometimes as fill-native canonical authority and sometimes as broker/portfolio-anchored materialized projection, and those two meanings are not kept separate end-to-end. 
+Use the incident-analysis context below as background, but do **not** treat it as proven fact. Verify every claim directly in `WG-14/bithumb-bot` before changing code. The current EC2 failure is no longer primarily about fee accounting, broker balance visibility, stale halt clearing, or open-position resume policy. The remaining failure is in **position authority projection/rebuild semantics**: `full_projection_rebuild` deletes fragmented `open_position_lots` rows, but replay recreates the same historical dust rows, leaving the materialized projection divergent from current broker/portfolio truth while still surfacing an unsafe `--apply --yes` recommendation. 
 
 You are working in:
 
@@ -8,115 +8,101 @@ WG-14/bithumb-bot
 
 ## Mission
 
-Do **not** solve this by flattening the position, forcing resume, manually editing the DB, repeatedly applying repair commands, or hiding blockers.
+Do **not** solve this by flattening the position, forcing resume, manually editing the DB, repeatedly applying repair commands, suppressing blockers, or weakening safety gates.
 
-The goal is to make `position_authority` a provenance-aware projection system:
+The goal is to make `position_authority` a broker/portfolio-anchored, provenance-aware projection system.
 
-```text
-canonical truth =
-  fills
-  trades
-  finalized fee events
-  external cash/position adjustments
-  manual repair events
-  current broker account snapshot as evidence
-
-derived materialized projections =
-  open_position_lots
-  trade_lifecycles
-  normalized exposure
-  dust tracking
-```
-
-`open_position_lots` must not act as untyped canonical truth. It must be a rebuildable projection whose invariants depend on provenance.
-
-The key principle:
+Core principle:
 
 ```text
-fill-native lot evidence
-≠ broker/portfolio-anchored projection evidence
-≠ manual portfolio repair evidence
+open_position_lots is a rebuildable materialized projection,
+not canonical truth.
 ```
+
+Canonical truth should be:
+
+```text
+fills
+trades
+finalized fee events
+external cash/position adjustments
+manual repair events
+current broker account snapshot as evidence
+```
+
+Derived projections should be:
+
+```text
+open_position_lots
+trade_lifecycles
+normalized exposure
+dust tracking
+```
+
+The current failure shows that `full_projection_rebuild` is not terminally anchored to current broker/portfolio state. It replays historical fills and recreates invalid fragmented dust rows. The patch must fix the rebuild semantics, final safety gates, and operator output.
 
 ## Current EC2 incident facts to preserve as fixtures
 
-The latest incident indicates that previously solved categories are not the active cause:
+Latest EC2 evidence shows:
 
 ```text
-fee pending: not active
-broker balance read: OK
-broker_portfolio_converged: true
-accounting_projection_ok: true
-stale RISK_STATE_MISMATCH halt: previously fixed
-OPEN_EXECUTABLE position-management resume: previously fixed
+broker_qty=0.00039985
+portfolio_qty=0.00039985
 ```
 
-The current issue is in `open_position_lots` / `position_authority` projection semantics.
-
-Observed failure pattern 1 — historical dust rows are over-materialized:
+But materialized lot projection shows:
 
 ```text
-portfolio_qty=0.00039985
-broker_qty=0.00039985
 projected_total_qty=0.00218797
 projected_qty_excess=0.00178812
 dust_tracking_lot_count=16
 dust_tracking_qty=0.00218797
+open_lot_count=0
+executable_lot_count=0
+```
+
+The active blockers are:
+
+```text
+POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+materialized_projection_fragmentation
+```
+
+The full projection rebuild replay currently does this:
+
+```text
+deleted_open_position_lot_count=16
+deleted_trade_lifecycle_count=4
+replayed_buy_count=16
+replayed_sell_count=12
+
+lot_snapshot_before.raw_total_asset_qty=0.00218797
+lot_snapshot_after.raw_total_asset_qty=0.00218797
+```
+
+This is the core bug: rebuild deletes fragmented rows but replay recreates the same fragmented dust projection instead of producing a current broker/portfolio-anchored terminal state.
+
+The unsafe operator surface currently shows or can show:
+
+```text
+safe_to_apply=true
+recommended_command=... rebuild-position-authority --full-projection-rebuild --apply --yes
+```
+
+while also showing:
+
+```text
 projection_converged=false
-```
-
-This means the materialized projection can become much larger than broker/portfolio truth.
-
-Observed failure pattern 2 — after broker/portfolio anchoring, semantic contract still fails:
-
-```text
+projected_total_qty=0.00218797
 portfolio_qty=0.00039985
-broker_qty=0.00039985
-projected_total_qty=0.00039985
-projection_converged=true
-
-but:
-target_lot_qty_fill_mismatch=
-  target_qty=0.000399850000,
-  fill_qty=0.000599990000
-
-alignment_state=semantic_contract_mismatch
-safe_to_correct=false
 ```
 
-This suggests that a broker/portfolio-anchored projection row is still being checked against a fill-native invariant.
-
-Observed failure pattern 3 — multi-lot partial close can compare target residual to whole portfolio incorrectly:
-
-```text
-portfolio_qty=0.00049980
-other_active_qty=0.00039982
-target_residual_qty=0.00009998
-```
-
-Correct comparison:
-
-```text
-portfolio_qty == other_active_qty + target_residual_qty
-```
-
-Incorrect comparison seen in prior output:
-
-```text
-portfolio_qty == target_residual_qty
-```
-
-which produced:
-
-```text
-portfolio_target_qty_mismatch=
-  portfolio_qty=0.00049980,
-  target_qty=0.00009998
-```
+This must not happen. If final post-rebuild projection is not converged, the command must not recommend apply.
 
 ## Files and code paths to inspect first
 
-Inspect these files and nearby tests:
+Inspect these files and related tests:
 
 ```text
 src/bithumb_bot/position_authority_state.py
@@ -129,8 +115,8 @@ src/bithumb_bot/db_core.py
 src/bithumb_bot/lot_model.py
 src/bithumb_bot/execution_service.py
 
-tests/test_operator_commands.py
 tests/test_position_authority_recovery_state.py
+tests/test_operator_commands.py
 tests/test_accounting_projection.py
 tests/test_recovery_report.py
 tests/test_runtime_readiness.py
@@ -141,27 +127,38 @@ Search for:
 ```text
 FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE
 PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE
-_classify_target_lot_provenance
 TargetLotProvenance
+_classify_target_lot_provenance
 fill_qty_invariant_applies
-target_lot_qty_fill_mismatch
-portfolio_target_qty_mismatch
-build_position_authority_assessment
+_semantic_contract_skip_reason
 build_lot_projection_convergence
+build_position_authority_assessment
 projection_replay
-manual_full_projection_rebuild_publish
 full_projection_rebuild
-portfolio_anchor_projection
+manual_full_projection_rebuild_publish
 safe_to_apply
-safe_to_correct
-semantic_contract_mismatch
+final_safe_to_apply
+recommended_command
 HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
 MATERIALIZED_PROJECTION_FRAGMENTATION
+POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED
+portfolio_projection_qty_mismatch
+dust_tracking_lot_count
 ```
 
 ## Repo facts to verify
 
-`position_authority_state.py` already appears to classify target lot provenance:
+`position_authority_state.py` already contains provenance primitives:
+
+```text
+FULL_PROJECTION_REBUILD_PORTFOLIO_ANCHOR_SOURCE_MODE
+PORTFOLIO_ANCHORED_REPAIR_SOURCE_MODE
+TargetLotProvenance
+fill_qty_invariant_applies
+_semantic_contract_skip_reason()
+```
+
+It classifies:
 
 ```text
 ledger / missing source mode
@@ -177,228 +174,201 @@ portfolio_anchored_repair
 → fill_qty_invariant_applies=False
 ```
 
-Verify this directly.
-
-If the classification exists, the bug is likely that this provenance is not preserved all the way to blocker generation, repair eligibility, post-assessment, and operator output.
+Verify whether this provenance model is actually used end-to-end in rebuild, publish, post-assessment, repair-plan, and operator recommendation paths. The presence of these dataclasses/functions is not enough; the final rebuild/apply recommendation must be governed by final broker/portfolio-anchored post-state. 
 
 ## Working hypotheses
 
 Keep these as hypotheses until verified or falsified in code and tests.
 
-### Hypothesis A — full projection rebuild replay over-materializes historical dust rows
+### Hypothesis A — `full_projection_rebuild` does not use broker/portfolio anchor as terminal truth
 
-The full projection rebuild deletes existing lot rows but then replays historical BUY/SELL evidence in a way that recreates many historical dust-tracking rows.
+Current evidence:
 
-Observed incident pattern:
+```text
+broker_qty=0.00039985
+portfolio_qty=0.00039985
+projected_total_qty=0.00218797
+```
+
+Replay evidence:
 
 ```text
 deleted_open_position_lot_count=16
 replayed_buy_count=16
 replayed_sell_count=12
-
-after replay:
-  dust_tracking_lot_count=16
-  dust_tracking_qty=0.00218797
-  projected_total_qty=0.00218797
-
-but current:
-  broker_qty=0.00039985
-  portfolio_qty=0.00039985
+lot_snapshot_after.raw_total_asset_qty=0.00218797
 ```
 
 Hypothesis:
 
 ```text
-Full projection rebuild uses historical fill residuals too strongly and does not terminally anchor the materialized projection to current broker/portfolio quantity.
+full_projection_rebuild replays historical fills/trades and materializes historical residual dust rows, but does not terminally collapse, trim, or re-anchor the projection to current broker_qty/portfolio_qty.
 ```
 
 Verification:
 
 ```text
-1. Inspect full projection rebuild replay code.
-2. Identify whether external_position_adjustments, manual_flat_accounting_repairs,
-   position_authority_repairs, portfolio-anchor publications, and current broker snapshot
-   are included in the replay terminal state.
+1. Inspect full projection rebuild implementation.
+2. Identify whether broker_qty and portfolio_qty are used as terminal anchors or only as pre-gates.
 3. Build a fixture:
-   - historical dust_tracking_lot_count=16
-   - historical projected_total_qty=0.00218797
-   - current broker_qty=0.00039985
-   - current portfolio_qty=0.00039985
-4. Run full projection rebuild.
+   - existing open_position_lots dust_tracking_lot_count=16
+   - projected_total_qty=0.00218797
+   - broker_qty=0.00039985
+   - portfolio_qty=0.00039985
+4. Run full_projection_rebuild preview/apply simulation.
+5. Assert final post-state projected_total_qty.
 ```
 
-Expected desired behavior:
+Desired behavior:
 
 ```text
 post_rebuild_projected_total_qty=0.00039985
 projection_converged=true
-no recreated 0.00218797 dust projection
+no regenerated 0.00218797 dust projection
 ```
 
 Falsification condition:
 
 ```text
-If canonical ledger + external adjustments + broker snapshot actually prove the account should hold 0.00218797 BTC, then broker/portfolio are wrong and full rebuild is correct.
+If canonical events plus external adjustments prove that true holdings should be 0.00218797 BTC, then broker/portfolio are wrong. But current broker snapshot, portfolio, and app-facing evidence indicate 0.00039985 BTC, so treat broker/portfolio as the operational anchor unless code proves otherwise.
 ```
 
-But current mobile app / broker snapshot / portfolio evidence suggests broker/portfolio are the anchor.
+### Hypothesis B — `safe_to_apply` / `recommended_command` is based on pre-gates or intermediate state, not final post-state
 
-### Hypothesis B — portfolio-anchor projection rows still receive fill-native invariant checks
-
-Observed incident pattern:
-
-```text
-portfolio_qty=0.00039985
-broker_qty=0.00039985
-projected_total_qty=0.00039985
-projection_converged=true
-
-but:
-target_lot_qty_fill_mismatch=
-  target_qty=0.000399850000,
-  fill_qty=0.000599990000
-semantic_contract_mismatch
-```
-
-Hypothesis:
-
-```text
-Rows sourced from full_projection_rebuild_portfolio_anchor or portfolio_anchored_repair are still checked as if they were ledger/fill-native rows.
-```
-
-Verification:
-
-```text
-1. Check _classify_target_lot_provenance() on the current target row.
-2. Confirm whether kind=portfolio_anchor_projection_lot and fill_qty_invariant_applies=False.
-3. Find where target_lot_qty_fill_mismatch is emitted.
-4. Confirm whether that blocker is guarded by target_lot_provenance.fill_qty_invariant_applies.
-5. Confirm whether post-rebuild/post-publish assessment uses the newly published source_mode, not stale pre-rebuild classification.
-```
-
-Expected desired behavior:
-
-```text
-For source_mode=full_projection_rebuild_portfolio_anchor:
-  no target_lot_qty_fill_mismatch
-  no fill-native target_qty == original_buy_fill_qty requirement
-  semantic_contract_check_applicable=false
-  semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-```
-
-Falsification condition:
-
-```text
-If the row is actually source_mode=ledger and not a portfolio-anchor projection, fill-native invariant may be valid.
-```
-
-### Hypothesis C — correction path compares target residual to entire portfolio instead of target residual plus other active qty
-
-Observed prior pattern:
-
-```text
-portfolio_qty=0.00049980
-other_active_qty=0.00039982
-target_residual_qty=0.00009998
-```
-
-Hypothesis:
-
-```text
-position authority correction eligibility computes other_active_qty but still emits portfolio_target_qty_mismatch by comparing portfolio_qty to target_residual_qty alone.
-```
-
-Verification:
-
-```text
-1. Locate portfolio_target_qty_mismatch generation.
-2. Check whether it compares portfolio_qty to target_total_qty / target_residual only.
-3. Check whether it uses portfolio_target_remainder_qty = max(0, portfolio_qty - other_active_qty).
-4. Build a multi-lot fixture:
-   other_active_qty=0.00039982
-   target_residual_qty=0.00009998
-   portfolio_qty=0.00049980
-```
-
-Expected desired behavior:
-
-```text
-portfolio_qty == other_active_qty + target_residual_qty
-no portfolio_target_qty_mismatch
-safe_to_correct or no conflict, assuming all other evidence is coherent
-```
-
-Falsification condition:
-
-```text
-If other_active_qty is stale/invalid and not broker/portfolio-supported, it must not be accepted blindly.
-```
-
-### Hypothesis D — repair flow does not enforce a single final post-state before recommending apply
-
-Observed output mixes:
+Current evidence:
 
 ```text
 safe_to_apply=true
-recommended_command=... --apply --yes
+recommended_command=... --full-projection-rebuild --apply --yes
 ```
 
-with:
+appears with:
 
 ```text
-projection_replay after projected_total_qty=0.00218797
-portfolio_qty=0.00039985
 projection_converged=false
-semantic_contract_mismatch
-safe_to_correct=false
+projected_total_qty=0.00218797
+portfolio_qty=0.00039985
 ```
 
 Hypothesis:
 
 ```text
-repair-plan / rebuild-position-authority reports safe_to_apply for one stage while later replay/post-assessment evidence disproves final convergence.
+The repair command reports safe_to_apply or recommended_command using precondition/gate success rather than final post-rebuild convergence.
 ```
 
 Verification:
 
 ```text
 1. Trace rebuild-position-authority preview/apply pipeline:
-   pre-assessment
-   replay
-   publish/write
-   post-publish assessment
-   operator recommendation
-2. Confirm final recommended_command is emitted only after final post-state passes all gates.
-3. Confirm safe_to_apply is not stale from pre-replay or replay-only stage.
+   - pre-assessment
+   - replay
+   - publish/write
+   - post-publish assessment
+   - operator recommendation
+2. Confirm where safe_to_apply is computed.
+3. Confirm where recommended_command is emitted.
+4. Confirm whether final post-state gates can override/remove apply recommendation.
 ```
 
-Expected desired behavior:
+Desired behavior:
 
 ```text
-safe_to_apply=true only when final post-publish assessment is converged and semantically valid.
+recommended_command is emitted only when final_safe_to_apply=true.
+final_safe_to_apply=true only when final post-state is converged and semantically valid.
 ```
 
-If replay/post-publish would produce:
+Falsification condition:
 
 ```text
-projected_total_qty=0.00218797
-portfolio_qty=0.00039985
-projection_converged=false
+If safe_to_apply=true is only an internal pre-gate field and not intended as an apply recommendation, then operator output is still wrong because it appears alongside --apply --yes. Fix naming/surface so the operator cannot mistake pre-gate pass for final apply safety.
 ```
 
-then:
+### Hypothesis C — historical dust rows are not invalidated by SELLs, external adjustments, manual repairs, or broker anchor
+
+Current evidence:
 
 ```text
-safe_to_apply=false
-recommended_command absent
-operator_next_action=review_rebuild_replay
+replayed_buy_count=16
+replayed_sell_count=12
+dust_tracking_lot_count=16
+dust_tracking_qty=0.00218797
+```
+
+Hypothesis:
+
+```text
+Replay does not sufficiently consume or invalidate historical residual dust rows using later SELLs, external_position_adjustments, manual_flat_accounting_repairs, position_authority_repairs, or broker/portfolio anchor evidence.
+```
+
+Verification:
+
+```text
+1. Inspect replay logic for BUY/SELL matching and trade_lifecycles recreation.
+2. Verify whether external_position_adjustments are replayed.
+3. Verify whether manual_flat_accounting_repairs are replayed.
+4. Verify whether position_authority_repairs are treated as historical evidence only or current-state proof.
+5. Verify whether a broker/portfolio anchor publication supersedes historical dust residuals.
+```
+
+Desired behavior:
+
+```text
+Historical dust residuals that exceed current broker/portfolio quantity must not survive full projection rebuild.
+```
+
+Falsification condition:
+
+```text
+If all 16 residual dust rows are actually supported by current broker holdings and canonical adjustments, then projection should converge to 0.00218797, but that contradicts current broker/portfolio evidence.
+```
+
+### Hypothesis D — tradeability/dust classification is derived from invalid projection instead of failing as projection-invalid
+
+Current evidence:
+
+```text
+dust_state=no_dust
+dust_tracking_qty=0.00218797
+terminal_state=dust_only
+exit_allowed=false
+entry_allowed=false
+```
+
+Hypothesis:
+
+```text
+When projection_converged=false, normalized exposure/dust classification still derives operational state from invalid open_position_lots data, producing misleading dust-only conclusions.
+```
+
+Verification:
+
+```text
+1. Inspect normalized exposure and recovery policy paths.
+2. Confirm behavior when projection_converged=false.
+3. Confirm whether state is reported as DUST_ONLY_TRACKED or as PROJECTION_INVALID.
+```
+
+Desired behavior:
+
+```text
+When projection_converged=false:
+  operational state should be projection_invalid / authority_projection_non_converged
+  entry/exit should fail closed
+  operator action should be repair/diagnose
+  do not claim this is a true dust-only position
+```
+
+Falsification condition:
+
+```text
+If current projection is valid, then dust-only may be correct. But current projected_total_qty != portfolio_qty, so this should be projection-invalid, not normal dust-only.
 ```
 
 ## Required design changes
 
-### 1. Make full projection rebuild broker/portfolio-anchored at terminal state
+### 1. Make full projection rebuild terminally broker/portfolio anchored
 
-If the command is called `full_projection_rebuild`, its final success invariant must be:
+A successful `full_projection_rebuild` must satisfy:
 
 ```text
 post_rebuild_projected_total_qty == portfolio_qty == broker_qty
@@ -406,138 +376,146 @@ post_rebuild_projected_total_qty == portfolio_qty == broker_qty
 
 within the repository’s quantity tolerance.
 
-This must be true after publish/write, not only in a preview sub-object.
-
-If historical replay creates old dust rows that exceed current portfolio/broker quantity, the rebuild must either:
+For this incident, successful post-state must be:
 
 ```text
-collapse / trim / re-anchor projection rows to broker/portfolio quantity
+post_rebuild_projected_total_qty=0.00039985
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+projection_converged=true
 ```
 
-or fail closed with:
+If replay produces:
 
 ```text
-safe_to_apply=false
+projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projected_qty_excess=0.00178812
+projection_converged=false
+```
+
+then final result must be:
+
+```text
+final_safe_to_apply=false
+recommended_command absent
 operator_next_action=review_rebuild_replay
 ```
 
-Do not allow a successful apply that leaves:
+Do not allow apply to succeed or be recommended if final projection is still divergent.
+
+### 2. Add broker-anchor collapse / trim / re-anchor step after historical replay
+
+Historical replay may be useful as an intermediate diagnostic step, but full rebuild must publish a materialized projection that matches current broker/portfolio truth.
+
+Implement one of these behaviors:
 
 ```text
-projected_total_qty != portfolio_qty
+A. Replay historical fills/trades, then collapse/trim/re-anchor projection rows to broker_qty/portfolio_qty before publish.
+
+B. If collapse/trim/re-anchor cannot be done safely because required evidence is missing or contradictory, fail closed:
+   final_safe_to_apply=false
+   recommended_command absent
+   operator_next_action=review_rebuild_replay
 ```
 
-### 2. Make projection row invariants provenance-aware
+Do not publish or recommend a projection that keeps resurrected historical dust rows beyond broker/portfolio anchor.
 
-Introduce or strengthen typed internal concepts equivalent to:
+### 3. Separate pre-gate safety from final apply safety
+
+Introduce distinct fields in the internal result and operator output:
 
 ```text
-FillNativeLot:
-  source_mode=ledger or equivalent
-  invariant=original fill qty + lifecycle residual
-
-PortfolioAnchorProjectionLot:
-  source_mode=full_projection_rebuild_portfolio_anchor
-  invariant=current broker/portfolio projection convergence
-
-ManualPortfolioRepairLot:
-  source_mode=portfolio_anchored_repair
-  invariant=repair event + current broker/portfolio convergence
+pre_gate_passed
+replay_projection_converged
+post_publish_projection_converged
+post_rebuild_projected_total_qty
+portfolio_qty
+broker_qty
+final_safe_to_apply
+recommended_command
+operator_next_action
 ```
 
 Rules:
 
 ```text
-target_lot_qty_fill_mismatch may only be emitted for FillNativeLot.
+safe_to_apply must either mean final_safe_to_apply, or be renamed so it cannot be mistaken.
+recommended_command with --apply --yes may appear only when final_safe_to_apply=true.
 ```
 
-For `PortfolioAnchorProjectionLot`, skip fill-native invariant and report:
+If only pre-gates pass but replay/post-publish does not converge:
 
 ```text
-semantic_contract_check_applicable=false
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-```
-
-For `ManualPortfolioRepairLot`, skip fill-native invariant only if matching repair/publication evidence is present and current broker/portfolio convergence holds.
-
-### 3. Ensure target provenance is reloaded after rebuild/publish
-
-If rebuild writes new `open_position_lots` rows with source mode:
-
-```text
-full_projection_rebuild_portfolio_anchor
-```
-
-then any post-assessment must reload target rows from the DB and re-run provenance classification.
-
-Do not reuse stale pre-rebuild classification.
-
-Expected:
-
-```text
-post_publish_target_lot_provenance.kind=portfolio_anchor_projection_lot
-post_publish_target_lot_provenance.fill_qty_invariant_applies=false
-```
-
-### 4. Fix multi-lot target residual vs portfolio total comparison
-
-Where `portfolio_target_qty_mismatch` is generated, ensure the check uses:
-
-```text
-portfolio_target_remainder_qty = max(0, portfolio_qty - other_active_qty)
-```
-
-or equivalent.
-
-For a multi-lot case:
-
-```text
-portfolio_qty=0.00049980
-other_active_qty=0.00039982
-target_residual_qty=0.00009998
-```
-
-the correct result is:
-
-```text
-portfolio_target_remainder_qty=0.00009998
-no portfolio_target_qty_mismatch
-```
-
-Do not accept `other_active_qty` blindly. It must itself be part of a converged projection or supported by broker/portfolio/replay evidence.
-
-### 5. Enforce final repair-plan/apply consistency
-
-A repair command may show intermediate preview details, but final recommendation must depend on final post-state.
-
-Required final gates:
-
-```text
-broker_portfolio_converged=true
-accounting_projection_ok=true
-post_rebuild_projection_converged=true
-post_rebuild_projected_total_qty == portfolio_qty
-active fee issue=0
-unresolved local order=0
-remote open order=0
-submit_unknown=0
-semantic contract passed
-  OR semantic contract intentionally skipped due to recognized projection provenance
-```
-
-If any final gate fails:
-
-```text
-safe_to_apply=false
+pre_gate_passed=true
+replay_projection_converged=false
+post_publish_projection_converged=false
+final_safe_to_apply=false
 recommended_command absent
-operator_next_action=review_position_authority_evidence or review_rebuild_replay
+operator_next_action=review_rebuild_replay
 ```
 
-## Required observability changes
+### 4. Treat `open_position_lots` as invalid projection when it diverges from broker/portfolio
 
-Improve `rebuild-position-authority`, `repair-plan`, `recovery-report`, and related operator surfaces so they clearly distinguish stages.
+When:
 
-Add fields equivalent to:
+```text
+projected_total_qty != portfolio_qty
+```
+
+do not let `open_position_lots` define true dust/exposure state. It is invalid projection evidence.
+
+Expected policy:
+
+```text
+canonical_state=PROJECTION_INVALID or equivalent
+run_loop_allowed=false
+entry_allowed=false
+exit_allowed=false
+operator_action=repair/diagnose
+```
+
+Do not present the position as a normal `dust_only` state when projection is divergent.
+
+### 5. Preserve provenance-aware invariants
+
+Keep and strengthen the provenance model:
+
+```text
+FillNativeLot:
+  source=ledger/accounted_buy_evidence
+  invariant=fill qty + lifecycle residual
+
+PortfolioAnchorProjectionLot:
+  source=full_projection_rebuild_portfolio_anchor
+  invariant=broker/portfolio convergence
+
+ManualRepairProjectionLot:
+  source=manual/portfolio repair
+  invariant=repair event + broker/portfolio convergence
+```
+
+Rules:
+
+```text
+target_lot_qty_fill_mismatch may only apply to FillNativeLot.
+PortfolioAnchorProjectionLot must be checked by broker/portfolio convergence, not original BUY fill qty.
+ManualRepairProjectionLot must require repair evidence plus broker/portfolio convergence.
+```
+
+### 6. Make repair-plan output stage-aware
+
+Operator output must distinguish:
+
+```text
+pre-assessment
+replay result
+publish candidate
+post-publish assessment
+final recommendation
+```
+
+Add or expose fields equivalent to:
 
 ```text
 repair_kind
@@ -555,180 +533,200 @@ target_lot_provenance_kind
 fill_qty_invariant_applies
 semantic_contract_check_applicable
 semantic_contract_check_skipped_reason
+pre_gate_passed
 final_safe_to_apply
+recommended_command
 rollback_path
+why_safe
+why_unsafe
 ```
 
-The operator must not see an unqualified:
-
-```text
-safe_to_apply=true
-```
-
-next to evidence that final projection still diverges.
+The operator must never see an unqualified `safe_to_apply=true` next to final evidence showing `projection_converged=false`.
 
 ## Required tests
 
-Add incident-shaped regression tests using the actual quantities.
+Add incident-shaped regression tests using the exact quantities.
 
 ### Test 1 — historical fragmented dust rows do not survive full projection rebuild
 
 Fixture:
 
 ```text
-historical open_position_lots:
+existing open_position_lots:
   dust_tracking_lot_count=16
   projected_total_qty=0.00218797
+  open_lot_count=0
+  executable_lot_count=0
 
-current portfolio/broker:
-  qty=0.00039985
+current broker/portfolio:
+  broker_qty=0.00039985
+  portfolio_qty=0.00039985
 ```
 
 Expected:
 
 ```text
-after full_projection_rebuild:
-  projected_total_qty=0.00039985
+full_projection_rebuild final post-state:
+  post_rebuild_projected_total_qty=0.00039985
   projection_converged=true
-  no recreated 0.00218797 dust projection
-  post_rebuild source_mode=full_projection_rebuild_portfolio_anchor
+  no regenerated 0.00218797 projected dust
+  source_mode_of_new_rows=full_projection_rebuild_portfolio_anchor or equivalent
 ```
 
-### Test 2 — portfolio-anchor lot skips fill-native invariant
+### Test 2 — if replay remains divergent, apply is not recommended
 
 Fixture:
 
 ```text
+historical replay result:
+  replay_projected_total_qty=0.00218797
+  portfolio_qty=0.00039985
+  projection_converged_after_replay=false
+```
+
+Expected:
+
+```text
+final_safe_to_apply=false
+recommended_command absent
+operator_next_action=review_rebuild_replay
+```
+
+### Test 3 — `recommended_command --apply --yes` depends on final post-state only
+
+Fixture A:
+
+```text
+pre_gate_passed=true
+replay_projection_converged=false
+post_publish_projection_converged=false
+```
+
+Expected:
+
+```text
+recommended_command absent
+```
+
+Fixture B:
+
+```text
+pre_gate_passed=true
+post_publish_projected_total_qty=0.00039985
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+post_publish_projection_converged=true
+```
+
+Expected:
+
+```text
+final_safe_to_apply=true
+recommended_command present
+```
+
+### Test 4 — projection divergence produces projection-invalid state, not normal dust-only
+
+Fixture:
+
+```text
+dust_state=no_dust
+dust_tracking_qty=0.00218797
+projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projection_converged=false
+```
+
+Expected:
+
+```text
+canonical_state=PROJECTION_INVALID or equivalent
+run_loop_allowed=false
+entry_allowed=false
+exit_allowed=false
+operator_next_action=review_position_authority_evidence
+not terminal_state=dust_only as a normal valid state
+```
+
+### Test 5 — portfolio-anchor projection skips fill-native invariant
+
+Fixture:
+
+```text
+source_mode=full_projection_rebuild_portfolio_anchor
 original BUY fill_qty=0.00059999
 current broker/portfolio qty=0.00039985
-target row source_mode=full_projection_rebuild_portfolio_anchor
+projection_converged=true
 ```
 
 Expected:
 
 ```text
 no target_lot_qty_fill_mismatch
-no semantic_contract_mismatch from fill qty
 semantic_contract_check_applicable=false
 semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
-projection_converged=true
 ```
 
-### Test 3 — fill-native lot still enforces fill residual invariant
+### Test 6 — fill-native lot still enforces fill residual invariant
 
 Fixture:
 
 ```text
 source_mode=ledger
 target_qty != expected fill/lifecycle residual
-no portfolio-anchor repair evidence
+no portfolio-anchor evidence
 ```
 
 Expected:
 
 ```text
 target_lot_qty_fill_mismatch emitted
-semantic_contract_mismatch emitted
 safe_to_correct=false
-```
-
-### Test 4 — multi-lot partial close uses other_active_qty correctly
-
-Fixture:
-
-```text
-other_active_qty=0.00039982
-target_residual_qty=0.00009998
-portfolio_qty=0.00049980
-broker_qty=0.00049980
-```
-
-Expected:
-
-```text
-portfolio_target_remainder_qty=0.00009998
-no portfolio_target_qty_mismatch
-portfolio total accepted because:
-  portfolio_qty == other_active_qty + target_residual_qty
-```
-
-### Test 5 — other_active_qty is not blindly trusted
-
-Fixture:
-
-```text
-other_active_qty is stale or unsupported
-portfolio_qty does not converge with projected_total_qty
-```
-
-Expected:
-
-```text
-safe_to_correct=false
-operator_next_action=review_position_authority_evidence
-```
-
-### Test 6 — repair-plan final state controls recommendation
-
-Fixture where replay would produce:
-
-```text
-replay_projected_total_qty=0.00218797
-portfolio_qty=0.00039985
-projection_converged_after_replay=false
-```
-
-Expected:
-
-```text
-safe_to_apply=false
-recommended_command absent
-```
-
-Fixture where post-publish anchor produces:
-
-```text
-post_publish_projected_total_qty=0.00039985
-portfolio_qty=0.00039985
-projection_converged_after_publish=true
-source_mode=full_projection_rebuild_portfolio_anchor
-```
-
-Expected:
-
-```text
-safe_to_apply=true
-recommended_command present only after final post-state gates pass
 ```
 
 ### Test 7 — recovery surfaces agree
 
-For a repaired anchored projection state:
+For unresolved projection divergence:
 
 ```text
-broker_portfolio_converged=true
-accounting_projection_ok=true
-projection_converged=true
-source_mode=full_projection_rebuild_portfolio_anchor
+broker_qty=0.00039985
+portfolio_qty=0.00039985
+projected_total_qty=0.00218797
+projection_converged=false
+```
+
+Expected all surfaces agree:
+
+```text
+health
+recovery-report
+repair-plan
+restart-checklist
+audit-ledger
 ```
 
 Expected:
 
 ```text
-recovery-report
-repair-plan
-restart-checklist
-health
-audit-ledger
+POSITION_AUTHORITY_PROJECTION_CONVERGENCE_REQUIRED present
+final_safe_to_apply=false unless final post-state convergence is proven
+recommended_command absent unless final_safe_to_apply=true
+operator_next_action=review_rebuild_replay or review_position_authority_evidence
 ```
 
-all agree:
+For successful anchored rebuild:
 
 ```text
-no LOT_AUTHORITY_CONFLICT
+post_publish_projected_total_qty=portfolio_qty=broker_qty=0.00039985
+projection_converged=true
+```
+
+Expected:
+
+```text
 no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
-no semantic_contract_mismatch
-run_loop policy determined by actual exposure/dust state
+no MATERIALIZED_PROJECTION_FRAGMENTATION
+no LOT_AUTHORITY_CONFLICT
 ```
 
 ## Verification commands
@@ -736,13 +734,13 @@ run_loop policy determined by actual exposure/dust state
 Run targeted tests first:
 
 ```bash
-uv run pytest tests/test_position_authority_recovery_state.py -k "projection or provenance or portfolio_anchor or fill_native or target_lot or multi_lot"
+uv run pytest tests/test_position_authority_recovery_state.py -k "projection or full_projection or fragmentation or safe_to_apply or portfolio_anchor"
 uv run pytest tests/test_operator_commands.py -k "rebuild_position_authority or repair_plan or recovery_report or projection"
 uv run pytest tests/test_accounting_projection.py -k "projection or lot or authority"
 uv run pytest tests/test_runtime_readiness.py -k "authority or projection or dust"
 ```
 
-Then broader relevant suites:
+Then run broader relevant suites:
 
 ```bash
 uv run pytest tests/test_position_authority_recovery_state.py
@@ -750,13 +748,13 @@ uv run pytest tests/test_operator_commands.py
 uv run pytest tests/test_accounting_projection.py
 ```
 
-If modules or test names differ, search the test suite and run the closest relevant tests.
+If module names or test names differ, search the test suite and run the closest relevant tests.
 
-Report exact commands and results.
+Report exact commands and pass/fail results.
 
 ## EC2 validation after patch
 
-Do **not** start the bot, resume, flatten, or apply repair blindly before validation.
+Do **not** start the bot, resume, flatten, or apply repair blindly.
 
 First run preview/diagnostics only:
 
@@ -769,7 +767,7 @@ MODE=live uv run bithumb-bot audit-ledger
 MODE=live uv run bithumb-bot health
 ```
 
-Expected safe preview state for this incident:
+Expected before any apply:
 
 ```text
 broker_portfolio_converged=true
@@ -780,18 +778,33 @@ remote open order=0
 submit_unknown=0
 ```
 
-If full projection rebuild is recommended, expected preview must clearly show:
+For this incident, if full projection rebuild is recommended, preview must show one of these:
+
+Safe case:
 
 ```text
 truth_source=broker_portfolio_anchor
-post_rebuild_projected_total_qty == portfolio_qty == broker_qty
+post_rebuild_projected_total_qty=0.00039985
+portfolio_qty=0.00039985
+broker_qty=0.00039985
+projection_converged_after_publish=true
 source_mode_of_new_rows=full_projection_rebuild_portfolio_anchor
-fill_qty_invariant_applies=false
-semantic_contract_check_skipped_reason=portfolio_anchor_projection_lot
 final_safe_to_apply=true
+recommended_command=... --apply --yes
 ```
 
-Only then consider:
+Unsafe case:
+
+```text
+replay_projected_total_qty=0.00218797
+portfolio_qty=0.00039985
+projection_converged_after_replay=false
+final_safe_to_apply=false
+recommended_command absent
+operator_next_action=review_rebuild_replay
+```
+
+Only if the safe case appears should the operator consider:
 
 ```bash
 MODE=live uv run bithumb-bot rebuild-position-authority --full-projection-rebuild --apply --yes
@@ -812,12 +825,10 @@ Expected post-apply:
 ```text
 projected_total_qty == portfolio_qty == broker_qty
 projection_converged=true
-target_lot_provenance_kind=portfolio_anchor_projection_lot
-fill_qty_invariant_applies=false
-no target_lot_qty_fill_mismatch
-no semantic_contract_mismatch
-no LOT_AUTHORITY_CONFLICT
 no HISTORICAL_FRAGMENTATION_PROJECTION_DRIFT
+no MATERIALIZED_PROJECTION_FRAGMENTATION
+no LOT_AUTHORITY_CONFLICT
+final_safe_to_apply not needed because no repair remains
 ```
 
 Only after that should `resume` or `systemctl start` be considered.
@@ -827,23 +838,24 @@ Only after that should `resume` or `systemctl start` be considered.
 Do:
 
 ```text
-- Make full projection rebuild terminally broker/portfolio anchored.
-- Make lot/projection invariants provenance-aware.
-- Ensure post-publish assessment reloads target provenance from current DB rows.
-- Fix multi-lot target residual vs portfolio total comparison using other_active_qty safely.
-- Make repair safe_to_apply depend on final post-state.
-- Add clear observability for replay vs publish vs post-assessment.
-- Add incident-shaped regression tests.
+- Make full_projection_rebuild terminally broker/portfolio anchored.
+- Add collapse/trim/re-anchor or fail-closed behavior after historical replay.
+- Make apply recommendation depend on final post-state convergence only.
+- Distinguish pre_gate_passed from final_safe_to_apply.
+- Treat divergent open_position_lots as invalid projection, not normal dust-only state.
+- Preserve provenance-aware invariants for fill-native vs portfolio-anchor rows.
+- Improve repair-plan/recovery output observability.
+- Add incident-shaped regression tests with 0.00218797 vs 0.00039985 quantities.
 ```
 
 Do not:
 
 ```text
 - Treat open_position_lots as canonical truth.
-- Let historical dust rows override broker/portfolio current truth.
-- Apply fill-native invariant to portfolio-anchor projection rows.
-- Recommend apply if final projection remains divergent.
-- Hide semantic_contract_mismatch without a provenance-specific reason.
+- Let historical dust rows override current broker/portfolio truth.
+- Recommend --apply when final projection remains divergent.
+- Hide projection divergence by relabeling dust rows.
+- Apply fill-native invariant to portfolio-anchor rows.
 - Ignore active fee issues, unresolved orders, submit_unknown, stale broker snapshots, or broker/portfolio mismatch.
 - Require flattening the current BTC position.
 - Use resume --force.
@@ -862,27 +874,37 @@ Discuss, even if not fully implemented now:
 2. Typed projection rows:
    FillNativeLot
    PortfolioAnchorProjectionLot
-   ManualPortfolioRepairLot
+   ManualRepairProjectionLot
 
 3. Deterministic projection rebuild:
    rebuild must be reproducible from canonical events + broker anchor + projection policy
 
-4. Operator repair workflow:
+4. Explicit projection states:
+   ACCOUNTING_OK_BUT_PROJECTION_INVALID
+   PROJECTION_REBUILD_PREVIEW_ONLY
+   PROJECTION_REBUILD_SAFE_TO_APPLY
+   PROJECTION_REBUILD_FAILED_POSTCHECK
+   POSITION_MANAGEMENT_READY
+
+5. Operator repair workflow:
    doctor --live --explain
    repair-plan --live
    repair-apply --plan-id
 
-5. Repair plan schema:
+6. Repair plan schema:
    preconditions
    truth source
    tables touched
    before/after portfolio
    before/after projection
+   replay result
+   post-publish result
    provenance of new rows
    idempotency key
    rollback path
    final gates
    why safe
+   why unsafe
 ```
 
 ## Final report format
@@ -892,21 +914,20 @@ When finished, produce a report with exactly these sections:
 ```text
 1. Summary
    - What changed.
-   - Why this addresses projection semantics instead of masking the blocker.
+   - Why this addresses projection rebuild semantics instead of masking the blocker.
    - Why this avoids repeated manual repair / flatten loops.
 
 2. Hypothesis results
-   - Hypothesis A: full projection rebuild over-materializes historical dust rows — confirmed / falsified / partially confirmed.
-   - Hypothesis B: portfolio-anchor projection row receives fill-native invariant — confirmed / falsified / partially confirmed.
-   - Hypothesis C: correction path compares target residual to whole portfolio — confirmed / falsified / partially confirmed.
-   - Hypothesis D: repair flow final safe_to_apply is not governed by final post-state — confirmed / falsified / partially confirmed.
+   - Hypothesis A: full_projection_rebuild does not use broker/portfolio anchor as terminal truth — confirmed / falsified / partially confirmed.
+   - Hypothesis B: safe_to_apply / recommended_command is based on pre-gates or intermediate state — confirmed / falsified / partially confirmed.
+   - Hypothesis C: historical dust rows are not invalidated by SELLs, adjustments, repairs, or broker anchor — confirmed / falsified / partially confirmed.
+   - Hypothesis D: dust/tradeability classification is derived from invalid projection instead of projection-invalid state — confirmed / falsified / partially confirmed.
 
 3. Design assessment
    - Canonical truth vs derived projection.
+   - Broker/portfolio terminal anchor model.
    - Lot provenance model.
-   - Invariants by provenance type.
-   - Full projection rebuild terminal invariant.
-   - How multi-lot partial close is handled.
+   - Final apply safety model.
    - What still fails closed.
 
 4. Code changes
@@ -917,11 +938,11 @@ When finished, produce a report with exactly these sections:
 
 5. Tests
    - Tests added/updated.
-   - Historical fragmentation tests.
+   - Historical fragmentation rebuild tests.
+   - Final-safe-to-apply tests.
+   - Projection-invalid tradeability tests.
    - Portfolio-anchor invariant tests.
    - Fill-native invariant tests.
-   - Multi-lot partial-close tests.
-   - Repair-plan final-state tests.
    - Cross-surface consistency tests.
 
 6. Verification
@@ -937,5 +958,5 @@ When finished, produce a report with exactly these sections:
    - When resume/systemctl start is safe.
 ```
 
-The goal is not to make the bot less strict. The goal is to make it strict about the right thing: **current broker/portfolio anchored projection correctness with explicit provenance**, not accidental historical dust materialization or invalid fill-native checks against portfolio-anchor rows.
+The goal is not to make the bot less strict. The goal is to make it strict about the correct invariant: **final broker/portfolio-anchored projection convergence**, not historical dust materialization or misleading pre-gate safety.
 

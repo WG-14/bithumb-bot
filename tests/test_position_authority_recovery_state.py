@@ -63,6 +63,13 @@ EC2_REPRO_PORTFOLIO_QTY = 0.00039985
 
 @pytest.fixture
 def recovery_db(tmp_path, monkeypatch):
+    original_db_path = settings.DB_PATH
+    original_mode = settings.MODE
+    original_pair = settings.PAIR
+    original_live_min_order_qty = settings.LIVE_MIN_ORDER_QTY
+    original_live_order_qty_step = settings.LIVE_ORDER_QTY_STEP
+    original_live_order_max_qty_decimals = settings.LIVE_ORDER_MAX_QTY_DECIMALS
+    original_min_order_notional_krw = settings.MIN_ORDER_NOTIONAL_KRW
     db_path = tmp_path / "authority-recovery.sqlite"
     monkeypatch.setenv("DB_PATH", str(db_path))
     object.__setattr__(settings, "DB_PATH", str(db_path))
@@ -76,7 +83,16 @@ def recovery_db(tmp_path, monkeypatch):
     runtime_state.enable_trading()
     runtime_state.set_startup_gate_reason(None)
     runtime_state.record_reconcile_result(success=True, reason_code="RECONCILE_OK", metadata={}, now_epoch_sec=0.0)
-    return db_path
+    try:
+        yield db_path
+    finally:
+        object.__setattr__(settings, "DB_PATH", original_db_path)
+        object.__setattr__(settings, "MODE", original_mode)
+        object.__setattr__(settings, "PAIR", original_pair)
+        object.__setattr__(settings, "LIVE_MIN_ORDER_QTY", original_live_min_order_qty)
+        object.__setattr__(settings, "LIVE_ORDER_QTY_STEP", original_live_order_qty_step)
+        object.__setattr__(settings, "LIVE_ORDER_MAX_QTY_DECIMALS", original_live_order_max_qty_decimals)
+        object.__setattr__(settings, "MIN_ORDER_NOTIONAL_KRW", original_min_order_notional_krw)
 
 
 def _record_fee_pending_buy(conn, *, client_order_id: str = "incident_buy", fill_id: str = "fill-23") -> None:
@@ -2555,17 +2571,22 @@ def test_full_projection_rebuild_preview_reports_final_post_publish_state(recove
         conn.close()
 
     assert preview["safe_to_apply"] is True
+    assert preview["pre_gate_passed"] is True
     assert preview["final_safe_to_apply"] is True
     assert preview["truth_source"] == "broker_portfolio_anchor"
     assert preview["pre_projected_total_qty"] == pytest.approx(0.00218797)
     assert preview["post_publish_projected_total_qty"] == pytest.approx(EC2_REPRO_PORTFOLIO_QTY)
     assert preview["projection_converged_before"] is False
     assert preview["projection_converged_after_publish"] is True
+    assert preview["post_publish_projection_converged"] is True
     assert preview["source_mode_of_new_rows"] == ["full_projection_rebuild_portfolio_anchor"]
     assert preview["target_lot_provenance_kind"] == "portfolio_anchor_projection_lot"
     assert preview["target_lot_fill_qty_invariant_applies"] is False
     assert preview["semantic_contract_check_applicable"] is False
     assert preview["semantic_contract_check_skipped_reason"] == "portfolio_anchor_projection_lot"
+    assert preview["recommended_command"] == (
+        "uv run python bot.py rebuild-position-authority --full-projection-rebuild --apply --yes"
+    )
     assert preview["full_projection_rebuild_post_state_preview"]["final_gate_failures"] == []
 
 
@@ -2699,14 +2720,37 @@ def test_full_projection_rebuild_preview_refuses_when_final_post_publish_state_f
         conn.close()
 
     assert preview["safe_to_apply"] is False
+    assert preview["pre_gate_passed"] is True
     assert preview["final_safe_to_apply"] is False
-    assert preview["recommended_command"] == "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
+    assert preview["recommended_command"] is None
+    assert preview["preview_command"] == "uv run python bot.py rebuild-position-authority --full-projection-rebuild"
     assert preview["next_required_action"] == "review_rebuild_replay"
     assert any(
         str(item).startswith("post_rebuild_projection_converged=0")
         or str(item).startswith("post_rebuild_projected_total_qty_mismatch=")
         for item in (preview["full_projection_rebuild_post_state_preview"]["final_gate_failures"])
     )
+
+
+def test_projection_divergence_is_reported_as_projection_invalid_not_normal_dust(recovery_db):
+    conn = ensure_db(str(recovery_db))
+    try:
+        _create_observed_live_projection_fragmentation_fixture(conn)
+        readiness = compute_runtime_readiness_snapshot(conn)
+        report = _load_recovery_report()
+    finally:
+        conn.close()
+
+    assert readiness.canonical_state == "PROJECTION_INVALID"
+    assert readiness.residual_class == "AUTHORITY_PROJECTION_NON_CONVERGED"
+    assert readiness.run_loop_allowed is False
+    assert readiness.new_entry_allowed is False
+    assert readiness.closeout_allowed is False
+    assert readiness.operator_next_action == "review_position_authority_evidence"
+    assert readiness.tradeability_operator_fields["residue_policy_state"] == "AUTHORITY_PROJECTION_NON_CONVERGED"
+    assert readiness.tradeability_operator_fields["strategy_tradeability_state"] == "run_loop_blocked"
+    assert report["runtime_readiness"]["canonical_state"] == "PROJECTION_INVALID"
+    assert report["runtime_readiness"]["residual_class"] == "AUTHORITY_PROJECTION_NON_CONVERGED"
 
 
 @pytest.mark.parametrize(
